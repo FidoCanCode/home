@@ -272,6 +272,5 @@ ignore = ["E501"]
 # cause instead.
 "tests/test_claude.py" = ["TID251"]
 "tests/test_events.py" = ["TID251"]
-"tests/test_github.py" = ["TID251"]
 "tests/test_server.py" = ["TID251"]
 "tests/test_worker.py" = ["TID251"]
