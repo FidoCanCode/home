@@ -526,25 +526,10 @@ fi
 
 # ── Promote or merge ───────────────────────────────────────────────────────
 log "checking: review status"
-IS_DRAFT=$(gh pr view "$PR" --repo "$REPO" --json isDraft --jq .isDraft)
 
-if [[ "$IS_DRAFT" == "true" ]]; then
-  # Don't promote if no tasks were ever completed (setup likely failed)
-  _COMPLETED=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null \
-    | jq -r '[.[] | select(.status == "completed")] | length' 2>/dev/null || echo "0")
-  _PR_COMPLETED=$(gh pr view "$PR" --repo "$REPO" --json body --jq .body 2>/dev/null \
-    | { grep -c '^\- \[x\]' || echo "0"; })
-  if [[ "$_COMPLETED" == "0" && "$_PR_COMPLETED" == "0" ]]; then
-    log "PR #$PR: no tasks completed — not promoting (setup may have failed)"
-    break
-  fi
-  log "PR #$PR work complete — marking ready, requesting review from $OWNER"
-  gh pr ready "$PR" --repo "$REPO"
-  gh pr edit "$PR" --repo "$REPO" --add-reviewer "$OWNER"
-  break
-fi
-
-_REVIEWS_JSON=$(gh pr view "$PR" --repo "$REPO" --json reviews)
+# Check approval first — merge takes priority over promote
+_REVIEWS_JSON=$(gh pr view "$PR" --repo "$REPO" --json reviews,isDraft)
+IS_DRAFT=$(printf '%s' "$_REVIEWS_JSON" | jq -r '.isDraft')
 APPROVED=$(printf '%s' "$_REVIEWS_JSON" \
   | jq -r --arg owner "$OWNER" \
     '[.reviews[] | select(.author.login == $owner and .state == "APPROVED")] | length > 0')
@@ -575,6 +560,19 @@ LATEST_REVIEW_STATE=$(printf '%s' "$_REVIEWS_JSON" \
 
 if [[ "$LATEST_REVIEW_STATE" == "CHANGES_REQUESTED" ]]; then
   log "PR #$PR: changes requested by $OWNER — all addressed, re-requesting review"
+  gh pr edit "$PR" --repo "$REPO" --add-reviewer "$OWNER"
+  break
+fi
+
+if [[ "$IS_DRAFT" == "true" ]]; then
+  _COMPLETED=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null \
+    | jq -r '[.[] | select(.status == "completed")] | length' 2>/dev/null || echo "0")
+  if [[ "$_COMPLETED" == "0" ]]; then
+    log "PR #$PR: no tasks completed — not promoting (setup may have failed)"
+    break
+  fi
+  log "PR #$PR work complete — marking ready, requesting review from $OWNER"
+  gh pr ready "$PR" --repo "$REPO"
   gh pr edit "$PR" --repo "$REPO" --add-reviewer "$OWNER"
   break
 fi
