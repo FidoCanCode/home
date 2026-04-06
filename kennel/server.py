@@ -93,9 +93,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 reply_to_review(action, self.config, already_replied=_replied_comments)
                 handled = True  # inline comments handled individually
 
-            if not handled:
-                create_task(action.prompt, self.config)
-
+            # Non-comment events just trigger work.sh — no task needed
             launch_worker(self.config)
         except Exception:
             log.exception("error processing action")
