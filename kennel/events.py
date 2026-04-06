@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from kennel.config import Config
+from kennel.tasks import add_task
 
 log = logging.getLogger("kennel")
 
@@ -200,44 +201,26 @@ def reply_to_review(action: Action, config: Config) -> None:
         )
 
 
-def update_task_list(prompt: str, config: Config) -> None:
-    """Run a fresh claude CLI to update the shared task list."""
-    env = {**os.environ, "CLAUDE_CODE_TASK_LIST_ID": config.project}
-    full_prompt = (
-        f"{prompt}\n\n"
-        "Triage this event and update the task list. Do NOT edit the PR body, "
-        "do NOT post comments, do NOT run any git commands. Only update the task list.\n\n"
-        "For human (repo owner) comments, triage as:\n"
-        "- ACT — you know what to do: create a task\n"
-        "- ASK — unclear what to do: create a task prefixed 'ASK: ' so work.sh asks a follow-up\n"
-        "- ANSWER — it's a question, not a code change: create a task prefixed 'ANSWER: '\n\n"
-        "For bot comments, triage as:\n"
-        "- DO — worth implementing: create a task\n"
-        "- DEFER — useful but out of scope: create a task prefixed 'DEFER: '\n"
-        "- DUMP — not applicable: skip, no task needed\n\n"
-        "For non-comment events (reviews, CI failures, merges): always create a task."
-    )
-    log.info("updating task list: %s", prompt[:100])
+def create_task(prompt: str, config: Config) -> None:
+    """Write a task directly to the shared task file, then trigger sync."""
+    log.info("creating task: %s", prompt[:100])
+    add_task(config.work_dir, title=prompt)
+    launch_sync(config)
+
+
+def launch_sync(config: Config) -> None:
+    """Launch sync-tasks.sh in background."""
+    sync_script = config.work_script.parent / "sync-tasks.sh"
     try:
-        result = subprocess.run(
-            ["claude", "-p", full_prompt],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=60,
+        subprocess.Popen(
+            ["bash", str(sync_script), str(config.work_dir)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
-        if result.returncode != 0:
-            log.warning(
-                "claude task update failed (exit %d): %s",
-                result.returncode,
-                result.stderr[:200],
-            )
-        else:
-            log.info("task list updated")
-    except subprocess.TimeoutExpired:
-        log.warning("claude task update timed out")
-    except FileNotFoundError:
-        log.error("claude CLI not found — is it on PATH?")
+        log.info("sync-tasks launched")
+    except Exception:
+        log.exception("failed to launch sync-tasks")
 
 
 def launch_worker(config: Config) -> int | None:

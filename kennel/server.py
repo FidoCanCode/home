@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from kennel.config import Config
-from kennel.events import dispatch, launch_worker, reply_to_comment, reply_to_review, update_task_list
+from kennel.events import create_task, dispatch, launch_worker, reply_to_comment, reply_to_review
 
 log = logging.getLogger("kennel")
 
@@ -60,7 +60,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 reply_to_comment(action, self.config)
             if action.review_comments:
                 reply_to_review(action, self.config)
-            update_task_list(action.prompt, self.config)
+            create_task(action.prompt, self.config)
             launch_worker(self.config)
 
     def do_GET(self) -> None:

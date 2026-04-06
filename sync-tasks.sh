@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sync-tasks.sh — sync Claude Code task list → PR body work queue
+# sync-tasks.sh — sync tasks.json → PR body work queue
 # Triggered by: PostToolUse hook, kennel webhook, cron
 # Protected by flock to prevent concurrent runs
 set -euo pipefail
@@ -47,53 +47,57 @@ if [[ -z "$PR" ]]; then
   exit 0
 fi
 
-log "syncing task list → PR #$PR"
-
-# ── Read task list via claude ─────────────────────────────────────────────
-PROJECT="${CLAUDE_CODE_TASK_LIST_ID:-confusio}"
-TASK_OUTPUT=$(CLAUDE_CODE_TASK_LIST_ID="$PROJECT" claude -p "List all tasks with their status (pending/in_progress/completed). Output ONLY lines in this exact format, one per task, no other text:
-- [STATUS] TITLE
-
-Where STATUS is one of: pending, in_progress, completed
-And TITLE is the full task title exactly as stored." 2>/dev/null || true)
-
-if [[ -z "$TASK_OUTPUT" ]]; then
-  log "no tasks returned — skipping"
+# ── Read tasks.json with flock ────────────────────────────────────────────
+TASK_FILE="$(git rev-parse --git-dir)/fido/tasks.json"
+if [[ ! -f "$TASK_FILE" ]]; then
+  log "no tasks.json — nothing to sync"
   exit 0
 fi
 
+# Lock task file for reading
+exec 7<"$TASK_FILE"
+flock -s 7
+TASKS=$(cat "$TASK_FILE")
+exec 7<&-
+
+if [[ -z "$TASKS" || "$TASKS" == "[]" ]]; then
+  log "no tasks — nothing to sync"
+  exit 0
+fi
+
+log "syncing task list → PR #$PR"
+
 # ── Format as work queue markdown ─────────────────────────────────────────
-PENDING=""
-COMPLETED=""
-FIRST_PENDING=true
+QUEUE=$(printf '%s' "$TASKS" | python3 -c "
+import json, sys
 
-while IFS= read -r line; do
-  [[ -z "$line" ]] && continue
-  # Parse: - [status] title
-  if [[ "$line" =~ ^-\ \[(pending|in_progress)\]\ (.+)$ ]]; then
-    title="${BASH_REMATCH[2]}"
-    if $FIRST_PENDING; then
-      PENDING+="- [ ] $title **→ next**"$'\n'
-      FIRST_PENDING=false
-    else
-      PENDING+="- [ ] $title"$'\n'
-    fi
-  elif [[ "$line" =~ ^-\ \[completed\]\ (.+)$ ]]; then
-    title="${BASH_REMATCH[1]}"
-    COMPLETED+="- [x] $title"$'\n'
-  fi
-done <<< "$TASK_OUTPUT"
+tasks = json.load(sys.stdin)
+pending = []
+completed = []
 
-# Build work queue block
-QUEUE=""
-if [[ -n "$PENDING" ]]; then
-  QUEUE+="$PENDING"
-fi
-if [[ -n "$COMPLETED" ]]; then
-  QUEUE+=$'\n'"<details><summary>Completed ($(echo "$COMPLETED" | grep -c '^- '))</summary>"$'\n\n'
-  QUEUE+="$COMPLETED"
-  QUEUE+="</details>"$'\n'
-fi
+for t in tasks:
+    title = t.get('title', '')
+    status = t.get('status', 'pending')
+    if status in ('pending', 'in_progress'):
+        pending.append(title)
+    elif status == 'completed':
+        completed.append(title)
+
+lines = []
+for i, title in enumerate(pending):
+    suffix = ' **→ next**' if i == 0 else ''
+    lines.append(f'- [ ] {title}{suffix}')
+
+if completed:
+    lines.append('')
+    lines.append(f'<details><summary>Completed ({len(completed)})</summary>')
+    lines.append('')
+    for title in completed:
+        lines.append(f'- [x] {title}')
+    lines.append('</details>')
+
+print('\n'.join(lines))
+")
 
 # ── Update PR body ────────────────────────────────────────────────────────
 CURRENT_BODY=$(gh pr view "$PR" --repo "$REPO" --json body --jq .body)
@@ -103,20 +107,20 @@ if ! echo "$CURRENT_BODY" | grep -q "WORK_QUEUE_START"; then
   exit 0
 fi
 
-# Replace content between markers
-NEW_BODY=$(echo "$CURRENT_BODY" | python3 -c "
+NEW_BODY=$(python3 -c "
 import sys
 body = sys.stdin.read()
 queue = sys.argv[1]
-start = body.find('<!-- WORK_QUEUE_START -->')
-end = body.find('<!-- WORK_QUEUE_END -->')
+start_marker = '<!-- WORK_QUEUE_START -->'
+end_marker = '<!-- WORK_QUEUE_END -->'
+start = body.find(start_marker)
+end = body.find(end_marker)
 if start == -1 or end == -1:
     print(body, end='')
     sys.exit()
-start += len('<!-- WORK_QUEUE_START -->')
-new = body[:start] + '\n' + queue + body[end:]
-print(new, end='')
-" "$QUEUE")
+start += len(start_marker)
+print(body[:start] + '\n' + queue + '\n' + body[end:], end='')
+" "$QUEUE" <<< "$CURRENT_BODY")
 
 gh pr edit "$PR" --repo "$REPO" --body "$NEW_BODY"
 log "PR #$PR work queue synced"
