@@ -2,30 +2,29 @@ A CI check is failing. All context (PR, repo, branch, check name, failure log) i
 
 ## Steps
 
-### 1. Check for an existing task
-Call TaskList. If an open (pending or in_progress) task titled "Fix CI: <check-name>" already exists, skip to step 3 — don't create a duplicate.
-
-### 2. Create a task
-TaskCreate with title `Fix CI: <check-name>` and the failure details in the description.
-
-### 3. Implement the fix
-1. TaskUpdate → in_progress
-2. Read the failure log. Identify root cause.
-3. Fix the code. Follow CLAUDE.md.
-4. Verify (CLAUDE.md test command; default: `make test`). Fix before continuing.
-5. Commit with a descriptive message and push:
+### 1. Implement the fix
+1. Read the failure log. Identify root cause.
+2. Fix the code. Follow CLAUDE.md.
+3. Verify (CLAUDE.md test command; default: `make test`). Fix before continuing.
+4. Commit with a descriptive message and push:
    ```bash
    git commit -m "<descriptive message>"
    git push
    ```
-6. TaskUpdate → completed
 
-### 4. Sync the work queue
-Fetch PR body, update the block between the HTML comment markers, write it back.
+### 2. Mark complete
+```bash
+bash /home/rhencke/workspace/kennel/task-cli.sh <work_dir> complete "CI failure: <check-name>"
+```
+
+Do NOT use TaskCreate, TaskUpdate, TodoWrite, or any other task tools. Only `task-cli.sh`.
+Do NOT edit the PR body directly. `sync-tasks.sh` owns the PR body work queue.
 
 ## Done when
-Fix committed, pushed, task completed, work queue synced.
+Fix committed and pushed, task marked complete.
 
 ## Constraints
-- **Never** mark the PR as ready for review (`gh pr ready`). It must stay draft. That is the user's decision.
+- **Never** mark the PR as ready for review (`gh pr ready`). It must stay draft.
 - **Never** rebase, amend, or force-push. New commits only.
+- **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, or TodoRead. Only `task-cli.sh`.
+- **Never** edit the PR body directly.
