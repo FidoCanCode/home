@@ -125,14 +125,37 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
     return None
 
 
+def _comment_lock(work_dir: Path, comment_id: int) -> Path:
+    """Return path to a per-comment lockfile."""
+    lock_dir = work_dir / ".git" / "fido" / "comments"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return lock_dir / f"{comment_id}.lock"
+
+
 def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
-    """Triage a comment via Haiku, generate a reply via Opus, post it.
+    """Triage a comment via Opus, generate a reply via Opus, post it.
 
     Returns (triage_category, task_title) so the caller can create the right task.
+    Uses a per-comment lockfile to prevent races with work.sh.
     """
     info = action.reply_to
     if not info or not action.comment_body:
         return ("ACT", action.comment_body or action.prompt)
+
+    # Per-comment lock — prevents kennel and work.sh from both replying
+    import fcntl
+    cid = info.get("comment_id")
+    if cid:
+        lock_path = _comment_lock(config.work_dir, cid)
+        lock_fd = open(lock_path, "w")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            log.info("comment %s locked by another process — skipping", cid)
+            lock_fd.close()
+            return ("ACT", action.comment_body[:80])
+    else:
+        lock_fd = None
 
     persona_path = Path(config.work_script).parent / "sub" / "persona.md"
     try:
@@ -229,6 +252,10 @@ def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
     # For DUMP: also resolve the thread
     if category == "DUMP" and info.get("comment_id"):
         _try_resolve_thread(info, config)
+
+    # Release comment lock (keep file so work.sh sees it was claimed)
+    if lock_fd:
+        lock_fd.close()
 
     return (category, title)
 

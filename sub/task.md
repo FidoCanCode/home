@@ -47,6 +47,16 @@ GIT_COMMITTER_NAME="$_COMMENTER_NAME" GIT_COMMITTER_EMAIL="$_COMMENTER_EMAIL" \
 ```
 
 Post directly with `in_reply_to` — do not check for pending reviews first. A pending review by the PR author does not block `pulls/{pr}/comments`; just post and it will succeed.
+
+**Before posting**, acquire the comment lock to prevent races with the webhook handler:
+```bash
+COMMENT_LOCK="$(git rev-parse --git-dir)/fido/comments/<first_db_id>.lock"
+mkdir -p "$(dirname "$COMMENT_LOCK")"
+exec 6>"$COMMENT_LOCK"
+flock -n 6 || { echo "comment locked — skipping reply"; exec 6>&-; }
+```
+If the lock fails, skip the reply (kennel already handled it). Otherwise, post and then release:
+
 ```bash
 # Draft the reply in plain English, then rewrite in character via Opus:
 # If change was made:
@@ -61,6 +71,7 @@ _BODY=$(printf '%s\n\nRewrite the following GitHub PR comment in character as Fi
 gh api repos/<owner>/<repo>/pulls/<pr>/comments \
   -X POST -F body="$_BODY" \
   -F in_reply_to=<first_db_id>
+exec 6>&-  # release comment lock
 
 gh api graphql -F threadId=<node_id> \
   -f query='mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id}}}'
