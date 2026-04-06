@@ -2,6 +2,7 @@
 # sync-tasks.sh — sync tasks.json → PR body work queue
 # Triggered by: PostToolUse hook, kennel webhook, cron
 # Protected by flock to prevent concurrent runs
+# If tasks.json changes during a sync, re-syncs automatically
 set -euo pipefail
 
 WORK_DIR="${1:-$PWD}"
@@ -47,28 +48,31 @@ if [[ -z "$PR" ]]; then
   exit 0
 fi
 
-# ── Read tasks.json with flock ────────────────────────────────────────────
 TASK_FILE="$(git rev-parse --git-dir)/fido/tasks.json"
 if [[ ! -f "$TASK_FILE" ]]; then
   log "no tasks.json — nothing to sync"
   exit 0
 fi
 
-# Lock task file for reading
-exec 7<"$TASK_FILE"
-flock -s 7
-TASKS=$(cat "$TASK_FILE")
-exec 7<&-
+# ── Sync loop: re-run if tasks.json changed during sync ───────────────────
+while true; do
+  MTIME_BEFORE=$(stat -c %Y "$TASK_FILE" 2>/dev/null || echo 0)
 
-if [[ -z "$TASKS" || "$TASKS" == "[]" ]]; then
-  log "no tasks — nothing to sync"
-  exit 0
-fi
+  # Lock task file for reading
+  exec 7<"$TASK_FILE"
+  flock -s 7
+  TASKS=$(cat "$TASK_FILE")
+  exec 7<&-
 
-log "syncing task list → PR #$PR"
+  if [[ -z "$TASKS" || "$TASKS" == "[]" ]]; then
+    log "no tasks — nothing to sync"
+    break
+  fi
 
-# ── Format as work queue markdown ─────────────────────────────────────────
-QUEUE=$(printf '%s' "$TASKS" | python3 -c "
+  log "syncing task list → PR #$PR"
+
+  # ── Format as work queue markdown ───────────────────────────────────────
+  QUEUE=$(printf '%s' "$TASKS" | python3 -c "
 import json, sys
 
 tasks = json.load(sys.stdin)
@@ -99,15 +103,15 @@ if completed:
 print('\n'.join(lines))
 ")
 
-# ── Update PR body ────────────────────────────────────────────────────────
-CURRENT_BODY=$(gh pr view "$PR" --repo "$REPO" --json body --jq .body)
+  # ── Update PR body ──────────────────────────────────────────────────────
+  CURRENT_BODY=$(gh pr view "$PR" --repo "$REPO" --json body --jq .body)
 
-if ! echo "$CURRENT_BODY" | grep -q "WORK_QUEUE_START"; then
-  log "PR #$PR has no work queue markers — skipping"
-  exit 0
-fi
+  if ! echo "$CURRENT_BODY" | grep -q "WORK_QUEUE_START"; then
+    log "PR #$PR has no work queue markers — skipping"
+    break
+  fi
 
-NEW_BODY=$(python3 -c "
+  NEW_BODY=$(python3 -c "
 import sys
 body = sys.stdin.read()
 queue = sys.argv[1]
@@ -122,5 +126,14 @@ start += len(start_marker)
 print(body[:start] + '\n' + queue + '\n' + body[end:], end='')
 " "$QUEUE" <<< "$CURRENT_BODY")
 
-gh pr edit "$PR" --repo "$REPO" --body "$NEW_BODY"
-log "PR #$PR work queue synced"
+  gh pr edit "$PR" --repo "$REPO" --body "$NEW_BODY"
+  log "PR #$PR work queue synced"
+
+  # Check if tasks.json changed during sync — if so, loop
+  MTIME_AFTER=$(stat -c %Y "$TASK_FILE" 2>/dev/null || echo 0)
+  if [[ "$MTIME_AFTER" != "$MTIME_BEFORE" ]]; then
+    log "tasks.json changed during sync — re-syncing"
+    continue
+  fi
+  break
+done
