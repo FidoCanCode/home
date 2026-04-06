@@ -8,11 +8,13 @@ Check for CLAUDE.md files. Note the test command, commit discipline, and any oth
 ### 2. Plan
 Break the request into the smallest meaningful tasks — one task per logical commit, ordered so each builds on the previous.
 
-For each task, write it to the shared task file AND call TaskCreate:
+For each task, write it to the shared task file (flock-protected, the single source of truth):
 ```bash
 bash /home/rhencke/workspace/kennel/task-cli.sh <work_dir> add "<task title>"
 ```
 Where `<work_dir>` is from the Context section.
+
+Do NOT use TaskCreate or TodoWrite — only `task-cli.sh`.
 
 ### 3. Sync the work queue
 Run sync-tasks to update the PR body from the task file:
