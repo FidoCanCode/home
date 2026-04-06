@@ -121,7 +121,9 @@ while true; do
 import json, sys
 
 tasks = json.load(sys.stdin)
-pending = []
+ci = []
+pr_comment = []
+other = []
 completed = []
 
 def fmt(t):
@@ -131,10 +133,18 @@ def fmt(t):
 
 for t in tasks:
     status = t.get('status', 'pending')
-    if status in ('pending', 'in_progress'):
-        pending.append(fmt(t))
-    elif status == 'completed':
+    title = t.get('title', '')
+    if status == 'completed':
         completed.append(fmt(t))
+    elif status in ('pending', 'in_progress'):
+        if title.startswith('CI failure:'):
+            ci.append(fmt(t))
+        elif title.startswith('PR comment:'):
+            pr_comment.append(fmt(t))
+        else:
+            other.append(fmt(t))
+
+pending = ci + pr_comment + other
 
 lines = []
 for i, display in enumerate(pending):
