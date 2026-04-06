@@ -65,21 +65,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def _process_action(self, action) -> None:
         try:
-            category, title = None, None
+            handled = False
+
             if action.reply_to:
                 category, title = reply_to_comment(action, self.config)
+                handled = True
+                # Create task based on triage result
+                if category in ("DUMP", "ANSWER"):
+                    pass  # No task needed
+                elif title:
+                    prefix = f"{category}: " if category in ("ASK", "DEFER") else ""
+                    create_task(f"{prefix}{title}", self.config)
+
             if action.review_comments:
                 reply_to_review(action, self.config)
+                handled = True  # inline comments handled individually
 
-            # Create task based on triage result
-            if category == "DUMP":
-                pass  # No task needed
-            elif category == "ANSWER":
-                pass  # Already answered, no code change
-            elif category and title:
-                prefix = f"{category}: " if category in ("ASK", "DEFER") else ""
-                create_task(f"{prefix}{title}", self.config)
-            else:
+            if not handled:
                 create_task(action.prompt, self.config)
 
             launch_worker(self.config)
