@@ -58,17 +58,30 @@ done
 COMPACTEOF
 chmod +x "$COMPACT_SCRIPT"
 HOOK_CMD="bash $COMPACT_SCRIPT"
+SYNC_CMD="bash $SCRIPT_DIR/sync-tasks.sh $WORK_DIR &"
 
 python3 -c "
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 cfg = json.loads(p.read_text()) if p.exists() else {}
+
+# PostCompact hook
 cfg.setdefault('hooks', {}).setdefault('PostCompact', [])
 entry = {'matcher': '', 'hooks': [{'type': 'command', 'command': sys.argv[2]}]}
 if entry not in cfg['hooks']['PostCompact']:
     cfg['hooks']['PostCompact'].append(entry)
+
+# PostToolUse hook for task mutations → sync work queue
+sync_entry = {'matcher': '', 'hooks': [{'type': 'command', 'command': sys.argv[3]}]}
+for tool in ('TaskCreate', 'TaskUpdate', 'TaskDelete'):
+    key = 'PostToolUse'
+    cfg.setdefault('hooks', {}).setdefault(key, [])
+    tool_entry = {'matcher': tool, 'hooks': [{'type': 'command', 'command': sys.argv[3]}]}
+    if tool_entry not in cfg['hooks'][key]:
+        cfg['hooks'][key].append(tool_entry)
+
 p.write_text(json.dumps(cfg, indent=2))
-" "$SETTINGS_LOCAL" "$HOOK_CMD" 2>/dev/null || true
+" "$SETTINGS_LOCAL" "$HOOK_CMD" "$SYNC_CMD" 2>/dev/null || true
 
 PROMPT="$FIDO_DIR/prompt"
 STREAM="$FIDO_DIR/stream"
@@ -80,13 +93,22 @@ import json, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 if not p.exists(): exit()
 cfg = json.loads(p.read_text())
-cmd = sys.argv[2]
+compact_cmd = sys.argv[2]
+sync_cmd = sys.argv[3]
+
+# Remove PostCompact hook
 hooks = cfg.get('hooks', {}).get('PostCompact', [])
-cfg['hooks']['PostCompact'] = [h for h in hooks if not any(e.get('command') == cmd for e in h.get('hooks', []))]
+cfg['hooks']['PostCompact'] = [h for h in hooks if not any(e.get('command') == compact_cmd for e in h.get('hooks', []))]
 if not cfg['hooks']['PostCompact']: del cfg['hooks']['PostCompact']
+
+# Remove PostToolUse hooks
+hooks = cfg.get('hooks', {}).get('PostToolUse', [])
+cfg['hooks']['PostToolUse'] = [h for h in hooks if not any(e.get('command') == sync_cmd for e in h.get('hooks', []))]
+if not cfg['hooks']['PostToolUse']: del cfg['hooks']['PostToolUse']
+
 if not cfg.get('hooks'): cfg.pop('hooks', None)
 p.write_text(json.dumps(cfg, indent=2))
-" "$SETTINGS_LOCAL" "$HOOK_CMD" 2>/dev/null || true
+" "$SETTINGS_LOCAL" "$HOOK_CMD" "$SYNC_CMD" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
