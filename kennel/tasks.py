@@ -48,15 +48,26 @@ def _locked(path: Path, write: bool = False):
     return Lock()
 
 
-def add_task(work_dir: Path, title: str, description: str = "", status: str = "pending") -> dict[str, Any]:
-    """Add a task to the shared task file. Returns the new task."""
-    task = {
+def add_task(
+    work_dir: Path,
+    title: str,
+    description: str = "",
+    status: str = "pending",
+    thread: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Add a task to the shared task file. Returns the new task.
+
+    thread: optional {repo, pr, comment_id} for comment-originated tasks.
+    """
+    task: dict[str, Any] = {
         "id": str(int(time.time() * 1000)),
         "title": title,
         "description": description,
         "status": status,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if thread:
+        task["thread"] = thread
     path = _task_file(work_dir)
     with _locked(path, write=True) as lock:
         tasks = lock.read()

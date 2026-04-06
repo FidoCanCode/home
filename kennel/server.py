@@ -75,7 +75,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     pass  # No task needed
                 elif title:
                     prefix = f"{category}: " if category in ("ASK", "DEFER") else ""
-                    create_task(f"{prefix}{title}", self.config)
+                    create_task(f"{prefix}{title}", self.config,
+                                thread=action.reply_to)
 
             if action.review_comments:
                 reply_to_review(action, self.config)

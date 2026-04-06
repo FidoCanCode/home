@@ -319,10 +319,10 @@ def _triage(comment_body: str, is_bot: bool, context: dict[str, Any] | None = No
     return ("DO" if is_bot else "ACT"), comment_body[:80]
 
 
-def create_task(prompt: str, config: Config) -> None:
+def create_task(prompt: str, config: Config, thread: dict[str, Any] | None = None) -> None:
     """Write a task to the shared task file, then trigger sync."""
     log.info("creating task: %s", prompt[:100])
-    add_task(config.work_dir, title=prompt)
+    add_task(config.work_dir, title=prompt, thread=thread)
     launch_sync(config)
 
 
