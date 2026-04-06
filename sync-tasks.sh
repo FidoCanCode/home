@@ -54,6 +54,51 @@ if [[ ! -f "$TASK_FILE" ]]; then
   exit 0
 fi
 
+# ── Auto-complete ASK tasks with resolved threads ─────────────────────────
+_OWNER="${REPO%/*}"
+_REPO_NAME="${REPO#*/}"
+_ASK_TASKS=$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: tasks = json.load(f)
+for t in tasks:
+    if t.get('status') == 'pending' and t.get('title','').startswith('ASK:') and t.get('thread'):
+        th = t['thread']
+        print(f\"{t['id']}\t{th.get('comment_id','')}\")
+" "$TASK_FILE" 2>/dev/null || true)
+
+if [[ -n "$_ASK_TASKS" ]]; then
+  # Fetch all resolved thread first-comment IDs in one call
+  _RESOLVED_IDS=$(gh api graphql \
+    -F owner="$_OWNER" -F repo="$_REPO_NAME" -F pr="$PR" \
+    -f query='query($owner:String!,$repo:String!,$pr:Int!){
+      repository(owner:$owner,name:$repo){
+        pullRequest(number:$pr){
+          reviewThreads(first:100){
+            nodes{
+              isResolved
+              comments(first:1){ nodes{ databaseId } }
+            }
+          }
+        }
+      }
+    }' \
+    --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved) | .comments.nodes[0].databaseId] | .[]' \
+    2>/dev/null || true)
+
+  while IFS=$'\t' read -r task_id comment_id; do
+    [[ -z "$comment_id" ]] && continue
+    if echo "$_RESOLVED_IDS" | grep -qx "$comment_id"; then
+      log "ASK task $task_id: thread resolved — marking complete"
+      bash "$(dirname "$0")/task-cli.sh" "$WORK_DIR" complete "$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: tasks = json.load(f)
+for t in tasks:
+    if t['id'] == sys.argv[2]: print(t['title']); break
+" "$TASK_FILE" "$task_id")" 2>/dev/null || true
+    fi
+  done <<< "$_ASK_TASKS"
+fi
+
 # ── Sync loop: re-run if tasks.json changed during sync ───────────────────
 while true; do
   MTIME_BEFORE=$(stat -c %Y "$TASK_FILE" 2>/dev/null || echo 0)
