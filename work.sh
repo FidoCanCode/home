@@ -346,6 +346,8 @@ Review threads related to this CI failure (JSON — may be empty):
 $CI_THREADS"
   claude_run
   log "CI fix done"
+  bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" complete "CI failure: $FAILING" 2>/dev/null || true
+  bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
   exec bash "$0" "$WORK_DIR"
 fi
 
@@ -378,6 +380,8 @@ Review feedback:
 $REVIEW_FEEDBACK"
   claude_run
   log "review feedback done"
+  bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" complete "Address review feedback from $OWNER" 2>/dev/null || true
+  bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
   exec bash "$0" "$WORK_DIR"
 fi
 
@@ -440,6 +444,7 @@ Unresolved threads (JSON):
 $THREADS"
   claude_run
   log "threads done"
+  bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
   exec bash "$0" "$WORK_DIR"
 fi
 
@@ -464,7 +469,9 @@ Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH
 
 Task title: $PENDING"
   claude_run
-  log "task done"
+  log "task done: $PENDING"
+  bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" complete "$PENDING" 2>/dev/null || true
+  bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
   exec bash "$0" "$WORK_DIR"
 fi
 
