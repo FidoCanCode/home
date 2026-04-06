@@ -167,7 +167,7 @@ def update_task_list(prompt: str, config: Config) -> None:
     log.info("updating task list: %s", prompt[:100])
     try:
         result = subprocess.run(
-            ["claude", "--print", "-p", full_prompt],
+            ["claude", "-p", full_prompt],
             env=env,
             capture_output=True,
             text=True,
