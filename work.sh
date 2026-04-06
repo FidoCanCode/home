@@ -227,6 +227,7 @@ EXISTING_SLUG=$(printf '%s' "$_PR_JSON" | jq -r '.headRefName // empty')
 if [[ -n "$EXISTING_PR" && "$EXISTING_PR_STATE" == "MERGED" ]]; then
   log "PR #$EXISTING_PR already merged — closing issue #$CURRENT_ISSUE"
   gh issue close "$CURRENT_ISSUE" --repo "$REPO" 2>/dev/null || true
+  echo '[]' > "$FIDO_DIR/tasks.json" 2>/dev/null || true
   rm -f "$STATE_FILE"
   git checkout "$DEFAULT_BRANCH" 2>/dev/null || true
   git pull "$FORK_REMOTE" "$DEFAULT_BRANCH" --ff-only 2>/dev/null || true
@@ -531,6 +532,7 @@ if [[ "$APPROVED" == "true" ]]; then
     || gh pr merge "$PR" --repo "$REPO" --squash --auto
   log "PR #$PR merged — closing issue #$CURRENT_ISSUE"
   gh issue close "$CURRENT_ISSUE" --repo "$REPO" 2>/dev/null || true
+  echo '[]' > "$FIDO_DIR/tasks.json" 2>/dev/null || true
   rm -f "$STATE_FILE"
   git checkout "$DEFAULT_BRANCH"
   git pull "$FORK_REMOTE" "$DEFAULT_BRANCH" --ff-only 2>/dev/null || true
