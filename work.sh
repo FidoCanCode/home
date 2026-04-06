@@ -245,10 +245,25 @@ if [[ -n "$EXISTING_SLUG" ]]; then
   git fetch "$UPSTREAM_REMOTE"
   git checkout "$SLUG" 2>/dev/null \
     || git checkout -b "$SLUG" --track "$FORK_REMOTE/$SLUG"
-  build_prompt resume \
+  # Check if PR has any tasks — if empty, run setup instead of resume
+  _HAS_TASKS=$(gh pr view "$PR" --repo "$REPO" --json body --jq .body 2>/dev/null \
+    | sed -n '/WORK_QUEUE_START/,/WORK_QUEUE_END/p' \
+    | { grep -c '^- \[' || echo "0"; })
+  if [[ "$_HAS_TASKS" == "0" ]]; then
+    log "PR #$PR has no tasks — running setup"
+    build_prompt setup \
+"Request: $REQUEST
+Repo: $REPO
+Branch: $SLUG
+PR: $PR
+Fork remote: $FORK_REMOTE
+Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH"
+  else
+    build_prompt resume \
 "PR: $PR
 Repo: $REPO
 Branch: $SLUG"
+  fi
   SESSION_ID=$(claude_start)
   log "session: $SESSION_ID"
 else
