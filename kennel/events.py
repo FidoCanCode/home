@@ -138,15 +138,16 @@ def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
     log.info("triage: %s — %s", category, title)
 
     # Step 2: Opus reply based on triage
+    context = f"Comment: {comment}\n\nYour plan: {title}"
     if category == "ACT" or category == "DO":
         reply_instruction = (
-            f"Write a short GitHub PR reply acknowledging this comment and saying you'll work on it. "
-            f"Briefly state what you'll do: {title}"
+            f"Write a short GitHub PR reply to this comment. Acknowledge what they're asking for "
+            f"and briefly explain your approach.\n\n{context}"
         )
     elif category == "ASK":
         reply_instruction = (
-            f"Write a short GitHub PR reply asking a focused clarifying question about this comment. "
-            f"You need more information before you can act.\n\nComment: {comment}"
+            f"Write a short GitHub PR reply asking a focused clarifying question. "
+            f"You need more information before you can act.\n\n{context}"
         )
     elif category == "ANSWER":
         reply_instruction = (
@@ -156,15 +157,15 @@ def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
     elif category == "DEFER":
         reply_instruction = (
             f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
-            f"out of scope for this PR. Be polite.\n\nSuggestion: {comment}"
+            f"out of scope for this PR.\n\n{context}"
         )
     elif category == "DUMP":
         reply_instruction = (
             f"Write a short GitHub PR reply politely declining this suggestion and briefly "
-            f"explaining why it's not applicable.\n\nSuggestion: {comment}"
+            f"explaining why it's not applicable.\n\n{context}"
         )
     else:
-        reply_instruction = f"Write a short GitHub PR reply to: {comment}"
+        reply_instruction = f"Write a short GitHub PR reply to this comment.\n\n{context}"
 
     log.info("generating %s reply for PR #%s comment %s", category, info["pr"], info["comment_id"])
     try:
