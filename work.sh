@@ -328,12 +328,16 @@ fi
 # ── Review-level feedback (non-inline "Request changes" body) ─────────────
 log "checking: review feedback"
 REVIEW_FEEDBACK=$(gh pr view "$PR" --repo "$REPO" --json reviews \
-  | jq -r --arg user "$GH_USER" --arg owner "$OWNER" '
-    [ .reviews[]
-      | select(.author.login == $owner)
-      | select(.state == "CHANGES_REQUESTED")
-      | select(.body != "")
-    ] | last | .body // empty')
+  | jq -r --arg owner "$OWNER" '
+    ([ .reviews[] | select(.author.login == $owner) ] | last | .state // "NONE") as $latest
+    | if $latest != "CHANGES_REQUESTED" then empty
+      else
+        [ .reviews[]
+          | select(.author.login == $owner)
+          | select(.state == "CHANGES_REQUESTED")
+          | select(.body != "")
+        ] | last | .body // empty
+      end' 2>/dev/null || true)
 
 if [[ -n "$REVIEW_FEEDBACK" ]]; then
   log "review feedback from $OWNER"
