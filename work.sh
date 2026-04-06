@@ -250,11 +250,11 @@ if [[ -n "$EXISTING_SLUG" ]]; then
   git fetch "$UPSTREAM_REMOTE"
   git checkout "$SLUG" 2>/dev/null \
     || git checkout -b "$SLUG" --track "$FORK_REMOTE/$SLUG"
-  # Check if tasks.json has pending tasks — if empty, run setup
-  _HAS_TASKS=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null \
-    | jq -r '[.[] | select(.status == "pending")] | length' 2>/dev/null || echo "0")
+  # Check if tasks.json has any tasks — run setup only if never planned
+  _ALL_TASKS=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null \
+    | jq -r 'length' 2>/dev/null || echo "0")
   SESSION_ID=""
-  if [[ "$_HAS_TASKS" -eq 0 ]]; then
+  if [[ "$_ALL_TASKS" -eq 0 ]]; then
     log "PR #$PR has no tasks — running setup"
     build_prompt setup \
 "Request: $REQUEST
