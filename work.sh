@@ -9,7 +9,13 @@ WORK_DIR="${1:-$PWD}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$WORK_DIR"
 
-log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
+mkdir -p "$HOME/log"
+log() {
+  local msg
+  msg="$(printf '[%s] %s' "$(date '+%H:%M:%S')" "$*")"
+  printf '%s\n' "$msg"
+  printf '%s\n' "$msg" >> "$HOME/log/fido.log"
+}
 
 # ── Lock (prevent duplicate workers) ──────────────────────────────────────
 FIDO_DIR_EARLY="$(git rev-parse --git-dir)/fido"
@@ -365,12 +371,16 @@ THREADS=$(gh api graphql \
       }
     }
   }' \
-  | jq --arg user "$GH_USER" '{
+  | jq --arg user "$GH_USER" --arg owner "$OWNER" --argjson bots '["copilot[bot]"]' '{
       threads: [
         .data.repository.pullRequest.reviewThreads.nodes[]
         | select(.isResolved == false)
         | select(
             (.comments.nodes | last | .author.login) != $user
+          )
+        | select(
+            (.comments.nodes | last | .author.login) as $author
+            | $author == $owner or ($bots | index($author) != null)
           )
         | {
             id,
