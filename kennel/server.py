@@ -15,6 +15,9 @@ from kennel.events import create_task, dispatch, launch_worker, reply_to_comment
 log = logging.getLogger("kennel")
 
 
+_replied_comments: set[int] = set()
+
+
 class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
 
@@ -68,8 +71,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
             handled = False
 
             if action.reply_to:
-                category, title = reply_to_comment(action, self.config)
-                handled = True
+                cid = action.reply_to.get("comment_id")
+                if cid and cid in _replied_comments:
+                    log.info("already replied to comment %s — skipping", cid)
+                    handled = True
+                    category, title = None, None
+                else:
+                    category, title = reply_to_comment(action, self.config)
+                    if cid:
+                        _replied_comments.add(cid)
+                    handled = True
                 # Create task based on triage result
                 if category in ("DUMP", "ANSWER"):
                     pass  # No task needed
@@ -79,7 +90,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                                 thread=action.reply_to)
 
             if action.review_comments:
-                reply_to_review(action, self.config)
+                reply_to_review(action, self.config, already_replied=_replied_comments)
                 handled = True  # inline comments handled individually
 
             if not handled:

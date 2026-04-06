@@ -239,7 +239,7 @@ def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
     pass
 
 
-def reply_to_review(action: Action, config: Config) -> None:
+def reply_to_review(action: Action, config: Config, already_replied: set[int] | None = None) -> None:
     """Fetch inline comments from a review and reply to each."""
     info = action.review_comments
     if not info:
@@ -266,8 +266,14 @@ def reply_to_review(action: Action, config: Config) -> None:
         log.info("no inline comments in review")
         return
 
-    log.info("replying to %d review comments", len(comment_ids))
-    for cid in comment_ids:
+    skipped = [cid for cid in comment_ids if already_replied and int(cid) in already_replied]
+    todo = [cid for cid in comment_ids if not already_replied or int(cid) not in already_replied]
+    if skipped:
+        log.info("skipping %d already-replied comments", len(skipped))
+    if not todo:
+        return
+    log.info("replying to %d review comments", len(todo))
+    for cid in todo:
         reply_to_comment(
             Action(
                 prompt=action.prompt,
@@ -275,6 +281,8 @@ def reply_to_review(action: Action, config: Config) -> None:
             ),
             config,
         )
+        if already_replied is not None:
+            already_replied.add(int(cid))
 
 
 def _triage(comment_body: str, is_bot: bool, context: dict[str, Any] | None = None) -> tuple[str, str]:
