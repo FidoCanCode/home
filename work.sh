@@ -143,10 +143,15 @@ claude_start() {   # start new session; prints session_id to stdout, progress to
   jq -r 'select(.type=="result") | .session_id // empty' "$STREAM" | tail -1
 }
 
-claude_run() {     # continue session; progress to stdout
-  claude --model claude-sonnet-4-6 --output-format stream-json --verbose \
-    --dangerously-skip-permissions --resume "$SESSION_ID" --print < "$PROMPT" \
-    | stdbuf -oL jq -rj "$STREAM_FILTER"
+claude_run() {     # continue or start session; progress to stdout
+  if [[ -n "$SESSION_ID" ]]; then
+    claude --model claude-sonnet-4-6 --output-format stream-json --verbose \
+      --dangerously-skip-permissions --resume "$SESSION_ID" --print < "$PROMPT" \
+      | stdbuf -oL jq -rj "$STREAM_FILTER"
+  else
+    SESSION_ID=$(claude_start)
+    log "session: $SESSION_ID"
+  fi
 }
 
 # ── Main loop (lock held throughout) ──────────────────────────────────────
@@ -248,6 +253,7 @@ if [[ -n "$EXISTING_SLUG" ]]; then
   # Check if tasks.json has pending tasks — if empty, run setup
   _HAS_TASKS=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null \
     | jq -r '[.[] | select(.status == "pending")] | length' 2>/dev/null || echo "0")
+  SESSION_ID=""
   if [[ "$_HAS_TASKS" -eq 0 ]]; then
     log "PR #$PR has no tasks — running setup"
     build_prompt setup \
