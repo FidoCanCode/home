@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -53,17 +54,37 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # Respond immediately — don't block on dispatch
         self._respond(200, "ok")
 
-        # Dispatch: reply (if comment), update task list, launch worker
+        # Process in background thread so we don't block the server
         action = dispatch(event, payload, self.config)
         if action:
+            threading.Thread(
+                target=self._process_action,
+                args=(action,),
+                daemon=True,
+            ).start()
+
+    def _process_action(self, action) -> None:
+        try:
+            category, title = None, None
             if action.reply_to:
-                reply_to_comment(action, self.config)
+                category, title = reply_to_comment(action, self.config)
             if action.review_comments:
                 reply_to_review(action, self.config)
-            create_task(action.prompt, self.config,
-                        comment_body=action.comment_body,
-                        is_bot=action.is_bot)
+
+            # Create task based on triage result
+            if category == "DUMP":
+                pass  # No task needed
+            elif category == "ANSWER":
+                pass  # Already answered, no code change
+            elif category and title:
+                prefix = f"{category}: " if category in ("ASK", "DEFER") else ""
+                create_task(f"{prefix}{title}", self.config)
+            else:
+                create_task(action.prompt, self.config)
+
             launch_worker(self.config)
+        except Exception:
+            log.exception("error processing action")
 
     def do_GET(self) -> None:
         self._respond(200, "kennel is running")

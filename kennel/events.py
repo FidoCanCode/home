@@ -116,11 +116,14 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
     return None
 
 
-def reply_to_comment(action: Action, config: Config) -> None:
-    """Post an immediate acknowledgment reply to a PR comment via Opus."""
+def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
+    """Triage a comment via Haiku, generate a reply via Opus, post it.
+
+    Returns (triage_category, task_title) so the caller can create the right task.
+    """
     info = action.reply_to
-    if not info:
-        return
+    if not info or not action.comment_body:
+        return ("ACT", action.comment_body or action.prompt)
 
     persona_path = Path(config.work_script).parent / "sub" / "persona.md"
     try:
@@ -128,25 +131,59 @@ def reply_to_comment(action: Action, config: Config) -> None:
     except FileNotFoundError:
         persona = ""
 
-    plain = f"Acknowledged — working on this now."
-    log.info("generating reply for PR #%s comment %s", info["pr"], info["comment_id"])
+    comment = action.comment_body
+
+    # Step 1: Haiku triage
+    category, title = _triage(comment, action.is_bot)
+    log.info("triage: %s — %s", category, title)
+
+    # Step 2: Opus reply based on triage
+    if category == "ACT" or category == "DO":
+        reply_instruction = (
+            f"Write a short GitHub PR reply acknowledging this comment and saying you'll work on it. "
+            f"Briefly state what you'll do: {title}"
+        )
+    elif category == "ASK":
+        reply_instruction = (
+            f"Write a short GitHub PR reply asking a focused clarifying question about this comment. "
+            f"You need more information before you can act.\n\nComment: {comment}"
+        )
+    elif category == "ANSWER":
+        reply_instruction = (
+            f"Write a short GitHub PR reply directly answering this question. "
+            f"Be helpful and specific. Do NOT say you'll make code changes.\n\nQuestion: {comment}"
+        )
+    elif category == "DEFER":
+        reply_instruction = (
+            f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
+            f"out of scope for this PR. Be polite.\n\nSuggestion: {comment}"
+        )
+    elif category == "DUMP":
+        reply_instruction = (
+            f"Write a short GitHub PR reply politely declining this suggestion and briefly "
+            f"explaining why it's not applicable.\n\nSuggestion: {comment}"
+        )
+    else:
+        reply_instruction = f"Write a short GitHub PR reply to: {comment}"
+
+    log.info("generating %s reply for PR #%s comment %s", category, info["pr"], info["comment_id"])
     try:
         result = subprocess.run(
             [
                 "claude", "--model", "claude-opus-4-6", "--print", "-p",
-                f"{persona}\n\nRewrite the following GitHub PR comment reply in character as Fido. "
-                f"Keep it to 1 sentence. Output only the comment text, no quotes, no explanation.\n\n{plain}",
+                f"{persona}\n\n{reply_instruction}\n\n"
+                "Output only the comment text, no quotes, no explanation. Keep it brief.",
             ],
             capture_output=True,
             text=True,
             timeout=30,
         )
-        body = result.stdout.strip() if result.returncode == 0 else plain
+        body = result.stdout.strip() if result.returncode == 0 else ""
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        body = plain
+        body = ""
 
     if not body:
-        body = plain
+        body = f"Looking into this now." if category in ("ACT", "DO") else f"Noted — checking on this."
 
     log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
     try:
@@ -165,6 +202,18 @@ def reply_to_comment(action: Action, config: Config) -> None:
         log.info("reply posted")
     except Exception:
         log.exception("failed to post reply")
+
+    # For DUMP: also resolve the thread
+    if category == "DUMP" and info.get("comment_id"):
+        _try_resolve_thread(info, config)
+
+    return (category, title)
+
+
+def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
+    """Best-effort resolve a review thread via GraphQL."""
+    # We'd need the thread node_id — skip for now, work.sh will handle it
+    pass
 
 
 def reply_to_review(action: Action, config: Config) -> None:
@@ -238,19 +287,10 @@ def _triage(comment_body: str, is_bot: bool) -> tuple[str, str]:
     return ("DO" if is_bot else "ACT"), comment_body[:80]
 
 
-def create_task(prompt: str, config: Config, comment_body: str | None = None, is_bot: bool = False) -> None:
-    """Triage (if comment) and write a task to the shared task file, then trigger sync."""
-    if comment_body is not None:
-        prefix, title = _triage(comment_body, is_bot)
-        if prefix == "DUMP":
-            log.info("triage: DUMP — skipping task for: %s", comment_body[:80])
-            return
-        task_title = f"{prefix}: {title}" if prefix not in ("ACT", "DO") else title
-    else:
-        task_title = prompt
-
-    log.info("creating task: %s", task_title[:100])
-    add_task(config.work_dir, title=task_title)
+def create_task(prompt: str, config: Config) -> None:
+    """Write a task to the shared task file, then trigger sync."""
+    log.info("creating task: %s", prompt[:100])
+    add_task(config.work_dir, title=prompt)
     launch_sync(config)
 
 
