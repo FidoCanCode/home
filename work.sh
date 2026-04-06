@@ -498,11 +498,14 @@ fi
 # ── Task ───────────────────────────────────────────────────────────────────
 log "checking: tasks"
 _TASK_JSON=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null || echo "[]")
-# Prioritise: CI fix → PR comment ACT → ASK (skip) → everything else
+# Prioritise: CI fix → PR comment → everything else (skip ASK/DEFER)
 PENDING=$(printf '%s' "$_TASK_JSON" | jq -r '
-  [.[] | select(.status == "pending" and (.title | startswith("ASK:") | not))] |
+  [.[] | select(.status == "pending")
+       | select((.title | ascii_downcase | startswith("ask:")) | not)
+       | select((.title | ascii_downcase | startswith("defer:")) | not)
+  ] |
   (map(select(.title | startswith("CI failure:"))) | .[0].title // empty) //
-  (map(select(.title | startswith("PR comment:"))) | .[0].title // empty) //
+  (map(select(.title | ascii_downcase | startswith("pr comment:"))) | .[0].title // empty) //
   (.[0].title // empty)' 2>/dev/null || true)
 
 if [[ -n "$PENDING" ]]; then
