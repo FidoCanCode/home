@@ -187,8 +187,9 @@ ISSUE_TITLE=$(gh issue view "$CURRENT_ISSUE" --repo "$REPO" --json title --jq .t
 REQUEST="$ISSUE_TITLE (closes #$CURRENT_ISSUE)"
 
 # ── Find or create branch + PR ─────────────────────────────────────────────
-_PR_JSON=$(gh pr list --repo "$REPO" --state all --json number,headRefName,state \
-  --search "#$CURRENT_ISSUE in:body" 2>/dev/null | jq -r '.[0] // empty')
+_PR_JSON=$(gh pr list --repo "$REPO" --state all --json number,headRefName,state,author \
+  --search "#$CURRENT_ISSUE in:body" 2>/dev/null \
+  | jq -r --arg user "$GH_USER" '[.[] | select(.author.login == $user)] | .[0] // empty')
 EXISTING_PR=$(printf '%s' "$_PR_JSON" | jq -r '.number // empty')
 EXISTING_PR_STATE=$(printf '%s' "$_PR_JSON" | jq -r '.state // empty')
 EXISTING_SLUG=$(printf '%s' "$_PR_JSON" | jq -r '.headRefName // empty')
