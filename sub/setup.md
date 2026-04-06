@@ -1,4 +1,4 @@
-A fresh git branch has been created from upstream, a sentinel commit pushed, and a draft PR opened. Your job is to plan the work and sync the plan to the PR description. All context is in the Context section above.
+A fresh git branch has been created. Your job is to plan the work by creating tasks. The PR does not exist yet — it will be created after you finish. All context is in the Context section above.
 
 ## Steps
 
@@ -15,20 +15,15 @@ bash /home/rhencke/workspace/kennel/task-cli.sh <work_dir> add "<task title>"
 Where `<work_dir>` is from the Context section.
 
 Do NOT use TaskCreate or TodoWrite — only `task-cli.sh`.
-
-### 3. Sync the work queue
-Run sync-tasks to update the PR body from the task file:
-```bash
-bash /home/rhencke/workspace/kennel/sync-tasks.sh <work_dir>
-```
+Do NOT create a PR. Do NOT edit any PR body. Do NOT run sync-tasks.
 
 ## Done when
-Tasks written to task file, synced to PR body.
-
-**Verify**: the PR body should have a `<!-- WORK_QUEUE_START -->` block with `- [ ]` items and end with `Fixes #N`.
+All tasks written to the task file via `task-cli.sh`.
 
 **Stop immediately. Do not implement any tasks. Implementation is handled by subsequent invocations.**
 
 ## Constraints
-- **Never** mark the PR as ready for review (`gh pr ready`). It must stay draft. That is the user's decision.
+- **Never** mark the PR as ready for review (`gh pr ready`).
 - **Never** rebase, amend, or force-push. New commits only.
+- **Never** use TaskCreate, TaskUpdate, TodoWrite, or TodoRead. Only `task-cli.sh`.
+- **Never** edit any PR body or call sync-tasks. The caller handles that.

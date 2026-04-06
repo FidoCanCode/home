@@ -267,7 +267,7 @@ Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH"
     log "session: $SESSION_ID"
   fi
 else
-  # Generate slug via Haiku
+  # Generate slug
   _SLUG_RAW=$(printf 'Output ONLY a git branch name: 2-4 lowercase words separated by hyphens, no issue numbers, summarising this request. No explanation, no punctuation, just the branch name.\n\nRequest: %s' "$REQUEST" \
     | claude --model claude-haiku-4-5-20251001 --print 2>/dev/null | head -1 \
     | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//;s/-*$//' | cut -c1-40)
@@ -284,12 +284,31 @@ else
     || git checkout "$SLUG"
   git commit --allow-empty -m "wip: start"
   git push -u "$FORK_REMOTE" "$SLUG"
+
+  # Run setup BEFORE creating PR — plans tasks into tasks.json
+  log "running setup (pre-PR)"
+  build_prompt setup \
+"Request: $REQUEST
+Repo: $REPO
+Branch: $SLUG
+Fork remote: $FORK_REMOTE
+Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH"
+  SESSION_ID=$(claude_start)
+  log "session: $SESSION_ID"
+
+  # Build PR body with tasks already populated
   _PR_BODY_PLAIN="Working on: $REQUEST. Implementation in progress."
   _PR_BODY_TEXT=$(printf '%s\n\nWrite a short, friendly pull request description (2-3 sentences) for the following work. No headers, no bullet points. Output only the description text.\n\n%s' \
     "$(cat "$SCRIPT_DIR/sub/persona.md")" "$_PR_BODY_PLAIN" \
     | claude --model claude-opus-4-6 --print 2>/dev/null | head -10)
   : "${_PR_BODY_TEXT:=$_PR_BODY_PLAIN}"
-  _PR_BODY="$(printf '%s\n\n---\n\n## Work queue\n\n<!-- WORK_QUEUE_START -->\n<!-- WORK_QUEUE_END -->\n\nFixes #%s' "$_PR_BODY_TEXT" "$CURRENT_ISSUE")"
+
+  # Format tasks from tasks.json into work queue
+  _TASK_QUEUE=$(bash "$SCRIPT_DIR/task-cli.sh" "$WORK_DIR" list 2>/dev/null \
+    | jq -r '[.[] | select(.status == "pending")] | to_entries | map("- [ ] \(.value.title)" + if .key == 0 then " **→ next**" else "" end) | .[]' 2>/dev/null || true)
+  : "${_TASK_QUEUE:=<!-- no tasks yet -->}"
+
+  _PR_BODY="$(printf '%s\n\n---\n\n## Work queue\n\n<!-- WORK_QUEUE_START -->\n%s\n<!-- WORK_QUEUE_END -->\n\nFixes #%s' "$_PR_BODY_TEXT" "$_TASK_QUEUE" "$CURRENT_ISSUE")"
   PR_URL=$(gh pr create --draft \
     --title "$REQUEST" \
     --body "$_PR_BODY" \
@@ -297,16 +316,7 @@ else
     --head "$SLUG" \
     --repo "$REPO")
   PR=$(printf '%s' "$PR_URL" | grep -oE '[0-9]+$')
-  log "PR: #$PR opened — starting setup"
-  build_prompt setup \
-"Request: $REQUEST
-Repo: $REPO
-Branch: $SLUG
-PR: $PR
-Fork remote: $FORK_REMOTE
-Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH"
-  SESSION_ID=$(claude_start)
-  log "session: $SESSION_ID"
+  log "PR: #$PR opened with $(echo "$_TASK_QUEUE" | grep -c '^- ' || echo 0) tasks"
 fi
 log "PR: #$PR  https://github.com/$REPO/pull/$PR"
 
