@@ -135,6 +135,21 @@ STREAM_FILTER='
 PERSONA="$(cat "$SCRIPT_DIR/sub/persona.md")"
 SYSTEM_FILE="$FIDO_DIR/system"
 
+set_status() {  # set_status <what fido is doing>
+  local what="$1"
+  local msg
+  msg=$(claude --model claude-opus-4-6 --print \
+    --system-prompt "You are setting your GitHub profile status. Write a short status (under 80 chars) describing what you're doing. Be a dog. Include one emoji. No quotes. Just the status text." \
+    -p "$PERSONA
+
+What you're doing: $what" 2>/dev/null | head -1)
+  : "${msg:=$what}"
+  # Truncate to 80 chars
+  msg="${msg:0:80}"
+  gh api /user -X PATCH -f "message=$msg" 2>/dev/null || true
+  log "status: $msg"
+}
+
 build_prompt() {   # build_prompt <subskill> <context-string>
   # System prompt: persona + task instructions (guardrails)
   printf '%s\n\n%s\n' "$PERSONA" "$(cat "$SCRIPT_DIR/sub/$1.md")" > "$SYSTEM_FILE"
@@ -215,12 +230,14 @@ if [[ -z "$CURRENT_ISSUE" ]]; then
 
   if [[ -z "$NEXT" || "$NEXT" == "null	null" ]]; then
     log "no eligible issues assigned to $GH_USER in $REPO"
+    set_status "All done — no issues to fetch"
     break
   fi
 
   CURRENT_ISSUE=$(echo "$NEXT" | cut -f1)
   NEXT_TITLE=$(echo "$NEXT" | cut -f2-)
   log "starting issue #$CURRENT_ISSUE: $NEXT_TITLE"
+  set_status "Picking up issue #$CURRENT_ISSUE: $NEXT_TITLE"
   jq -n --argjson issue "$CURRENT_ISSUE" '{issue: $issue}' > "$STATE_FILE"
   # Only post pickup comment for genuinely new issues (not restarts)
   _ALREADY_COMMENTED=$(gh api "repos/$REPO/issues/$CURRENT_ISSUE/comments" \
@@ -370,6 +387,7 @@ FAILING=$(gh pr checks "$PR" --repo "$REPO" --json name,state,link 2>/dev/null \
 
 if [[ -n "$FAILING" ]]; then
   log "CI failing: $FAILING"
+  set_status "Fixing CI: $FAILING on PR #$PR"
   RUN_URL=$(gh pr checks "$PR" --repo "$REPO" --json name,state,link 2>/dev/null \
     | jq -r --arg n "$FAILING" '.[] | select(.name == $n) | .link' || true)
   RUN_ID=$(printf '%s' "$RUN_URL" | grep -oP 'runs/\K[0-9]+' \
@@ -542,6 +560,7 @@ PENDING=$(printf '%s' "$_TASK_JSON" | jq -r '
 
 if [[ -n "$PENDING" ]]; then
   log "task: $PENDING"
+  set_status "Working on: $PENDING"
   build_prompt task \
 "PR: $PR
 Repo: $REPO
@@ -577,6 +596,7 @@ if [[ "$APPROVED" == "true" ]]; then
   gh pr merge "$PR" --repo "$REPO" --squash 2>/dev/null \
     || gh pr merge "$PR" --repo "$REPO" --squash --auto
   log "PR #$PR merged — closing issue #$CURRENT_ISSUE"
+  set_status "Merged PR #$PR! Issue #$CURRENT_ISSUE done"
   gh issue close "$CURRENT_ISSUE" --repo "$REPO" 2>/dev/null || true
   echo '[]' > "$FIDO_DIR/tasks.json" 2>/dev/null || true
   rm -f "$STATE_FILE"
@@ -611,6 +631,7 @@ fi
 
 # ── No work ────────────────────────────────────────────────────────────────
 log "no work"
+set_status "Napping — waiting for work"
 break
 
 done # end main loop
