@@ -1099,6 +1099,7 @@ class Worker:
             if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
                 return 1
             if self.execute_task(ctx.fido_dir, repo_ctx, pr_number, slug):
+                self.resolve_addressed_threads(repo_ctx, pr_number)
                 return 1
             return self.handle_promote_merge(
                 ctx.fido_dir, repo_ctx, pr_number, slug, issue

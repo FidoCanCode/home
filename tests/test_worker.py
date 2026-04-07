@@ -4283,6 +4283,7 @@ class TestRunExecuteTaskIntegration:
             patch.object(worker, "handle_review_feedback", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=True),
+            patch.object(worker, "resolve_addressed_threads"),
         ):
             result = worker.run()
         assert result == 1
@@ -4951,6 +4952,7 @@ class TestRunPromoteMergeIntegration:
             patch.object(worker, "handle_review_feedback", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=True),
+            patch.object(worker, "resolve_addressed_threads"),
             patch.object(worker, "handle_promote_merge", mock_hpm),
         ):
             worker.run()
