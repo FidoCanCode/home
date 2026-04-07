@@ -13,11 +13,15 @@ from kennel.worker import (
     RepoContext,
     WorkerContext,
     acquire_lock,
+    clear_state,
     create_compact_script,
     create_context,
     discover_repo_context,
+    get_current_issue,
+    load_state,
     resolve_git_dir,
     run,
+    save_state,
     set_status,
     setup_hooks,
     teardown_hooks,
@@ -597,3 +601,148 @@ class TestSetStatus:
             (tmp_path / "persona.md").write_text("I am Fido.")
             set_status(gh, "working")
         assert mock_gen.call_args[1]["system_prompt"] is not None
+
+
+class TestLoadState:
+    def test_returns_empty_dict_when_absent(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        assert load_state(fido_dir) == {}
+
+    def test_returns_state_when_present(self, tmp_path: Path) -> None:
+        import json
+
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        (fido_dir / "state.json").write_text(json.dumps({"issue": 42}))
+        assert load_state(fido_dir) == {"issue": 42}
+
+    def test_returns_dict_with_arbitrary_keys(self, tmp_path: Path) -> None:
+        import json
+
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        (fido_dir / "state.json").write_text(json.dumps({"issue": 7, "extra": "val"}))
+        result = load_state(fido_dir)
+        assert result["issue"] == 7
+        assert result["extra"] == "val"
+
+
+class TestSaveState:
+    def test_creates_state_file(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 5})
+        assert (fido_dir / "state.json").exists()
+
+    def test_roundtrips_with_load_state(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 99})
+        assert load_state(fido_dir) == {"issue": 99}
+
+    def test_overwrites_existing_state(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 1})
+        save_state(fido_dir, {"issue": 2})
+        assert load_state(fido_dir) == {"issue": 2}
+
+
+class TestClearState:
+    def test_removes_state_file(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 3})
+        clear_state(fido_dir)
+        assert not (fido_dir / "state.json").exists()
+
+    def test_noop_when_absent(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        # Should not raise
+        clear_state(fido_dir)
+
+    def test_load_returns_empty_after_clear(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 10})
+        clear_state(fido_dir)
+        assert load_state(fido_dir) == {}
+
+
+class TestGetCurrentIssue:
+    def _make_gh(self, state: str = "OPEN") -> MagicMock:
+        gh = MagicMock()
+        gh.view_issue.return_value = {"state": state, "title": "Test", "body": ""}
+        return gh
+
+    def test_returns_none_when_no_state(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        gh = self._make_gh()
+        assert get_current_issue(fido_dir, gh, "owner/repo") is None
+
+    def test_returns_issue_number_when_open(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 7})
+        gh = self._make_gh(state="OPEN")
+        assert get_current_issue(fido_dir, gh, "owner/repo") == 7
+
+    def test_returns_int_type(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 7})
+        gh = self._make_gh(state="OPEN")
+        result = get_current_issue(fido_dir, gh, "owner/repo")
+        assert isinstance(result, int)
+
+    def test_returns_none_when_closed(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 4})
+        gh = self._make_gh(state="CLOSED")
+        assert get_current_issue(fido_dir, gh, "owner/repo") is None
+
+    def test_clears_state_when_closed(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 4})
+        gh = self._make_gh(state="CLOSED")
+        get_current_issue(fido_dir, gh, "owner/repo")
+        assert load_state(fido_dir) == {}
+
+    def test_does_not_call_view_issue_when_no_state(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        gh = self._make_gh()
+        get_current_issue(fido_dir, gh, "owner/repo")
+        gh.view_issue.assert_not_called()
+
+    def test_calls_view_issue_with_correct_args(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 12})
+        gh = self._make_gh(state="OPEN")
+        get_current_issue(fido_dir, gh, "alice/proj")
+        gh.view_issue.assert_called_once_with("alice/proj", 12)
+
+    def test_logs_info_when_closed(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 9})
+        gh = self._make_gh(state="CLOSED")
+        with caplog.at_level(logging.INFO, logger="kennel"):
+            get_current_issue(fido_dir, gh, "owner/repo")
+        assert "advancing" in caplog.text
+
+    def test_state_preserved_when_open(self, tmp_path: Path) -> None:
+        fido_dir = tmp_path / "fido"
+        fido_dir.mkdir()
+        save_state(fido_dir, {"issue": 5})
+        gh = self._make_gh(state="OPEN")
+        get_current_issue(fido_dir, gh, "owner/repo")
+        assert load_state(fido_dir) == {"issue": 5}

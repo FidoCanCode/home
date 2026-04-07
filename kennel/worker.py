@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 from kennel import claude, hooks
 from kennel.github import GitHub
@@ -152,6 +153,42 @@ def teardown_hooks(
     """Remove hooks and the compact script created by setup_hooks."""
     hooks.remove_hooks(work_dir, compact_cmd, sync_cmd)
     (fido_dir / "compact.sh").unlink(missing_ok=True)
+
+
+def load_state(fido_dir: Path) -> dict[str, Any]:
+    """Load state.json from fido_dir, returning an empty dict if absent."""
+    state_path = fido_dir / "state.json"
+    if not state_path.exists():
+        return {}
+    return json.loads(state_path.read_text())
+
+
+def save_state(fido_dir: Path, state: dict[str, Any]) -> None:
+    """Write state to state.json in fido_dir."""
+    (fido_dir / "state.json").write_text(json.dumps(state))
+
+
+def clear_state(fido_dir: Path) -> None:
+    """Remove state.json from fido_dir (no-op if absent)."""
+    (fido_dir / "state.json").unlink(missing_ok=True)
+
+
+def get_current_issue(fido_dir: Path, gh: GitHub, repo: str) -> int | None:
+    """Return the current issue number from state, or None if there is none.
+
+    If state.json records an issue that has been CLOSED on GitHub, the state
+    is cleared (advancing to the next issue) and None is returned.
+    """
+    state = load_state(fido_dir)
+    issue = state.get("issue")
+    if issue is None:
+        return None
+    issue_data = gh.view_issue(repo, issue)
+    if issue_data["state"] == "CLOSED":
+        log.info("issue #%s: closed — advancing", issue)
+        clear_state(fido_dir)
+        return None
+    return int(issue)
 
 
 def set_status(gh: GitHub, what: str, busy: bool = True) -> None:
