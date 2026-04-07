@@ -5,12 +5,13 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
-from kennel import claude, hooks
+from kennel import claude, hooks, tasks
 from kennel.github import GitHub
 from kennel.prompts import Prompts, status_system_prompt
 
@@ -333,6 +334,202 @@ class Worker:
         self.set_status("All done — no issues to fetch", busy=False)
         return None
 
+    @staticmethod
+    def _sanitize_slug(raw: str, fallback: str) -> str:
+        """Sanitize a branch name slug: lowercase, hyphens only, max 40 chars.
+
+        If the sanitized result is shorter than 3 characters, falls back to a
+        slug derived from *fallback* (with any ``(closes #N)`` suffix stripped).
+        """
+        slug = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")[:40]
+        if len(slug) < 3:
+            clean = re.sub(r"\(closes\s*#\d+\)", "", fallback, flags=re.IGNORECASE)
+            slug = re.sub(r"[^a-z0-9]+", "-", clean.lower()).strip("-")[:40]
+        return slug
+
+    def _git(
+        self, args: list[str], check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        """Run a git command in self.work_dir."""
+        return subprocess.run(
+            ["git", *args],
+            cwd=self.work_dir,
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+
+    def _build_pr_body(self, request: str, issue: int) -> str:
+        """Build the draft PR body: generated description + work-queue section.
+
+        Reads the Fido persona from ``sub/persona.md`` and generates a 2-3
+        sentence description via Claude (Opus).  Falls back to plain text if
+        Claude returns nothing.  Appends the pending task list (read from
+        tasks.json) inside the ``WORK_QUEUE_START/END`` markers used by
+        sync-tasks.sh.
+        """
+        persona_path = _sub_dir() / "persona.md"
+        try:
+            persona = persona_path.read_text()
+        except OSError:
+            persona = ""
+
+        plain = f"Working on: {request}. Implementation in progress."
+        system_prompt = (
+            "You are a GitHub PR description writer. Output ONLY the description"
+            " text — no preamble, no thinking, no quotes, no markdown headers."
+            " Your first word is the first word of the description."
+            f" The last line must be a blank line followed by 'Fixes #{issue}.'"
+            " on its own line, where N is the issue number."
+        )
+        desc = claude.print_prompt(
+            prompt=f"{persona}\n\nWrite a 2-3 sentence pull request description"
+            f" for: {plain}",
+            model="claude-opus-4-6",
+            system_prompt=system_prompt,
+        )
+        if not desc:
+            desc = plain
+
+        task_list = tasks.list_tasks(self.work_dir)
+        pending = [t for t in task_list if t.get("status") == "pending"]
+        if pending:
+            lines = []
+            for i, t in enumerate(pending):
+                marker = " **→ next**" if i == 0 else ""
+                lines.append(f"- [ ] {t['title']}{marker}")
+            queue = "\n".join(lines)
+        else:
+            queue = "<!-- no tasks yet -->"
+
+        return (
+            f"{desc}\n\n---\n\n## Work queue\n\n"
+            f"<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
+        )
+
+    def find_or_create_pr(
+        self,
+        fido_dir: Path,
+        repo_ctx: RepoContext,
+        issue: int,
+        issue_title: str,
+    ) -> tuple[int, str] | None:
+        """Find or create the branch and draft PR for *issue*.
+
+        Returns ``(pr_number, slug)`` for an open or freshly-created PR,
+        or ``None`` if the issue was already resolved (PR merged and issue
+        closed).
+
+        Workflow:
+        - **Existing merged PR**: close the issue, clear state, return None.
+        - **Existing closed PR**: ignore it and create a fresh PR.
+        - **Existing open PR**: check out the branch; run the setup sub-Claude
+          if tasks.json is empty (planning not yet done).
+        - **No PR**: generate a slug via Claude Haiku, create branch, push,
+          run setup sub-Claude, build the PR body (description + work queue),
+          then create the draft PR.
+        """
+        remote = "origin"
+        request = f"{issue_title} (closes #{issue})"
+
+        existing = self.gh.find_pr(repo_ctx.repo, issue, repo_ctx.gh_user)
+
+        if existing is not None:
+            state = existing["state"]
+            pr_number = existing["number"]
+            slug = existing["headRefName"]
+
+            if state == "MERGED":
+                log.info("PR #%s already merged — closing issue #%s", pr_number, issue)
+                self.gh.close_issue(repo_ctx.repo, issue)
+                self.clear_state(fido_dir)
+                return None
+
+            if state != "CLOSED":
+                # Open PR — resume
+                log.info("resuming PR #%s on branch %s", pr_number, slug)
+                self._git(["fetch", remote])
+                try:
+                    self._git(["checkout", slug])
+                except subprocess.CalledProcessError:
+                    self._git(["checkout", "-b", slug, "--track", f"{remote}/{slug}"])
+                task_list = tasks.list_tasks(self.work_dir)
+                if not task_list:
+                    log.info("PR #%s has no tasks — running setup", pr_number)
+                    context = (
+                        f"Request: {request}\n"
+                        f"Repo: {repo_ctx.repo}\n"
+                        f"Branch: {slug}\n"
+                        f"PR: {pr_number}\n"
+                        f"Fork remote: {remote}\n"
+                        f"Upstream: {remote}/{repo_ctx.default_branch}"
+                    )
+                    self.build_prompt(fido_dir, "setup", context)
+                    session_id = self.claude_start(fido_dir)
+                    log.info("setup session: %s", session_id)
+                log.info(
+                    "PR: #%s  https://github.com/%s/pull/%s",
+                    pr_number,
+                    repo_ctx.repo,
+                    pr_number,
+                )
+                return pr_number, slug
+
+            # CLOSED — fall through to create a fresh PR
+            log.info("PR #%s closed without merge — creating fresh PR", pr_number)
+
+        # Generate branch slug via Haiku
+        raw_slug = claude.generate_branch_name(
+            "Output ONLY a git branch name: 2-4 lowercase words separated by"
+            " hyphens, no issue numbers, summarising this request."
+            " No explanation, no punctuation, just the branch name."
+            f"\n\nRequest: {request}"
+        )
+        slug = self._sanitize_slug(raw_slug, request)
+        log.info("new branch: %s", slug)
+
+        # Create branch from default, push
+        self._git(["fetch", remote])
+        try:
+            self._git(["checkout", "-b", slug, f"{remote}/{repo_ctx.default_branch}"])
+        except subprocess.CalledProcessError:
+            self._git(["checkout", slug])
+        self._git(["commit", "--allow-empty", "-m", "wip: start"])
+        self._git(["push", "-u", remote, slug])
+
+        # Run setup sub-Claude (plans tasks before PR is created)
+        log.info("running setup (pre-PR)")
+        context = (
+            f"Request: {request}\n"
+            f"Repo: {repo_ctx.repo}\n"
+            f"Branch: {slug}\n"
+            f"Fork remote: {remote}\n"
+            f"Upstream: {remote}/{repo_ctx.default_branch}"
+        )
+        self.build_prompt(fido_dir, "setup", context)
+        session_id = self.claude_start(fido_dir)
+        log.info("setup session: %s", session_id)
+
+        # Build PR body with tasks already populated by setup
+        pr_body = self._build_pr_body(request, issue)
+
+        # Create draft PR
+        url = self.gh.create_pr(
+            repo_ctx.repo,
+            request,
+            pr_body,
+            repo_ctx.default_branch,
+            slug,
+        )
+        pr_number = int(url.rstrip("/").split("/")[-1])
+        task_count = len(
+            [t for t in tasks.list_tasks(self.work_dir) if t.get("status") == "pending"]
+        )
+        log.info("PR: #%s opened with %d tasks", pr_number, task_count)
+        log.info("PR: #%s  %s", pr_number, url)
+
+        return pr_number, slug
+
     def post_pickup_comment(
         self, repo: str, issue: int, issue_title: str, gh_user: str
     ) -> None:
@@ -397,7 +594,12 @@ class Worker:
             self.post_pickup_comment(
                 repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
             )
-            # TODO: PR management, CI checks, task execution, and merge
+            if (
+                self.find_or_create_pr(ctx.fido_dir, repo_ctx, issue, issue_title)
+                is None
+            ):
+                return 0
+            # TODO: CI checks, task execution, and merge
         finally:
             self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
 

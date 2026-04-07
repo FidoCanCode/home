@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -627,6 +627,7 @@ class TestWorker:
             patch.object(worker, "get_current_issue", return_value=7),
             patch.object(worker, "find_next_issue", mock_find),
             patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(1, "my-branch")),
         ):
             worker.run()
         mock_find.assert_not_called()
@@ -667,6 +668,7 @@ class TestWorker:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=5),
             patch.object(worker, "post_pickup_comment", mock_pickup),
+            patch.object(worker, "find_or_create_pr", return_value=(1, "my-branch")),
         ):
             worker.run()
         mock_pickup.assert_called_once_with("owner/repo", 5, "Test issue", "fido-bot")
@@ -689,9 +691,49 @@ class TestWorker:
             patch.object(worker, "teardown_hooks"),
             patch.object(worker, "get_current_issue", return_value=3),
             patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(1, "my-branch")),
         ):
             worker.run()
         gh.view_issue.assert_called_once_with("owner/repo", 3)
+
+    def test_run_calls_find_or_create_pr_when_issue_found(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "My task", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_focp = MagicMock(return_value=(42, "my-branch"))
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=8),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", mock_focp),
+        ):
+            worker.run()
+        mock_focp.assert_called_once_with(mock_ctx.fido_dir, repo_ctx, 8, "My task")
+
+    def test_run_returns_0_when_find_or_create_pr_returns_none(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Done", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=2),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=None),
+        ):
+            assert worker.run() == 0
 
 
 class TestWorkerFindNextIssue:
@@ -1577,3 +1619,671 @@ class TestClaudeRun:
         with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
             Worker.claude_run(fido_dir, session_id="sid", timeout=90)
         assert mock_rs.call_args[0][3] == 90
+
+
+class TestSanitizeSlug:
+    """Tests for Worker._sanitize_slug."""
+
+    def test_lowercases_input(self) -> None:
+        assert Worker._sanitize_slug("AddFeature", "fallback text") == "addfeature"
+
+    def test_replaces_special_chars_with_hyphens(self) -> None:
+        result = Worker._sanitize_slug("add feature test", "fallback")
+        assert result == "add-feature-test"
+
+    def test_strips_leading_trailing_hyphens(self) -> None:
+        result = Worker._sanitize_slug("  add-feature  ", "fallback")
+        assert result == "add-feature"
+
+    def test_truncates_at_40_chars(self) -> None:
+        long_input = "a" * 50
+        result = Worker._sanitize_slug(long_input, "fallback")
+        assert len(result) <= 40
+
+    def test_falls_back_when_too_short(self) -> None:
+        result = Worker._sanitize_slug("ab", "fix the login bug")
+        assert "fix" in result or "login" in result or "bug" in result
+
+    def test_falls_back_strips_closes_clause(self) -> None:
+        result = Worker._sanitize_slug("x", "fix bug (closes #42)")
+        assert "42" not in result
+        assert "closes" not in result
+
+    def test_three_char_slug_is_valid(self) -> None:
+        result = Worker._sanitize_slug("abc", "fallback text")
+        assert result == "abc"
+
+    def test_two_char_slug_falls_back(self) -> None:
+        result = Worker._sanitize_slug("ab", "fix login issue")
+        assert len(result) >= 3
+
+    def test_empty_raw_falls_back(self) -> None:
+        result = Worker._sanitize_slug("", "implement auth")
+        assert len(result) >= 3
+
+    def test_fallback_also_sanitized(self) -> None:
+        result = Worker._sanitize_slug("x", "Add New Feature!")
+        assert result == result.lower()
+        assert "!" not in result
+
+
+class TestGit:
+    """Tests for Worker._git helper."""
+
+    def test_calls_subprocess_run_with_git_prefix(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            worker._git(["status"])
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        assert args[0] == "git"
+        assert args[1] == "status"
+
+    def test_passes_work_dir_as_cwd(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            worker._git(["status"])
+        assert mock_run.call_args[1]["cwd"] == tmp_path
+
+    def test_check_true_by_default(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            worker._git(["status"])
+        assert mock_run.call_args[1]["check"] is True
+
+    def test_check_false_propagated(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1)
+            worker._git(["status"], check=False)
+        assert mock_run.call_args[1]["check"] is False
+
+    def test_propagates_called_process_error(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.CalledProcessError(1, "git")
+            with pytest.raises(subprocess.CalledProcessError):
+                worker._git(["checkout", "no-such-branch"])
+
+    def test_capture_output_and_text_set(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            worker._git(["log"])
+        assert mock_run.call_args[1]["capture_output"] is True
+        assert mock_run.call_args[1]["text"] is True
+
+
+class TestBuildPrBody:
+    """Tests for Worker._build_pr_body."""
+
+    def _make_worker(self, tmp_path: Path) -> "Worker":
+        return Worker(tmp_path, MagicMock())
+
+    def _pending_task(self, title: str) -> dict:
+        return {"id": "1", "title": title, "status": "pending"}
+
+    def test_returns_string(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="PR desc."),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("Fix the thing (closes #1)", 1)
+        assert isinstance(result, str)
+
+    def test_contains_work_queue_start_marker(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("req", 1)
+        assert "<!-- WORK_QUEUE_START -->" in result
+
+    def test_contains_work_queue_end_marker(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("req", 1)
+        assert "<!-- WORK_QUEUE_END -->" in result
+
+    def test_pending_tasks_shown_as_checkboxes(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        pending = [self._pending_task("Write tests"), self._pending_task("Fix lint")]
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
+            patch("kennel.worker.tasks.list_tasks", return_value=pending),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("req", 1)
+        assert "- [ ] Write tests" in result
+        assert "- [ ] Fix lint" in result
+
+    def test_first_task_has_next_marker(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        pending = [self._pending_task("First task"), self._pending_task("Second task")]
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
+            patch("kennel.worker.tasks.list_tasks", return_value=pending),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("req", 1)
+        assert "- [ ] First task **→ next**" in result
+
+    def test_second_task_has_no_next_marker(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        pending = [self._pending_task("First task"), self._pending_task("Second task")]
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
+            patch("kennel.worker.tasks.list_tasks", return_value=pending),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("req", 1)
+        assert "- [ ] Second task **→ next**" not in result
+        assert "- [ ] Second task\n" in result or result.endswith("- [ ] Second task")
+
+    def test_no_tasks_shows_placeholder(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("req", 1)
+        assert "<!-- no tasks yet -->" in result
+
+    def test_falls_back_to_plain_when_claude_returns_empty(
+        self, tmp_path: Path
+    ) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value=""),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("Fix auth", 7)
+        assert "Working on: Fix auth" in result
+
+    def test_contains_separator(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="desc"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("req", 1)
+        assert "---" in result
+
+    def test_calls_claude_print_prompt_with_opus(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="d") as mock_pp,
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            worker._build_pr_body("req", 1)
+        assert mock_pp.call_args[1]["model"] == "claude-opus-4-6"
+
+    def test_system_prompt_includes_issue_number(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="d") as mock_pp,
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            worker._build_pr_body("req", 99)
+        assert "99" in mock_pp.call_args[1]["system_prompt"]
+
+    def test_prompt_includes_persona(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="d") as mock_pp,
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido, a very good dog.")
+            worker._build_pr_body("req", 1)
+        assert "I am Fido, a very good dog." in mock_pp.call_args[1]["prompt"]
+
+    def test_skips_completed_tasks(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        task_list = [
+            {"id": "1", "title": "Done task", "status": "completed"},
+            {"id": "2", "title": "Pending task", "status": "pending"},
+        ]
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="d"),
+            patch("kennel.worker.tasks.list_tasks", return_value=task_list),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("")
+            result = worker._build_pr_body("req", 1)
+        assert "Done task" not in result
+        assert "Pending task" in result
+
+    def test_falls_back_gracefully_when_persona_missing(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        missing = tmp_path / "nosuchdir"
+        with (
+            patch("kennel.worker.claude.print_prompt", return_value="d") as mock_pp,
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._sub_dir", return_value=missing),
+        ):
+            worker._build_pr_body("req", 1)
+        # Should not raise; persona becomes empty string
+        assert mock_pp.called
+
+
+class TestFindOrCreatePr:
+    """Tests for Worker.find_or_create_pr."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple["Worker", MagicMock]:
+        gh = MagicMock()
+        return Worker(tmp_path, gh), gh
+
+    def _make_repo_ctx(
+        self,
+        repo: str = "owner/proj",
+        owner: str = "owner",
+        repo_name: str = "proj",
+        gh_user: str = "fido-bot",
+        default_branch: str = "main",
+    ) -> "RepoContext":
+        from kennel.worker import RepoContext
+
+        return RepoContext(
+            repo=repo,
+            owner=owner,
+            repo_name=repo_name,
+            gh_user=gh_user,
+            default_branch=default_branch,
+        )
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "fido"
+        d.mkdir()
+        return d
+
+    def _open_pr(self, number: int = 10, slug: str = "fix-bug") -> dict:
+        return {"number": number, "headRefName": slug, "state": "OPEN"}
+
+    def _merged_pr(self, number: int = 10, slug: str = "fix-bug") -> dict:
+        return {"number": number, "headRefName": slug, "state": "MERGED"}
+
+    def _closed_pr(self, number: int = 10, slug: str = "fix-bug") -> dict:
+        return {"number": number, "headRefName": slug, "state": "CLOSED"}
+
+    # --- Merged PR path ---
+
+    def test_merged_pr_returns_none(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._merged_pr()
+        fido_dir = self._fido_dir(tmp_path)
+        result = worker.find_or_create_pr(
+            fido_dir, self._make_repo_ctx(), 5, "Fix the thing"
+        )
+        assert result is None
+
+    def test_merged_pr_closes_issue(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._merged_pr(number=77)
+        fido_dir = self._fido_dir(tmp_path)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        gh.close_issue.assert_called_once_with("owner/proj", 5)
+
+    def test_merged_pr_clears_state(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._merged_pr()
+        fido_dir = self._fido_dir(tmp_path)
+        Worker.save_state(fido_dir, {"issue": 5})
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        assert Worker.load_state(fido_dir) == {}
+
+    def test_merged_pr_logs_info(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._merged_pr(number=33)
+        fido_dir = self._fido_dir(tmp_path)
+        with caplog.at_level(logging.INFO, logger="kennel"):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        assert "merged" in caplog.text
+
+    # --- Open PR (resume) path ---
+
+    def test_open_pr_returns_pr_number_and_slug(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-branch")
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.tasks.list_tasks", return_value=["a task"]),
+        ):
+            result = worker.find_or_create_pr(
+                fido_dir, self._make_repo_ctx(), 5, "title"
+            )
+        assert result == (20, "my-branch")
+
+    def test_open_pr_logs_resuming(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="fix-stuff")
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.tasks.list_tasks", return_value=["a task"]),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        assert "resuming" in caplog.text
+
+    def test_open_pr_runs_setup_when_no_tasks(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        mock_start = MagicMock(return_value="sess-1")
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "build_prompt", mock_build),
+            patch.object(worker, "claude_start", mock_start),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        mock_build.assert_called_once_with(fido_dir, "setup", ANY)
+        mock_start.assert_called_once_with(fido_dir)
+
+    def test_open_pr_skips_setup_when_tasks_exist(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                return_value=[{"title": "t", "status": "pending"}],
+            ),
+            patch.object(worker, "build_prompt", mock_build),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        mock_build.assert_not_called()
+
+    def test_open_pr_checkout_fallback_on_error(self, tmp_path: Path) -> None:
+        """If git checkout slug fails, try checkout -b --track."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(slug="br")
+        fido_dir = self._fido_dir(tmp_path)
+        git_calls = []
+
+        def side_effect(args, check=True):  # noqa: ARG001
+            git_calls.append(args)
+            if args == ["checkout", "br"]:
+                raise subprocess.CalledProcessError(1, "git")
+            return MagicMock()
+
+        with (
+            patch.object(worker, "_git", side_effect=side_effect),
+            patch("kennel.worker.tasks.list_tasks", return_value=["t"]),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        assert ["checkout", "-b", "br", "--track", "origin/br"] in git_calls
+
+    def test_open_pr_fetches_before_checkout(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(slug="br")
+        fido_dir = self._fido_dir(tmp_path)
+        git_calls = []
+
+        def side_effect(args, check=True):  # noqa: ARG001
+            git_calls.append(args)
+            return MagicMock()
+
+        with (
+            patch.object(worker, "_git", side_effect=side_effect),
+            patch("kennel.worker.tasks.list_tasks", return_value=["t"]),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        assert git_calls[0] == ["fetch", "origin"]
+
+    # --- No PR (new branch) path ---
+
+    def test_no_pr_returns_pr_number_and_slug(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/55"
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
+            patch.object(worker, "build_prompt"),
+            patch.object(worker, "claude_start", return_value="sess"),
+            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+        ):
+            result = worker.find_or_create_pr(
+                fido_dir, self._make_repo_ctx(), 5, "Fix the bug"
+            )
+        assert result is not None
+        pr_number, slug = result
+        assert pr_number == 55
+        assert slug == "fix-bug"
+
+    def test_no_pr_logs_new_branch(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
+            patch.object(worker, "build_prompt"),
+            patch.object(worker, "claude_start", return_value=""),
+            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        assert "new branch" in caplog.text
+
+    def test_no_pr_calls_setup(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        mock_start = MagicMock(return_value="s")
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
+            patch.object(worker, "build_prompt", mock_build),
+            patch.object(worker, "claude_start", mock_start),
+            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        mock_build.assert_called_once_with(fido_dir, "setup", ANY)
+        mock_start.assert_called_once_with(fido_dir)
+
+    def test_no_pr_creates_pr_with_correct_params(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/99"
+        fido_dir = self._fido_dir(tmp_path)
+        repo_ctx = self._make_repo_ctx(repo="owner/proj", default_branch="main")
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
+            patch.object(worker, "build_prompt"),
+            patch.object(worker, "claude_start", return_value=""),
+            patch.object(worker, "_build_pr_body", return_value="pr-body"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+        ):
+            worker.find_or_create_pr(fido_dir, repo_ctx, 7, "Do the work")
+        gh.create_pr.assert_called_once_with(
+            "owner/proj",
+            "Do the work (closes #7)",
+            "pr-body",
+            "main",
+            "do-work",
+        )
+
+    def test_no_pr_git_operations_in_order(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
+        fido_dir = self._fido_dir(tmp_path)
+        git_calls = []
+
+        def side_effect(args, check=True):  # noqa: ARG001
+            git_calls.append(list(args))
+            return MagicMock()
+
+        with (
+            patch.object(worker, "_git", side_effect=side_effect),
+            patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
+            patch.object(worker, "build_prompt"),
+            patch.object(worker, "claude_start", return_value=""),
+            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        assert git_calls[0] == ["fetch", "origin"]
+        assert git_calls[-2] == ["commit", "--allow-empty", "-m", "wip: start"]
+        assert git_calls[-1] == ["push", "-u", "origin", "do-work"]
+
+    def test_no_pr_checkout_fallback_when_branch_exists(self, tmp_path: Path) -> None:
+        """checkout -b fails (branch exists) → fall back to checkout."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
+        fido_dir = self._fido_dir(tmp_path)
+        git_calls = []
+
+        def side_effect(args, check=True):  # noqa: ARG001
+            git_calls.append(list(args))
+            if args[0:2] == ["checkout", "-b"]:
+                raise subprocess.CalledProcessError(128, "git")
+            return MagicMock()
+
+        with (
+            patch.object(worker, "_git", side_effect=side_effect),
+            patch("kennel.worker.claude.generate_branch_name", return_value="slug"),
+            patch.object(worker, "build_prompt"),
+            patch.object(worker, "claude_start", return_value=""),
+            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        assert ["checkout", "slug"] in git_calls
+
+    def test_no_pr_slug_sanitized(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
+        fido_dir = self._fido_dir(tmp_path)
+        git_calls = []
+
+        def side_effect(args, check=True):  # noqa: ARG001
+            git_calls.append(list(args))
+            return MagicMock()
+
+        with (
+            patch.object(worker, "_git", side_effect=side_effect),
+            patch(
+                "kennel.worker.claude.generate_branch_name",
+                return_value="Add New Feature!",
+            ),
+            patch.object(worker, "build_prompt"),
+            patch.object(worker, "claude_start", return_value=""),
+            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+        ):
+            result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
+        assert result is not None
+        _, slug = result
+        assert slug == slug.lower()
+        assert "!" not in slug
+
+    # --- Closed PR (fall through) path ---
+
+    def test_closed_pr_creates_fresh_pr(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._closed_pr(number=5, slug="old-br")
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/6"
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="new-br"),
+            patch.object(worker, "build_prompt"),
+            patch.object(worker, "claude_start", return_value=""),
+            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+        ):
+            result = worker.find_or_create_pr(
+                fido_dir, self._make_repo_ctx(), 5, "title"
+            )
+        assert result is not None
+        pr_number, _ = result
+        assert pr_number == 6
+
+    def test_closed_pr_logs_message(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._closed_pr(number=77)
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/78"
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="slug"),
+            patch.object(worker, "build_prompt"),
+            patch.object(worker, "claude_start", return_value=""),
+            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        assert "closed" in caplog.text
+
+    def test_no_pr_logs_pr_number(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/42"
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.claude.generate_branch_name", return_value="work"),
+            patch.object(worker, "build_prompt"),
+            patch.object(worker, "claude_start", return_value=""),
+            patch.object(worker, "_build_pr_body", return_value="body"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        assert "42" in caplog.text
