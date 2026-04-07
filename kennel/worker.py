@@ -184,6 +184,34 @@ def claude_run(
     return new_session_id, output
 
 
+def _pick_next_task(task_list: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the highest-priority eligible pending task, or ``None``.
+
+    Filters out completed tasks and those prefixed with ``ask:`` or ``defer:``
+    (case-insensitive).  Among the remaining candidates the priority order is:
+
+    1. Tasks whose title starts with ``CI failure:``
+    2. Tasks that carry a ``thread`` payload (comment-originated)
+    3. Everything else (first in list wins)
+    """
+    pending = [
+        t
+        for t in task_list
+        if t.get("status") == "pending"
+        and not t.get("title", "").lower().startswith("ask:")
+        and not t.get("title", "").lower().startswith("defer:")
+    ]
+    if not pending:
+        return None
+    for t in pending:
+        if t.get("title", "").startswith("CI failure:"):
+            return t
+    for t in pending:
+        if t.get("thread") is not None:
+            return t
+    return pending[0]
+
+
 class Worker:
     """Fido worker for a single repository.
 
@@ -792,6 +820,46 @@ class Worker:
         )
         return True
 
+    def execute_task(
+        self,
+        fido_dir: Path,
+        repo_ctx: RepoContext,
+        pr_number: int,
+        slug: str,
+    ) -> bool:
+        """Pick and execute the next pending task via the task sub-Claude.
+
+        Priority order: CI-failure tasks first, then thread-originated tasks,
+        then all others.  Skips tasks whose titles begin with ``ask:`` or
+        ``defer:`` (case-insensitive).
+
+        Returns ``True`` if a task was executed, ``False`` when no eligible
+        task was found.
+        """
+        log.info("checking: tasks")
+        task_list = tasks.list_tasks(self.work_dir)
+        task = _pick_next_task(task_list)
+        if task is None:
+            return False
+        task_title = task["title"]
+        log.info("task: %s", task_title)
+        self.set_status(f"Working on: {task_title}")
+        context = (
+            f"PR: {pr_number}\n"
+            f"Repo: {repo_ctx.repo}\n"
+            f"Branch: {slug}\n"
+            f"Upstream: origin/{repo_ctx.default_branch}\n"
+            f"\nTask title: {task_title}"
+        )
+        build_prompt(fido_dir, "task", context)
+        session_id, _ = claude_run(fido_dir)
+        log.info("task done (session=%s)", session_id)
+        tasks.complete_by_title(self.work_dir, task_title)
+        subprocess.Popen(  # noqa: S603
+            ["bash", str(_sync_script()), str(self.work_dir)],
+        )
+        return True
+
     def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:
         """Seed tasks.json from the PR body work-queue markers if tasks.json is empty.
 
@@ -899,7 +967,9 @@ class Worker:
                 return 1
             if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
                 return 1
-            # TODO: task execution and merge
+            if self.execute_task(ctx.fido_dir, repo_ctx, pr_number, slug):
+                return 1
+            # TODO: merge
         finally:
             self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
 

@@ -13,6 +13,7 @@ from kennel.worker import (
     RepoContext,
     Worker,
     WorkerContext,
+    _pick_next_task,
     _sanitize_slug,
     acquire_lock,
     build_prompt,
@@ -3803,6 +3804,389 @@ class TestRunThreadsIntegration:
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_review_feedback", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
         ):
             result = worker.run()
         assert result == 0
+
+
+class TestPickNextTask:
+    """Tests for the module-level _pick_next_task helper."""
+
+    def _task(
+        self,
+        title: str,
+        status: str = "pending",
+        thread: dict | None = None,
+    ) -> dict:
+        t: dict = {"id": "x", "title": title, "status": status}
+        if thread is not None:
+            t["thread"] = thread
+        return t
+
+    def test_returns_none_for_empty_list(self) -> None:
+        assert _pick_next_task([]) is None
+
+    def test_returns_none_when_all_completed(self) -> None:
+        tasks = [self._task("Fix it", status="completed")]
+        assert _pick_next_task(tasks) is None
+
+    def test_skips_ask_prefix_lowercase(self) -> None:
+        tasks = [self._task("ask: clarify this")]
+        assert _pick_next_task(tasks) is None
+
+    def test_skips_ask_prefix_uppercase(self) -> None:
+        tasks = [self._task("ASK: clarify this")]
+        assert _pick_next_task(tasks) is None
+
+    def test_skips_ask_prefix_mixed_case(self) -> None:
+        tasks = [self._task("Ask: clarify this")]
+        assert _pick_next_task(tasks) is None
+
+    def test_skips_defer_prefix_lowercase(self) -> None:
+        tasks = [self._task("defer: until later")]
+        assert _pick_next_task(tasks) is None
+
+    def test_skips_defer_prefix_uppercase(self) -> None:
+        tasks = [self._task("DEFER: until later")]
+        assert _pick_next_task(tasks) is None
+
+    def test_returns_none_when_only_ask_and_defer(self) -> None:
+        tasks = [
+            self._task("ask: need info"),
+            self._task("defer: not now"),
+        ]
+        assert _pick_next_task(tasks) is None
+
+    def test_returns_regular_task(self) -> None:
+        t = self._task("Implement feature X")
+        assert _pick_next_task([t]) is t
+
+    def test_ci_failure_takes_priority_over_regular(self) -> None:
+        regular = self._task("Implement feature X")
+        ci = self._task("CI failure: lint")
+        assert _pick_next_task([regular, ci]) is ci
+
+    def test_ci_failure_takes_priority_over_thread(self) -> None:
+        thread_task = self._task("PR comment: fix nit", thread={"repo": "r", "pr": 1})
+        ci = self._task("CI failure: tests")
+        assert _pick_next_task([thread_task, ci]) is ci
+
+    def test_thread_task_takes_priority_over_regular(self) -> None:
+        regular = self._task("Regular work")
+        thread_task = self._task(
+            "PR comment: rename var", thread={"repo": "r", "pr": 1}
+        )
+        assert _pick_next_task([regular, thread_task]) is thread_task
+
+    def test_returns_first_pending_when_no_special(self) -> None:
+        first = self._task("First task")
+        second = self._task("Second task")
+        assert _pick_next_task([first, second]) is first
+
+    def test_ignores_completed_when_selecting(self) -> None:
+        completed = self._task("Done task", status="completed")
+        pending = self._task("Pending task")
+        assert _pick_next_task([completed, pending]) is pending
+
+    def test_task_without_thread_key_not_thread_originated(self) -> None:
+        """A task with no thread key is not treated as thread-originated."""
+        no_thread = self._task("Regular task")
+        assert no_thread.get("thread") is None
+        result = _pick_next_task([no_thread])
+        assert result is no_thread  # returned via fallthrough, not thread path
+
+
+class TestExecuteTask:
+    """Tests for Worker.execute_task."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        return Worker(tmp_path, gh), gh
+
+    def _repo_ctx(self) -> RepoContext:
+        return RepoContext(
+            repo="owner/repo",
+            owner="owner",
+            repo_name="repo",
+            gh_user="fido-bot",
+            default_branch="main",
+        )
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _pending_task(self, title: str) -> dict:
+        return {"id": "t1", "title": title, "status": "pending"}
+
+    def test_returns_false_when_no_tasks(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is False
+
+    def test_returns_true_when_task_found(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Implement feature")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+
+    def test_calls_set_status_with_task_title(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Write the tests")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status") as mock_status,
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 5, "my-branch")
+        mock_status.assert_called_once_with("Working on: Write the tests")
+
+    def test_builds_task_prompt_with_correct_skill(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Fix the bug")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt") as mock_bp,
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 7, "fix-branch")
+        _, skill, _ = mock_bp.call_args[0]
+        assert skill == "task"
+
+    def test_context_includes_pr_and_repo(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Do work")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt") as mock_bp,
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 42, "my-slug")
+        _, _, context = mock_bp.call_args[0]
+        assert "PR: 42" in context
+        assert "Repo: owner/repo" in context
+        assert "Branch: my-slug" in context
+        assert "Upstream: origin/main" in context
+
+    def test_context_includes_task_title(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("The special task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt") as mock_bp,
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        _, _, context = mock_bp.call_args[0]
+        assert "Task title: The special task" in context
+
+    def test_calls_claude_run(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sess", "")) as mock_run,
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_run.assert_called_once_with(fido_dir)
+
+    def test_completes_task_by_title(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("My task title")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+            patch("subprocess.Popen"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_complete.assert_called_once_with(tmp_path, "My task title")
+
+    def test_syncs_work_queue_after_completion(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen") as mock_popen,
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_popen.assert_called_once()
+        args = mock_popen.call_args[0][0]
+        assert args[0] == "bash"
+        assert str(tmp_path) in args
+
+    def test_logs_task_name(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Log me please")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert "Log me please" in caplog.text
+
+    def test_logs_task_done_with_session_id(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("A task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("my-session", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert "my-session" in caplog.text
+
+
+class TestRunExecuteTaskIntegration:
+    """Tests that Worker.run() calls execute_task after handle_threads."""
+
+    def _make_gh(self) -> MagicMock:
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.get_default_branch.return_value = "main"
+        gh.get_pr.return_value = {"body": ""}
+        return gh
+
+    def _make_mock_ctx(self, tmp_path: Path) -> MagicMock:
+        mock_ctx = MagicMock(spec=WorkerContext)
+        mock_ctx.git_dir = tmp_path / ".git"
+        mock_ctx.fido_dir = tmp_path / ".git" / "fido"
+        return mock_ctx
+
+    def _make_mock_repo_ctx(self) -> MagicMock:
+        repo_ctx = MagicMock(spec=RepoContext)
+        repo_ctx.repo = "owner/repo"
+        repo_ctx.gh_user = "fido-bot"
+        repo_ctx.default_branch = "main"
+        return repo_ctx
+
+    def test_execute_task_called_when_all_others_return_false(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_execute = MagicMock(return_value=False)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", mock_execute),
+        ):
+            worker.run()
+        mock_execute.assert_called_once_with(mock_ctx.fido_dir, repo_ctx, 42, "fix-bug")
+
+    def test_returns_1_when_execute_task_done(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=True),
+        ):
+            result = worker.run()
+        assert result == 1
+
+    def test_execute_task_not_called_when_threads_handled(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_execute = MagicMock(return_value=False)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=True),
+            patch.object(worker, "execute_task", mock_execute),
+        ):
+            worker.run()
+        mock_execute.assert_not_called()
