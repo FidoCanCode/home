@@ -489,7 +489,10 @@ def create_task(
 
 
 def launch_sync(config: Config, repo_cfg: RepoConfig) -> None:
-    """Launch sync-tasks.sh in background."""
+    """Launch sync-tasks.sh in background.
+
+    TODO: remove once sync-tasks.sh is rewritten to Python.
+    """
     sync_script = config.sub_dir.parent / "sync-tasks.sh"
     try:
         subprocess.Popen(
@@ -504,7 +507,10 @@ def launch_sync(config: Config, repo_cfg: RepoConfig) -> None:
 
 
 def launch_worker(config: Config, repo_cfg: RepoConfig) -> int | None:
-    """Launch work.sh in background (disowned). Returns PID."""
+    """Launch work.sh in background (disowned). Returns PID.
+
+    TODO: replace with a call to worker.run() once work.sh is fully rewritten to Python.
+    """
     work_script = config.sub_dir.parent / "work.sh"
     log_path = repo_cfg.work_dir / ".git" / "fido" / "fido.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)

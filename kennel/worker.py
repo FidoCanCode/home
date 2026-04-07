@@ -46,7 +46,10 @@ def _sub_dir() -> Path:
 
 
 def _sync_script() -> Path:
-    """Return the path to sync-tasks.sh."""
+    """Return the path to sync-tasks.sh.
+
+    TODO: remove once sync-tasks.sh is rewritten to Python.
+    """
     return Path(__file__).parent.parent / "sync-tasks.sh"
 
 
@@ -142,6 +145,7 @@ def setup_hooks(work_dir: Path, fido_dir: Path) -> tuple[str, str]:
     hooks.ensure_gitexcluded(work_dir)
     compact_script = create_compact_script(fido_dir)
     compact_cmd = f"bash {compact_script}"
+    # TODO: replace with Python sync once sync-tasks.sh is removed
     sync_cmd = f"bash {_sync_script()} {work_dir} &"
     hooks.add_hooks(work_dir, compact_cmd, sync_cmd)
     return compact_cmd, sync_cmd
