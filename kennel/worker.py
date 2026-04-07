@@ -920,6 +920,99 @@ class Worker:
         self.gh.comment_issue(repo, issue, msg)
         log.info("posted pickup comment on issue #%s", issue)
 
+    def handle_promote_merge(
+        self,
+        fido_dir: Path,
+        repo_ctx: RepoContext,
+        pr_number: int,
+        slug: str,
+        issue: int,
+    ) -> int:
+        """Handle promote/merge at the end of a work iteration.
+
+        Called when CI, review feedback, threads, and pending tasks are all
+        clear.  Checks the review state and either merges, enables auto-merge,
+        re-requests review, promotes a draft PR, or sets the idle status.
+
+        Returns:
+            0 — no more work (auto-merge enabled, changes-requested,
+                setup not complete, or no outstanding work)
+            1 — did work (merged and cleaned up, or promoted draft;
+                caller should re-run immediately)
+        """
+        log.info("PR #%s: checking review status", pr_number)
+        reviews_data = self.gh.get_reviews(repo_ctx.repo, pr_number)
+        reviews = reviews_data.get("reviews", [])
+        is_draft = reviews_data.get("isDraft", False)
+
+        is_approved = any(
+            r.get("author", {}).get("login") == repo_ctx.owner
+            and r.get("state") == "APPROVED"
+            for r in reviews
+        )
+        task_list = tasks.list_tasks(self.work_dir)
+        pending = [t for t in task_list if t.get("status") == "pending"]
+
+        # Merge only if: approved + not draft + no pending tasks
+        if is_approved and not is_draft and not pending:
+            pr_info = self.gh.get_pr(repo_ctx.repo, pr_number)
+            merge_state = pr_info.get("mergeStateStatus", "")
+            if merge_state == "BLOCKED":
+                log.info(
+                    "PR #%s approved but merge blocked — enabling auto-merge",
+                    pr_number,
+                )
+                self.gh.pr_merge(repo_ctx.repo, pr_number, squash=True, auto=True)
+                return 0
+            log.info("PR #%s approved by %s — merging", pr_number, repo_ctx.owner)
+            self.gh.pr_merge(repo_ctx.repo, pr_number, squash=True)
+            self.gh.close_issue(repo_ctx.repo, issue)
+            (fido_dir / "tasks.json").write_text("[]")
+            clear_state(fido_dir)
+            self._git(["checkout", repo_ctx.default_branch])
+            self._git(
+                ["pull", "origin", repo_ctx.default_branch, "--ff-only"], check=False
+            )
+            self._git(["branch", "-d", slug], check=False)
+            self.set_status(f"Merged PR #{pr_number}! Issue #{issue} done")
+            return 1
+
+        owner_reviews = [
+            r for r in reviews if r.get("author", {}).get("login") == repo_ctx.owner
+        ]
+        latest_state = (
+            owner_reviews[-1].get("state", "NONE") if owner_reviews else "NONE"
+        )
+
+        if latest_state == "CHANGES_REQUESTED":
+            log.info(
+                "PR #%s: changes requested — all addressed, re-requesting review",
+                pr_number,
+            )
+            self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+            return 0
+
+        if is_draft:
+            completed = [t for t in task_list if t.get("status") == "completed"]
+            if not completed:
+                log.info(
+                    "PR #%s: no tasks completed — not promoting (setup may have failed)",
+                    pr_number,
+                )
+                return 0
+            log.info(
+                "PR #%s: work complete — marking ready, requesting review from %s",
+                pr_number,
+                repo_ctx.owner,
+            )
+            self.gh.pr_ready(repo_ctx.repo, pr_number)
+            self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+            return 1
+
+        log.info("PR #%s: no work", pr_number)
+        self.set_status("Napping — waiting for work", busy=False)
+        return 0
+
     def run(self) -> int:
         """Run one iteration of the worker loop.
 
@@ -969,7 +1062,9 @@ class Worker:
                 return 1
             if self.execute_task(ctx.fido_dir, repo_ctx, pr_number, slug):
                 return 1
-            # TODO: merge
+            return self.handle_promote_merge(
+                ctx.fido_dir, repo_ctx, pr_number, slug, issue
+            )
         finally:
             self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
 

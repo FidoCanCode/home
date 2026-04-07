@@ -4190,3 +4190,648 @@ class TestRunExecuteTaskIntegration:
         ):
             worker.run()
         mock_execute.assert_not_called()
+
+
+class TestHandlePromoteMerge:
+    """Tests for Worker.handle_promote_merge."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        return Worker(tmp_path, gh), gh
+
+    def _repo_ctx(self, owner: str = "rhencke") -> RepoContext:
+        return RepoContext(
+            repo=f"{owner}/myrepo",
+            owner=owner,
+            repo_name="myrepo",
+            gh_user="fido-bot",
+            default_branch="main",
+        )
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _reviews(
+        self,
+        owner: str = "rhencke",
+        state: str = "APPROVED",
+        is_draft: bool = False,
+    ) -> dict:
+        return {
+            "reviews": [{"author": {"login": owner}, "state": state}],
+            "isDraft": is_draft,
+        }
+
+    # --- get_reviews call ---
+
+    def test_calls_get_reviews_with_correct_args(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": False}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 7, "my-branch", 3)
+        gh.get_reviews.assert_called_once_with("rhencke/myrepo", 7)
+
+    # --- merge on approval ---
+
+    def test_approved_not_draft_no_pending_calls_get_pr(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git"),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.get_pr.assert_called_once_with("rhencke/myrepo", 9)
+
+    def test_approved_not_draft_no_pending_merges_squash(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git"),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_merge.assert_called_once_with("rhencke/myrepo", 9, squash=True)
+
+    def test_approved_not_draft_no_pending_closes_issue(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git"),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.close_issue.assert_called_once_with("rhencke/myrepo", 5)
+
+    def test_approved_not_draft_no_pending_resets_tasks_json(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        tasks_file = fido_dir / "tasks.json"
+        tasks_file.write_text('[{"id":"x","status":"completed"}]')
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git"),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert tasks_file.read_text() == "[]"
+
+    def test_approved_not_draft_no_pending_clears_state(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 5})
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git"),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert load_state(fido_dir) == {}
+
+    def test_approved_not_draft_no_pending_git_checkout_default(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        mock_git = MagicMock()
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git", mock_git),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        calls = [c[0][0] for c in mock_git.call_args_list]
+        assert ["checkout", "main"] in calls
+
+    def test_approved_not_draft_no_pending_git_pull_ff_only(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        mock_git = MagicMock()
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git", mock_git),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        calls = [c[0][0] for c in mock_git.call_args_list]
+        assert ["pull", "origin", "main", "--ff-only"] in calls
+
+    def test_approved_not_draft_no_pending_git_branch_delete(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        mock_git = MagicMock()
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git", mock_git),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix-slug", 5)
+        calls = [c[0][0] for c in mock_git.call_args_list]
+        assert ["branch", "-d", "fix-slug"] in calls
+
+    def test_approved_not_draft_no_pending_sets_merged_status(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        mock_status = MagicMock()
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git"),
+            patch.object(worker, "set_status", mock_status),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        msg = mock_status.call_args[0][0]
+        assert "Merged" in msg
+        assert "9" in msg
+        assert "5" in msg
+
+    def test_approved_not_draft_no_pending_returns_1(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git"),
+            patch.object(worker, "set_status"),
+        ):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 1
+
+    def test_approved_not_draft_no_pending_blocked_enables_auto_merge(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_merge.assert_called_once_with("rhencke/myrepo", 9, squash=True, auto=True)
+
+    def test_approved_not_draft_no_pending_blocked_returns_0(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 0
+
+    def test_approved_with_pending_skips_merge(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        pending = [{"id": "t1", "title": "Do work", "status": "pending"}]
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=pending),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_merge.assert_not_called()
+
+    def test_approved_but_draft_skips_merge(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=True)
+        completed = [{"id": "t1", "title": "Done", "status": "completed"}]
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=completed),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_merge.assert_not_called()
+
+    def test_not_approved_skips_merge(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(state="COMMENTED", is_draft=False)
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_merge.assert_not_called()
+
+    # --- changes requested ---
+
+    def test_changes_requested_adds_reviewer(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(
+            state="CHANGES_REQUESTED", is_draft=False
+        )
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+
+    def test_changes_requested_returns_0(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(
+            state="CHANGES_REQUESTED", is_draft=False
+        )
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 0
+
+    def test_changes_requested_does_not_merge(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(
+            state="CHANGES_REQUESTED", is_draft=False
+        )
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_merge.assert_not_called()
+
+    def test_uses_latest_review_for_changes_requested(self, tmp_path: Path) -> None:
+        """Later APPROVED overrides earlier CHANGES_REQUESTED."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {"author": {"login": "rhencke"}, "state": "CHANGES_REQUESTED"},
+                {"author": {"login": "rhencke"}, "state": "APPROVED"},
+            ],
+            "isDraft": False,
+        }
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git"),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        # APPROVED is latest — should merge, not re-request
+        gh.pr_merge.assert_called_once()
+        gh.add_pr_reviewer.assert_not_called()
+
+    # --- draft promote ---
+
+    def test_draft_no_completed_tasks_returns_0(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 0
+
+    def test_draft_no_completed_tasks_does_not_promote(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_ready.assert_not_called()
+
+    def test_draft_with_completed_tasks_calls_pr_ready(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        completed = [{"id": "t1", "title": "Done", "status": "completed"}]
+        with patch("kennel.worker.tasks.list_tasks", return_value=completed):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_ready.assert_called_once_with("rhencke/myrepo", 9)
+
+    def test_draft_with_completed_tasks_adds_reviewer(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        completed = [{"id": "t1", "title": "Done", "status": "completed"}]
+        with patch("kennel.worker.tasks.list_tasks", return_value=completed):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+
+    def test_draft_with_completed_tasks_returns_1(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        completed = [{"id": "t1", "title": "Done", "status": "completed"}]
+        with patch("kennel.worker.tasks.list_tasks", return_value=completed):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 1
+
+    def test_draft_pending_tasks_ignored_for_promote_decision(
+        self, tmp_path: Path
+    ) -> None:
+        """Pending tasks don't prevent promote — only completed count matters."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        tasks_list = [
+            {"id": "t1", "title": "Done", "status": "completed"},
+            {"id": "t2", "title": "Next", "status": "pending"},
+        ]
+        with patch("kennel.worker.tasks.list_tasks", return_value=tasks_list):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 1
+        gh.pr_ready.assert_called_once()
+
+    # --- idle / no work ---
+
+    def test_not_draft_not_approved_idle_sets_status(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": False}
+        mock_status = MagicMock()
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "set_status", mock_status),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        mock_status.assert_called_once_with("Napping — waiting for work", busy=False)
+
+    def test_not_draft_not_approved_idle_returns_0(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": False}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "set_status"),
+        ):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 0
+
+    # --- logging ---
+
+    def test_logs_review_status_check(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": False}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "set_status"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert "review status" in caplog.text
+
+    def test_logs_merge(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git"),
+            patch.object(worker, "set_status"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert "merging" in caplog.text
+
+    def test_logs_auto_merge(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=False)
+        gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert "auto-merge" in caplog.text
+
+    def test_logs_changes_requested(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(
+            state="CHANGES_REQUESTED", is_draft=False
+        )
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert "changes requested" in caplog.text
+
+    def test_logs_not_promoting(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert "not promoting" in caplog.text
+
+    def test_logs_marking_ready(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": True}
+        completed = [{"id": "t1", "title": "Done", "status": "completed"}]
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=completed),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert "marking ready" in caplog.text
+
+    def test_logs_no_work(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "isDraft": False}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "set_status"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert "no work" in caplog.text
+
+
+class TestRunPromoteMergeIntegration:
+    """Tests that Worker.run() calls handle_promote_merge after execute_task."""
+
+    def _make_gh(self) -> MagicMock:
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.get_default_branch.return_value = "main"
+        gh.get_pr.return_value = {"body": ""}
+        return gh
+
+    def _make_mock_ctx(self, tmp_path: Path) -> MagicMock:
+        mock_ctx = MagicMock(spec=WorkerContext)
+        mock_ctx.git_dir = tmp_path / ".git"
+        mock_ctx.fido_dir = tmp_path / ".git" / "fido"
+        return mock_ctx
+
+    def _make_mock_repo_ctx(self) -> MagicMock:
+        repo_ctx = MagicMock(spec=RepoContext)
+        repo_ctx.repo = "owner/repo"
+        repo_ctx.gh_user = "fido-bot"
+        repo_ctx.default_branch = "main"
+        return repo_ctx
+
+    def test_handle_promote_merge_called_when_execute_task_returns_false(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_hpm = MagicMock(return_value=0)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", mock_hpm),
+        ):
+            worker.run()
+        mock_hpm.assert_called_once_with(mock_ctx.fido_dir, repo_ctx, 42, "fix-bug", 7)
+
+    def test_run_returns_0_when_handle_promote_merge_returns_0(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            result = worker.run()
+        assert result == 0
+
+    def test_run_returns_1_when_handle_promote_merge_returns_1(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=1),
+        ):
+            result = worker.run()
+        assert result == 1
+
+    def test_handle_promote_merge_not_called_when_execute_task_returns_true(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_hpm = MagicMock(return_value=0)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=True),
+            patch.object(worker, "handle_promote_merge", mock_hpm),
+        ):
+            worker.run()
+        mock_hpm.assert_not_called()
