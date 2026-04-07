@@ -1,8 +1,9 @@
-"""Top-level kennel entry point — dispatches to 'serve' or 'task' subcommands."""
+"""Top-level kennel entry point — dispatches to 'serve', 'task', or 'worker'."""
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -13,7 +14,12 @@ def main(argv: list[str] | None = None) -> None:
         from kennel.cli import main as task_main
 
         task_main(args[1:])
-    else:
-        from kennel.server import run
+    elif args and args[0] == "worker":
+        from kennel.worker import run
 
-        run()
+        work_dir = Path(args[1]) if len(args) > 1 else Path.cwd()
+        sys.exit(run(work_dir))
+    else:
+        from kennel.server import run as server_run
+
+        server_run()

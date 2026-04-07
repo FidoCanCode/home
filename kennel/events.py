@@ -10,9 +10,8 @@ from typing import Any
 from kennel.config import Config, RepoConfig
 from kennel.github import get_github
 from kennel.prompts import (
+    Prompts,
     issue_reply_instruction,
-    persona_wrap,
-    react_prompt,
     reply_instruction,
     triage_prompt,
 )
@@ -195,6 +194,7 @@ def maybe_react(
     except FileNotFoundError:
         persona = ""
 
+    prompts = Prompts(persona)
     try:
         result = subprocess.run(
             [
@@ -203,7 +203,7 @@ def maybe_react(
                 "claude-opus-4-6",
                 "--print",
                 "-p",
-                react_prompt(persona, comment_body),
+                prompts.react_prompt(comment_body),
             ],
             capture_output=True,
             text=True,
@@ -214,7 +214,7 @@ def maybe_react(
             if result.returncode == 0
             else ""
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return
 
     valid = {"+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"}
@@ -263,6 +263,7 @@ def reply_to_comment(
     except FileNotFoundError:
         persona = ""
 
+    prompts = Prompts(persona)
     comment = action.comment_body
 
     # Step 1: Haiku triage
@@ -286,14 +287,14 @@ def reply_to_comment(
                 "claude-opus-4-6",
                 "--print",
                 "-p",
-                persona_wrap(persona, instr),
+                prompts.persona_wrap(instr),
             ],
             capture_output=True,
             text=True,
             timeout=30,
         )
         body = result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         body = ""
 
     if not body:
@@ -427,6 +428,7 @@ def reply_to_issue_comment(
     except FileNotFoundError:
         persona = ""
 
+    prompts = Prompts(persona)
     category, title = _triage(comment, action.is_bot, action.context)
     log.info("issue comment triage: %s — %s", category, title)
 
@@ -441,14 +443,14 @@ def reply_to_issue_comment(
                 "claude-opus-4-6",
                 "--print",
                 "-p",
-                persona_wrap(persona, instr),
+                prompts.persona_wrap(instr),
             ],
             capture_output=True,
             text=True,
             timeout=30,
         )
         body = result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         body = ""
     if not body:
         body = "On it!" if category in ("ACT", "DO") else "Noted."
@@ -489,7 +491,10 @@ def create_task(
 
 
 def launch_sync(config: Config, repo_cfg: RepoConfig) -> None:
-    """Launch sync-tasks.sh in background."""
+    """Launch sync-tasks.sh in background.
+
+    TODO: remove once sync-tasks.sh is rewritten to Python.
+    """
     sync_script = config.sub_dir.parent / "sync-tasks.sh"
     try:
         subprocess.Popen(
@@ -504,7 +509,10 @@ def launch_sync(config: Config, repo_cfg: RepoConfig) -> None:
 
 
 def launch_worker(config: Config, repo_cfg: RepoConfig) -> int | None:
-    """Launch work.sh in background (disowned). Returns PID."""
+    """Launch work.sh in background (disowned). Returns PID.
+
+    TODO: replace with a call to worker.run() once work.sh is fully rewritten to Python.
+    """
     work_script = config.sub_dir.parent / "work.sh"
     log_path = repo_cfg.work_dir / ".git" / "fido" / "fido.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)

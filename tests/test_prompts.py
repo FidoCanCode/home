@@ -1,13 +1,12 @@
-"""Unit tests for kennel/prompts.py — all prompt-building functions."""
+"""Unit tests for kennel/prompts.py — prompt-building functions and Prompts class."""
 
 from __future__ import annotations
 
 import pytest
 
 from kennel.prompts import (
+    Prompts,
     issue_reply_instruction,
-    persona_wrap,
-    react_prompt,
     reply_context_block,
     reply_instruction,
     triage_categories,
@@ -212,51 +211,130 @@ class TestIssueReplyInstruction:
         assert "Comment: do something" in result
 
 
-# ── persona_wrap ──────────────────────────────────────────────────────────────
+# ── Prompts.status_system_prompt ─────────────────────────────────────────────
 
 
-class TestPersonaWrap:
+class TestStatusSystemPrompt:
+    def test_returns_string(self) -> None:
+        result = Prompts("persona").status_system_prompt()
+        assert isinstance(result, str)
+
+    def test_mentions_two_lines(self) -> None:
+        result = Prompts("persona").status_system_prompt()
+        assert "two lines" in result
+
+    def test_mentions_emoji(self) -> None:
+        result = Prompts("persona").status_system_prompt()
+        assert "emoji" in result
+
+    def test_mentions_fido(self) -> None:
+        result = Prompts("persona").status_system_prompt()
+        assert "Fido" in result
+
+
+# ── Prompts class ─────────────────────────────────────────────────────────────
+
+
+class TestPromptsPersonaWrap:
     def test_includes_persona(self) -> None:
-        result = persona_wrap("I am Fido.", "Write a reply.")
+        result = Prompts("I am Fido.").persona_wrap("Write a reply.")
         assert "I am Fido." in result
 
     def test_includes_instruction(self) -> None:
-        result = persona_wrap("persona", "do the thing")
+        result = Prompts("persona").persona_wrap("do the thing")
         assert "do the thing" in result
 
     def test_includes_output_constraint(self) -> None:
-        result = persona_wrap("persona", "instruction")
+        result = Prompts("persona").persona_wrap("instruction")
         assert "Output only the comment text" in result
         assert "no quotes" in result
 
     def test_empty_persona(self) -> None:
-        result = persona_wrap("", "instruct")
+        result = Prompts("").persona_wrap("instruct")
         assert "instruct" in result
         assert "Output only" in result
 
 
-# ── react_prompt ──────────────────────────────────────────────────────────────
-
-
-class TestReactPrompt:
+class TestPromptsReactPrompt:
     def test_includes_persona(self) -> None:
-        result = react_prompt("I am Fido.", "great work!")
+        result = Prompts("I am Fido.").react_prompt("great work!")
         assert "I am Fido." in result
 
     def test_includes_comment(self) -> None:
-        result = react_prompt("persona", "looks good!")
+        result = Prompts("persona").react_prompt("looks good!")
         assert "looks good!" in result
 
     def test_includes_emoji_options(self) -> None:
-        result = react_prompt("persona", "comment")
+        result = Prompts("persona").react_prompt("comment")
         assert "rocket" in result
         assert "heart" in result
 
     def test_includes_none_option(self) -> None:
-        result = react_prompt("persona", "comment")
+        result = Prompts("persona").react_prompt("comment")
         assert "NONE" in result
 
     def test_empty_persona(self) -> None:
-        result = react_prompt("", "hi")
+        result = Prompts("").react_prompt("hi")
         assert "hi" in result
         assert "emoji" in result
+
+
+class TestPromptsStatusPrompt:
+    def test_includes_persona(self) -> None:
+        result = Prompts("I am Fido.").status_prompt("writing tests")
+        assert "I am Fido." in result
+
+    def test_includes_what(self) -> None:
+        result = Prompts("persona").status_prompt("reviewing PRs")
+        assert "reviewing PRs" in result
+
+    def test_what_is_framed_as_doing(self) -> None:
+        result = Prompts("persona").status_prompt("fixing a bug")
+        assert "What you're doing right now" in result
+        assert "fixing a bug" in result
+
+
+class TestPromptsPickupCommentPrompt:
+    def test_includes_persona(self) -> None:
+        result = Prompts("I am Fido.").pickup_comment_prompt("Fix the thing")
+        assert "I am Fido." in result
+
+    def test_includes_issue_title(self) -> None:
+        result = Prompts("persona").pickup_comment_prompt("Refactor auth module")
+        assert "Refactor auth module" in result
+
+    def test_includes_plain_text(self) -> None:
+        result = Prompts("persona").pickup_comment_prompt("Add caching")
+        assert "Picking up issue: Add caching" in result
+
+    def test_instructs_fido_character(self) -> None:
+        result = Prompts("persona").pickup_comment_prompt("title")
+        assert "Fido" in result
+
+    def test_requests_short_output(self) -> None:
+        result = Prompts("persona").pickup_comment_prompt("title")
+        assert "1-2 sentences" in result
+
+    def test_output_constraint_present(self) -> None:
+        result = Prompts("persona").pickup_comment_prompt("title")
+        assert "Output only the comment text" in result
+
+    def test_empty_persona(self) -> None:
+        result = Prompts("").pickup_comment_prompt("Some issue")
+        assert "Picking up issue: Some issue" in result
+
+    def test_returns_string(self) -> None:
+        assert isinstance(Prompts("persona").pickup_comment_prompt("title"), str)
+
+
+class TestPromptsStoresPersona:
+    def test_persona_stored(self) -> None:
+        p = Prompts("my persona")
+        assert p.persona == "my persona"
+
+    def test_different_personas_independent(self) -> None:
+        p1 = Prompts("persona A")
+        p2 = Prompts("persona B")
+        assert "persona A" in p1.status_prompt("working")
+        assert "persona B" in p2.status_prompt("working")
+        assert "persona A" not in p2.status_prompt("working")

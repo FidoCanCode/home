@@ -80,6 +80,33 @@ Markdown instruction files passed to sub-Claude as system prompts:
 - **PRs required** — branch protection on main
 - **Pre-commit hook** — blocks commits that fail format/lint/tests
 - **One entry point** — `kennel` (heading toward all-threads architecture)
+- **No `@staticmethod`** — use module-level functions instead; static methods can't be patched via `self` and resist the dependency injection pattern
+
+### Dependency injection pattern
+
+Worker classes accept external collaborators (e.g. `GitHub`) via the
+constructor rather than instantiating them internally.  This keeps methods
+testable without patching module-level names.
+
+```python
+class Worker:
+    def __init__(self, work_dir: Path, gh: GitHub) -> None:
+        self.work_dir = work_dir
+        self.gh = gh        # injected — mock freely in tests
+
+    def some_method(self) -> ...:
+        self.gh.do_thing(...)  # uses injected client
+```
+
+The module-level `run()` entry point creates real collaborators and delegates:
+
+```python
+def run(work_dir: Path) -> int:
+    return Worker(work_dir, GitHub()).run()
+```
+
+Tests construct `Worker(tmp_path, mock_gh)` directly instead of patching
+`kennel.worker.GitHub`.
 
 ## Lessons learned
 

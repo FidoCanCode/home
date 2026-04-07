@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,30 @@ def _claude(
         text=True,
         timeout=timeout,
     )
+
+
+# ── Stream-JSON helpers ───────────────────────────────────────────────────────
+
+
+def extract_session_id(output: str) -> str:
+    """Extract the session_id from stream-json output.
+
+    Scans each line for a JSON object with ``"type": "result"`` and a
+    non-empty ``"session_id"`` field.  Returns the last such value found
+    (matching bash ``| tail -1``), or an empty string if none is present.
+    """
+    result = ""
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") == "result" and obj.get("session_id"):
+            result = str(obj["session_id"])
+    return result
 
 
 # ── Simple print calls (no tool use) ─────────────────────────────────────────
@@ -41,7 +66,7 @@ def print_prompt(
     try:
         result = _claude(*args, timeout=timeout)
         return result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
 
 
@@ -76,7 +101,7 @@ def print_prompt_from_file(
             timeout=timeout,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
 
 
@@ -110,7 +135,7 @@ def resume_session(
             timeout=timeout,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
 
 
@@ -131,7 +156,7 @@ def triage_comment(
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip().splitlines()[0]
         return ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
 
 
@@ -144,7 +169,7 @@ def generate_reply(
     try:
         result = _claude("--model", model, "--print", "-p", prompt, timeout=timeout)
         return result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
 
 
@@ -159,7 +184,7 @@ def generate_branch_name(
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip().splitlines()[0]
         return ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
 
 
