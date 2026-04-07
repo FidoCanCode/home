@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from kennel.config import Config, RepoConfig
+from kennel.prompts import (
+    issue_reply_instruction,
+    persona_wrap,
+    react_prompt,
+    reply_instruction,
+    triage_prompt,
+)
 from kennel.tasks import add_task
 
 log = logging.getLogger("kennel")
@@ -195,13 +202,7 @@ def maybe_react(
                 "claude-opus-4-6",
                 "--print",
                 "-p",
-                f"{persona}\n\n"
-                f"You just saw this comment on a PR:\n\n{comment_body}\n\n"
-                "Would you react to this with a GitHub emoji reaction? Not every comment needs one — "
-                "use your dog instincts. Pick from: 👍 (+1), 👎 (-1), 😄 (laugh), 😕 (confused), "
-                "❤️ (heart), 🎉 (hooray), 🚀 (rocket), 👀 (eyes). "
-                "Reply with JUST the reaction keyword (e.g. heart, rocket, eyes). "
-                "If you wouldn't react, reply NONE.",
+                react_prompt(persona, comment_body),
             ],
             capture_output=True,
             text=True,
@@ -274,49 +275,7 @@ def reply_to_comment(
     log.info("triage: %s — %s", category, title)
 
     # Step 2: Opus reply based on triage
-    # Build rich context for Opus
-    ctx = action.context or {}
-    context_parts = []
-    if ctx.get("pr_title"):
-        context_parts.append(f"PR: {ctx['pr_title']}")
-    if ctx.get("file"):
-        context_parts.append(f"File: {ctx['file']}")
-        if ctx.get("line"):
-            context_parts.append(f"Line: {ctx['line']}")
-    if ctx.get("diff_hunk"):
-        context_parts.append(f"Diff:\n```\n{ctx['diff_hunk']}\n```")
-    context_parts.append(f"Comment: {comment}")
-    context_parts.append(f"Your plan: {title}")
-    context = "\n\n".join(context_parts)
-    if category == "ACT" or category == "DO":
-        reply_instruction = (
-            f"Write a short GitHub PR reply to this comment. Acknowledge what they're asking for "
-            f"and briefly explain your approach.\n\n{context}"
-        )
-    elif category == "ASK":
-        reply_instruction = (
-            f"Write a short GitHub PR reply asking a focused clarifying question. "
-            f"You need more information before you can act.\n\n{context}"
-        )
-    elif category == "ANSWER":
-        reply_instruction = (
-            f"Write a short GitHub PR reply directly answering this question. "
-            f"Be helpful and specific. Do NOT say you'll make code changes.\n\nQuestion: {comment}"
-        )
-    elif category == "DEFER":
-        reply_instruction = (
-            f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
-            f"out of scope for this PR.\n\n{context}"
-        )
-    elif category == "DUMP":
-        reply_instruction = (
-            f"Write a short GitHub PR reply politely declining this suggestion and briefly "
-            f"explaining why it's not applicable.\n\n{context}"
-        )
-    else:
-        reply_instruction = (
-            f"Write a short GitHub PR reply to this comment.\n\n{context}"
-        )
+    instr = reply_instruction(category, comment, title, action.context)
 
     log.info(
         "generating %s reply for PR #%s comment %s",
@@ -332,8 +291,7 @@ def reply_to_comment(
                 "claude-opus-4-6",
                 "--print",
                 "-p",
-                f"{persona}\n\n{reply_instruction}\n\n"
-                "Output only the comment text, no quotes, no explanation. Keep it brief.",
+                persona_wrap(persona, instr),
             ],
             capture_output=True,
             text=True,
@@ -464,29 +422,7 @@ def _triage(
     comment_body: str, is_bot: bool, context: dict[str, Any] | None = None
 ) -> tuple[str, str]:
     """Ask Haiku to triage a comment. Returns (prefix, title)."""
-    if is_bot:
-        categories = (
-            "DO (worth implementing), DEFER (out of scope), DUMP (not applicable)"
-        )
-    else:
-        categories = "ACT (code change needed), ASK (unclear what code change is needed), ANSWER (question, casual/playful comment, or anything that isn't a code change request — just respond naturally)"
-
-    ctx = context or {}
-    ctx_parts = []
-    if ctx.get("pr_title"):
-        ctx_parts.append(f"PR: {ctx['pr_title']}")
-    if ctx.get("file"):
-        ctx_parts.append(f"File: {ctx['file']}")
-    if ctx.get("diff_hunk"):
-        ctx_parts.append(f"Diff:\n{ctx['diff_hunk']}")
-    ctx_str = "\n".join(ctx_parts)
-
-    prompt = (
-        f"Triage this PR comment into exactly one category: {categories}\n\n"
-        f"{ctx_str}\n\nComment: {comment_body}\n\n"
-        "Reply with ONLY the category word (e.g. ACT or DEFER), then a colon, then a short task title. "
-        "Example: ACT: add unit tests for parser"
-    )
+    prompt = triage_prompt(comment_body, is_bot, context)
     try:
         result = subprocess.run(
             ["claude", "--model", "claude-opus-4-6", "--print", "-p", prompt],
@@ -512,7 +448,6 @@ def reply_to_issue_comment(
 ) -> tuple[str, str]:
     """Triage and reply to a top-level PR comment (issue_comment event)."""
     comment = action.comment_body or ""
-    ctx = action.context or {}
 
     # Extract PR number from prompt
     import re
@@ -529,25 +464,7 @@ def reply_to_issue_comment(
     category, title = _triage(comment, action.is_bot, action.context)
     log.info("issue comment triage: %s — %s", category, title)
 
-    context_parts = []
-    if ctx.get("pr_title"):
-        context_parts.append(f"PR: {ctx['pr_title']}")
-    context_parts.append(f"Comment: {comment}")
-    context_parts.append(f"Your plan: {title}")
-    context = "\n\n".join(context_parts)
-
-    if category in ("ACT", "DO"):
-        instr = f"Write a short GitHub PR reply acknowledging and explaining your approach.\n\n{context}"
-    elif category == "ASK":
-        instr = (
-            f"Write a short GitHub PR reply asking a clarifying question.\n\n{context}"
-        )
-    elif category == "ANSWER":
-        instr = f"Write a short GitHub PR reply directly answering the question.\n\nQuestion: {comment}"
-    elif category == "DUMP":
-        instr = f"Write a short polite decline.\n\n{context}"
-    else:
-        instr = f"Write a short GitHub PR reply.\n\n{context}"
+    instr = issue_reply_instruction(category, comment, title, action.context)
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
     try:
@@ -558,7 +475,7 @@ def reply_to_issue_comment(
                 "claude-opus-4-6",
                 "--print",
                 "-p",
-                f"{persona}\n\n{instr}\n\nOutput only the comment text, no quotes, no explanation.",
+                persona_wrap(persona, instr),
             ],
             capture_output=True,
             text=True,
