@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kennel.tasks import add_task, list_tasks, remove_task, update_task
+from kennel.tasks import (
+    add_task,
+    complete_by_title,
+    list_tasks,
+    remove_task,
+    update_task,
+)
 
 
 def _task_file(tmp_path: Path) -> Path:
@@ -56,6 +62,41 @@ class TestListTasks:
     def test_corrupt_json(self, tmp_path: Path) -> None:
         _task_file(tmp_path).write_text("not json")
         assert list_tasks(tmp_path) == []
+
+
+class TestCompleteByTitle:
+    def test_marks_completed_returns_none_when_no_thread(self, tmp_path: Path) -> None:
+        add_task(tmp_path, title="do something")
+        result = complete_by_title(tmp_path, "do something")
+        assert result is None
+        assert list_tasks(tmp_path)[0]["status"] == "completed"
+
+    def test_returns_thread_when_present(self, tmp_path: Path) -> None:
+        thread = {"repo": "a/b", "pr": 1, "comment_id": 99}
+        add_task(tmp_path, title="t", thread=thread)
+        result = complete_by_title(tmp_path, "t")
+        assert result == thread
+
+    def test_returns_none_when_not_found(self, tmp_path: Path) -> None:
+        add_task(tmp_path, title="other")
+        assert complete_by_title(tmp_path, "missing") is None
+        assert list_tasks(tmp_path)[0]["status"] == "pending"
+
+    def test_skips_already_completed(self, tmp_path: Path) -> None:
+        add_task(tmp_path, title="t")
+        complete_by_title(tmp_path, "t")
+        # second call on already-completed task returns None
+        assert complete_by_title(tmp_path, "t") is None
+
+    def test_completes_first_pending_when_duplicate_titles(
+        self, tmp_path: Path
+    ) -> None:
+        add_task(tmp_path, title="t")
+        add_task(tmp_path, title="t")
+        complete_by_title(tmp_path, "t")
+        tasks = list_tasks(tmp_path)
+        assert tasks[0]["status"] == "completed"
+        assert tasks[1]["status"] == "pending"
 
 
 class TestRemoveTask:

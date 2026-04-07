@@ -106,6 +106,24 @@ def list_tasks(work_dir: Path) -> list[dict[str, Any]]:
         return lock.read()
 
 
+def complete_by_title(work_dir: Path, title: str) -> dict[str, Any] | None:
+    """Mark the first pending task with the given title as completed.
+
+    Returns the task's thread dict if it had one, else None.
+    Returns None silently if no matching pending task is found.
+    """
+    path = _task_file(work_dir)
+    with _locked(path, write=True) as lock:
+        tasks = lock.read()
+        for t in tasks:
+            if t["title"] == title and t["status"] != "completed":
+                t["status"] = "completed"
+                lock.write(tasks)
+                log.info("task completed: %s", title[:80])
+                return t.get("thread")
+    return None
+
+
 def remove_task(work_dir: Path, task_id: str) -> bool:
     """Remove a task. Returns True if found."""
     path = _task_file(work_dir)
