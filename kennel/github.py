@@ -142,6 +142,12 @@ def get_issue_comments(repo: str, number: int | str) -> list[dict[str, Any]]:
 # ── Pull requests ─────────────────────────────────────────────────────────────
 
 
+def get_pull_comments(repo: str, pr: int | str) -> list[dict[str, Any]]:
+    """Return all inline review comments on a pull request."""
+    result = _gh("api", f"repos/{repo}/pulls/{pr}/comments")
+    return json.loads(result.stdout)
+
+
 def find_pr(repo: str, issue_number: int | str, user: str) -> dict[str, Any] | None:
     """Find the most recent PR linked to issue_number authored by user, or None."""
     result = _gh(

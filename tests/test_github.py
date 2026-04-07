@@ -18,6 +18,7 @@ from kennel.github import (
     get_default_branch,
     get_issue_comments,
     get_pr,
+    get_pull_comments,
     get_repo_info,
     get_review_comments,
     get_review_threads,
@@ -183,6 +184,19 @@ class TestGetIssueComments:
             get_issue_comments("o/r", 9)
         cmd = mock.call_args.args[0]
         assert "repos/o/r/issues/9/comments" in cmd
+
+
+class TestGetPullComments:
+    def test_returns_list(self) -> None:
+        comments = [{"id": 42, "body": "looks good"}]
+        with patch("subprocess.run", return_value=_completed(json.dumps(comments))):
+            assert get_pull_comments("o/r", 7) == comments
+
+    def test_uses_api_endpoint(self) -> None:
+        with patch("subprocess.run", return_value=_completed("[]")) as mock:
+            get_pull_comments("o/r", 7)
+        cmd = mock.call_args.args[0]
+        assert "repos/o/r/pulls/7/comments" in cmd
 
 
 class TestFindPr:
