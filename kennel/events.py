@@ -214,7 +214,7 @@ def maybe_react(
             if result.returncode == 0
             else ""
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return
 
     valid = {"+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"}
@@ -294,7 +294,7 @@ def reply_to_comment(
             timeout=30,
         )
         body = result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         body = ""
 
     if not body:
@@ -450,7 +450,7 @@ def reply_to_issue_comment(
             timeout=30,
         )
         body = result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         body = ""
     if not body:
         body = "On it!" if category in ("ACT", "DO") else "Noted."

@@ -66,7 +66,7 @@ def print_prompt(
     try:
         result = _claude(*args, timeout=timeout)
         return result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
 
 
@@ -101,7 +101,7 @@ def print_prompt_from_file(
             timeout=timeout,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
 
 
@@ -135,7 +135,7 @@ def resume_session(
             timeout=timeout,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
 
 
@@ -156,7 +156,7 @@ def triage_comment(
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip().splitlines()[0]
         return ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
 
 
@@ -169,7 +169,7 @@ def generate_reply(
     try:
         result = _claude("--model", model, "--print", "-p", prompt, timeout=timeout)
         return result.stdout.strip() if result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
 
 
@@ -184,7 +184,7 @@ def generate_branch_name(
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip().splitlines()[0]
         return ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired, FileNotFoundError:
         return ""
 
 
