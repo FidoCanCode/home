@@ -142,7 +142,7 @@ set_status() {  # set_status <what fido is doing>
     --system-prompt "You are writing your GitHub profile status as Fido the dog. Output exactly two lines. Line 1: a single emoji for the status icon. Line 2: the status text (under 80 chars, no quotes, no preamble)." \
     -p "$PERSONA
 
-What you're doing right now: $what" 2>/dev/null | head -2)
+What you're doing right now: $what" 2>/dev/null || true)
   if [[ -z "$msg" ]]; then
     log "status: opus returned empty — skipping"
     return
