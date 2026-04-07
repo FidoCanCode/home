@@ -86,3 +86,34 @@ class TestMain:
             pytest.raises(SystemExit),
         ):
             main()
+
+    def test_watchdog_subcommand_dispatches_to_watchdog(self, tmp_path) -> None:
+        """'kennel watchdog <work_dir>' should call watchdog.run and sys.exit."""
+        with patch("kennel.watchdog.run", return_value=0) as mock_run:
+            with pytest.raises(SystemExit) as exc_info:
+                main(["watchdog", str(tmp_path)])
+        mock_run.assert_called_once_with(Path(str(tmp_path)))
+        assert exc_info.value.code == 0
+
+    def test_watchdog_subcommand_exits_with_run_code(self, tmp_path) -> None:
+        """watchdog exit code is passed through sys.exit."""
+        with patch("kennel.watchdog.run", return_value=2):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["watchdog", str(tmp_path)])
+        assert exc_info.value.code == 2
+
+    def test_watchdog_subcommand_defaults_to_cwd(self) -> None:
+        """'kennel watchdog' with no path defaults to Path.cwd()."""
+        with patch("kennel.watchdog.run", return_value=0) as mock_run:
+            with pytest.raises(SystemExit):
+                main(["watchdog"])
+        mock_run.assert_called_once_with(Path.cwd())
+
+    def test_argv_none_watchdog_uses_sys_argv(self, tmp_path) -> None:
+        """When argv is None and sys.argv has 'watchdog', dispatches to watchdog."""
+        with (
+            patch("sys.argv", ["kennel", "watchdog", str(tmp_path)]),
+            patch("kennel.watchdog.run", return_value=0),
+            pytest.raises(SystemExit),
+        ):
+            main()
