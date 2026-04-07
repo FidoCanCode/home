@@ -327,22 +327,24 @@ class TestMaybeReact:
     def test_reacts_when_valid(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
+        mock_gh = MagicMock()
         with (
             patch("subprocess.run", return_value=_make_completed_run("heart\n")),
-            patch("kennel.github.add_reaction") as mock_react,
+            patch("kennel.events.get_github", return_value=mock_gh),
         ):
             maybe_react("great work!", 99, "pulls", "owner/repo", cfg)
-        mock_react.assert_called_once_with("owner/repo", "pulls", 99, "heart")
+        mock_gh.add_reaction.assert_called_once_with("owner/repo", "pulls", 99, "heart")
 
     def test_no_reaction_for_none(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
+        mock_gh = MagicMock()
         with (
             patch("subprocess.run", return_value=_make_completed_run("NONE\n")),
-            patch("kennel.github.add_reaction") as mock_react,
+            patch("kennel.events.get_github", return_value=mock_gh),
         ):
             maybe_react("ok", 99, "pulls", "owner/repo", cfg)
-        mock_react.assert_not_called()
+        mock_gh.add_reaction.assert_not_called()
 
     def test_timeout_silently_returns(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -378,7 +380,7 @@ class TestMaybeReact:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             maybe_react("look at this", 1, "pulls", "owner/repo", cfg)
         assert "you are fido" in captured.get("prompt", "")
@@ -439,8 +441,7 @@ class TestReplyToComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.reply_to_review_comment"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
@@ -465,8 +466,7 @@ class TestReplyToComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.reply_to_review_comment"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ASK"
@@ -490,8 +490,7 @@ class TestReplyToComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.reply_to_review_comment"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ANSWER"
@@ -515,8 +514,7 @@ class TestReplyToComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.reply_to_review_comment"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "DEFER"
@@ -540,8 +538,7 @@ class TestReplyToComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.reply_to_review_comment"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "DUMP"
@@ -566,8 +563,7 @@ class TestReplyToComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.reply_to_review_comment"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"  # still succeeds with fallback body
@@ -593,8 +589,7 @@ class TestReplyToComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.reply_to_review_comment"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
@@ -641,8 +636,7 @@ class TestReplyToComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.reply_to_review_comment"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
@@ -684,11 +678,11 @@ class TestReplyToReview:
                 return _make_completed_run("Will fix.\n")
             return _make_completed_run("")
 
+        mock_gh = MagicMock()
+        mock_gh.get_review_comments.return_value = [100, 200]
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.get_review_comments", return_value=[100, 200]),
-            patch("kennel.github.reply_to_review_comment"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=mock_gh),
         ):
             reply_to_review(action, cfg, self._repo_cfg(tmp_path))
 
@@ -705,9 +699,11 @@ class TestReplyToReview:
             calls.append(args)
             return _make_completed_run("")
 
+        mock_gh = MagicMock()
+        mock_gh.get_review_comments.return_value = [100, 200]
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.get_review_comments", return_value=[100, 200]),
+            patch("kennel.events.get_github", return_value=mock_gh),
         ):
             reply_to_review(
                 action, cfg, self._repo_cfg(tmp_path), already_replied=already
@@ -721,9 +717,9 @@ class TestReplyToReview:
             prompt="review",
             review_comments={"repo": "owner/repo", "pr": 5, "review_id": 779},
         )
-        with patch(
-            "kennel.github.get_review_comments", side_effect=Exception("network fail")
-        ):
+        mock_gh = MagicMock()
+        mock_gh.get_review_comments.side_effect = Exception("network fail")
+        with patch("kennel.events.get_github", return_value=mock_gh):
             reply_to_review(action, cfg, self._repo_cfg(tmp_path))  # should not raise
 
     def test_no_inline_comments(self, tmp_path: Path) -> None:
@@ -732,7 +728,9 @@ class TestReplyToReview:
             prompt="review",
             review_comments={"repo": "owner/repo", "pr": 5, "review_id": 780},
         )
-        with patch("kennel.github.get_review_comments", return_value=[]):
+        mock_gh = MagicMock()
+        mock_gh.get_review_comments.return_value = []
+        with patch("kennel.events.get_github", return_value=mock_gh):
             reply_to_review(action, cfg, self._repo_cfg(tmp_path))  # empty → no replies
 
 
@@ -772,8 +770,7 @@ class TestReplyToIssueComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.comment_issue"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(
                 self._action(), cfg, self._repo_cfg(tmp_path)
@@ -793,8 +790,7 @@ class TestReplyToIssueComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.comment_issue"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(
                 self._action("unclear"), cfg, self._repo_cfg(tmp_path)
@@ -814,8 +810,7 @@ class TestReplyToIssueComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.comment_issue"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(
                 self._action("why?"), cfg, self._repo_cfg(tmp_path)
@@ -835,8 +830,7 @@ class TestReplyToIssueComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.comment_issue"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(
                 self._action("do it differently"), cfg, self._repo_cfg(tmp_path)
@@ -856,8 +850,7 @@ class TestReplyToIssueComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.comment_issue"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(
                 self._action("big refactor"), cfg, self._repo_cfg(tmp_path)
@@ -877,8 +870,7 @@ class TestReplyToIssueComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.comment_issue"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(
                 self._action(), cfg, self._repo_cfg(tmp_path)
@@ -898,8 +890,7 @@ class TestReplyToIssueComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.comment_issue"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(
                 self._action(), cfg, self._repo_cfg(tmp_path)
@@ -923,10 +914,14 @@ class TestReplyToIssueComment:
                 if "Triage" in text:
                     return _make_completed_run("ACT: do it\n")
                 return _make_completed_run("ok\n")
-            # get_repo_info still uses subprocess — raise to hit except block
-            raise Exception("gh fail")
+            return _make_completed_run("")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        mock_gh = MagicMock()
+        mock_gh.comment_issue.side_effect = Exception("gh fail")
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.events.get_github", return_value=mock_gh),
+        ):
             cat, title = reply_to_issue_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
@@ -949,7 +944,7 @@ class TestReplyToIssueComment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.comment_issue"),
+            patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
@@ -1191,12 +1186,11 @@ class TestMaybeReactGhException:
             self_repo=None,
             sub_dir=tmp_path / "sub",
         )
+        mock_gh = MagicMock()
+        mock_gh.add_reaction.side_effect = RuntimeError("network down")
         with (
             patch("subprocess.run", return_value=_make_completed_run("heart\n")),
-            patch(
-                "kennel.github.add_reaction",
-                side_effect=RuntimeError("network down"),
-            ),
+            patch("kennel.events.get_github", return_value=mock_gh),
         ):
             maybe_react("great job", 77, "pulls", "owner/repo", cfg)  # must not raise
 
@@ -1239,8 +1233,7 @@ class TestReplyToCommentElseBranch:
 
             with (
                 patch("subprocess.run", side_effect=fake_run),
-                patch("kennel.github.reply_to_review_comment"),
-                patch("kennel.github.add_reaction"),
+                patch("kennel.events.get_github", return_value=MagicMock()),
             ):
                 cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "UNKNOWN_CAT"
@@ -1263,13 +1256,11 @@ class TestReplyToCommentElseBranch:
                 return _make_completed_run("I'll fix it.\n")
             return _make_completed_run("")
 
+        mock_gh = MagicMock()
+        mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch(
-                "kennel.github.reply_to_review_comment",
-                side_effect=RuntimeError("network down"),
-            ),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=mock_gh),
         ):
             cat, title = reply_to_comment(
                 action, cfg, self._repo_cfg(tmp_path)
@@ -1309,11 +1300,11 @@ class TestReplyToReviewAlreadyRepliedTracking:
                 return _make_completed_run("Will fix.\n")
             return _make_completed_run("")
 
+        mock_gh = MagicMock()
+        mock_gh.get_review_comments.return_value = [500]
         with (
             patch("subprocess.run", side_effect=fake_run),
-            patch("kennel.github.get_review_comments", return_value=[500]),
-            patch("kennel.github.reply_to_review_comment"),
-            patch("kennel.github.add_reaction"),
+            patch("kennel.events.get_github", return_value=mock_gh),
         ):
             reply_to_review(
                 action, cfg, self._repo_cfg(tmp_path), already_replied=already

@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kennel import github
 from kennel.config import Config, RepoConfig
+from kennel.github import get_github
 from kennel.prompts import (
     issue_reply_instruction,
     persona_wrap,
@@ -224,7 +224,7 @@ def maybe_react(
 
     log.info("fido reacts with %s to comment %s", reaction, comment_id)
     try:
-        github.add_reaction(repo, comment_type, comment_id, reaction)
+        get_github().add_reaction(repo, comment_type, comment_id, reaction)
     except Exception:
         log.exception("failed to post reaction")
 
@@ -305,7 +305,7 @@ def reply_to_comment(
 
     log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
     try:
-        github.reply_to_review_comment(
+        get_github().reply_to_review_comment(
             info["repo"], info["pr"], body, info["comment_id"]
         )
         log.info("reply posted")
@@ -347,7 +347,7 @@ def reply_to_review(
         "fetching review comments for PR #%s review %s", info["pr"], info["review_id"]
     )
     try:
-        comment_ids = github.get_review_comments(
+        comment_ids = get_github().get_review_comments(
             info["repo"], info["pr"], info["review_id"]
         )
     except Exception:
@@ -455,8 +455,8 @@ def reply_to_issue_comment(
 
     log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
     try:
-        repo_full = github.get_repo_info(cwd=repo_cfg.work_dir)
-        github.comment_issue(repo_full, number, body)
+        repo_full = get_github().get_repo_info(cwd=repo_cfg.work_dir)
+        get_github().comment_issue(repo_full, number, body)
         log.info("reply posted")
     except Exception:
         log.exception("failed to post issue comment reply")
@@ -470,7 +470,7 @@ def reply_to_issue_comment(
     # Get comment_id from the dispatch payload (stored in context)
     _cid = (action.context or {}).get("comment_id")
     if _cid:
-        repo_full = github.get_repo_info(cwd=repo_cfg.work_dir)
+        repo_full = get_github().get_repo_info(cwd=repo_cfg.work_dir)
         maybe_react(comment, _cid, "issues", repo_full, config)
 
     return (category, title)

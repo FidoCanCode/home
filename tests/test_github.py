@@ -10,33 +10,8 @@ from kennel.github import (
     GH,
     GitHub,
     _get_gh,
-    _get_github,
     _gh_token,
-    add_pr_reviewer,
-    add_reaction,
-    close_issue,
-    comment_issue,
-    create_pr,
-    edit_pr_body,
-    find_issues,
-    find_pr,
-    get_default_branch,
-    get_issue_comments,
-    get_pr,
-    get_pull_comments,
-    get_repo_info,
-    get_review_comments,
-    get_review_threads,
-    get_reviews,
-    get_run_log,
-    get_user,
-    pr_checks,
-    pr_merge,
-    pr_ready,
-    reply_to_review_comment,
-    resolve_thread,
-    set_user_status,
-    view_issue,
+    get_github,
 )
 
 
@@ -50,180 +25,10 @@ def _completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedPro
 def _reset_gh_cache() -> None:
     """Reset caches before each test and seed with real instances."""
     _get_gh.cache_clear()
-    _get_github.cache_clear()
+    get_github.cache_clear()
     with patch("kennel.github._gh_token", return_value="test-token"):
         _get_gh()
-        _get_github()
-
-
-class TestGetRepoInfo:
-    def test_returns_https_remote(self) -> None:
-        with patch(
-            "subprocess.run",
-            return_value=_completed("https://github.com/owner/repo.git\n"),
-        ):
-            assert get_repo_info() == "owner/repo"
-
-    def test_returns_ssh_remote(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed("git@github.com:owner/repo.git\n")
-        ):
-            assert get_repo_info() == "owner/repo"
-
-    def test_https_without_git_suffix(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed("https://github.com/owner/repo\n")
-        ):
-            assert get_repo_info() == "owner/repo"
-
-    def test_passes_cwd(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed("https://github.com/o/r.git")
-        ) as mock:
-            get_repo_info(cwd="/some/path")
-        assert mock.call_args.kwargs["cwd"] == "/some/path"
-
-    def test_raises_on_unknown_url(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_completed("https://example.com/repo.git")
-        ):
-            with pytest.raises(ValueError, match="Cannot parse"):
-                get_repo_info()
-
-
-class TestGetUser:
-    def test_returns_login(self) -> None:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"login": "fido"}
-        with patch.object(_get_github()._gh._s, "get", return_value=mock_resp):
-            assert get_user() == "fido"
-
-
-class TestGetDefaultBranch:
-    def test_returns_branch(self) -> None:
-        remote_resp = _completed("https://github.com/o/r.git\n")
-        repo_resp = MagicMock()
-        repo_resp.json.return_value = {"default_branch": "main"}
-        with (
-            patch("subprocess.run", return_value=remote_resp),
-            patch.object(_get_github()._gh._s, "get", return_value=repo_resp),
-        ):
-            assert get_default_branch() == "main"
-
-    def test_passes_cwd(self) -> None:
-        remote_resp = _completed("https://github.com/o/r.git\n")
-        repo_resp = MagicMock()
-        repo_resp.json.return_value = {"default_branch": "main"}
-        with (
-            patch("subprocess.run", return_value=remote_resp) as mock_sub,
-            patch.object(_get_github()._gh._s, "get", return_value=repo_resp),
-        ):
-            get_default_branch(cwd=Path("/repo"))
-        assert mock_sub.call_args.kwargs["cwd"] == Path("/repo")
-
-
-class TestSetUserStatus:
-    def test_busy_true(self) -> None:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        with patch.object(
-            _get_github()._gh._s, "post", return_value=mock_resp
-        ) as mock_post:
-            set_user_status("coding", "🐶", busy=True)
-        body = mock_post.call_args.kwargs["json"]
-        assert body["variables"]["busy"] is True
-
-    def test_busy_false(self) -> None:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        with patch.object(
-            _get_github()._gh._s, "post", return_value=mock_resp
-        ) as mock_post:
-            set_user_status("napping", "💤", busy=False)
-        body = mock_post.call_args.kwargs["json"]
-        assert body["variables"]["busy"] is False
-
-    def test_passes_msg_and_emoji(self) -> None:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        with patch.object(
-            _get_github()._gh._s, "post", return_value=mock_resp
-        ) as mock_post:
-            set_user_status("working", "🚀")
-        body = mock_post.call_args.kwargs["json"]
-        assert body["variables"]["msg"] == "working"
-        assert body["variables"]["emoji"] == "🚀"
-
-
-class TestFindIssues:
-    def test_returns_nodes(self) -> None:
-        nodes = [{"number": 1, "title": "Fix it", "subIssues": {"nodes": []}}]
-        payload = {"data": {"repository": {"issues": {"nodes": nodes}}}}
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = payload
-        with patch.object(_get_github()._gh._s, "post", return_value=mock_resp):
-            result = find_issues("owner", "repo", "fido")
-        assert result == nodes
-
-    def test_passes_variables(self) -> None:
-        payload = {"data": {"repository": {"issues": {"nodes": []}}}}
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = payload
-        with patch.object(
-            _get_github()._gh._s, "post", return_value=mock_resp
-        ) as mock_post:
-            find_issues("myowner", "myrepo", "mylogin")
-        body = mock_post.call_args.kwargs["json"]
-        assert body["variables"]["owner"] == "myowner"
-        assert body["variables"]["repo"] == "myrepo"
-        assert body["variables"]["login"] == "mylogin"
-
-
-class TestViewIssue:
-    def test_returns_parsed_json(self) -> None:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"state": "open", "title": "Bug", "body": "desc"}
-        with patch.object(_get_github()._gh._s, "get", return_value=mock_resp):
-            assert view_issue("o/r", 5) == {
-                "state": "OPEN",
-                "title": "Bug",
-                "body": "desc",
-            }
-
-    def test_uppercases_state(self) -> None:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"state": "closed", "title": "T", "body": ""}
-        with patch.object(_get_github()._gh._s, "get", return_value=mock_resp):
-            assert view_issue("o/r", 5)["state"] == "CLOSED"
-
-    def test_null_body_becomes_empty_string(self) -> None:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"state": "open", "title": "T", "body": None}
-        with patch.object(_get_github()._gh._s, "get", return_value=mock_resp):
-            assert view_issue("o/r", 5)["body"] == ""
-
-    def test_uses_correct_url(self) -> None:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"state": "open", "title": "T", "body": ""}
-        with patch.object(
-            _get_github()._gh._s, "get", return_value=mock_resp
-        ) as mock_get:
-            view_issue("o/r", 42)
-        url = mock_get.call_args.args[0]
-        assert "repos/o/r/issues/42" in url
-
-
-class TestCloseIssue:
-    def test_patches_state_closed(self) -> None:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        with patch.object(
-            _get_github()._gh._s, "patch", return_value=mock_resp
-        ) as mock_patch:
-            close_issue("o/r", 3)
-        url = mock_patch.call_args.args[0]
-        assert "repos/o/r/issues/3" in url
-        assert mock_patch.call_args.kwargs["json"]["state"] == "closed"
+        get_github()
 
 
 class TestGhToken:
@@ -274,24 +79,24 @@ class TestGetGh:
 class TestGetGithub:
     def test_creates_instance_lazily(self) -> None:
         mock_instance = MagicMock()
-        _get_github.cache_clear()
+        get_github.cache_clear()
         with (
             patch("kennel.github._gh_token", return_value="tok"),
             patch("kennel.github.GitHub", return_value=mock_instance) as mock_cls,
         ):
-            result = _get_github()
+            result = get_github()
         mock_cls.assert_called_once_with()
         assert result is mock_instance
 
     def test_returns_cached_instance(self) -> None:
         mock_instance = MagicMock()
-        _get_github.cache_clear()
+        get_github.cache_clear()
         with (
             patch("kennel.github._gh_token", return_value="tok"),
             patch("kennel.github.GitHub", return_value=mock_instance) as mock_cls,
         ):
-            first = _get_github()
-            second = _get_github()
+            first = get_github()
+            second = get_github()
         mock_cls.assert_called_once()
         assert first is second is mock_instance
 
@@ -1216,218 +1021,3 @@ class TestGHClass:
         with patch.object(gh._s, "get", side_effect=[jobs_resp, log_resp]):
             result = gh.get_run_log("o/r", 55)
         assert result == "timed out log\n"
-
-
-class TestCommentIssue:
-    def test_calls_gh_class(self) -> None:
-        mock_gh = MagicMock()
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            comment_issue("o/r", 7, "hello")
-        mock_gh.comment_issue.assert_called_once_with("o/r", 7, "hello")
-
-
-class TestGetIssueComments:
-    def test_delegates_to_gh_class(self) -> None:
-        comments = [{"id": 1, "body": "hi"}]
-        mock_gh = MagicMock()
-        mock_gh.get_issue_comments.return_value = comments
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            assert get_issue_comments("o/r", 9) == comments
-        mock_gh.get_issue_comments.assert_called_once_with("o/r", 9)
-
-
-class TestGetPullComments:
-    def test_delegates_to_gh_class(self) -> None:
-        comments = [{"id": 42, "body": "looks good"}]
-        mock_gh = MagicMock()
-        mock_gh.get_pull_comments.return_value = comments
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            assert get_pull_comments("o/r", 7) == comments
-        mock_gh.get_pull_comments.assert_called_once_with("o/r", 7)
-
-
-class TestFindPr:
-    def test_delegates_to_gh_class(self) -> None:
-        expected = {
-            "number": 1,
-            "headRefName": "feat",
-            "state": "OPEN",
-            "author": {"login": "fido"},
-        }
-        mock_gh = MagicMock()
-        mock_gh.find_pr.return_value = expected
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            result = find_pr("o/r", 5, "fido")
-        mock_gh.find_pr.assert_called_once_with("o/r", 5, "fido")
-        assert result == expected
-
-    def test_returns_none_when_gh_returns_none(self) -> None:
-        mock_gh = MagicMock()
-        mock_gh.find_pr.return_value = None
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            assert find_pr("o/r", 1, "fido") is None
-
-
-class TestCreatePr:
-    def test_delegates_to_gh_class(self) -> None:
-        mock_gh = MagicMock()
-        mock_gh.create_pr.return_value = "https://github.com/o/r/pull/10"
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            result = create_pr("o/r", "title", "body", "main", "feat")
-        mock_gh.create_pr.assert_called_once_with(
-            "o/r", "title", "body", "main", "feat"
-        )
-        assert result == "https://github.com/o/r/pull/10"
-
-
-class TestEditPrBody:
-    def test_delegates_to_gh_class(self) -> None:
-        mock_gh = MagicMock()
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            edit_pr_body("o/r", 10, "new body")
-        mock_gh.edit_pr_body.assert_called_once_with("o/r", 10, "new body")
-
-
-class TestAddPrReviewer:
-    def test_delegates_to_gh_class(self) -> None:
-        mock_gh = MagicMock()
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            add_pr_reviewer("o/r", 10, "rhencke")
-        mock_gh.add_pr_reviewer.assert_called_once_with("o/r", 10, "rhencke")
-
-
-class TestPrChecks:
-    def test_delegates_to_gh_class(self) -> None:
-        checks = [{"name": "ci", "state": "SUCCESS", "link": "http://..."}]
-        mock_gh = MagicMock()
-        mock_gh.pr_checks.return_value = checks
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            assert pr_checks("o/r", 10) == checks
-        mock_gh.pr_checks.assert_called_once_with("o/r", 10)
-
-
-class TestPrReady:
-    def test_delegates_to_gh_class(self) -> None:
-        mock_gh = MagicMock()
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            pr_ready("o/r", 10)
-        mock_gh.pr_ready.assert_called_once_with("o/r", 10)
-
-
-class TestPrMerge:
-    def test_squash_default(self) -> None:
-        mock_gh = MagicMock()
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            pr_merge("o/r", 10)
-        mock_gh.pr_merge.assert_called_once_with("o/r", 10, squash=True, auto=False)
-
-    def test_auto_flag(self) -> None:
-        mock_gh = MagicMock()
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            pr_merge("o/r", 10, auto=True)
-        mock_gh.pr_merge.assert_called_once_with("o/r", 10, squash=True, auto=True)
-
-    def test_no_squash(self) -> None:
-        mock_gh = MagicMock()
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            pr_merge("o/r", 10, squash=False)
-        mock_gh.pr_merge.assert_called_once_with("o/r", 10, squash=False, auto=False)
-
-
-class TestGetPr:
-    def test_delegates_to_gh_class(self) -> None:
-        data = {
-            "reviews": [],
-            "isDraft": True,
-            "mergeStateStatus": "CLEAN",
-            "body": "",
-            "commits": [],
-        }
-        mock_gh = MagicMock()
-        mock_gh.get_pr.return_value = data
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            assert get_pr("o/r", 10) == data
-        mock_gh.get_pr.assert_called_once_with("o/r", 10)
-
-
-class TestGetReviews:
-    def test_delegates_to_gh_class(self) -> None:
-        data = {"reviews": [], "isDraft": False}
-        mock_gh = MagicMock()
-        mock_gh.get_reviews.return_value = data
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            assert get_reviews("o/r", 10) == data
-        mock_gh.get_reviews.assert_called_once_with("o/r", 10)
-
-
-class TestGetReviewComments:
-    def test_delegates_to_gh_class(self) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [101, 102, 103]
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            assert get_review_comments("o/r", 10, 99) == [101, 102, 103]
-        mock_gh.get_review_comments.assert_called_once_with("o/r", 10, 99)
-
-    def test_empty_result(self) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = []
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            assert get_review_comments("o/r", 10, 99) == []
-
-
-class TestReplyToReviewComment:
-    def test_delegates_to_gh_class(self) -> None:
-        mock_gh = MagicMock()
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            reply_to_review_comment("o/r", 10, "lgtm", 55)
-        mock_gh.reply_to_review_comment.assert_called_once_with("o/r", 10, "lgtm", 55)
-
-
-class TestAddReaction:
-    def test_delegates_to_gh_class_pulls(self) -> None:
-        mock_gh = MagicMock()
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            add_reaction("o/r", "pulls", 42, "rocket")
-        mock_gh.add_reaction.assert_called_once_with("o/r", "pulls", 42, "rocket")
-
-    def test_delegates_to_gh_class_issues(self) -> None:
-        mock_gh = MagicMock()
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            add_reaction("o/r", "issues", 7, "+1")
-        mock_gh.add_reaction.assert_called_once_with("o/r", "issues", 7, "+1")
-
-
-class TestGetReviewThreads:
-    def test_delegates_to_gh_class(self) -> None:
-        data = {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": []}}}}
-        }
-        mock_gh = MagicMock()
-        mock_gh.get_review_threads.return_value = data
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            assert get_review_threads("owner", "repo", 10) == data
-        mock_gh.get_review_threads.assert_called_once_with("owner", "repo", 10)
-
-
-class TestResolveThread:
-    def test_delegates_to_gh_class(self) -> None:
-        mock_gh = MagicMock()
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            resolve_thread("T_kwDOABC123")
-        mock_gh.resolve_thread.assert_called_once_with("T_kwDOABC123")
-
-
-class TestGetRunLog:
-    def test_delegates_to_gh_class(self) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_run_log.return_value = "log output\n"
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            assert get_run_log("o/r", 12345) == "log output\n"
-        mock_gh.get_run_log.assert_called_once_with("o/r", 12345)
-
-    def test_passes_string_run_id(self) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_run_log.return_value = ""
-        with patch("kennel.github._get_github", return_value=mock_gh):
-            get_run_log("o/r", "99")
-        mock_gh.get_run_log.assert_called_once_with("o/r", "99")
