@@ -1,9 +1,11 @@
 """Shared task file operations with flock-based locking."""
+
 from __future__ import annotations
 
 import fcntl
 import json
 import logging
+import random
 import time
 from pathlib import Path
 from typing import Any
@@ -17,19 +19,23 @@ def _task_file(work_dir: Path) -> Path:
 
 def _locked(path: Path, write: bool = False):
     """Context manager: flock the task file."""
+
     class Lock:
         def __init__(self):
             self.fd = None
+
         def __enter__(self):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch(exist_ok=True)
             self.fd = open(path, "r+")
             fcntl.flock(self.fd, fcntl.LOCK_EX)
             return self
+
         def __exit__(self, *_):
             if self.fd:
                 fcntl.flock(self.fd, fcntl.LOCK_UN)
                 self.fd.close()
+
         def read(self) -> list[dict[str, Any]]:
             self.fd.seek(0)
             text = self.fd.read().strip()
@@ -40,11 +46,13 @@ def _locked(path: Path, write: bool = False):
             except json.JSONDecodeError:
                 log.warning("corrupt tasks.json — resetting")
                 return []
+
         def write(self, tasks: list[dict[str, Any]]) -> None:
             self.fd.seek(0)
             self.fd.truncate()
             json.dump(tasks, self.fd, indent=2)
             self.fd.flush()
+
     return Lock()
 
 
@@ -60,7 +68,7 @@ def add_task(
     thread: optional {repo, pr, comment_id} for comment-originated tasks.
     """
     task: dict[str, Any] = {
-        "id": str(int(time.time() * 1000)),
+        "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
         "title": title,
         "description": description,
         "status": status,

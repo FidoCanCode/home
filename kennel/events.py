@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +64,8 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
         return Action(
             prompt=f"Review on PR #{number}: {state} by {user}",
             review_comments={"repo": repo, "pr": number, "review_id": review_id}
-                if review_id else None,
+            if review_id
+            else None,
         )
 
     if event == "pull_request_review_comment" and action == "created":
@@ -86,8 +87,12 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
         is_bot = user.endswith("[bot]")
         return Action(
             prompt=f"Review comment on PR #{number} by {user} ({'bot' if is_bot else 'human/owner'}):\n\n{comment_body}",
-            reply_to={"repo": repo, "pr": number, "comment_id": comment_id,
-                      "url": comment.get("html_url", "")},
+            reply_to={
+                "repo": repo,
+                "pr": number,
+                "comment_id": comment_id,
+                "url": comment.get("html_url", ""),
+            },
             comment_body=comment_body,
             is_bot=is_bot,
             context={
@@ -123,8 +128,11 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
             reply_to=None,  # top-level comments use issues API, not pulls
             comment_body=comment_body,
             is_bot=is_bot,
-            context={"pr_title": issue.get("title", ""), "pr_body": (issue.get("body", "") or "")[:500],
-                      "comment_id": comment_id},
+            context={
+                "pr_title": issue.get("title", ""),
+                "pr_body": (issue.get("body", "") or "")[:500],
+                "comment_id": comment_id,
+            },
         )
 
     if event == "check_run" and action == "completed":
@@ -160,8 +168,13 @@ def _comment_lock(work_dir: Path, comment_id: int) -> Path:
     return lock_dir / f"{comment_id}.lock"
 
 
-def maybe_react(comment_body: str, comment_id: int | str, comment_type: str,
-                 repo: str, config: Config) -> None:
+def maybe_react(
+    comment_body: str,
+    comment_id: int | str,
+    comment_type: str,
+    repo: str,
+    config: Config,
+) -> None:
     """Let Fido decide whether to react to a comment with an emoji.
 
     comment_type: 'pulls' for review comments, 'issues' for issue comments.
@@ -174,17 +187,29 @@ def maybe_react(comment_body: str, comment_id: int | str, comment_type: str,
 
     try:
         result = subprocess.run(
-            ["claude", "--model", "claude-opus-4-6", "--print", "-p",
-             f"{persona}\n\n"
-             f"You just saw this comment on a PR:\n\n{comment_body}\n\n"
-             "Would you react to this with a GitHub emoji reaction? Not every comment needs one — "
-             "use your dog instincts. Pick from: 👍 (+1), 👎 (-1), 😄 (laugh), 😕 (confused), "
-             "❤️ (heart), 🎉 (hooray), 🚀 (rocket), 👀 (eyes). "
-             "Reply with JUST the reaction keyword (e.g. heart, rocket, eyes). "
-             "If you wouldn't react, reply NONE."],
-            capture_output=True, text=True, timeout=15,
+            [
+                "claude",
+                "--model",
+                "claude-opus-4-6",
+                "--print",
+                "-p",
+                f"{persona}\n\n"
+                f"You just saw this comment on a PR:\n\n{comment_body}\n\n"
+                "Would you react to this with a GitHub emoji reaction? Not every comment needs one — "
+                "use your dog instincts. Pick from: 👍 (+1), 👎 (-1), 😄 (laugh), 😕 (confused), "
+                "❤️ (heart), 🎉 (hooray), 🚀 (rocket), 👀 (eyes). "
+                "Reply with JUST the reaction keyword (e.g. heart, rocket, eyes). "
+                "If you wouldn't react, reply NONE.",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
-        reaction = result.stdout.strip().lower().split('\n')[0].strip() if result.returncode == 0 else ""
+        reaction = (
+            result.stdout.strip().lower().split("\n")[0].strip()
+            if result.returncode == 0
+            else ""
+        )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return
 
@@ -198,7 +223,9 @@ def maybe_react(comment_body: str, comment_id: int | str, comment_type: str,
     try:
         subprocess.run(
             ["gh", "api", endpoint, "-X", "POST", "-f", f"content={reaction}"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except Exception:
         log.exception("failed to post reaction")
@@ -216,6 +243,7 @@ def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
 
     # Per-comment lock — prevents kennel and work.sh from both replying
     import fcntl
+
     cid = info.get("comment_id")
     if cid:
         lock_path = _comment_lock(config.work_dir, cid)
@@ -282,13 +310,24 @@ def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
             f"explaining why it's not applicable.\n\n{context}"
         )
     else:
-        reply_instruction = f"Write a short GitHub PR reply to this comment.\n\n{context}"
+        reply_instruction = (
+            f"Write a short GitHub PR reply to this comment.\n\n{context}"
+        )
 
-    log.info("generating %s reply for PR #%s comment %s", category, info["pr"], info["comment_id"])
+    log.info(
+        "generating %s reply for PR #%s comment %s",
+        category,
+        info["pr"],
+        info["comment_id"],
+    )
     try:
         result = subprocess.run(
             [
-                "claude", "--model", "claude-opus-4-6", "--print", "-p",
+                "claude",
+                "--model",
+                "claude-opus-4-6",
+                "--print",
+                "-p",
                 f"{persona}\n\n{reply_instruction}\n\n"
                 "Output only the comment text, no quotes, no explanation. Keep it brief.",
             ],
@@ -301,17 +340,25 @@ def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
         body = ""
 
     if not body:
-        body = f"Looking into this now." if category in ("ACT", "DO") else f"Noted — checking on this."
+        body = (
+            "Looking into this now."
+            if category in ("ACT", "DO")
+            else "Noted — checking on this."
+        )
 
     log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
     try:
         subprocess.run(
             [
-                "gh", "api",
+                "gh",
+                "api",
                 f"repos/{info['repo']}/pulls/{info['pr']}/comments",
-                "-X", "POST",
-                "-f", f"body={body}",
-                "-F", f"in_reply_to={info['comment_id']}",
+                "-X",
+                "POST",
+                "-f",
+                f"body={body}",
+                "-F",
+                f"in_reply_to={info['comment_id']}",
             ],
             capture_output=True,
             text=True,
@@ -322,8 +369,7 @@ def reply_to_comment(action: Action, config: Config) -> tuple[str, str]:
         log.exception("failed to post reply")
 
     # Maybe react
-    maybe_react(comment, info["comment_id"], "pulls",
-                info.get("repo", ""), config)
+    maybe_react(comment, info["comment_id"], "pulls", info.get("repo", ""), config)
 
     # For DUMP: also resolve the thread
     if category == "DUMP" and info.get("comment_id"):
@@ -342,25 +388,33 @@ def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
     pass
 
 
-def reply_to_review(action: Action, config: Config, already_replied: set[int] | None = None) -> None:
+def reply_to_review(
+    action: Action, config: Config, already_replied: set[int] | None = None
+) -> None:
     """Fetch inline comments from a review and reply to each."""
     info = action.review_comments
     if not info:
         return
 
-    log.info("fetching review comments for PR #%s review %s", info["pr"], info["review_id"])
+    log.info(
+        "fetching review comments for PR #%s review %s", info["pr"], info["review_id"]
+    )
     try:
         result = subprocess.run(
             [
-                "gh", "api",
+                "gh",
+                "api",
                 f"repos/{info['repo']}/pulls/{info['pr']}/reviews/{info['review_id']}/comments",
-                "--jq", ".[] | .id",
+                "--jq",
+                ".[] | .id",
             ],
             capture_output=True,
             text=True,
             timeout=15,
         )
-        comment_ids = [cid.strip() for cid in result.stdout.strip().splitlines() if cid.strip()]
+        comment_ids = [
+            cid.strip() for cid in result.stdout.strip().splitlines() if cid.strip()
+        ]
     except Exception:
         log.exception("failed to fetch review comments")
         return
@@ -369,8 +423,14 @@ def reply_to_review(action: Action, config: Config, already_replied: set[int] | 
         log.info("no inline comments in review")
         return
 
-    skipped = [cid for cid in comment_ids if already_replied and int(cid) in already_replied]
-    todo = [cid for cid in comment_ids if not already_replied or int(cid) not in already_replied]
+    skipped = [
+        cid for cid in comment_ids if already_replied and int(cid) in already_replied
+    ]
+    todo = [
+        cid
+        for cid in comment_ids
+        if not already_replied or int(cid) not in already_replied
+    ]
     if skipped:
         log.info("skipping %d already-replied comments", len(skipped))
     if not todo:
@@ -380,7 +440,11 @@ def reply_to_review(action: Action, config: Config, already_replied: set[int] | 
         reply_to_comment(
             Action(
                 prompt=action.prompt,
-                reply_to={"repo": info["repo"], "pr": info["pr"], "comment_id": int(cid)},
+                reply_to={
+                    "repo": info["repo"],
+                    "pr": info["pr"],
+                    "comment_id": int(cid),
+                },
             ),
             config,
         )
@@ -388,10 +452,14 @@ def reply_to_review(action: Action, config: Config, already_replied: set[int] | 
             already_replied.add(int(cid))
 
 
-def _triage(comment_body: str, is_bot: bool, context: dict[str, Any] | None = None) -> tuple[str, str]:
+def _triage(
+    comment_body: str, is_bot: bool, context: dict[str, Any] | None = None
+) -> tuple[str, str]:
     """Ask Haiku to triage a comment. Returns (prefix, title)."""
     if is_bot:
-        categories = "DO (worth implementing), DEFER (out of scope), DUMP (not applicable)"
+        categories = (
+            "DO (worth implementing), DEFER (out of scope), DUMP (not applicable)"
+        )
     else:
         categories = "ACT (code change needed), ASK (unclear what code change is needed), ANSWER (question, casual/playful comment, or anything that isn't a code change request — just respond naturally)"
 
@@ -438,6 +506,7 @@ def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
 
     # Extract PR number from prompt
     import re
+
     m = re.search(r"#(\d+)", action.prompt)
     number = m.group(1) if m else ""
 
@@ -460,7 +529,9 @@ def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
     if category in ("ACT", "DO"):
         instr = f"Write a short GitHub PR reply acknowledging and explaining your approach.\n\n{context}"
     elif category == "ASK":
-        instr = f"Write a short GitHub PR reply asking a clarifying question.\n\n{context}"
+        instr = (
+            f"Write a short GitHub PR reply asking a clarifying question.\n\n{context}"
+        )
     elif category == "ANSWER":
         instr = f"Write a short GitHub PR reply directly answering the question.\n\nQuestion: {comment}"
     elif category == "DUMP":
@@ -471,9 +542,17 @@ def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
     log.info("generating %s reply for issue comment on PR #%s", category, number)
     try:
         result = subprocess.run(
-            ["claude", "--model", "claude-opus-4-6", "--print", "-p",
-             f"{persona}\n\n{instr}\n\nOutput only the comment text, no quotes, no explanation."],
-            capture_output=True, text=True, timeout=30,
+            [
+                "claude",
+                "--model",
+                "claude-opus-4-6",
+                "--print",
+                "-p",
+                f"{persona}\n\n{instr}\n\nOutput only the comment text, no quotes, no explanation.",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         body = result.stdout.strip() if result.returncode == 0 else ""
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -485,11 +564,25 @@ def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
     try:
         repo_full = subprocess.run(
             ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-            capture_output=True, text=True, timeout=10, cwd=str(config.work_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(config.work_dir),
         ).stdout.strip()
         subprocess.run(
-            ["gh", "issue", "comment", str(number), "--repo", repo_full, "--body", body],
-            capture_output=True, text=True, timeout=15,
+            [
+                "gh",
+                "issue",
+                "comment",
+                str(number),
+                "--repo",
+                repo_full,
+                "--body",
+                body,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         log.info("reply posted")
     except Exception:
@@ -499,6 +592,7 @@ def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
     _issue_comment_id = None
     if "#" in action.prompt:
         import re
+
         m = re.search(r"#(\d+)", action.prompt)
         number = m.group(1) if m else ""
     # Get comment_id from the dispatch payload (stored in context)
@@ -506,14 +600,19 @@ def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
     if _cid:
         repo_full = subprocess.run(
             ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-            capture_output=True, text=True, timeout=10, cwd=str(config.work_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(config.work_dir),
         ).stdout.strip()
         maybe_react(comment, _cid, "issues", repo_full, config)
 
     return (category, title)
 
 
-def create_task(prompt: str, config: Config, thread: dict[str, Any] | None = None) -> None:
+def create_task(
+    prompt: str, config: Config, thread: dict[str, Any] | None = None
+) -> None:
     """Write a task to the shared task file, then trigger sync."""
     log.info("creating task: %s", prompt[:100])
     add_task(config.work_dir, title=prompt, thread=thread)

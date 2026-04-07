@@ -10,7 +10,14 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from kennel.config import Config
-from kennel.events import create_task, dispatch, launch_worker, reply_to_comment, reply_to_review, reply_to_issue_comment
+from kennel.events import (
+    create_task,
+    dispatch,
+    launch_worker,
+    reply_to_comment,
+    reply_to_issue_comment,
+    reply_to_review,
+)
 
 log = logging.getLogger("kennel")
 
@@ -86,8 +93,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     pass  # No task needed — ASK just posts a question
                 elif title:
                     prefix = f"{category}: " if category == "DEFER" else ""
-                    create_task(f"{prefix}{title}", self.config,
-                                thread=action.reply_to)
+                    create_task(f"{prefix}{title}", self.config, thread=action.reply_to)
 
             if action.review_comments:
                 reply_to_review(action, self.config, already_replied=_replied_comments)
@@ -113,9 +119,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
         header = self.headers.get("X-Hub-Signature-256", "")
         if not header:
             return False
-        expected = "sha256=" + hmac.new(
-            self.config.secret, body, hashlib.sha256
-        ).hexdigest()
+        expected = (
+            "sha256=" + hmac.new(self.config.secret, body, hashlib.sha256).hexdigest()
+        )
         return hmac.compare_digest(expected, header)
 
     def _respond(self, code: int, message: str) -> None:

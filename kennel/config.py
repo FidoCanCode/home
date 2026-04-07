@@ -42,7 +42,9 @@ class Config:
             .resolve(),
             allowed_bots=frozenset(
                 b.strip()
-                for b in os.environ.get("KENNEL_ALLOWED_BOTS", "copilot[bot]").split(",")
+                for b in os.environ.get("KENNEL_ALLOWED_BOTS", "copilot[bot]").split(
+                    ","
+                )
                 if b.strip()
             ),
             project=os.environ["KENNEL_PROJECT"],
