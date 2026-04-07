@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from kennel.config import Config
-from kennel.events import create_task, dispatch, launch_worker, reply_to_comment, reply_to_review
+from kennel.events import create_task, dispatch, launch_worker, reply_to_comment, reply_to_review, reply_to_issue_comment
 
 log = logging.getLogger("kennel")
 
@@ -92,6 +92,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
             if action.review_comments:
                 reply_to_review(action, self.config, already_replied=_replied_comments)
                 handled = True  # inline comments handled individually
+
+            # Top-level PR comments (issue_comment) — no reply_to, but has comment_body
+            if not handled and action.comment_body:
+                category, title = reply_to_issue_comment(action, self.config)
+                handled = True
+                if category not in ("DUMP", "ANSWER") and title:
+                    prefix = f"{category}: " if category in ("ASK", "DEFER") else ""
+                    create_task(f"{prefix}{title}", self.config)
 
             # Non-comment events just trigger work.sh — no task needed
             launch_worker(self.config)

@@ -99,6 +99,33 @@ def dispatch(event: str, payload: dict[str, Any], config: Config) -> Action | No
             },
         )
 
+    if event == "issue_comment" and action == "created":
+        comment = payload.get("comment", {})
+        issue = payload.get("issue", {})
+        user = comment.get("user", {}).get("login", "")
+        pr = issue.get("pull_request")
+        if not pr:
+            log.debug("issue_comment on non-PR issue — ignoring")
+            return None
+        if user.lower() in ("fidocancode", "fido-can-code"):
+            log.debug("ignoring own comment on PR")
+            return None
+        if not _is_allowed(user, payload, config):
+            log.debug("ignoring comment by %s (not allowed)", user)
+            return None
+        number = issue.get("number")
+        comment_body = comment.get("body", "") or ""
+        comment_id = comment.get("id")
+        is_bot = user.endswith("[bot]")
+        log.info("PR comment on #%s by %s: %s", number, user, comment_body[:80])
+        return Action(
+            prompt=f"PR top-level comment on #{number} by {user}:\n\n{comment_body}",
+            reply_to=None,  # top-level comments use issues API, not pulls
+            comment_body=comment_body,
+            is_bot=is_bot,
+            context={"pr_title": issue.get("title", ""), "pr_body": (issue.get("body", "") or "")[:500]},
+        )
+
     if event == "check_run" and action == "completed":
         check = payload.get("check_run", {})
         conclusion = check.get("conclusion", "")
@@ -353,6 +380,73 @@ def _triage(comment_body: str, is_bot: bool, context: dict[str, Any] | None = No
         pass
     # Fallback: ACT for humans, DO for bots
     return ("DO" if is_bot else "ACT"), comment_body[:80]
+
+
+def reply_to_issue_comment(action: Action, config: Config) -> tuple[str, str]:
+    """Triage and reply to a top-level PR comment (issue_comment event)."""
+    comment = action.comment_body or ""
+    ctx = action.context or {}
+
+    # Extract PR number from prompt
+    import re
+    m = re.search(r"#(\d+)", action.prompt)
+    number = m.group(1) if m else ""
+
+    persona_path = Path(config.work_script).parent / "sub" / "persona.md"
+    try:
+        persona = persona_path.read_text()
+    except FileNotFoundError:
+        persona = ""
+
+    category, title = _triage(comment, action.is_bot, action.context)
+    log.info("issue comment triage: %s — %s", category, title)
+
+    context_parts = []
+    if ctx.get("pr_title"):
+        context_parts.append(f"PR: {ctx['pr_title']}")
+    context_parts.append(f"Comment: {comment}")
+    context_parts.append(f"Your plan: {title}")
+    context = "\n\n".join(context_parts)
+
+    if category in ("ACT", "DO"):
+        instr = f"Write a short GitHub PR reply acknowledging and explaining your approach.\n\n{context}"
+    elif category == "ASK":
+        instr = f"Write a short GitHub PR reply asking a clarifying question.\n\n{context}"
+    elif category == "ANSWER":
+        instr = f"Write a short GitHub PR reply directly answering the question.\n\nQuestion: {comment}"
+    elif category == "DUMP":
+        instr = f"Write a short polite decline.\n\n{context}"
+    else:
+        instr = f"Write a short GitHub PR reply.\n\n{context}"
+
+    log.info("generating %s reply for issue comment on PR #%s", category, number)
+    try:
+        result = subprocess.run(
+            ["claude", "--model", "claude-opus-4-6", "--print", "-p",
+             f"{persona}\n\n{instr}\n\nOutput only the comment text, no quotes, no explanation."],
+            capture_output=True, text=True, timeout=30,
+        )
+        body = result.stdout.strip() if result.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        body = ""
+    if not body:
+        body = "On it!" if category in ("ACT", "DO") else "Noted."
+
+    log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
+    try:
+        repo_full = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+            capture_output=True, text=True, timeout=10, cwd=str(config.work_dir),
+        ).stdout.strip()
+        subprocess.run(
+            ["gh", "issue", "comment", str(number), "--repo", repo_full, "--body", body],
+            capture_output=True, text=True, timeout=15,
+        )
+        log.info("reply posted")
+    except Exception:
+        log.exception("failed to post issue comment reply")
+
+    return (category, title)
 
 
 def create_task(prompt: str, config: Config, thread: dict[str, Any] | None = None) -> None:
