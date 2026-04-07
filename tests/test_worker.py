@@ -1390,7 +1390,10 @@ class TestClaudeStart:
         output = '{"type":"result","session_id":"sess-abc"}'
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=output),
-            patch("kennel.worker.claude.extract_session_id", return_value="sess-abc"),
+            patch(
+                "kennel.worker.claude.Claude.extract_session_id",
+                return_value="sess-abc",
+            ),
         ):
             result = Worker.claude_start(fido_dir)
         assert result == "sess-abc"
@@ -1399,7 +1402,7 @@ class TestClaudeStart:
         fido_dir = self._setup_fido_dir(tmp_path)
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
-            patch("kennel.worker.claude.extract_session_id", return_value=""),
+            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
         ):
             result = Worker.claude_start(fido_dir)
         assert result == ""
@@ -1412,7 +1415,7 @@ class TestClaudeStart:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.extract_session_id", return_value=""),
+            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
         ):
             Worker.claude_start(fido_dir)
         mock_ppf.assert_called_once_with(
@@ -1428,7 +1431,7 @@ class TestClaudeStart:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.extract_session_id", return_value=""),
+            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
         ):
             Worker.claude_start(fido_dir, model="claude-opus-4-6")
         assert mock_ppf.call_args[0][2] == "claude-opus-4-6"
@@ -1439,7 +1442,7 @@ class TestClaudeStart:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.extract_session_id", return_value=""),
+            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
         ):
             Worker.claude_start(fido_dir, timeout=600)
         assert mock_ppf.call_args[0][3] == 600
@@ -1450,7 +1453,7 @@ class TestClaudeStart:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.extract_session_id", return_value=""),
+            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
         ):
             Worker.claude_start(fido_dir)
         assert mock_ppf.call_args[0][2] == "claude-sonnet-4-6"
@@ -1461,7 +1464,7 @@ class TestClaudeStart:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.extract_session_id", return_value=""),
+            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
         ):
             Worker.claude_start(fido_dir)
         assert mock_ppf.call_args[0][3] == 300
@@ -1472,7 +1475,7 @@ class TestClaudeStart:
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=raw),
             patch(
-                "kennel.worker.claude.extract_session_id", return_value="xyz"
+                "kennel.worker.claude.Claude.extract_session_id", return_value="xyz"
             ) as mock_ext,
         ):
             Worker.claude_start(fido_dir)
@@ -1534,7 +1537,10 @@ class TestClaudeRun:
         raw = '{"type":"result","session_id":"new-sess"}'
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=raw),
-            patch("kennel.worker.claude.extract_session_id", return_value="new-sess"),
+            patch(
+                "kennel.worker.claude.Claude.extract_session_id",
+                return_value="new-sess",
+            ),
         ):
             session_id, _ = Worker.claude_run(fido_dir)
         assert session_id == "new-sess"
@@ -1544,7 +1550,7 @@ class TestClaudeRun:
         raw = '{"type":"result","session_id":"s"}'
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=raw),
-            patch("kennel.worker.claude.extract_session_id", return_value="s"),
+            patch("kennel.worker.claude.Claude.extract_session_id", return_value="s"),
         ):
             _, output = Worker.claude_run(fido_dir)
         assert output == raw
@@ -1555,7 +1561,7 @@ class TestClaudeRun:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.extract_session_id", return_value=""),
+            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
         ):
             Worker.claude_run(fido_dir)
         mock_ppf.assert_called_once_with(
@@ -1569,7 +1575,7 @@ class TestClaudeRun:
         fido_dir = self._setup_fido_dir(tmp_path)
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
-            patch("kennel.worker.claude.extract_session_id", return_value=""),
+            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
             patch("kennel.worker.claude.resume_session") as mock_rs,
         ):
             Worker.claude_run(fido_dir)
@@ -1579,7 +1585,7 @@ class TestClaudeRun:
         fido_dir = self._setup_fido_dir(tmp_path)
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
-            patch("kennel.worker.claude.extract_session_id", return_value=""),
+            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
         ):
             session_id, _ = Worker.claude_run(fido_dir)
         assert session_id == ""
@@ -1590,7 +1596,7 @@ class TestClaudeRun:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.extract_session_id", return_value=""),
+            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
         ):
             Worker.claude_run(fido_dir)
         assert mock_ppf.call_args[0][2] == "claude-sonnet-4-6"
@@ -1601,7 +1607,7 @@ class TestClaudeRun:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.extract_session_id", return_value=""),
+            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
         ):
             Worker.claude_run(fido_dir)
         assert mock_ppf.call_args[0][3] == 300

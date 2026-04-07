@@ -158,7 +158,7 @@ class Worker:
         system_file = fido_dir / "system"
         prompt_file = fido_dir / "prompt"
         output = claude.print_prompt_from_file(system_file, prompt_file, model, timeout)
-        return claude.extract_session_id(output)
+        return claude.Claude.extract_session_id(output)
 
     @staticmethod
     def claude_run(
@@ -182,7 +182,7 @@ class Worker:
             return session_id, output
         system_file = fido_dir / "system"
         output = claude.print_prompt_from_file(system_file, prompt_file, model, timeout)
-        new_session_id = claude.extract_session_id(output)
+        new_session_id = claude.Claude.extract_session_id(output)
         return new_session_id, output
 
     # ------------------------------------------------------------------

@@ -5,8 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from kennel.claude import (
+    Claude,
     _claude,
-    extract_session_id,
     generate_branch_name,
     generate_reply,
     generate_status,
@@ -378,47 +378,47 @@ class TestGenerateStatus:
 class TestExtractSessionId:
     def test_returns_session_id_from_result_line(self) -> None:
         output = '{"type":"result","session_id":"abc-123"}'
-        assert extract_session_id(output) == "abc-123"
+        assert Claude.extract_session_id(output) == "abc-123"
 
     def test_returns_empty_when_no_result_line(self) -> None:
         output = '{"type":"assistant","message":{"content":[]}}'
-        assert extract_session_id(output) == ""
+        assert Claude.extract_session_id(output) == ""
 
     def test_returns_empty_on_empty_input(self) -> None:
-        assert extract_session_id("") == ""
+        assert Claude.extract_session_id("") == ""
 
     def test_returns_empty_on_blank_lines_only(self) -> None:
-        assert extract_session_id("\n\n  \n") == ""
+        assert Claude.extract_session_id("\n\n  \n") == ""
 
     def test_returns_empty_on_malformed_json(self) -> None:
-        assert extract_session_id("not json at all") == ""
+        assert Claude.extract_session_id("not json at all") == ""
 
     def test_skips_malformed_lines_and_finds_valid(self) -> None:
         output = "bad json\n" + '{"type":"result","session_id":"xyz"}'
-        assert extract_session_id(output) == "xyz"
+        assert Claude.extract_session_id(output) == "xyz"
 
     def test_returns_last_session_id_when_multiple_result_lines(self) -> None:
         output = (
             '{"type":"result","session_id":"first"}\n'
             '{"type":"result","session_id":"last"}'
         )
-        assert extract_session_id(output) == "last"
+        assert Claude.extract_session_id(output) == "last"
 
     def test_returns_empty_when_session_id_missing(self) -> None:
         output = '{"type":"result"}'
-        assert extract_session_id(output) == ""
+        assert Claude.extract_session_id(output) == ""
 
     def test_returns_empty_when_session_id_null(self) -> None:
         output = '{"type":"result","session_id":null}'
-        assert extract_session_id(output) == ""
+        assert Claude.extract_session_id(output) == ""
 
     def test_returns_empty_when_session_id_empty_string(self) -> None:
         output = '{"type":"result","session_id":""}'
-        assert extract_session_id(output) == ""
+        assert Claude.extract_session_id(output) == ""
 
     def test_ignores_non_result_types(self) -> None:
         output = '{"type":"system","session_id":"should-ignore"}'
-        assert extract_session_id(output) == ""
+        assert Claude.extract_session_id(output) == ""
 
     def test_handles_mixed_output(self) -> None:
         output = (
@@ -426,4 +426,4 @@ class TestExtractSessionId:
             '{"type":"assistant","message":{}}\n'
             '{"type":"result","session_id":"real-id"}\n'
         )
-        assert extract_session_id(output) == "real-id"
+        assert Claude.extract_session_id(output) == "real-id"
