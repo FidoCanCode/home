@@ -638,6 +638,9 @@ class TestWorker:
             patch.object(worker, "find_next_issue", mock_find),
             patch.object(worker, "post_pickup_comment"),
             patch.object(worker, "find_or_create_pr", return_value=(1, "my-branch")),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
         ):
             worker.run()
         mock_find.assert_not_called()
@@ -679,6 +682,9 @@ class TestWorker:
             patch.object(worker, "get_current_issue", return_value=5),
             patch.object(worker, "post_pickup_comment", mock_pickup),
             patch.object(worker, "find_or_create_pr", return_value=(1, "my-branch")),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
         ):
             worker.run()
         mock_pickup.assert_called_once_with("owner/repo", 5, "Test issue", "fido-bot")
@@ -702,6 +708,9 @@ class TestWorker:
             patch.object(worker, "get_current_issue", return_value=3),
             patch.object(worker, "post_pickup_comment"),
             patch.object(worker, "find_or_create_pr", return_value=(1, "my-branch")),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
         ):
             worker.run()
         gh.view_issue.assert_called_once_with("owner/repo", 3)
@@ -721,6 +730,9 @@ class TestWorker:
             patch.object(worker, "get_current_issue", return_value=8),
             patch.object(worker, "post_pickup_comment"),
             patch.object(worker, "find_or_create_pr", mock_focp),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
         ):
             worker.run()
         mock_focp.assert_called_once_with(mock_ctx.fido_dir, repo_ctx, 8, "My task")
@@ -2489,6 +2501,9 @@ class TestRunSeedTasksIntegration:
             patch.object(worker, "post_pickup_comment"),
             patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
             patch.object(worker, "seed_tasks_from_pr_body", mock_seed),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
         ):
             worker.run()
         mock_seed.assert_called_once_with("owner/repo", 42)
@@ -3027,6 +3042,8 @@ class TestRunHandleCiIntegration:
             patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", mock_handle_ci),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
         ):
             worker.run()
         mock_handle_ci.assert_called_once_with(
@@ -3069,6 +3086,8 @@ class TestRunHandleCiIntegration:
             patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
         ):
             result = worker.run()
         assert result == 0
@@ -3096,3 +3115,694 @@ class TestRunHandleCiIntegration:
         ):
             worker.run()
         mock_handle_ci.assert_not_called()
+
+
+class TestFilterThreads:
+    """Tests for Worker._filter_threads."""
+
+    def _make_worker(self, tmp_path: Path) -> Worker:
+        return Worker(tmp_path, MagicMock())
+
+    def _make_threads_data(self, nodes: list) -> dict:
+        return {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+
+    def _make_node(
+        self,
+        *,
+        resolved: bool = False,
+        node_id: str = "thread-1",
+        first_author: str = "owner",
+        first_db_id: int = 1,
+        first_body: str = "please fix this",
+        last_author: str | None = None,
+        last_body: str = "please fix this",
+        url: str = "https://example.com/comment",
+        extra_comments: list | None = None,
+    ) -> dict:
+        """Build a review-thread node.
+
+        If *last_author* is given (and differs from first_author or last_body
+        differs from first_body) a second comment is appended.  *extra_comments*
+        are inserted between first and last.
+        """
+        first = {
+            "author": {"login": first_author},
+            "body": first_body,
+            "url": url,
+            "databaseId": first_db_id,
+        }
+        comments: list = [first]
+        if extra_comments:
+            comments.extend(extra_comments)
+        if last_author is not None and (
+            last_author != first_author or last_body != first_body
+        ):
+            comments.append(
+                {
+                    "author": {"login": last_author},
+                    "body": last_body,
+                    "url": url,
+                    "databaseId": first_db_id + len(comments),
+                }
+            )
+        return {
+            "id": node_id,
+            "isResolved": resolved,
+            "comments": {"nodes": comments},
+        }
+
+    def test_returns_empty_when_no_nodes(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        assert w._filter_threads({}, "fido-bot", "owner") == []
+
+    def test_excludes_resolved_threads(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(resolved=True)
+        data = self._make_threads_data([node])
+        assert w._filter_threads(data, "fido-bot", "owner") == []
+
+    def test_excludes_threads_where_last_author_is_gh_user(
+        self, tmp_path: Path
+    ) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(last_author="fido-bot", last_body="done")
+        data = self._make_threads_data([node])
+        assert w._filter_threads(data, "fido-bot", "owner") == []
+
+    def test_excludes_threads_where_last_author_is_neither_owner_nor_bot(
+        self, tmp_path: Path
+    ) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(last_author="random-user", last_body="comment")
+        data = self._make_threads_data([node])
+        assert w._filter_threads(data, "fido-bot", "owner") == []
+
+    def test_includes_thread_from_owner(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(last_author="owner")
+        data = self._make_threads_data([node])
+        result = w._filter_threads(data, "fido-bot", "owner")
+        assert len(result) == 1
+
+    def test_includes_thread_from_bot(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(last_author="my-app[bot]", last_body="bot comment")
+        data = self._make_threads_data([node])
+        result = w._filter_threads(data, "fido-bot", "owner")
+        assert len(result) == 1
+
+    def test_maps_fields_correctly(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(
+            node_id="tid-42",
+            first_author="owner",
+            first_db_id=99,
+            first_body="first comment",
+            last_author="owner",
+            last_body="last comment",
+            url="https://github.com/x",
+        )
+        data = self._make_threads_data([node])
+        result = w._filter_threads(data, "fido-bot", "owner")
+        assert result[0]["id"] == "tid-42"
+        assert result[0]["first_author"] == "owner"
+        assert result[0]["first_db_id"] == 99
+        assert result[0]["first_body"] == "first comment"
+        assert result[0]["last_author"] == "owner"
+        assert result[0]["last_body"] == "last comment"
+        assert result[0]["url"] == "https://github.com/x"
+        assert result[0]["total"] == 2
+
+    def test_is_bot_true_when_first_author_ends_with_bot(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(first_author="my-app[bot]", last_author="owner")
+        data = self._make_threads_data([node])
+        result = w._filter_threads(data, "fido-bot", "owner")
+        assert result[0]["is_bot"] is True
+
+    def test_is_bot_false_when_first_author_is_human(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(first_author="owner", last_author="owner")
+        data = self._make_threads_data([node])
+        result = w._filter_threads(data, "fido-bot", "owner")
+        assert result[0]["is_bot"] is False
+
+    def test_excludes_threads_with_no_comments(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = {"id": "x", "isResolved": False, "comments": {"nodes": []}}
+        data = self._make_threads_data([node])
+        assert w._filter_threads(data, "fido-bot", "owner") == []
+
+    def test_total_counts_all_comments(self, tmp_path: Path) -> None:
+        w = self._make_worker(tmp_path)
+        node = self._make_node(
+            first_author="owner",
+            last_author="owner",
+            last_body="final comment",
+            extra_comments=[
+                {
+                    "author": {"login": "owner"},
+                    "body": "mid",
+                    "url": "u",
+                    "databaseId": 2,
+                }
+            ],
+        )
+        data = self._make_threads_data([node])
+        result = w._filter_threads(data, "fido-bot", "owner")
+        assert result[0]["total"] == 3
+
+
+class TestHandleReviewFeedback:
+    """Tests for Worker.handle_review_feedback."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        return Worker(tmp_path, gh), gh
+
+    def _repo_ctx(self) -> RepoContext:
+        return RepoContext(
+            repo="owner/repo",
+            owner="owner",
+            repo_name="repo",
+            gh_user="fido-bot",
+            default_branch="main",
+        )
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _pr_data(
+        self,
+        *,
+        state: str = "CHANGES_REQUESTED",
+        submitted_at: str = "2024-01-01T12:00:00Z",
+        review_body: str = "Please fix the typo.",
+        commit_date: str = "2024-01-01T10:00:00Z",
+    ) -> dict:
+        return {
+            "reviews": [
+                {
+                    "author": {"login": "owner"},
+                    "state": state,
+                    "submittedAt": submitted_at,
+                    "body": review_body,
+                }
+            ],
+            "commits": [
+                {
+                    "messageHeadline": "Fix bug",
+                    "oid": "abc",
+                    "committedDate": commit_date,
+                }
+            ],
+            "isDraft": False,
+            "mergeStateStatus": "CLEAN",
+            "body": "",
+        }
+
+    def test_returns_false_when_no_reviews(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {"reviews": [], "commits": [], "body": ""}
+        fido_dir = self._fido_dir(tmp_path)
+        assert (
+            worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
+            is False
+        )
+
+    def test_returns_false_when_no_owner_reviews(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {
+            "reviews": [
+                {
+                    "author": {"login": "other-user"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2024-01-01T12:00:00Z",
+                    "body": "change this",
+                }
+            ],
+            "commits": [],
+            "body": "",
+        }
+        fido_dir = self._fido_dir(tmp_path)
+        assert (
+            worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
+            is False
+        )
+
+    def test_returns_false_when_last_review_not_changes_requested(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_data(state="APPROVED")
+        fido_dir = self._fido_dir(tmp_path)
+        assert (
+            worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
+            is False
+        )
+
+    def test_returns_false_when_commits_newer_than_review(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_data(
+            submitted_at="2024-01-01T10:00:00Z",
+            commit_date="2024-01-01T12:00:00Z",
+        )
+        fido_dir = self._fido_dir(tmp_path)
+        assert (
+            worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
+            is False
+        )
+
+    def test_returns_false_when_review_body_empty(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_data(review_body="")
+        fido_dir = self._fido_dir(tmp_path)
+        assert (
+            worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
+            is False
+        )
+
+    def test_returns_true_when_changes_requested_no_newer_commits(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_data()
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            result = worker.handle_review_feedback(
+                fido_dir, self._repo_ctx(), 1, "branch"
+            )
+        assert result is True
+
+    def test_builds_task_prompt(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_data(review_body="fix the nit")
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt") as mock_bp,
+            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_review_feedback(fido_dir, self._repo_ctx(), 5, "my-branch")
+        mock_bp.assert_called_once()
+        _, subskill, context = mock_bp.call_args[0]
+        assert subskill == "task"
+        assert "PR: 5" in context
+        assert "my-branch" in context
+
+    def test_runs_claude(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_data()
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sess-1", "")) as mock_cr,
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
+        mock_cr.assert_called_once_with(fido_dir)
+
+    def test_completes_task_by_title(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_data()
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
+        mock_complete.assert_called_once_with(
+            tmp_path, "Address review feedback from owner"
+        )
+
+    def test_spawns_sync_script(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_data()
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen") as mock_popen,
+        ):
+            worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
+        mock_popen.assert_called_once()
+        popen_args = mock_popen.call_args[0][0]
+        assert popen_args[0] == "bash"
+        assert "sync-tasks.sh" in popen_args[1]
+
+    def test_logs_review_feedback(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = self._pr_data()
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("subprocess.Popen"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
+        assert "review feedback" in caplog.text
+
+
+class TestHandleThreads:
+    """Tests for Worker.handle_threads."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        return Worker(tmp_path, gh), gh
+
+    def _repo_ctx(self) -> RepoContext:
+        return RepoContext(
+            repo="owner/repo",
+            owner="owner",
+            repo_name="repo",
+            gh_user="fido-bot",
+            default_branch="main",
+        )
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _threads_data_with_nodes(self, nodes: list) -> dict:
+        return {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+
+    def _open_thread_node(
+        self, *, last_author: str = "owner", first_author: str = "owner"
+    ) -> dict:
+        return {
+            "id": "thread-1",
+            "isResolved": False,
+            "comments": {
+                "nodes": [
+                    {
+                        "author": {"login": first_author},
+                        "body": "please fix",
+                        "url": "https://example.com",
+                        "databaseId": 1,
+                    },
+                    {
+                        "author": {"login": last_author},
+                        "body": "still open",
+                        "url": "https://example.com",
+                        "databaseId": 2,
+                    },
+                ]
+            },
+        }
+
+    def test_returns_false_when_no_threads(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        assert worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch") is False
+
+    def test_returns_true_when_threads_exist(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        node = self._open_thread_node()
+        gh.get_review_threads.return_value = self._threads_data_with_nodes([node])
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("subprocess.Popen"),
+        ):
+            result = worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+
+    def test_calls_get_review_threads_with_correct_args(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_review_threads.return_value = {}
+        fido_dir = self._fido_dir(tmp_path)
+        worker.handle_threads(fido_dir, self._repo_ctx(), 42, "branch")
+        gh.get_review_threads.assert_called_once_with("owner", "repo", 42)
+
+    def test_builds_comments_prompt(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        node = self._open_thread_node()
+        gh.get_review_threads.return_value = self._threads_data_with_nodes([node])
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt") as mock_bp,
+            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_threads(fido_dir, self._repo_ctx(), 5, "my-branch")
+        mock_bp.assert_called_once()
+        _, subskill, context = mock_bp.call_args[0]
+        assert subskill == "comments"
+        assert "PR: 5" in context
+        assert "my-branch" in context
+
+    def test_runs_claude(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        node = self._open_thread_node()
+        gh.get_review_threads.return_value = self._threads_data_with_nodes([node])
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sess-1", "")) as mock_cr,
+            patch("subprocess.Popen"),
+        ):
+            worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+        mock_cr.assert_called_once_with(fido_dir)
+
+    def test_spawns_sync_script(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        node = self._open_thread_node()
+        gh.get_review_threads.return_value = self._threads_data_with_nodes([node])
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("subprocess.Popen") as mock_popen,
+        ):
+            worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+        mock_popen.assert_called_once()
+        popen_args = mock_popen.call_args[0][0]
+        assert popen_args[0] == "bash"
+        assert "sync-tasks.sh" in popen_args[1]
+
+    def test_logs_thread_count(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        node = self._open_thread_node()
+        gh.get_review_threads.return_value = self._threads_data_with_nodes([node])
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch("subprocess.Popen"),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
+        assert "unresolved threads" in caplog.text
+
+
+class TestRunReviewFeedbackIntegration:
+    """Tests that Worker.run() calls handle_review_feedback after handle_ci."""
+
+    def _make_gh(self) -> MagicMock:
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.get_default_branch.return_value = "main"
+        gh.get_pr.return_value = {"body": ""}
+        return gh
+
+    def _make_mock_ctx(self, tmp_path: Path) -> MagicMock:
+        mock_ctx = MagicMock(spec=WorkerContext)
+        mock_ctx.git_dir = tmp_path / ".git"
+        mock_ctx.fido_dir = tmp_path / ".git" / "fido"
+        return mock_ctx
+
+    def _make_mock_repo_ctx(self) -> MagicMock:
+        repo_ctx = MagicMock(spec=RepoContext)
+        repo_ctx.repo = "owner/repo"
+        repo_ctx.gh_user = "fido-bot"
+        repo_ctx.default_branch = "main"
+        return repo_ctx
+
+    def test_handle_review_feedback_called_when_ci_passes(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_rf = MagicMock(return_value=False)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", mock_rf),
+            patch.object(worker, "handle_threads", return_value=False),
+        ):
+            worker.run()
+        mock_rf.assert_called_once_with(mock_ctx.fido_dir, repo_ctx, 42, "fix-bug")
+
+    def test_returns_1_when_review_feedback_handled(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=True),
+        ):
+            result = worker.run()
+        assert result == 1
+
+    def test_handle_threads_not_called_when_review_feedback_handled(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_threads = MagicMock(return_value=False)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=True),
+            patch.object(worker, "handle_threads", mock_threads),
+        ):
+            worker.run()
+        mock_threads.assert_not_called()
+
+
+class TestRunThreadsIntegration:
+    """Tests that Worker.run() calls handle_threads after handle_review_feedback."""
+
+    def _make_gh(self) -> MagicMock:
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.get_default_branch.return_value = "main"
+        gh.get_pr.return_value = {"body": ""}
+        return gh
+
+    def _make_mock_ctx(self, tmp_path: Path) -> MagicMock:
+        mock_ctx = MagicMock(spec=WorkerContext)
+        mock_ctx.git_dir = tmp_path / ".git"
+        mock_ctx.fido_dir = tmp_path / ".git" / "fido"
+        return mock_ctx
+
+    def _make_mock_repo_ctx(self) -> MagicMock:
+        repo_ctx = MagicMock(spec=RepoContext)
+        repo_ctx.repo = "owner/repo"
+        repo_ctx.gh_user = "fido-bot"
+        repo_ctx.default_branch = "main"
+        return repo_ctx
+
+    def test_handle_threads_called_when_review_feedback_passes(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        mock_threads = MagicMock(return_value=False)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", mock_threads),
+        ):
+            worker.run()
+        mock_threads.assert_called_once_with(mock_ctx.fido_dir, repo_ctx, 42, "fix-bug")
+
+    def test_returns_1_when_threads_handled(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=True),
+        ):
+            result = worker.run()
+        assert result == 1
+
+    def test_returns_0_when_no_work(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", return_value=(42, "fix-bug")),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_review_feedback", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+        ):
+            result = worker.run()
+        assert result == 0

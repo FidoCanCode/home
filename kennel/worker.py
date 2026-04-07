@@ -650,6 +650,148 @@ class Worker:
         )
         return True
 
+    def _filter_threads(
+        self,
+        threads_data: dict[str, Any],
+        gh_user: str,
+        owner: str,
+    ) -> list[dict[str, Any]]:
+        """Return unresolved review threads for the comments sub-Claude.
+
+        A thread is included when:
+        - it is not resolved,
+        - it has at least one comment,
+        - the last commenter is not *gh_user* (awaiting a response), and
+        - the last commenter is either *owner* or ends with ``[bot]``.
+        """
+        nodes = (
+            threads_data.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+            .get("nodes", [])
+        )
+        result = []
+        for node in nodes:
+            if node.get("isResolved"):
+                continue
+            comments = node.get("comments", {}).get("nodes", [])
+            if not comments:
+                continue
+            first_comment = comments[0]
+            last_comment = comments[-1]
+            last_author = last_comment.get("author", {}).get("login", "")
+            if last_author == gh_user:
+                continue
+            if last_author != owner and not last_author.endswith("[bot]"):
+                continue
+            result.append(
+                {
+                    "id": node.get("id", ""),
+                    "is_bot": first_comment.get("author", {})
+                    .get("login", "")
+                    .endswith("[bot]"),
+                    "first_author": first_comment.get("author", {}).get("login", ""),
+                    "first_db_id": first_comment.get("databaseId"),
+                    "first_body": first_comment.get("body", ""),
+                    "last_author": last_author,
+                    "last_body": last_comment.get("body", ""),
+                    "url": first_comment.get("url", ""),
+                    "total": len(comments),
+                }
+            )
+        return result
+
+    def handle_review_feedback(
+        self,
+        fido_dir: Path,
+        repo_ctx: RepoContext,
+        pr_number: int,
+        slug: str,
+    ) -> bool:
+        """Check for a CHANGES_REQUESTED review with no newer commits and handle it.
+
+        Returns ``True`` if review feedback was found and handled.  Returns
+        ``False`` if there is no actionable review.
+        """
+        pr_data = self.gh.get_pr(repo_ctx.repo, pr_number)
+        reviews = pr_data.get("reviews", [])
+        owner_reviews = [
+            r for r in reviews if r.get("author", {}).get("login") == repo_ctx.owner
+        ]
+        if not owner_reviews:
+            return False
+        review = owner_reviews[-1]
+        if review.get("state") != "CHANGES_REQUESTED":
+            return False
+        commits = pr_data.get("commits", [])
+        if commits:
+            last_commit_date = commits[-1].get("committedDate", "")
+            if last_commit_date > review.get("submittedAt", ""):
+                return False
+        review_body = review.get("body", "")
+        if not review_body:
+            return False
+        log.info("review feedback from %s", repo_ctx.owner)
+        context = (
+            f"PR: {pr_number}\n"
+            f"Repo: {repo_ctx.repo}\n"
+            f"Branch: {slug}\n"
+            f"Upstream: origin/{repo_ctx.default_branch}\n"
+            f"\nTask title: Address review feedback from {repo_ctx.owner}\n"
+            f"Task description: {repo_ctx.owner} submitted a review requesting"
+            f" changes with the following feedback. Address it, commit, and push.\n"
+            f"\nReview feedback:\n{review_body}"
+        )
+        build_prompt(fido_dir, "task", context)
+        session_id, _ = claude_run(fido_dir)
+        log.info("review feedback done (session=%s)", session_id)
+        tasks.complete_by_title(
+            self.work_dir, f"Address review feedback from {repo_ctx.owner}"
+        )
+        subprocess.Popen(  # noqa: S603
+            ["bash", str(_sync_script()), str(self.work_dir)],
+        )
+        return True
+
+    def handle_threads(
+        self,
+        fido_dir: Path,
+        repo_ctx: RepoContext,
+        pr_number: int,
+        slug: str,
+    ) -> bool:
+        """Check for unresolved review threads and run the comments sub-Claude.
+
+        Returns ``True`` if unresolved threads were found and handled.  Returns
+        ``False`` if there are no actionable threads.
+        """
+        log.info("checking: threads")
+        threads_data = self.gh.get_review_threads(
+            repo_ctx.owner, repo_ctx.repo_name, pr_number
+        )
+        threads = self._filter_threads(threads_data, repo_ctx.gh_user, repo_ctx.owner)
+        if not threads:
+            return False
+        log.info("unresolved threads: %d", len(threads))
+        context = (
+            f"PR: {pr_number}\n"
+            f"Repo: {repo_ctx.repo}\n"
+            f"Owner: {repo_ctx.owner}\n"
+            f"Repo name: {repo_ctx.repo_name}\n"
+            f"Branch: {slug}\n"
+            f"Upstream: origin/{repo_ctx.default_branch}\n"
+            f"GitHub user: {repo_ctx.gh_user}\n"
+            f"\nUnresolved threads (JSON):\n{json.dumps({'threads': threads})}"
+        )
+        build_prompt(fido_dir, "comments", context)
+        session_id, _ = claude_run(fido_dir)
+        log.info("threads done (session=%s)", session_id)
+        subprocess.Popen(  # noqa: S603
+            ["bash", str(_sync_script()), str(self.work_dir)],
+        )
+        return True
+
     def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:
         """Seed tasks.json from the PR body work-queue markers if tasks.json is empty.
 
@@ -752,6 +894,10 @@ class Worker:
             pr_number, slug = result
             self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
             if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
+                return 1
+            if self.handle_review_feedback(ctx.fido_dir, repo_ctx, pr_number, slug):
+                return 1
+            if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
                 return 1
             # TODO: task execution and merge
         finally:

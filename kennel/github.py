@@ -276,6 +276,7 @@ class GH:
             {
                 "messageHeadline": c["commit"]["message"].split("\n")[0],
                 "oid": c["sha"],
+                "committedDate": c["commit"].get("committer", {}).get("date", ""),
             }
             for c in commits_data
         ]

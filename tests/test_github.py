@@ -888,7 +888,13 @@ class TestGHClass:
         ]
         commits_resp = MagicMock()
         commits_resp.json.return_value = [
-            {"sha": "abc", "commit": {"message": "Fix bug\n\nDetails"}}
+            {
+                "sha": "abc",
+                "commit": {
+                    "message": "Fix bug\n\nDetails",
+                    "committer": {"date": "2024-01-02T00:00:00Z"},
+                },
+            }
         ]
         with patch.object(
             gh._s, "get", side_effect=[pr_resp, reviews_resp, commits_resp]
@@ -904,7 +910,13 @@ class TestGHClass:
                 "submittedAt": "2024-01-01T00:00:00Z",
             }
         ]
-        assert result["commits"] == [{"messageHeadline": "Fix bug", "oid": "abc"}]
+        assert result["commits"] == [
+            {
+                "messageHeadline": "Fix bug",
+                "oid": "abc",
+                "committedDate": "2024-01-02T00:00:00Z",
+            }
+        ]
 
     def test_get_pr_null_body(self) -> None:
         gh = self._gh()
