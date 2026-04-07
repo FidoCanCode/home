@@ -82,10 +82,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         _replied_comments.add(cid)
                     handled = True
                 # Create task based on triage result
-                if category in ("DUMP", "ANSWER"):
-                    pass  # No task needed
+                if category in ("DUMP", "ANSWER", "ASK"):
+                    pass  # No task needed — ASK just posts a question
                 elif title:
-                    prefix = f"{category}: " if category in ("ASK", "DEFER") else ""
+                    prefix = f"{category}: " if category == "DEFER" else ""
                     create_task(f"{prefix}{title}", self.config,
                                 thread=action.reply_to)
 
@@ -97,8 +97,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
             if not handled and action.comment_body:
                 category, title = reply_to_issue_comment(action, self.config)
                 handled = True
-                if category not in ("DUMP", "ANSWER") and title:
-                    prefix = f"{category}: " if category in ("ASK", "DEFER") else ""
+                if category not in ("DUMP", "ANSWER", "ASK") and title:
+                    prefix = f"{category}: " if category == "DEFER" else ""
                     create_task(f"{prefix}{title}", self.config)
 
             # Non-comment events just trigger work.sh — no task needed
