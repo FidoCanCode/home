@@ -139,17 +139,21 @@ set_status() {  # set_status <what fido is doing>
   local what="$1"
   local msg
   msg=$(claude --model claude-opus-4-6 --print \
-    --system-prompt "You are writing your GitHub profile status as Fido the dog. Output ONLY the status text — under 80 chars, one emoji, no quotes, no preamble. Your first character is the first character of the status." \
+    --system-prompt "You are writing your GitHub profile status as Fido the dog. Output exactly two lines. Line 1: a single emoji for the status icon. Line 2: the status text (under 80 chars, no quotes, no preamble)." \
     -p "$PERSONA
 
-What you're doing right now: $what" 2>/dev/null | head -1)
+What you're doing right now: $what" 2>/dev/null | head -2)
   if [[ -z "$msg" ]]; then
     log "status: opus returned empty — skipping"
     return
   fi
-  msg="${msg:0:80}"
-  gh api graphql -F msg="$msg" -f query='mutation($msg:String!) { changeUserStatus(input: {message: $msg}) { status { message } } }' >/dev/null 2>&1 || true
-  log "status: $msg"
+  local emoji text
+  emoji=$(echo "$msg" | head -1)
+  text=$(echo "$msg" | tail -1)
+  text="${text:0:80}"
+  gh api graphql -F msg="$text" -F emoji="$emoji" \
+    -f query='mutation($msg:String!,$emoji:String!) { changeUserStatus(input: {message: $msg, emoji: $emoji}) { status { message emoji } } }' >/dev/null 2>&1 || true
+  log "status: $emoji $text"
 }
 
 build_prompt() {   # build_prompt <subskill> <context-string>
