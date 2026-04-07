@@ -139,12 +139,14 @@ set_status() {  # set_status <what fido is doing>
   local what="$1"
   local msg
   msg=$(claude --model claude-opus-4-6 --print \
-    --system-prompt "You are setting your GitHub profile status. Write a short status (under 80 chars) describing what you're doing. Be a dog. Include one emoji. No quotes. Just the status text." \
+    --system-prompt "You are writing your GitHub profile status as Fido the dog. Output ONLY the status text — under 80 chars, one emoji, no quotes, no preamble. Your first character is the first character of the status." \
     -p "$PERSONA
 
-What you're doing: $what" 2>/dev/null | head -1)
-  : "${msg:=$what}"
-  # Truncate to 80 chars
+What you're doing right now: $what" 2>/dev/null | head -1)
+  if [[ -z "$msg" ]]; then
+    log "status: opus returned empty — skipping"
+    return
+  fi
   msg="${msg:0:80}"
   gh api graphql -F msg="$msg" -f query='mutation($msg:String!) { changeUserStatus(input: {message: $msg}) { status { message } } }' >/dev/null 2>&1 || true
   log "status: $msg"
