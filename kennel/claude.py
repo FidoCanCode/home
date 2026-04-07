@@ -25,29 +25,25 @@ def _claude(
 # ── Stream-JSON helpers ───────────────────────────────────────────────────────
 
 
-class Claude:
-    """Wrapper around Claude CLI stream-json output helpers."""
+def extract_session_id(output: str) -> str:
+    """Extract the session_id from stream-json output.
 
-    @staticmethod
-    def extract_session_id(output: str) -> str:
-        """Extract the session_id from stream-json output.
-
-        Scans each line for a JSON object with ``"type": "result"`` and a
-        non-empty ``"session_id"`` field.  Returns the last such value found
-        (matching bash ``| tail -1``), or an empty string if none is present.
-        """
-        result = ""
-        for line in output.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if obj.get("type") == "result" and obj.get("session_id"):
-                result = str(obj["session_id"])
-        return result
+    Scans each line for a JSON object with ``"type": "result"`` and a
+    non-empty ``"session_id"`` field.  Returns the last such value found
+    (matching bash ``| tail -1``), or an empty string if none is present.
+    """
+    result = ""
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") == "result" and obj.get("session_id"):
+            result = str(obj["session_id"])
+    return result
 
 
 # ── Simple print calls (no tool use) ─────────────────────────────────────────

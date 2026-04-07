@@ -80,6 +80,7 @@ Markdown instruction files passed to sub-Claude as system prompts:
 - **PRs required** — branch protection on main
 - **Pre-commit hook** — blocks commits that fail format/lint/tests
 - **One entry point** — `kennel` (heading toward all-threads architecture)
+- **No `@staticmethod`** — use module-level functions instead; static methods can't be patched via `self` and resist the dependency injection pattern
 
 ### Dependency injection pattern
 

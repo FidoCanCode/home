@@ -54,6 +54,134 @@ def _sync_script() -> Path:
     return Path(__file__).parent.parent / "sync-tasks.sh"
 
 
+def acquire_lock(fido_dir: Path) -> IO[str]:
+    """Acquire the fido lock file exclusively (non-blocking).
+
+    Returns the open file object (must stay open to hold the lock).
+    Raises LockHeld if another fido is already running.
+    """
+    fido_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = fido_dir / "lock"
+    fd = open(lock_path, "w")  # noqa: SIM115
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fd.close()
+        raise LockHeld("another fido is running")
+    return fd
+
+
+def create_compact_script(fido_dir: Path) -> Path:
+    """Write the PostCompact hook script that re-reads skill instructions.
+
+    Returns the path to the created script.
+    """
+    sub_dir = _sub_dir()
+    script_path = fido_dir / "compact.sh"
+    script_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '[fido PostCompact] Re-reading skill instructions"
+        " after context compression.\\n\\n'\n"
+        f'for f in "{sub_dir}"/*.md; do\n'
+        '  printf \'## %s\\n\\n\' "$(basename "$f")"\n'
+        '  cat "$f"\n'
+        "  printf '\\n\\n'\n"
+        "done\n"
+    )
+    script_path.chmod(0o755)
+    return script_path
+
+
+def load_state(fido_dir: Path) -> dict[str, Any]:
+    """Load state.json from fido_dir, returning an empty dict if absent."""
+    state_path = fido_dir / "state.json"
+    if not state_path.exists():
+        return {}
+    return json.loads(state_path.read_text())
+
+
+def save_state(fido_dir: Path, state: dict[str, Any]) -> None:
+    """Write state to state.json in fido_dir."""
+    (fido_dir / "state.json").write_text(json.dumps(state))
+
+
+def clear_state(fido_dir: Path) -> None:
+    """Remove state.json from fido_dir (no-op if absent)."""
+    (fido_dir / "state.json").unlink(missing_ok=True)
+
+
+def build_prompt(fido_dir: Path, subskill: str, context: str) -> tuple[Path, Path]:
+    """Write system and prompt files for a sub-Claude session.
+
+    The system file contains ``persona.md`` and ``<subskill>.md`` joined by a
+    blank line (matching bash ``printf '%s\\n\\n%s\\n' "$PERSONA" "$skill"``).
+    The prompt file contains the context string.
+
+    Returns ``(system_file, prompt_file)`` where both live in *fido_dir*.
+    """
+    sub = _sub_dir()
+    persona = (sub / "persona.md").read_text().rstrip()
+    skill = (sub / f"{subskill}.md").read_text().rstrip()
+    system_file = fido_dir / "system"
+    prompt_file = fido_dir / "prompt"
+    system_file.write_text(f"{persona}\n\n{skill}\n")
+    prompt_file.write_text(f"{context}\n")
+    return system_file, prompt_file
+
+
+def _sanitize_slug(raw: str, fallback: str) -> str:
+    """Sanitize a branch name slug: lowercase, hyphens only, max 40 chars.
+
+    If the sanitized result is shorter than 3 characters, falls back to a
+    slug derived from *fallback* (with any ``(closes #N)`` suffix stripped).
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")[:40]
+    if len(slug) < 3:
+        clean = re.sub(r"\(closes\s*#\d+\)", "", fallback, flags=re.IGNORECASE)
+        slug = re.sub(r"[^a-z0-9]+", "-", clean.lower()).strip("-")[:40]
+    return slug
+
+
+def claude_start(
+    fido_dir: Path,
+    model: str = "claude-sonnet-4-6",
+    timeout: int = 300,
+) -> str:
+    """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
+
+    Returns the session_id string (empty string on failure).
+    """
+    system_file = fido_dir / "system"
+    prompt_file = fido_dir / "prompt"
+    output = claude.print_prompt_from_file(system_file, prompt_file, model, timeout)
+    return claude.extract_session_id(output)
+
+
+def claude_run(
+    fido_dir: Path,
+    session_id: str = "",
+    model: str = "claude-sonnet-4-6",
+    timeout: int = 300,
+) -> tuple[str, str]:
+    """Continue or start a sub-Claude session, streaming progress as JSON.
+
+    If *session_id* is non-empty the existing session is resumed via
+    ``claude --resume``.  Otherwise a new session is started from
+    *fido_dir/system* and *fido_dir/prompt*.
+
+    Returns ``(session_id, raw_output)`` where *raw_output* is the full
+    stream-json text produced by the claude CLI.
+    """
+    prompt_file = fido_dir / "prompt"
+    if session_id:
+        output = claude.resume_session(session_id, prompt_file, model, timeout)
+        return session_id, output
+    system_file = fido_dir / "system"
+    output = claude.print_prompt_from_file(system_file, prompt_file, model, timeout)
+    new_session_id = claude.extract_session_id(output)
+    return new_session_id, output
+
+
 class Worker:
     """Fido worker for a single repository.
 
@@ -65,129 +193,6 @@ class Worker:
     def __init__(self, work_dir: Path, gh: GitHub) -> None:
         self.work_dir = work_dir
         self.gh = gh
-
-    # ------------------------------------------------------------------
-    # Static utilities
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def acquire_lock(fido_dir: Path) -> IO[str]:
-        """Acquire the fido lock file exclusively (non-blocking).
-
-        Returns the open file object (must stay open to hold the lock).
-        Raises LockHeld if another fido is already running.
-        """
-        fido_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = fido_dir / "lock"
-        fd = open(lock_path, "w")  # noqa: SIM115
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            fd.close()
-            raise LockHeld("another fido is running")
-        return fd
-
-    @staticmethod
-    def create_compact_script(fido_dir: Path) -> Path:
-        """Write the PostCompact hook script that re-reads skill instructions.
-
-        Returns the path to the created script.
-        """
-        sub_dir = _sub_dir()
-        script_path = fido_dir / "compact.sh"
-        script_path.write_text(
-            "#!/usr/bin/env bash\n"
-            "printf '[fido PostCompact] Re-reading skill instructions"
-            " after context compression.\\n\\n'\n"
-            f'for f in "{sub_dir}"/*.md; do\n'
-            '  printf \'## %s\\n\\n\' "$(basename "$f")"\n'
-            '  cat "$f"\n'
-            "  printf '\\n\\n'\n"
-            "done\n"
-        )
-        script_path.chmod(0o755)
-        return script_path
-
-    @staticmethod
-    def load_state(fido_dir: Path) -> dict[str, Any]:
-        """Load state.json from fido_dir, returning an empty dict if absent."""
-        state_path = fido_dir / "state.json"
-        if not state_path.exists():
-            return {}
-        return json.loads(state_path.read_text())
-
-    @staticmethod
-    def save_state(fido_dir: Path, state: dict[str, Any]) -> None:
-        """Write state to state.json in fido_dir."""
-        (fido_dir / "state.json").write_text(json.dumps(state))
-
-    @staticmethod
-    def clear_state(fido_dir: Path) -> None:
-        """Remove state.json from fido_dir (no-op if absent)."""
-        (fido_dir / "state.json").unlink(missing_ok=True)
-
-    @staticmethod
-    def build_prompt(fido_dir: Path, subskill: str, context: str) -> tuple[Path, Path]:
-        """Write system and prompt files for a sub-Claude session.
-
-        The system file contains ``persona.md`` and ``<subskill>.md`` joined by a
-        blank line (matching bash ``printf '%s\\n\\n%s\\n' "$PERSONA" "$skill"``).
-        The prompt file contains the context string.
-
-        Returns ``(system_file, prompt_file)`` where both live in *fido_dir*.
-        """
-        sub = _sub_dir()
-        persona = (sub / "persona.md").read_text().rstrip()
-        skill = (sub / f"{subskill}.md").read_text().rstrip()
-        system_file = fido_dir / "system"
-        prompt_file = fido_dir / "prompt"
-        system_file.write_text(f"{persona}\n\n{skill}\n")
-        prompt_file.write_text(f"{context}\n")
-        return system_file, prompt_file
-
-    @staticmethod
-    def claude_start(
-        fido_dir: Path,
-        model: str = "claude-sonnet-4-6",
-        timeout: int = 300,
-    ) -> str:
-        """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
-
-        Returns the session_id string (empty string on failure).
-        """
-        system_file = fido_dir / "system"
-        prompt_file = fido_dir / "prompt"
-        output = claude.print_prompt_from_file(system_file, prompt_file, model, timeout)
-        return claude.Claude.extract_session_id(output)
-
-    @staticmethod
-    def claude_run(
-        fido_dir: Path,
-        session_id: str = "",
-        model: str = "claude-sonnet-4-6",
-        timeout: int = 300,
-    ) -> tuple[str, str]:
-        """Continue or start a sub-Claude session, streaming progress as JSON.
-
-        If *session_id* is non-empty the existing session is resumed via
-        ``claude --resume``.  Otherwise a new session is started from
-        *fido_dir/system* and *fido_dir/prompt*.
-
-        Returns ``(session_id, raw_output)`` where *raw_output* is the full
-        stream-json text produced by the claude CLI.
-        """
-        prompt_file = fido_dir / "prompt"
-        if session_id:
-            output = claude.resume_session(session_id, prompt_file, model, timeout)
-            return session_id, output
-        system_file = fido_dir / "system"
-        output = claude.print_prompt_from_file(system_file, prompt_file, model, timeout)
-        new_session_id = claude.Claude.extract_session_id(output)
-        return new_session_id, output
-
-    # ------------------------------------------------------------------
-    # Instance methods that use self.work_dir
-    # ------------------------------------------------------------------
 
     def resolve_git_dir(self) -> Path:
         """Return the absolute .git directory for self.work_dir."""
@@ -207,7 +212,7 @@ class Worker:
         """
         git_dir = self.resolve_git_dir()
         fido_dir = git_dir / "fido"
-        lock_fd = self.acquire_lock(fido_dir)
+        lock_fd = acquire_lock(fido_dir)
         return WorkerContext(
             work_dir=self.work_dir,
             git_dir=git_dir,
@@ -224,7 +229,7 @@ class Worker:
         Returns (compact_cmd, sync_cmd).
         """
         hooks.ensure_gitexcluded(self.work_dir)
-        compact_script = self.create_compact_script(fido_dir)
+        compact_script = create_compact_script(fido_dir)
         compact_cmd = f"bash {compact_script}"
         # TODO: replace with Python sync once sync-tasks.sh is removed
         sync_cmd = f"bash {_sync_script()} {self.work_dir} &"
@@ -260,14 +265,14 @@ class Worker:
         If state.json records an issue that has been CLOSED on GitHub, the state
         is cleared (advancing to the next issue) and None is returned.
         """
-        state = self.load_state(fido_dir)
+        state = load_state(fido_dir)
         issue = state.get("issue")
         if issue is None:
             return None
         issue_data = self.gh.view_issue(repo, issue)
         if issue_data["state"] == "CLOSED":
             log.info("issue #%s: closed — advancing", issue)
-            self.clear_state(fido_dir)
+            clear_state(fido_dir)
             return None
         return int(issue)
 
@@ -322,7 +327,7 @@ class Worker:
                 number = issue["number"]
                 title = issue["title"]
                 log.info("starting issue #%s: %s", number, title)
-                self.save_state(fido_dir, {"issue": number})
+                save_state(fido_dir, {"issue": number})
                 self.set_status(f"Picking up issue #{number}: {title}")
                 return number
 
@@ -333,19 +338,6 @@ class Worker:
         )
         self.set_status("All done — no issues to fetch", busy=False)
         return None
-
-    @staticmethod
-    def _sanitize_slug(raw: str, fallback: str) -> str:
-        """Sanitize a branch name slug: lowercase, hyphens only, max 40 chars.
-
-        If the sanitized result is shorter than 3 characters, falls back to a
-        slug derived from *fallback* (with any ``(closes #N)`` suffix stripped).
-        """
-        slug = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")[:40]
-        if len(slug) < 3:
-            clean = re.sub(r"\(closes\s*#\d+\)", "", fallback, flags=re.IGNORECASE)
-            slug = re.sub(r"[^a-z0-9]+", "-", clean.lower()).strip("-")[:40]
-        return slug
 
     def _git(
         self, args: list[str], check: bool = True
@@ -442,7 +434,7 @@ class Worker:
             if state == "MERGED":
                 log.info("PR #%s already merged — closing issue #%s", pr_number, issue)
                 self.gh.close_issue(repo_ctx.repo, issue)
-                self.clear_state(fido_dir)
+                clear_state(fido_dir)
                 return None
 
             if state != "CLOSED":
@@ -464,8 +456,8 @@ class Worker:
                         f"Fork remote: {remote}\n"
                         f"Upstream: {remote}/{repo_ctx.default_branch}"
                     )
-                    self.build_prompt(fido_dir, "setup", context)
-                    session_id = self.claude_start(fido_dir)
+                    build_prompt(fido_dir, "setup", context)
+                    session_id = claude_start(fido_dir)
                     log.info("setup session: %s", session_id)
                 log.info(
                     "PR: #%s  https://github.com/%s/pull/%s",
@@ -485,7 +477,7 @@ class Worker:
             " No explanation, no punctuation, just the branch name."
             f"\n\nRequest: {request}"
         )
-        slug = self._sanitize_slug(raw_slug, request)
+        slug = _sanitize_slug(raw_slug, request)
         log.info("new branch: %s", slug)
 
         # Create branch from default, push
@@ -506,8 +498,8 @@ class Worker:
             f"Fork remote: {remote}\n"
             f"Upstream: {remote}/{repo_ctx.default_branch}"
         )
-        self.build_prompt(fido_dir, "setup", context)
-        session_id = self.claude_start(fido_dir)
+        build_prompt(fido_dir, "setup", context)
+        session_id = claude_start(fido_dir)
         log.info("setup session: %s", session_id)
 
         # Build PR body with tasks already populated by setup

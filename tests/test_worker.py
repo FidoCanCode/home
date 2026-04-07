@@ -13,7 +13,16 @@ from kennel.worker import (
     RepoContext,
     Worker,
     WorkerContext,
+    _sanitize_slug,
+    acquire_lock,
+    build_prompt,
+    claude_run,
+    claude_start,
+    clear_state,
+    create_compact_script,
+    load_state,
     run,
+    save_state,
 )
 
 
@@ -55,45 +64,45 @@ class TestResolveGitDir:
 class TestAcquireLock:
     def test_returns_open_fd(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        fd = Worker.acquire_lock(fido_dir)
+        fd = acquire_lock(fido_dir)
         assert not fd.closed
         fd.close()
 
     def test_creates_fido_dir(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "nested" / "fido"
-        fd = Worker.acquire_lock(fido_dir)
+        fd = acquire_lock(fido_dir)
         assert fido_dir.is_dir()
         fd.close()
 
     def test_creates_lock_file(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        fd = Worker.acquire_lock(fido_dir)
+        fd = acquire_lock(fido_dir)
         assert (fido_dir / "lock").exists()
         fd.close()
 
     def test_raises_lock_held_when_already_locked(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        fd1 = Worker.acquire_lock(fido_dir)
+        fd1 = acquire_lock(fido_dir)
         try:
             with pytest.raises(LockHeld):
-                Worker.acquire_lock(fido_dir)
+                acquire_lock(fido_dir)
         finally:
             fd1.close()
 
     def test_lock_held_message(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        fd1 = Worker.acquire_lock(fido_dir)
+        fd1 = acquire_lock(fido_dir)
         try:
             with pytest.raises(LockHeld, match="another fido"):
-                Worker.acquire_lock(fido_dir)
+                acquire_lock(fido_dir)
         finally:
             fd1.close()
 
     def test_reacquirable_after_release(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        fd1 = Worker.acquire_lock(fido_dir)
+        fd1 = acquire_lock(fido_dir)
         fd1.close()
-        fd2 = Worker.acquire_lock(fido_dir)
+        fd2 = acquire_lock(fido_dir)
         assert not fd2.closed
         fd2.close()
 
@@ -126,7 +135,7 @@ class TestCreateContext:
         fido_dir = git_dir / "fido"
         worker = Worker(tmp_path, MagicMock())
         with patch.object(worker, "resolve_git_dir", return_value=git_dir):
-            fd1 = Worker.acquire_lock(fido_dir)
+            fd1 = acquire_lock(fido_dir)
             try:
                 with pytest.raises(LockHeld):
                     worker.create_context()
@@ -359,14 +368,14 @@ class TestWorker:
     def test_get_issue_returns_issue_number_when_open(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        Worker.save_state(fido_dir, {"issue": 7})
+        save_state(fido_dir, {"issue": 7})
         gh = self._make_issue_gh(state="OPEN")
         assert Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo") == 7
 
     def test_get_issue_returns_int_type(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        Worker.save_state(fido_dir, {"issue": 7})
+        save_state(fido_dir, {"issue": 7})
         gh = self._make_issue_gh(state="OPEN")
         result = Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
         assert isinstance(result, int)
@@ -374,17 +383,17 @@ class TestWorker:
     def test_get_issue_returns_none_when_closed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        Worker.save_state(fido_dir, {"issue": 4})
+        save_state(fido_dir, {"issue": 4})
         gh = self._make_issue_gh(state="CLOSED")
         assert Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo") is None
 
     def test_get_issue_clears_state_when_closed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        Worker.save_state(fido_dir, {"issue": 4})
+        save_state(fido_dir, {"issue": 4})
         gh = self._make_issue_gh(state="CLOSED")
         Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
-        assert Worker.load_state(fido_dir) == {}
+        assert load_state(fido_dir) == {}
 
     def test_get_issue_does_not_call_view_issue_when_no_state(
         self, tmp_path: Path
@@ -398,7 +407,7 @@ class TestWorker:
     def test_get_issue_calls_view_issue_with_correct_args(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        Worker.save_state(fido_dir, {"issue": 12})
+        save_state(fido_dir, {"issue": 12})
         gh = self._make_issue_gh(state="OPEN")
         Worker(tmp_path, gh).get_current_issue(fido_dir, "alice/proj")
         gh.view_issue.assert_called_once_with("alice/proj", 12)
@@ -408,7 +417,7 @@ class TestWorker:
 
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        Worker.save_state(fido_dir, {"issue": 9})
+        save_state(fido_dir, {"issue": 9})
         gh = self._make_issue_gh(state="CLOSED")
         with caplog.at_level(logging.INFO, logger="kennel"):
             Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
@@ -417,10 +426,10 @@ class TestWorker:
     def test_get_issue_state_preserved_when_open(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        Worker.save_state(fido_dir, {"issue": 5})
+        save_state(fido_dir, {"issue": 5})
         gh = self._make_issue_gh(state="OPEN")
         Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
-        assert Worker.load_state(fido_dir) == {"issue": 5}
+        assert load_state(fido_dir) == {"issue": 5}
 
     # --- run ---
 
@@ -845,7 +854,7 @@ class TestWorkerFindNextIssue:
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
-        assert Worker.load_state(fido_dir) == {"issue": 7}
+        assert load_state(fido_dir) == {"issue": 7}
 
     def test_does_not_save_state_when_no_issue(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -853,7 +862,7 @@ class TestWorkerFindNextIssue:
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
-        assert Worker.load_state(fido_dir) == {}
+        assert load_state(fido_dir) == {}
 
     def test_calls_set_status_with_issue_info_when_found(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -1077,31 +1086,31 @@ class TestCreateCompactScript:
     def test_creates_file(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = Worker.create_compact_script(fido_dir)
+        script = create_compact_script(fido_dir)
         assert script.exists()
 
     def test_returns_path_in_fido_dir(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = Worker.create_compact_script(fido_dir)
+        script = create_compact_script(fido_dir)
         assert script == fido_dir / "compact.sh"
 
     def test_script_is_executable(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = Worker.create_compact_script(fido_dir)
+        script = create_compact_script(fido_dir)
         assert script.stat().st_mode & 0o111  # any execute bit
 
     def test_script_has_shebang(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = Worker.create_compact_script(fido_dir)
+        script = create_compact_script(fido_dir)
         assert script.read_text().startswith("#!/usr/bin/env bash\n")
 
     def test_script_references_sub_dir(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = Worker.create_compact_script(fido_dir)
+        script = create_compact_script(fido_dir)
         from kennel.worker import _sub_dir
 
         assert str(_sub_dir()) in script.read_text()
@@ -1109,13 +1118,13 @@ class TestCreateCompactScript:
     def test_script_contains_post_compact_message(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = Worker.create_compact_script(fido_dir)
+        script = create_compact_script(fido_dir)
         assert "PostCompact" in script.read_text()
 
     def test_script_contains_md_glob(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        script = Worker.create_compact_script(fido_dir)
+        script = create_compact_script(fido_dir)
         assert "*.md" in script.read_text()
 
 
@@ -1221,7 +1230,7 @@ class TestLoadState:
     def test_returns_empty_dict_when_absent(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        assert Worker.load_state(fido_dir) == {}
+        assert load_state(fido_dir) == {}
 
     def test_returns_state_when_present(self, tmp_path: Path) -> None:
         import json
@@ -1229,7 +1238,7 @@ class TestLoadState:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (fido_dir / "state.json").write_text(json.dumps({"issue": 42}))
-        assert Worker.load_state(fido_dir) == {"issue": 42}
+        assert load_state(fido_dir) == {"issue": 42}
 
     def test_returns_dict_with_arbitrary_keys(self, tmp_path: Path) -> None:
         import json
@@ -1237,7 +1246,7 @@ class TestLoadState:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (fido_dir / "state.json").write_text(json.dumps({"issue": 7, "extra": "val"}))
-        result = Worker.load_state(fido_dir)
+        result = load_state(fido_dir)
         assert result["issue"] == 7
         assert result["extra"] == "val"
 
@@ -1246,47 +1255,47 @@ class TestSaveState:
     def test_creates_state_file(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        Worker.save_state(fido_dir, {"issue": 5})
+        save_state(fido_dir, {"issue": 5})
         assert (fido_dir / "state.json").exists()
 
     def test_roundtrips_with_load_state(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        Worker.save_state(fido_dir, {"issue": 99})
-        assert Worker.load_state(fido_dir) == {"issue": 99}
+        save_state(fido_dir, {"issue": 99})
+        assert load_state(fido_dir) == {"issue": 99}
 
     def test_overwrites_existing_state(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        Worker.save_state(fido_dir, {"issue": 1})
-        Worker.save_state(fido_dir, {"issue": 2})
-        assert Worker.load_state(fido_dir) == {"issue": 2}
+        save_state(fido_dir, {"issue": 1})
+        save_state(fido_dir, {"issue": 2})
+        assert load_state(fido_dir) == {"issue": 2}
 
 
 class TestClearState:
     def test_removes_state_file(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        Worker.save_state(fido_dir, {"issue": 3})
-        Worker.clear_state(fido_dir)
+        save_state(fido_dir, {"issue": 3})
+        clear_state(fido_dir)
         assert not (fido_dir / "state.json").exists()
 
     def test_noop_when_absent(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         # Should not raise
-        Worker.clear_state(fido_dir)
+        clear_state(fido_dir)
 
     def test_load_returns_empty_after_clear(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        Worker.save_state(fido_dir, {"issue": 10})
-        Worker.clear_state(fido_dir)
-        assert Worker.load_state(fido_dir) == {}
+        save_state(fido_dir, {"issue": 10})
+        clear_state(fido_dir)
+        assert load_state(fido_dir) == {}
 
 
 class TestBuildPrompt:
-    """Tests for Worker.build_prompt."""
+    """Tests for build_prompt."""
 
     def _setup_sub_dir(self, tmp_path: Path) -> Path:
         sub = tmp_path / "sub"
@@ -1300,7 +1309,7 @@ class TestBuildPrompt:
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
         with patch("kennel.worker._sub_dir", return_value=sub):
-            sys_file, prompt_file = Worker.build_prompt(fido_dir, "task", "context")
+            sys_file, prompt_file = build_prompt(fido_dir, "task", "context")
         assert sys_file == fido_dir / "system"
         assert prompt_file == fido_dir / "prompt"
 
@@ -1309,7 +1318,7 @@ class TestBuildPrompt:
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
         with patch("kennel.worker._sub_dir", return_value=sub):
-            sys_file, _ = Worker.build_prompt(fido_dir, "task", "context")
+            sys_file, _ = build_prompt(fido_dir, "task", "context")
         assert "I am Fido" in sys_file.read_text()
 
     def test_system_file_contains_skill(self, tmp_path: Path) -> None:
@@ -1317,7 +1326,7 @@ class TestBuildPrompt:
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
         with patch("kennel.worker._sub_dir", return_value=sub):
-            sys_file, _ = Worker.build_prompt(fido_dir, "task", "context")
+            sys_file, _ = build_prompt(fido_dir, "task", "context")
         assert "Implement the task carefully." in sys_file.read_text()
 
     def test_system_file_joins_with_blank_line(self, tmp_path: Path) -> None:
@@ -1325,7 +1334,7 @@ class TestBuildPrompt:
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
         with patch("kennel.worker._sub_dir", return_value=sub):
-            sys_file, _ = Worker.build_prompt(fido_dir, "task", "context")
+            sys_file, _ = build_prompt(fido_dir, "task", "context")
         content = sys_file.read_text()
         assert "I am Fido, a very good dog.\n\nImplement the task carefully." in content
 
@@ -1334,7 +1343,7 @@ class TestBuildPrompt:
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
         with patch("kennel.worker._sub_dir", return_value=sub):
-            _, prompt_file = Worker.build_prompt(fido_dir, "task", "do the work")
+            _, prompt_file = build_prompt(fido_dir, "task", "do the work")
         assert "do the work" in prompt_file.read_text()
 
     def test_system_file_ends_with_newline(self, tmp_path: Path) -> None:
@@ -1342,7 +1351,7 @@ class TestBuildPrompt:
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
         with patch("kennel.worker._sub_dir", return_value=sub):
-            sys_file, _ = Worker.build_prompt(fido_dir, "task", "ctx")
+            sys_file, _ = build_prompt(fido_dir, "task", "ctx")
         assert sys_file.read_text().endswith("\n")
 
     def test_prompt_file_ends_with_newline(self, tmp_path: Path) -> None:
@@ -1350,7 +1359,7 @@ class TestBuildPrompt:
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
         with patch("kennel.worker._sub_dir", return_value=sub):
-            _, prompt_file = Worker.build_prompt(fido_dir, "task", "ctx")
+            _, prompt_file = build_prompt(fido_dir, "task", "ctx")
         assert prompt_file.read_text().endswith("\n")
 
     def test_uses_correct_subskill_file(self, tmp_path: Path) -> None:
@@ -1359,7 +1368,7 @@ class TestBuildPrompt:
         sub = self._setup_sub_dir(tmp_path)
         (sub / "ci.md").write_text("Fix the CI failure.")
         with patch("kennel.worker._sub_dir", return_value=sub):
-            sys_file, _ = Worker.build_prompt(fido_dir, "ci", "ctx")
+            sys_file, _ = build_prompt(fido_dir, "ci", "ctx")
         assert "Fix the CI failure." in sys_file.read_text()
         assert "Implement the task carefully." not in sys_file.read_text()
 
@@ -1369,14 +1378,14 @@ class TestBuildPrompt:
         sub = self._setup_sub_dir(tmp_path)
         (sub / "persona.md").write_text("Persona text\n\n\n")
         with patch("kennel.worker._sub_dir", return_value=sub):
-            sys_file, _ = Worker.build_prompt(fido_dir, "task", "ctx")
+            sys_file, _ = build_prompt(fido_dir, "task", "ctx")
         content = sys_file.read_text()
         assert content.startswith("Persona text\n\n")
         assert not content.startswith("Persona text\n\n\n\n")
 
 
 class TestClaudeStart:
-    """Tests for Worker.claude_start."""
+    """Tests for claude_start."""
 
     def _setup_fido_dir(self, tmp_path: Path) -> Path:
         fido_dir = tmp_path / "fido"
@@ -1391,20 +1400,20 @@ class TestClaudeStart:
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=output),
             patch(
-                "kennel.worker.claude.Claude.extract_session_id",
+                "kennel.claude.extract_session_id",
                 return_value="sess-abc",
             ),
         ):
-            result = Worker.claude_start(fido_dir)
+            result = claude_start(fido_dir)
         assert result == "sess-abc"
 
     def test_returns_empty_when_extract_fails(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
-            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
+            patch("kennel.claude.extract_session_id", return_value=""),
         ):
-            result = Worker.claude_start(fido_dir)
+            result = claude_start(fido_dir)
         assert result == ""
 
     def test_calls_print_prompt_from_file_with_correct_files(
@@ -1415,9 +1424,9 @@ class TestClaudeStart:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
+            patch("kennel.claude.extract_session_id", return_value=""),
         ):
-            Worker.claude_start(fido_dir)
+            claude_start(fido_dir)
         mock_ppf.assert_called_once_with(
             fido_dir / "system",
             fido_dir / "prompt",
@@ -1431,9 +1440,9 @@ class TestClaudeStart:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
+            patch("kennel.claude.extract_session_id", return_value=""),
         ):
-            Worker.claude_start(fido_dir, model="claude-opus-4-6")
+            claude_start(fido_dir, model="claude-opus-4-6")
         assert mock_ppf.call_args[0][2] == "claude-opus-4-6"
 
     def test_passes_custom_timeout(self, tmp_path: Path) -> None:
@@ -1442,9 +1451,9 @@ class TestClaudeStart:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
+            patch("kennel.claude.extract_session_id", return_value=""),
         ):
-            Worker.claude_start(fido_dir, timeout=600)
+            claude_start(fido_dir, timeout=600)
         assert mock_ppf.call_args[0][3] == 600
 
     def test_default_model_is_sonnet(self, tmp_path: Path) -> None:
@@ -1453,9 +1462,9 @@ class TestClaudeStart:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
+            patch("kennel.claude.extract_session_id", return_value=""),
         ):
-            Worker.claude_start(fido_dir)
+            claude_start(fido_dir)
         assert mock_ppf.call_args[0][2] == "claude-sonnet-4-6"
 
     def test_default_timeout_is_300(self, tmp_path: Path) -> None:
@@ -1464,9 +1473,9 @@ class TestClaudeStart:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
+            patch("kennel.claude.extract_session_id", return_value=""),
         ):
-            Worker.claude_start(fido_dir)
+            claude_start(fido_dir)
         assert mock_ppf.call_args[0][3] == 300
 
     def test_passes_output_to_extract_session_id(self, tmp_path: Path) -> None:
@@ -1474,16 +1483,14 @@ class TestClaudeStart:
         raw = '{"type":"result","session_id":"xyz"}'
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=raw),
-            patch(
-                "kennel.worker.claude.Claude.extract_session_id", return_value="xyz"
-            ) as mock_ext,
+            patch("kennel.claude.extract_session_id", return_value="xyz") as mock_ext,
         ):
-            Worker.claude_start(fido_dir)
+            claude_start(fido_dir)
         mock_ext.assert_called_once_with(raw)
 
 
 class TestClaudeRun:
-    """Tests for Worker.claude_run."""
+    """Tests for claude_run."""
 
     def _setup_fido_dir(self, tmp_path: Path) -> Path:
         fido_dir = tmp_path / "fido"
@@ -1497,13 +1504,13 @@ class TestClaudeRun:
     def test_resume_returns_existing_session_id(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         with patch("kennel.worker.claude.resume_session", return_value="output text"):
-            session_id, _ = Worker.claude_run(fido_dir, session_id="existing-id")
+            session_id, _ = claude_run(fido_dir, session_id="existing-id")
         assert session_id == "existing-id"
 
     def test_resume_returns_output(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         with patch("kennel.worker.claude.resume_session", return_value="stream output"):
-            _, output = Worker.claude_run(fido_dir, session_id="sid")
+            _, output = claude_run(fido_dir, session_id="sid")
         assert output == "stream output"
 
     def test_resume_calls_resume_session_with_correct_args(
@@ -1511,7 +1518,7 @@ class TestClaudeRun:
     ) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
-            Worker.claude_run(
+            claude_run(
                 fido_dir,
                 session_id="my-session",
                 model="claude-opus-4-6",
@@ -1527,7 +1534,7 @@ class TestClaudeRun:
             patch("kennel.worker.claude.resume_session", return_value=""),
             patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf,
         ):
-            Worker.claude_run(fido_dir, session_id="sid")
+            claude_run(fido_dir, session_id="sid")
         mock_ppf.assert_not_called()
 
     # ── Start path ─────────────────────────────────────────────────────────
@@ -1538,11 +1545,11 @@ class TestClaudeRun:
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=raw),
             patch(
-                "kennel.worker.claude.Claude.extract_session_id",
+                "kennel.claude.extract_session_id",
                 return_value="new-sess",
             ),
         ):
-            session_id, _ = Worker.claude_run(fido_dir)
+            session_id, _ = claude_run(fido_dir)
         assert session_id == "new-sess"
 
     def test_start_returns_raw_output(self, tmp_path: Path) -> None:
@@ -1550,9 +1557,9 @@ class TestClaudeRun:
         raw = '{"type":"result","session_id":"s"}'
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=raw),
-            patch("kennel.worker.claude.Claude.extract_session_id", return_value="s"),
+            patch("kennel.claude.extract_session_id", return_value="s"),
         ):
-            _, output = Worker.claude_run(fido_dir)
+            _, output = claude_run(fido_dir)
         assert output == raw
 
     def test_start_calls_print_prompt_from_file(self, tmp_path: Path) -> None:
@@ -1561,9 +1568,9 @@ class TestClaudeRun:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
+            patch("kennel.claude.extract_session_id", return_value=""),
         ):
-            Worker.claude_run(fido_dir)
+            claude_run(fido_dir)
         mock_ppf.assert_called_once_with(
             fido_dir / "system",
             fido_dir / "prompt",
@@ -1575,19 +1582,19 @@ class TestClaudeRun:
         fido_dir = self._setup_fido_dir(tmp_path)
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
-            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
+            patch("kennel.claude.extract_session_id", return_value=""),
             patch("kennel.worker.claude.resume_session") as mock_rs,
         ):
-            Worker.claude_run(fido_dir)
+            claude_run(fido_dir)
         mock_rs.assert_not_called()
 
     def test_start_returns_empty_session_id_on_failure(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         with (
             patch("kennel.worker.claude.print_prompt_from_file", return_value=""),
-            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
+            patch("kennel.claude.extract_session_id", return_value=""),
         ):
-            session_id, _ = Worker.claude_run(fido_dir)
+            session_id, _ = claude_run(fido_dir)
         assert session_id == ""
 
     def test_default_model_is_sonnet(self, tmp_path: Path) -> None:
@@ -1596,9 +1603,9 @@ class TestClaudeRun:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
+            patch("kennel.claude.extract_session_id", return_value=""),
         ):
-            Worker.claude_run(fido_dir)
+            claude_run(fido_dir)
         assert mock_ppf.call_args[0][2] == "claude-sonnet-4-6"
 
     def test_default_timeout_is_300(self, tmp_path: Path) -> None:
@@ -1607,68 +1614,66 @@ class TestClaudeRun:
             patch(
                 "kennel.worker.claude.print_prompt_from_file", return_value=""
             ) as mock_ppf,
-            patch("kennel.worker.claude.Claude.extract_session_id", return_value=""),
+            patch("kennel.claude.extract_session_id", return_value=""),
         ):
-            Worker.claude_run(fido_dir)
+            claude_run(fido_dir)
         assert mock_ppf.call_args[0][3] == 300
 
     def test_passes_custom_model_to_resume(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
-            Worker.claude_run(
-                fido_dir, session_id="sid", model="claude-haiku-4-5-20251001"
-            )
+            claude_run(fido_dir, session_id="sid", model="claude-haiku-4-5-20251001")
         assert mock_rs.call_args[0][2] == "claude-haiku-4-5-20251001"
 
     def test_passes_custom_timeout_to_resume(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         with patch("kennel.worker.claude.resume_session", return_value="") as mock_rs:
-            Worker.claude_run(fido_dir, session_id="sid", timeout=90)
+            claude_run(fido_dir, session_id="sid", timeout=90)
         assert mock_rs.call_args[0][3] == 90
 
 
 class TestSanitizeSlug:
-    """Tests for Worker._sanitize_slug."""
+    """Tests for _sanitize_slug."""
 
     def test_lowercases_input(self) -> None:
-        assert Worker._sanitize_slug("AddFeature", "fallback text") == "addfeature"
+        assert _sanitize_slug("AddFeature", "fallback text") == "addfeature"
 
     def test_replaces_special_chars_with_hyphens(self) -> None:
-        result = Worker._sanitize_slug("add feature test", "fallback")
+        result = _sanitize_slug("add feature test", "fallback")
         assert result == "add-feature-test"
 
     def test_strips_leading_trailing_hyphens(self) -> None:
-        result = Worker._sanitize_slug("  add-feature  ", "fallback")
+        result = _sanitize_slug("  add-feature  ", "fallback")
         assert result == "add-feature"
 
     def test_truncates_at_40_chars(self) -> None:
         long_input = "a" * 50
-        result = Worker._sanitize_slug(long_input, "fallback")
+        result = _sanitize_slug(long_input, "fallback")
         assert len(result) <= 40
 
     def test_falls_back_when_too_short(self) -> None:
-        result = Worker._sanitize_slug("ab", "fix the login bug")
+        result = _sanitize_slug("ab", "fix the login bug")
         assert "fix" in result or "login" in result or "bug" in result
 
     def test_falls_back_strips_closes_clause(self) -> None:
-        result = Worker._sanitize_slug("x", "fix bug (closes #42)")
+        result = _sanitize_slug("x", "fix bug (closes #42)")
         assert "42" not in result
         assert "closes" not in result
 
     def test_three_char_slug_is_valid(self) -> None:
-        result = Worker._sanitize_slug("abc", "fallback text")
+        result = _sanitize_slug("abc", "fallback text")
         assert result == "abc"
 
     def test_two_char_slug_falls_back(self) -> None:
-        result = Worker._sanitize_slug("ab", "fix login issue")
+        result = _sanitize_slug("ab", "fix login issue")
         assert len(result) >= 3
 
     def test_empty_raw_falls_back(self) -> None:
-        result = Worker._sanitize_slug("", "implement auth")
+        result = _sanitize_slug("", "implement auth")
         assert len(result) >= 3
 
     def test_fallback_also_sanitized(self) -> None:
-        result = Worker._sanitize_slug("x", "Add New Feature!")
+        result = _sanitize_slug("x", "Add New Feature!")
         assert result == result.lower()
         assert "!" not in result
 
@@ -1961,9 +1966,9 @@ class TestFindOrCreatePr:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._merged_pr()
         fido_dir = self._fido_dir(tmp_path)
-        Worker.save_state(fido_dir, {"issue": 5})
+        save_state(fido_dir, {"issue": 5})
         worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
-        assert Worker.load_state(fido_dir) == {}
+        assert load_state(fido_dir) == {}
 
     def test_merged_pr_logs_info(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -2013,8 +2018,8 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch.object(worker, "build_prompt", mock_build),
-            patch.object(worker, "claude_start", mock_start),
+            patch("kennel.worker.build_prompt", mock_build),
+            patch("kennel.worker.claude_start", mock_start),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
@@ -2031,7 +2036,7 @@ class TestFindOrCreatePr:
                 "kennel.worker.tasks.list_tasks",
                 return_value=[{"title": "t", "status": "pending"}],
             ),
-            patch.object(worker, "build_prompt", mock_build),
+            patch("kennel.worker.build_prompt", mock_build),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_not_called()
@@ -2083,8 +2088,8 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.claude.generate_branch_name", return_value="fix-bug"),
-            patch.object(worker, "build_prompt"),
-            patch.object(worker, "claude_start", return_value="sess"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value="sess"),
             patch.object(worker, "_build_pr_body", return_value="body"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
         ):
@@ -2106,8 +2111,8 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
-            patch.object(worker, "build_prompt"),
-            patch.object(worker, "claude_start", return_value=""),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value=""),
             patch.object(worker, "_build_pr_body", return_value="body"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             caplog.at_level(logging.INFO, logger="kennel"),
@@ -2125,8 +2130,8 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
-            patch.object(worker, "build_prompt", mock_build),
-            patch.object(worker, "claude_start", mock_start),
+            patch("kennel.worker.build_prompt", mock_build),
+            patch("kennel.worker.claude_start", mock_start),
             patch.object(worker, "_build_pr_body", return_value="body"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
         ):
@@ -2143,8 +2148,8 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
-            patch.object(worker, "build_prompt"),
-            patch.object(worker, "claude_start", return_value=""),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value=""),
             patch.object(worker, "_build_pr_body", return_value="pr-body"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
         ):
@@ -2171,8 +2176,8 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("kennel.worker.claude.generate_branch_name", return_value="do-work"),
-            patch.object(worker, "build_prompt"),
-            patch.object(worker, "claude_start", return_value=""),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value=""),
             patch.object(worker, "_build_pr_body", return_value="body"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
         ):
@@ -2198,8 +2203,8 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("kennel.worker.claude.generate_branch_name", return_value="slug"),
-            patch.object(worker, "build_prompt"),
-            patch.object(worker, "claude_start", return_value=""),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value=""),
             patch.object(worker, "_build_pr_body", return_value="body"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
         ):
@@ -2223,8 +2228,8 @@ class TestFindOrCreatePr:
                 "kennel.worker.claude.generate_branch_name",
                 return_value="Add New Feature!",
             ),
-            patch.object(worker, "build_prompt"),
-            patch.object(worker, "claude_start", return_value=""),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value=""),
             patch.object(worker, "_build_pr_body", return_value="body"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
         ):
@@ -2244,8 +2249,8 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.claude.generate_branch_name", return_value="new-br"),
-            patch.object(worker, "build_prompt"),
-            patch.object(worker, "claude_start", return_value=""),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value=""),
             patch.object(worker, "_build_pr_body", return_value="body"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
         ):
@@ -2266,8 +2271,8 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.claude.generate_branch_name", return_value="slug"),
-            patch.object(worker, "build_prompt"),
-            patch.object(worker, "claude_start", return_value=""),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value=""),
             patch.object(worker, "_build_pr_body", return_value="body"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             caplog.at_level(logging.INFO, logger="kennel"),
@@ -2285,8 +2290,8 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("kennel.worker.claude.generate_branch_name", return_value="work"),
-            patch.object(worker, "build_prompt"),
-            patch.object(worker, "claude_start", return_value=""),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value=""),
             patch.object(worker, "_build_pr_body", return_value="body"),
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             caplog.at_level(logging.INFO, logger="kennel"),
