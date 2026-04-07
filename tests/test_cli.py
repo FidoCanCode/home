@@ -300,3 +300,18 @@ class TestMain:
     def test_no_args_exits(self) -> None:
         with pytest.raises(SystemExit):
             main([])
+
+    def test_unknown_command_raises(self, tmp_path: Path, monkeypatch) -> None:
+        """Fallback case in match statement raises AssertionError."""
+        from unittest.mock import MagicMock
+
+        import kennel.cli as cli_mod
+
+        fake_args = MagicMock()
+        fake_args.command = "bogus"
+        fake_parser = MagicMock()
+        fake_parser.parse_args.return_value = fake_args
+
+        monkeypatch.setattr(cli_mod, "build_parser", lambda: fake_parser)
+        with pytest.raises(AssertionError, match="unreachable"):
+            main([])

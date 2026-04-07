@@ -112,3 +112,5 @@ def main(argv: list[str] | None = None) -> None:
             cmd.complete(args.work_dir, args.title)
         case "list":
             cmd.list(args.work_dir)
+        case _:
+            raise AssertionError(f"unreachable: unknown command {args.command!r}")
