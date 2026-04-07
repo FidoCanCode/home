@@ -679,7 +679,7 @@ class TestReplyToReview:
             return _make_completed_run("")
 
         mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [100, 200]
+        mock_gh.get_review_comments.return_value = [(100, "fix this"), (200, "nit")]
         with (
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=mock_gh),
@@ -700,7 +700,7 @@ class TestReplyToReview:
             return _make_completed_run("")
 
         mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [100, 200]
+        mock_gh.get_review_comments.return_value = [(100, "fix this"), (200, "nit")]
         with (
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=mock_gh),
@@ -1301,7 +1301,7 @@ class TestReplyToReviewAlreadyRepliedTracking:
             return _make_completed_run("")
 
         mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [500]
+        mock_gh.get_review_comments.return_value = [(500, "please fix")]
         with (
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=mock_gh),

@@ -348,27 +348,31 @@ def reply_to_review(
         "fetching review comments for PR #%s review %s", info["pr"], info["review_id"]
     )
     try:
-        comment_ids = get_github().get_review_comments(
+        comments = get_github().get_review_comments(
             info["repo"], info["pr"], info["review_id"]
         )
     except Exception:
         log.exception("failed to fetch review comments")
         return
 
-    if not comment_ids:
+    if not comments:
         log.info("no inline comments in review")
         return
 
-    skipped = [cid for cid in comment_ids if already_replied and cid in already_replied]
+    skipped = [
+        cid for cid, _body in comments if already_replied and cid in already_replied
+    ]
     todo = [
-        cid for cid in comment_ids if not already_replied or cid not in already_replied
+        (cid, body)
+        for cid, body in comments
+        if not already_replied or cid not in already_replied
     ]
     if skipped:
         log.info("skipping %d already-replied comments", len(skipped))
     if not todo:
         return
     log.info("replying to %d review comments", len(todo))
-    for cid in todo:
+    for cid, body in todo:
         reply_to_comment(
             Action(
                 prompt=action.prompt,
@@ -377,6 +381,7 @@ def reply_to_review(
                     "pr": info["pr"],
                     "comment_id": cid,
                 },
+                comment_body=body,
             ),
             config,
             repo_cfg,
