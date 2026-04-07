@@ -151,8 +151,9 @@ What you're doing right now: $what" 2>/dev/null | head -2)
   emoji=$(echo "$msg" | head -1)
   text=$(echo "$msg" | tail -1)
   text="${text:0:80}"
-  gh api graphql -F msg="$text" -F emoji="$emoji" \
-    -f query='mutation($msg:String!,$emoji:String!) { changeUserStatus(input: {message: $msg, emoji: $emoji}) { status { message emoji } } }' >/dev/null 2>&1 || true
+  local busy="${2:-true}"
+  gh api graphql -F msg="$text" -F emoji="$emoji" -F busy="$busy" \
+    -f query='mutation($msg:String!,$emoji:String!,$busy:Boolean!) { changeUserStatus(input: {message: $msg, emoji: $emoji, limitedAvailability: $busy}) { status { message emoji indicatesLimitedAvailability } } }' >/dev/null 2>&1 || true
   log "status: $emoji $text"
 }
 
@@ -236,7 +237,7 @@ if [[ -z "$CURRENT_ISSUE" ]]; then
 
   if [[ -z "$NEXT" || "$NEXT" == "null	null" ]]; then
     log "no eligible issues assigned to $GH_USER in $REPO"
-    set_status "All done — no issues to fetch"
+    set_status "All done — no issues to fetch" false
     break
   fi
 
@@ -640,7 +641,7 @@ fi
 
 # ── No work ────────────────────────────────────────────────────────────────
 log "no work"
-set_status "Napping — waiting for work"
+set_status "Napping — waiting for work" false
 break
 
 done # end main loop
