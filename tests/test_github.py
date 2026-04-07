@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from kennel.github import (
     GH,
+    _get_gh,
     _gh,
     _gh_token,
     add_pr_reviewer,
@@ -176,6 +177,29 @@ class TestGhToken:
             patch("subprocess.run", return_value=_completed("  tok  \n")),
         ):
             assert _gh_token() == "tok"
+
+
+class TestGetGh:
+    def test_creates_instance_lazily(self) -> None:
+        mock_instance = MagicMock()
+        with (
+            patch("kennel.github._shared_gh", None),
+            patch("kennel.github._gh_token", return_value="tok"),
+            patch("kennel.github.GH", return_value=mock_instance) as mock_cls,
+        ):
+            result = _get_gh()
+        mock_cls.assert_called_once_with("tok")
+        assert result is mock_instance
+
+    def test_returns_cached_instance(self) -> None:
+        existing = MagicMock()
+        with (
+            patch("kennel.github._shared_gh", existing),
+            patch("kennel.github.GH") as mock_cls,
+        ):
+            result = _get_gh()
+        assert result is existing
+        mock_cls.assert_not_called()
 
 
 class TestGHClass:
@@ -391,12 +415,8 @@ class TestGHClass:
 class TestCommentIssue:
     def test_calls_gh_class(self) -> None:
         mock_gh = MagicMock()
-        with (
-            patch("kennel.github._gh_token", return_value="tok"),
-            patch("kennel.github.GH", return_value=mock_gh) as mock_cls,
-        ):
+        with patch("kennel.github._get_gh", return_value=mock_gh):
             comment_issue("o/r", 7, "hello")
-        mock_cls.assert_called_once_with("tok")
         mock_gh.comment_issue.assert_called_once_with("o/r", 7, "hello")
 
 
@@ -418,10 +438,7 @@ class TestGetPullComments:
         comments = [{"id": 42, "body": "looks good"}]
         mock_gh = MagicMock()
         mock_gh.get_pull_comments.return_value = comments
-        with (
-            patch("kennel.github._gh_token", return_value="tok"),
-            patch("kennel.github.GH", return_value=mock_gh),
-        ):
+        with patch("kennel.github._get_gh", return_value=mock_gh):
             assert get_pull_comments("o/r", 7) == comments
         mock_gh.get_pull_comments.assert_called_once_with("o/r", 7)
 
@@ -436,10 +453,7 @@ class TestFindPr:
         }
         mock_gh = MagicMock()
         mock_gh.find_pr.return_value = expected
-        with (
-            patch("kennel.github._gh_token", return_value="tok"),
-            patch("kennel.github.GH", return_value=mock_gh),
-        ):
+        with patch("kennel.github._get_gh", return_value=mock_gh):
             result = find_pr("o/r", 5, "fido")
         mock_gh.find_pr.assert_called_once_with("o/r", 5, "fido")
         assert result == expected
@@ -447,10 +461,7 @@ class TestFindPr:
     def test_returns_none_when_gh_returns_none(self) -> None:
         mock_gh = MagicMock()
         mock_gh.find_pr.return_value = None
-        with (
-            patch("kennel.github._gh_token", return_value="tok"),
-            patch("kennel.github.GH", return_value=mock_gh),
-        ):
+        with patch("kennel.github._get_gh", return_value=mock_gh):
             assert find_pr("o/r", 1, "fido") is None
 
 
@@ -576,52 +587,35 @@ class TestGetReviewComments:
     def test_delegates_to_gh_class(self) -> None:
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = [101, 102, 103]
-        with (
-            patch("kennel.github._gh_token", return_value="tok"),
-            patch("kennel.github.GH", return_value=mock_gh),
-        ):
+        with patch("kennel.github._get_gh", return_value=mock_gh):
             assert get_review_comments("o/r", 10, 99) == [101, 102, 103]
         mock_gh.get_review_comments.assert_called_once_with("o/r", 10, 99)
 
     def test_empty_result(self) -> None:
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = []
-        with (
-            patch("kennel.github._gh_token", return_value="tok"),
-            patch("kennel.github.GH", return_value=mock_gh),
-        ):
+        with patch("kennel.github._get_gh", return_value=mock_gh):
             assert get_review_comments("o/r", 10, 99) == []
 
 
 class TestReplyToReviewComment:
     def test_delegates_to_gh_class(self) -> None:
         mock_gh = MagicMock()
-        with (
-            patch("kennel.github._gh_token", return_value="tok"),
-            patch("kennel.github.GH", return_value=mock_gh) as mock_cls,
-        ):
+        with patch("kennel.github._get_gh", return_value=mock_gh):
             reply_to_review_comment("o/r", 10, "lgtm", 55)
-        mock_cls.assert_called_once_with("tok")
         mock_gh.reply_to_review_comment.assert_called_once_with("o/r", 10, "lgtm", 55)
 
 
 class TestAddReaction:
     def test_delegates_to_gh_class_pulls(self) -> None:
         mock_gh = MagicMock()
-        with (
-            patch("kennel.github._gh_token", return_value="tok"),
-            patch("kennel.github.GH", return_value=mock_gh) as mock_cls,
-        ):
+        with patch("kennel.github._get_gh", return_value=mock_gh):
             add_reaction("o/r", "pulls", 42, "rocket")
-        mock_cls.assert_called_once_with("tok")
         mock_gh.add_reaction.assert_called_once_with("o/r", "pulls", 42, "rocket")
 
     def test_delegates_to_gh_class_issues(self) -> None:
         mock_gh = MagicMock()
-        with (
-            patch("kennel.github._gh_token", return_value="tok"),
-            patch("kennel.github.GH", return_value=mock_gh),
-        ):
+        with patch("kennel.github._get_gh", return_value=mock_gh):
             add_reaction("o/r", "issues", 7, "+1")
         mock_gh.add_reaction.assert_called_once_with("o/r", "issues", 7, "+1")
 

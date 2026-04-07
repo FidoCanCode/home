@@ -106,6 +106,17 @@ class GH:
         self._post(f"/repos/{repo}/issues/{number}/comments", body=body)
 
 
+_shared_gh: GH | None = None
+
+
+def _get_gh() -> GH:
+    """Return the shared GH instance, creating it on first call."""
+    global _shared_gh
+    if _shared_gh is None:
+        _shared_gh = GH(_gh_token())
+    return _shared_gh
+
+
 def _gh(
     *args: str,
     cwd: Path | str | None = None,
@@ -228,7 +239,7 @@ def close_issue(repo: str, number: int | str) -> None:
 
 def comment_issue(repo: str, number: int | str, body: str) -> None:
     """Post a comment on an issue."""
-    GH(_gh_token()).comment_issue(repo, number, body)
+    _get_gh().comment_issue(repo, number, body)
 
 
 def get_issue_comments(repo: str, number: int | str) -> list[dict[str, Any]]:
@@ -242,12 +253,12 @@ def get_issue_comments(repo: str, number: int | str) -> list[dict[str, Any]]:
 
 def get_pull_comments(repo: str, pr: int | str) -> list[dict[str, Any]]:
     """Return all inline review comments on a pull request."""
-    return GH(_gh_token()).get_pull_comments(repo, pr)
+    return _get_gh().get_pull_comments(repo, pr)
 
 
 def find_pr(repo: str, issue_number: int | str, user: str) -> dict[str, Any] | None:
     """Find the most recent PR linked to issue_number authored by user, or None."""
-    return GH(_gh_token()).find_pr(repo, issue_number, user)
+    return _get_gh().find_pr(repo, issue_number, user)
 
 
 def create_pr(
@@ -345,7 +356,7 @@ def get_reviews(repo: str, pr: int | str) -> dict[str, Any]:
 
 def get_review_comments(repo: str, pr: int | str, review_id: int | str) -> list[int]:
     """Return list of comment IDs from a review."""
-    return GH(_gh_token()).get_review_comments(repo, pr, review_id)
+    return _get_gh().get_review_comments(repo, pr, review_id)
 
 
 def reply_to_review_comment(
@@ -355,7 +366,7 @@ def reply_to_review_comment(
     in_reply_to: int | str,
 ) -> None:
     """Post a reply to an inline review comment."""
-    GH(_gh_token()).reply_to_review_comment(repo, pr, body, in_reply_to)
+    _get_gh().reply_to_review_comment(repo, pr, body, in_reply_to)
 
 
 def add_reaction(
@@ -365,7 +376,7 @@ def add_reaction(
     content: str,
 ) -> None:
     """Add a reaction to a comment. comment_type: 'pulls' or 'issues'."""
-    GH(_gh_token()).add_reaction(repo, comment_type, comment_id, content)
+    _get_gh().add_reaction(repo, comment_type, comment_id, content)
 
 
 # ── Review threads ────────────────────────────────────────────────────────────
