@@ -8,6 +8,7 @@ import sys
 def main(argv: list[str] | None = None) -> None:
     args = sys.argv[1:] if argv is None else argv
 
+    # TODO: remove this compat shim once shell scripts are fully removed
     if args and args[0] == "task":
         from kennel.cli import main as task_main
 
