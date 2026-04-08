@@ -572,6 +572,7 @@ class TestGHClass:
         mock_resp = MagicMock()
         comments = [{"id": 42, "body": "looks good"}]
         mock_resp.json.return_value = comments
+        mock_resp.headers = {}
         with patch.object(gh._s, "get", return_value=mock_resp):
             result = gh.get_pull_comments("o/r", 7)
         assert result == comments
@@ -580,6 +581,7 @@ class TestGHClass:
         gh = self._gh()
         mock_resp = MagicMock()
         mock_resp.json.return_value = []
+        mock_resp.headers = {}
         with patch.object(gh._s, "get", return_value=mock_resp) as mock_get:
             gh.get_pull_comments("o/r", 7)
         url = mock_get.call_args.args[0]
@@ -592,6 +594,7 @@ class TestGHClass:
             {"id": 101, "body": "nit"},
             {"id": 102, "body": "fix"},
         ]
+        mock_resp.headers = {}
         with patch.object(gh._s, "get", return_value=mock_resp):
             result = gh.get_review_comments("o/r", 10, 99)
         assert result == [(101, "nit"), (102, "fix")]
@@ -600,6 +603,7 @@ class TestGHClass:
         gh = self._gh()
         mock_resp = MagicMock()
         mock_resp.json.return_value = []
+        mock_resp.headers = {}
         with patch.object(gh._s, "get", return_value=mock_resp):
             result = gh.get_review_comments("o/r", 10, 99)
         assert result == []
@@ -608,6 +612,7 @@ class TestGHClass:
         gh = self._gh()
         mock_resp = MagicMock()
         mock_resp.json.return_value = []
+        mock_resp.headers = {}
         with patch.object(gh._s, "get", return_value=mock_resp) as mock_get:
             gh.get_review_comments("o/r", 10, 99)
         url = mock_get.call_args.args[0]
@@ -870,6 +875,7 @@ class TestGHClass:
         comments = [{"id": 1, "body": "hi"}]
         mock_resp = MagicMock()
         mock_resp.json.return_value = comments
+        mock_resp.headers = {}
         with patch.object(gh._s, "get", return_value=mock_resp) as mock_get:
             result = gh.get_issue_comments("o/r", 9)
         url = mock_get.call_args.args[0]
@@ -1048,6 +1054,7 @@ class TestGHClass:
                 "submitted_at": "2024-01-01T00:00:00Z",
             }
         ]
+        reviews_resp.headers = {}
         commits_resp = MagicMock()
         commits_resp.json.return_value = [
             {
@@ -1058,6 +1065,7 @@ class TestGHClass:
                 },
             }
         ]
+        commits_resp.headers = {}
         with patch.object(
             gh._s, "get", side_effect=[pr_resp, reviews_resp, commits_resp]
         ):
@@ -1090,8 +1098,10 @@ class TestGHClass:
         }
         reviews_resp = MagicMock()
         reviews_resp.json.return_value = []
+        reviews_resp.headers = {}
         commits_resp = MagicMock()
         commits_resp.json.return_value = []
+        commits_resp.headers = {}
         with patch.object(
             gh._s, "get", side_effect=[pr_resp, reviews_resp, commits_resp]
         ):
@@ -1114,10 +1124,12 @@ class TestGHClass:
                 "submitted_at": "2024-01-01T00:00:00Z",
             }
         ]
+        reviews_resp.headers = {}
         commits_resp = MagicMock()
         commits_resp.json.return_value = [
             {"commit": {"committer": {"date": "2024-01-02T00:00:00Z"}}}
         ]
+        commits_resp.headers = {}
         with patch.object(
             gh._s, "get", side_effect=[pr_resp, reviews_resp, commits_resp]
         ):
@@ -1139,8 +1151,10 @@ class TestGHClass:
         pr_resp.json.return_value = {"draft": False}
         reviews_resp = MagicMock()
         reviews_resp.json.return_value = []
+        reviews_resp.headers = {}
         commits_resp = MagicMock()
         commits_resp.json.return_value = []
+        commits_resp.headers = {}
         with patch.object(
             gh._s, "get", side_effect=[pr_resp, reviews_resp, commits_resp]
         ):

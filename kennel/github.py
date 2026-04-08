@@ -101,7 +101,7 @@ class GH:
 
     def get_pull_comments(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
         """Return all inline review comments on a pull request."""
-        return self._get(f"/repos/{repo}/pulls/{pr}/comments")
+        return list(self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/comments"))
 
     def fetch_sibling_threads(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
         """Return all review-comment threads for a PR as a structured list.
@@ -141,8 +141,8 @@ class GH:
         self, repo: str, pr: int | str, review_id: int | str
     ) -> list[tuple[int, str]]:
         """Return list of (comment_id, body) pairs from a review."""
-        data = self._get(f"/repos/{repo}/pulls/{pr}/reviews/{review_id}/comments")
-        return [(c["id"], c.get("body", "")) for c in data]
+        url = f"{self.BASE}/repos/{repo}/pulls/{pr}/reviews/{review_id}/comments"
+        return [(c["id"], c.get("body", "")) for c in self._paginate(url)]
 
     def _paginate(self, url: str) -> Iterator[Any]:
         """Yield each item from all pages of a paginated GitHub API endpoint."""
@@ -257,7 +257,9 @@ class GH:
 
     def get_issue_comments(self, repo: str, number: int | str) -> list[dict[str, Any]]:
         """Return all comments on an issue."""
-        return self._get(f"/repos/{repo}/issues/{number}/comments")
+        return list(
+            self._paginate(f"{self.BASE}/repos/{repo}/issues/{number}/comments")
+        )
 
     def create_issue(self, repo: str, title: str, body: str) -> str:
         """Create an issue and return its HTML URL."""
@@ -344,8 +346,12 @@ class GH:
     def get_pr(self, repo: str, pr: int | str) -> dict[str, Any]:
         """Return PR data (reviews, isDraft, mergeStateStatus, body, commits)."""
         pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
-        reviews_data = self._get(f"/repos/{repo}/pulls/{pr}/reviews")
-        commits_data = self._get(f"/repos/{repo}/pulls/{pr}/commits")
+        reviews_data = list(
+            self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/reviews")
+        )
+        commits_data = list(
+            self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/commits")
+        )
         reviews = [
             {
                 "author": {"login": r["user"]["login"]},
@@ -373,8 +379,12 @@ class GH:
     def get_reviews(self, repo: str, pr: int | str) -> dict[str, Any]:
         """Return reviews, commits, and isDraft for a PR."""
         pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
-        reviews_data = self._get(f"/repos/{repo}/pulls/{pr}/reviews")
-        commits_data = self._get(f"/repos/{repo}/pulls/{pr}/commits")
+        reviews_data = list(
+            self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/reviews")
+        )
+        commits_data = list(
+            self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/commits")
+        )
         reviews = [
             {
                 "author": {"login": r["user"]["login"]},
