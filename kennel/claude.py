@@ -170,6 +170,7 @@ def _run_streaming(
             if not line:
                 break  # EOF
             lines.append(line)
+            log.debug(line.rstrip())
             last_activity = time.monotonic()
         elif proc.poll() is not None:
             break  # process exited
