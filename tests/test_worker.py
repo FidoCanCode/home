@@ -5152,6 +5152,28 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "skipping re-request" in caplog.text
 
+    def test_changes_requested_owner_already_requested_skips_add(
+        self, tmp_path: Path
+    ) -> None:
+        """Owner already in requested_reviewers — don't add again."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {
+                    "author": {"login": "rhencke"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2024-01-01T10:00:00Z",
+                }
+            ],
+            "commits": [{"committedDate": "2024-01-02T12:00:00Z"}],
+            "isDraft": False,
+            "requestedReviewers": ["rhencke"],
+        }
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_not_called()
+
     # --- draft promote ---
 
     def test_draft_no_completed_tasks_returns_0(self, tmp_path: Path) -> None:
@@ -5200,6 +5222,21 @@ class TestHandlePromoteMerge:
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
         assert result == 1
+
+    def test_draft_owner_already_requested_skips_add(self, tmp_path: Path) -> None:
+        """Owner already in requested_reviewers — don't add again."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [],
+            "commits": [],
+            "isDraft": True,
+            "requestedReviewers": ["rhencke"],
+        }
+        completed = [{"id": "t1", "title": "Done", "status": "completed"}]
+        with patch("kennel.worker.tasks.list_tasks", return_value=completed):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_not_called()
 
     def test_draft_pending_tasks_ignored_for_promote_decision(
         self, tmp_path: Path
