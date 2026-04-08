@@ -357,6 +357,7 @@ class GH:
                 "author": {"login": r["user"]["login"]},
                 "state": r["state"],
                 "submittedAt": r["submitted_at"],
+                "body": r.get("body", "") or "",
             }
             for r in reviews_data
         ]

@@ -1052,6 +1052,7 @@ class TestGHClass:
                 "user": {"login": "alice"},
                 "state": "APPROVED",
                 "submitted_at": "2024-01-01T00:00:00Z",
+                "body": "Looks good!",
             }
         ]
         reviews_resp.headers = {}
@@ -1078,6 +1079,7 @@ class TestGHClass:
                 "author": {"login": "alice"},
                 "state": "APPROVED",
                 "submittedAt": "2024-01-01T00:00:00Z",
+                "body": "Looks good!",
             }
         ]
         assert result["commits"] == [
