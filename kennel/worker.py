@@ -712,11 +712,9 @@ class Worker:
         """Find or create the branch and draft PR for *issue*.
 
         Returns ``(pr_number, slug)`` for an open or freshly-created PR,
-        or ``None`` if the issue was already resolved (PR merged and issue
-        closed).
+        or ``None`` if setup produced no tasks.
 
         Workflow:
-        - **Existing merged PR**: close the issue, clear state, return None.
         - **Existing closed PR**: ignore it and create a fresh PR.
         - **Existing open PR**: check out the branch; run the setup sub-Claude
           if tasks.json is empty (planning not yet done).
@@ -733,14 +731,6 @@ class Worker:
             state = existing["state"]
             pr_number = existing["number"]
             slug = existing["headRefName"]
-
-            if state == "MERGED":
-                log.info(
-                    "PR #%s already merged — issue #%s auto-closed", pr_number, issue
-                )
-                clear_state(fido_dir)
-                self._git(["push", "origin", "--delete", slug], check=False)
-                return None
 
             if state != "CLOSED":
                 # Open PR — resume

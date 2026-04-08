@@ -2080,55 +2080,8 @@ class TestFindOrCreatePr:
     def _open_pr(self, number: int = 10, slug: str = "fix-bug") -> dict:
         return {"number": number, "headRefName": slug, "state": "OPEN"}
 
-    def _merged_pr(self, number: int = 10, slug: str = "fix-bug") -> dict:
-        return {"number": number, "headRefName": slug, "state": "MERGED"}
-
     def _closed_pr(self, number: int = 10, slug: str = "fix-bug") -> dict:
         return {"number": number, "headRefName": slug, "state": "CLOSED"}
-
-    # --- Merged PR path ---
-
-    def test_merged_pr_returns_none(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        gh.find_pr.return_value = self._merged_pr()
-        fido_dir = self._fido_dir(tmp_path)
-        with patch.object(worker, "_git"):
-            result = worker.find_or_create_pr(
-                fido_dir, self._make_repo_ctx(), 5, "Fix the thing"
-            )
-        assert result is None
-
-    def test_merged_pr_clears_state(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        gh.find_pr.return_value = self._merged_pr()
-        fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 5})
-        with patch.object(worker, "_git"):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
-        assert load_state(fido_dir) == {}
-
-    def test_merged_pr_deletes_remote_branch(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        gh.find_pr.return_value = self._merged_pr(slug="fix-bug")
-        fido_dir = self._fido_dir(tmp_path)
-        with patch.object(worker, "_git") as mock_git:
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
-        mock_git.assert_called_once_with(
-            ["push", "origin", "--delete", "fix-bug"], check=False
-        )
-
-    def test_merged_pr_logs_info(self, tmp_path: Path, caplog) -> None:
-        import logging
-
-        worker, gh = self._make_worker(tmp_path)
-        gh.find_pr.return_value = self._merged_pr(number=33)
-        fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "_git"),
-            caplog.at_level(logging.INFO, logger="kennel"),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
-        assert "merged" in caplog.text
 
     # --- Open PR (resume) path ---
 

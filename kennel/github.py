@@ -185,7 +185,9 @@ class GH:
                 continue
             pr_number = source_issue["number"]
             pr = self._get(f"/repos/{repo}/pulls/{pr_number}")
-            state = "MERGED" if pr.get("merged") else pr["state"].upper()
+            if pr.get("merged"):
+                continue
+            state = pr["state"].upper()
             return {
                 "number": pr["number"],
                 "headRefName": pr["head"]["ref"],

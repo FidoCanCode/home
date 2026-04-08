@@ -708,14 +708,31 @@ class TestGHClass:
             "author": {"login": "fido"},
         }
 
-    def test_find_pr_merged_state(self) -> None:
+    def test_find_pr_skips_merged(self) -> None:
+        """Merged PRs are skipped — a reopened issue should get a fresh PR."""
         gh = self._gh()
         timeline = self._timeline_resp([self._cross_ref_event(3, "fido", "closes #2")])
         pr = self._pr_resp(3, "fix", "closed", True, "fido")
         with patch.object(gh._s, "get", side_effect=[timeline, pr]):
             result = gh.find_pr("o/r", 2, "fido")
+        assert result is None
+
+    def test_find_pr_skips_merged_returns_subsequent_open_pr(self) -> None:
+        """When a merged PR and a later open PR both reference the issue, returns open."""
+        gh = self._gh()
+        timeline = self._timeline_resp(
+            [
+                self._cross_ref_event(3, "fido", "closes #2"),
+                self._cross_ref_event(7, "fido", "closes #2"),
+            ]
+        )
+        merged_pr = self._pr_resp(3, "fix", "closed", True, "fido")
+        open_pr = self._pr_resp(7, "fix-retry", "open", False, "fido")
+        with patch.object(gh._s, "get", side_effect=[timeline, merged_pr, open_pr]):
+            result = gh.find_pr("o/r", 2, "fido")
         assert result is not None
-        assert result["state"] == "MERGED"
+        assert result["number"] == 7
+        assert result["state"] == "OPEN"
 
     def test_find_pr_filters_by_user(self) -> None:
         gh = self._gh()
