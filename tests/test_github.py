@@ -222,7 +222,7 @@ class TestGitHubClass:
         gh = self._github()
         search_resp = MagicMock()
         search_resp.json.return_value = {
-            "items": [{"number": 1, "user": {"login": "fido"}}]
+            "items": [{"number": 1, "user": {"login": "fido"}, "body": "closes #5"}]
         }
         pr_resp = MagicMock()
         pr_resp.json.return_value = {
@@ -615,7 +615,7 @@ class TestGHClass:
         gh = self._gh()
         search_resp = MagicMock()
         search_resp.json.return_value = {
-            "items": [{"number": 1, "user": {"login": "fido"}}]
+            "items": [{"number": 1, "user": {"login": "fido"}, "body": "closes #5"}]
         }
         pr_resp = MagicMock()
         pr_resp.json.return_value = {
@@ -638,7 +638,7 @@ class TestGHClass:
         gh = self._gh()
         search_resp = MagicMock()
         search_resp.json.return_value = {
-            "items": [{"number": 3, "user": {"login": "fido"}}]
+            "items": [{"number": 3, "user": {"login": "fido"}, "body": "closes #2"}]
         }
         pr_resp = MagicMock()
         pr_resp.json.return_value = {
@@ -668,6 +668,16 @@ class TestGHClass:
         search_resp.json.return_value = {"items": []}
         with patch.object(gh._s, "get", return_value=search_resp):
             assert gh.find_pr("o/r", 1, "fido") is None
+
+    def test_find_pr_skips_substring_match(self) -> None:
+        """Search for #9 must not match a PR body that only contains #90."""
+        gh = self._gh()
+        search_resp = MagicMock()
+        search_resp.json.return_value = {
+            "items": [{"number": 99, "user": {"login": "fido"}, "body": "closes #90"}]
+        }
+        with patch.object(gh._s, "get", return_value=search_resp):
+            assert gh.find_pr("o/r", 9, "fido") is None
 
     def test_find_pr_search_url(self) -> None:
         gh = self._gh()

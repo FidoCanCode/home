@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -149,8 +150,11 @@ class GH:
         """Find the most recent PR with issue_number in body by user."""
         q = quote(f"#{issue_number} in:body repo:{repo} type:pr")
         data = self._get(f"/search/issues?q={q}")
+        pattern = re.compile(rf"#{issue_number}\b")
         for item in data.get("items", []):
             if item.get("user", {}).get("login") != user:
+                continue
+            if not pattern.search(item.get("body", "") or ""):
                 continue
             pr = self._get(f"/repos/{repo}/pulls/{item['number']}")
             state = "MERGED" if pr.get("merged") else pr["state"].upper()
