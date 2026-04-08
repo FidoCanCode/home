@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
@@ -1166,6 +1167,60 @@ class Worker:
             self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
 
         return 0
+
+
+_IDLE_TIMEOUT = 60.0  # seconds to wait when there was no work to do
+_RETRY_TIMEOUT = 5.0  # seconds to wait when the lock was contended
+_ERROR_TIMEOUT = 30.0  # seconds to wait after an unexpected exception
+
+
+class WorkerThread(threading.Thread):
+    """Daemon thread that repeatedly calls :class:`Worker` for one repo.
+
+    Loop semantics:
+    - ``Worker.run()`` returns 1 → did work, loop immediately.
+    - ``Worker.run()`` returns 0 → idle, wait up to ``_IDLE_TIMEOUT``.
+    - ``Worker.run()`` returns 2 → lock held, wait up to ``_RETRY_TIMEOUT``.
+    - Unexpected exception → wait up to ``_ERROR_TIMEOUT``, then retry.
+
+    Call :meth:`wake` to interrupt any wait early (e.g. when a webhook arrives).
+    Call :meth:`stop` to request a clean shutdown.
+    """
+
+    def __init__(self, work_dir: Path, gh: GitHub) -> None:
+        super().__init__(name=f"worker-{work_dir.name}", daemon=True)
+        self.work_dir = work_dir
+        self._gh = gh
+        self._wake = threading.Event()
+        self._stop = False
+
+    def wake(self) -> None:
+        """Signal the thread to wake up and check for work immediately."""
+        self._wake.set()
+
+    def stop(self) -> None:
+        """Request the thread to exit after the current iteration."""
+        self._stop = True
+        self._wake.set()
+
+    def run(self) -> None:
+        """Main loop — runs until :meth:`stop` is called."""
+        while not self._stop:
+            try:
+                result = Worker(self.work_dir, self._gh).run()
+            except Exception:
+                log.exception("WorkerThread %s: unexpected error", self.name)
+                self._wake.wait(timeout=_ERROR_TIMEOUT)
+                self._wake.clear()
+                continue
+
+            if result == 1:
+                # Did work — loop immediately without waiting.
+                continue
+
+            timeout = _RETRY_TIMEOUT if result == 2 else _IDLE_TIMEOUT
+            self._wake.wait(timeout=timeout)
+            self._wake.clear()
 
 
 def run(work_dir: Path) -> int:
