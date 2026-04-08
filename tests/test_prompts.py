@@ -21,10 +21,10 @@ class TestTriageCategories:
     def test_human_categories(self) -> None:
         result = triage_categories(is_bot=False)
         assert "ACT" in result
+        assert "DEFER" in result
         assert "ASK" in result
         assert "ANSWER" in result
         assert "DO" not in result
-        assert "DEFER" not in result
 
     def test_bot_categories(self) -> None:
         result = triage_categories(is_bot=True)
@@ -147,6 +147,7 @@ class TestTriagePrompt:
     def test_includes_categories(self) -> None:
         result = triage_prompt("fix this", is_bot=False)
         assert "ACT" in result
+        assert "DEFER" in result
 
     def test_includes_bot_categories(self) -> None:
         result = triage_prompt("suggestion", is_bot=True)

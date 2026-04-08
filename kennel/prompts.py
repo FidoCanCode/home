@@ -17,7 +17,9 @@ def triage_categories(is_bot: bool) -> str:
             "DUMP (not applicable)"
         )
     return (
-        "ACT (code change needed), ASK (unclear what code change is needed), "
+        "ACT (code change needed on this PR), "
+        "DEFER (out of scope for this PR — file a separate issue), "
+        "ASK (unclear what code change is needed), "
         "ANSWER (question, casual/playful comment, or anything that isn't a code change request"
         " — just respond naturally)"
     )
