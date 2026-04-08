@@ -4949,6 +4949,127 @@ class TestHandlePromoteMerge:
         gh.pr_merge.assert_called_once()
         gh.add_pr_reviewer.assert_not_called()
 
+    def test_changes_requested_newer_than_commit_skips_re_request(
+        self, tmp_path: Path
+    ) -> None:
+        """Review submitted after latest commit — new feedback, don't re-request."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {
+                    "author": {"login": "rhencke"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2024-01-02T12:00:00Z",
+                }
+            ],
+            "commits": [{"committedDate": "2024-01-01T10:00:00Z"}],
+            "isDraft": False,
+        }
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_not_called()
+
+    def test_changes_requested_newer_than_commit_returns_0(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {
+                    "author": {"login": "rhencke"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2024-01-02T12:00:00Z",
+                }
+            ],
+            "commits": [{"committedDate": "2024-01-01T10:00:00Z"}],
+            "isDraft": False,
+        }
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 0
+
+    def test_changes_requested_older_than_commit_re_requests(
+        self, tmp_path: Path
+    ) -> None:
+        """Review submitted before latest commit — we addressed it, re-request."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {
+                    "author": {"login": "rhencke"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2024-01-01T10:00:00Z",
+                }
+            ],
+            "commits": [{"committedDate": "2024-01-02T12:00:00Z"}],
+            "isDraft": False,
+        }
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+
+    def test_changes_requested_no_submitted_at_re_requests(
+        self, tmp_path: Path
+    ) -> None:
+        """No submittedAt on review — fall back to re-requesting."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(
+            state="CHANGES_REQUESTED", is_draft=False
+        )
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_called_once()
+
+    def test_changes_requested_no_commits_re_requests(self, tmp_path: Path) -> None:
+        """No commits in data — fall back to re-requesting."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {
+                    "author": {"login": "rhencke"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2024-01-02T12:00:00Z",
+                }
+            ],
+            "commits": [],
+            "isDraft": False,
+        }
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_called_once()
+
+    def test_changes_requested_newer_than_commit_logs_skip(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {
+                    "author": {"login": "rhencke"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2024-01-02T12:00:00Z",
+                }
+            ],
+            "commits": [{"committedDate": "2024-01-01T10:00:00Z"}],
+            "isDraft": False,
+        }
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        assert "skipping re-request" in caplog.text
+
     # --- draft promote ---
 
     def test_draft_no_completed_tasks_returns_0(self, tmp_path: Path) -> None:

@@ -1070,6 +1070,17 @@ class Worker:
         )
 
         if latest_state == "CHANGES_REQUESTED":
+            latest_review = owner_reviews[-1]
+            review_at = latest_review.get("submittedAt", "")
+            latest_commit_date = max(
+                (c.get("committedDate", "") for c in commits), default=""
+            )
+            if review_at and latest_commit_date and review_at > latest_commit_date:
+                log.info(
+                    "PR #%s: CHANGES_REQUESTED review newer than latest commit — skipping re-request",
+                    pr_number,
+                )
+                return 0
             log.info(
                 "PR #%s: changes requested — all addressed, re-requesting review",
                 pr_number,
