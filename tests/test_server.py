@@ -538,20 +538,23 @@ class TestSelfRestart:
                 time.sleep(0.2)
                 mock_exec.assert_called_once()
                 calls = mock_run.call_args_list
-                assert any(c.args[0] == ["git", "checkout", "main"] for c in calls), (
+                cmds = [c.args[0] for c in calls]
+                assert ["git", "checkout", "main"] in cmds, (
                     "expected git checkout main before pull"
                 )
-                assert any(c.args[0] == ["git", "pull"] for c in calls), (
-                    "expected git pull"
+                assert ["git", "reset", "--hard"] in cmds, (
+                    "expected git reset --hard before pull"
                 )
-                checkout_idx = next(
-                    i
-                    for i, c in enumerate(calls)
-                    if c.args[0] == ["git", "checkout", "main"]
+                assert ["git", "clean", "-fd"] in cmds, (
+                    "expected git clean -fd before pull"
                 )
-                pull_idx = next(
-                    i for i, c in enumerate(calls) if c.args[0] == ["git", "pull"]
-                )
-                assert checkout_idx < pull_idx, "checkout main must precede pull"
+                assert ["git", "pull"] in cmds, "expected git pull"
+                checkout_idx = cmds.index(["git", "checkout", "main"])
+                reset_idx = cmds.index(["git", "reset", "--hard"])
+                clean_idx = cmds.index(["git", "clean", "-fd"])
+                pull_idx = cmds.index(["git", "pull"])
+                assert checkout_idx < reset_idx, "checkout main must precede reset"
+                assert reset_idx < clean_idx, "reset must precede clean"
+                assert clean_idx < pull_idx, "clean must precede pull"
         finally:
             srv.shutdown()

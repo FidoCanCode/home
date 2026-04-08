@@ -156,6 +156,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 capture_output=True,
             )
             subprocess.run(
+                ["git", "reset", "--hard"],
+                cwd=str(repo_cfg.work_dir),
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "clean", "-fd"],
+                cwd=str(repo_cfg.work_dir),
+                capture_output=True,
+            )
+            subprocess.run(
                 ["git", "pull"], cwd=str(repo_cfg.work_dir), capture_output=True
             )
             os.execv(sys.argv[0], sys.argv)
