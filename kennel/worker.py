@@ -1187,7 +1187,9 @@ class Worker:
         context = "\n".join(context_parts)
         build_prompt(fido_dir, "task", context)
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
-        session_id, output = claude_run(fido_dir)
+        state = load_state(fido_dir)
+        setup_session_id = state.get("setup_session_id", "")
+        session_id, output = claude_run(fido_dir, session_id=setup_session_id)
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
 
@@ -1210,6 +1212,11 @@ class Worker:
                 session_id, output = claude_run(fido_dir)
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
+
+        if session_id:
+            state = load_state(fido_dir)
+            state["setup_session_id"] = session_id
+            save_state(fido_dir, state)
 
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
