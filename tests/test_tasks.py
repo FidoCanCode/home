@@ -71,6 +71,23 @@ class TestAddTask:
         assert tasks[0]["title"] == "existing"
         assert tasks[1]["title"] == "comment task"
 
+    def test_deduplicates_by_comment_id(self, tmp_path: Path) -> None:
+        thread = {"repo": "r/r", "pr": 1, "comment_id": 99}
+        t1 = add_task(tmp_path, title="first title", thread=thread)
+        t2 = add_task(tmp_path, title="second title", thread=thread)
+        assert t1["id"] == t2["id"]
+        assert len(list_tasks(tmp_path)) == 1
+
+    def test_different_comment_ids_are_not_deduplicated(self, tmp_path: Path) -> None:
+        t1 = add_task(
+            tmp_path, title="t", thread={"repo": "r/r", "pr": 1, "comment_id": 1}
+        )
+        t2 = add_task(
+            tmp_path, title="t", thread={"repo": "r/r", "pr": 1, "comment_id": 2}
+        )
+        assert t1["id"] != t2["id"]
+        assert len(list_tasks(tmp_path)) == 2
+
 
 class TestUpdateTask:
     def test_updates_status(self, tmp_path: Path) -> None:
