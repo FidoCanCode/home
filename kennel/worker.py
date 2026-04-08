@@ -369,7 +369,7 @@ def sync_tasks_background(work_dir: Path, gh: GitHub) -> None:
 
 def claude_start(
     fido_dir: Path,
-    model: str = "claude-sonnet-4-6",
+    model: str = "claude-opus-4-6",
     timeout: int = 300,
 ) -> str:
     """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.

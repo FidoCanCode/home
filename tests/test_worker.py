@@ -1549,7 +1549,7 @@ class TestClaudeStart:
         mock_ppf.assert_called_once_with(
             fido_dir / "system",
             fido_dir / "prompt",
-            "claude-sonnet-4-6",
+            "claude-opus-4-6",
             300,
         )
 
@@ -1561,8 +1561,8 @@ class TestClaudeStart:
             ) as mock_ppf,
             patch("kennel.claude.extract_session_id", return_value=""),
         ):
-            claude_start(fido_dir, model="claude-opus-4-6")
-        assert mock_ppf.call_args[0][2] == "claude-opus-4-6"
+            claude_start(fido_dir, model="claude-sonnet-4-6")
+        assert mock_ppf.call_args[0][2] == "claude-sonnet-4-6"
 
     def test_passes_custom_timeout(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
@@ -1575,7 +1575,7 @@ class TestClaudeStart:
             claude_start(fido_dir, timeout=600)
         assert mock_ppf.call_args[0][3] == 600
 
-    def test_default_model_is_sonnet(self, tmp_path: Path) -> None:
+    def test_default_model_is_opus(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         with (
             patch(
@@ -1584,7 +1584,7 @@ class TestClaudeStart:
             patch("kennel.claude.extract_session_id", return_value=""),
         ):
             claude_start(fido_dir)
-        assert mock_ppf.call_args[0][2] == "claude-sonnet-4-6"
+        assert mock_ppf.call_args[0][2] == "claude-opus-4-6"
 
     def test_default_timeout_is_300(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
