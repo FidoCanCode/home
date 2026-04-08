@@ -445,7 +445,7 @@ def needs_more_context(comment_body: str) -> bool:
         answer = result.stdout.strip().upper()
         return answer.startswith("YES")
     except Exception:
-        log.warning("needs_more_context subprocess failed", exc_info=True)
+        log.exception("needs_more_context subprocess failed")
         return False
 
 
@@ -469,7 +469,7 @@ def _triage(
             if prefix in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
                 return prefix, title
     except Exception:
-        log.warning("triage subprocess failed", exc_info=True)
+        log.exception("triage subprocess failed")
     # Fallback: ACT for humans, DO for bots
     return ("DO" if is_bot else "ACT"), comment_body[:80]
 
