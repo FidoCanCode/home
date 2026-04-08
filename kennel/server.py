@@ -36,9 +36,10 @@ _RESTART_CMDS: list[list[str]] = [
 
 
 def _run_git_cmd(work_dir: Path, cmd: list[str]) -> bool:
-    result = subprocess.run(cmd, cwd=str(work_dir), capture_output=True)
-    if result.returncode != 0:
-        log.error("self-restart: git command failed (%d): %s", result.returncode, cmd)
+    try:
+        subprocess.run(cmd, cwd=str(work_dir), capture_output=True, check=True)
+    except subprocess.CalledProcessError as e:
+        log.error("self-restart: git command failed (%d): %s", e.returncode, cmd)
         return False
     return True
 

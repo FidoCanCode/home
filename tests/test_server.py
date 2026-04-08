@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import subprocess
 import threading
 import time
 import urllib.error
@@ -581,7 +582,7 @@ class TestSelfRestart:
                 patch("kennel.server.os.execv") as mock_exec,
             ):
                 # First command fails; subsequent commands and exec should be skipped.
-                mock_run.return_value = MagicMock(returncode=1)
+                mock_run.side_effect = subprocess.CalledProcessError(1, [])
                 status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
                 assert status == 200
                 time.sleep(0.2)
