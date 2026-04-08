@@ -1323,11 +1323,15 @@ class Worker:
 
         Called when CI, review feedback, threads, and pending tasks are all
         clear.  Checks the review state and either merges, enables auto-merge,
-        re-requests review, promotes a draft PR, or sets the idle status.
+        re-requests review, promotes a draft PR, requests review (once CI
+        passes), or sets the idle status.
+
+        Review is only requested when all required CI checks are passing (or
+        when there are no required checks on the target branch).
 
         Returns:
             0 — no more work (auto-merge enabled, changes-requested,
-                setup not complete, or no outstanding work)
+                setup not complete, waiting for CI, or review in progress)
             1 — did work (merged and cleaned up, or promoted draft;
                 caller should re-run immediately)
         """
@@ -1395,15 +1399,45 @@ class Worker:
                     pr_number,
                 )
                 return 0
-            log.info(
-                "PR #%s: work complete — marking ready, requesting review from %s",
-                pr_number,
-                repo_ctx.owner,
-            )
+            log.info("PR #%s: work complete — marking ready", pr_number)
             self.gh.pr_ready(repo_ctx.repo, pr_number)
             if repo_ctx.owner not in requested_reviewers:
-                self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+                checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
+                required = self.gh.get_required_checks(
+                    repo_ctx.repo, repo_ctx.default_branch
+                )
+                if ci_ready_for_review(checks, required):
+                    log.info(
+                        "PR #%s: CI passing — requesting review from %s",
+                        pr_number,
+                        repo_ctx.owner,
+                    )
+                    self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+                else:
+                    log.info(
+                        "PR #%s: CI not yet passing — deferring review request",
+                        pr_number,
+                    )
             return 1
+
+        if repo_ctx.owner not in requested_reviewers and latest_state == "NONE":
+            checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
+            required = self.gh.get_required_checks(
+                repo_ctx.repo, repo_ctx.default_branch
+            )
+            if ci_ready_for_review(checks, required):
+                log.info(
+                    "PR #%s: CI passing — requesting review from %s",
+                    pr_number,
+                    repo_ctx.owner,
+                )
+                self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+            else:
+                log.info(
+                    "PR #%s: CI not yet passing — waiting before requesting review",
+                    pr_number,
+                )
+            return 0
 
         log.info("PR #%s: no work", pr_number)
         self.set_status("Napping — waiting for work", busy=False)
