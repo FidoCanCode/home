@@ -705,6 +705,16 @@ class TestGHClass:
         with patch.object(gh._s, "get", return_value=timeline):
             assert gh.find_pr("o/r", 9, "fido") is None
 
+    def test_find_pr_body_only_not_title(self) -> None:
+        """Issue reference in PR title alone does not count — body only."""
+        gh = self._gh()
+        event = self._cross_ref_event(7, "fido", "")  # empty body
+        # Inject a title field to simulate a PR where #5 appears only in the title
+        event["source"]["issue"]["title"] = "closes #5"
+        timeline = self._timeline_resp([event])
+        with patch.object(gh._s, "get", return_value=timeline):
+            assert gh.find_pr("o/r", 5, "fido") is None
+
     def test_find_pr_timeline_url(self) -> None:
         gh = self._gh()
         timeline = self._timeline_resp([])
