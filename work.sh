@@ -578,8 +578,15 @@ Upstream: $UPSTREAM_REMOTE/$DEFAULT_BRANCH
 
 Task title: $PENDING"
   claude_run
-  log "task done: $PENDING"
-  uv run --project "$SCRIPT_DIR" kennel task "$WORK_DIR" complete "$PENDING" 2>/dev/null || true
+  git push "$FORK_REMOTE" "$SLUG" 2>/dev/null || true
+  _LOCAL=$(git rev-parse HEAD)
+  _REMOTE=$(git rev-parse "$FORK_REMOTE/$SLUG" 2>/dev/null || echo "none")
+  if [[ "$_LOCAL" == "$_REMOTE" ]]; then
+    log "task done: $PENDING"
+    uv run --project "$SCRIPT_DIR" kennel task "$WORK_DIR" complete "$PENDING" 2>/dev/null || true
+  else
+    log "push failed — leaving task pending: $PENDING"
+  fi
   bash "$SCRIPT_DIR/sync-tasks.sh" "$WORK_DIR" &
   continue
 fi
