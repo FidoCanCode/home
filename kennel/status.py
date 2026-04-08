@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kennel.config import Config, RepoConfig
+from kennel.config import RepoConfig
 
 
 @dataclass
@@ -230,11 +230,12 @@ def repo_status(repo_config: RepoConfig) -> RepoStatus:
     )
 
 
-def collect(config: Config) -> KennelStatus:
+def collect() -> KennelStatus:
     """Collect the full kennel + per-repo status."""
     pid = _kennel_pid()
     uptime = _process_uptime_seconds(pid) if pid is not None else None
-    repos = [repo_status(rc) for rc in config.repos.values()]
+    repo_configs = _repos_from_pid(pid) if pid is not None else []
+    repos = [repo_status(rc) for rc in repo_configs]
     return KennelStatus(kennel_pid=pid, kennel_uptime=uptime, repos=repos)
 
 

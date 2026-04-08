@@ -444,17 +444,8 @@ class TestRepoStatus:
 
 
 class TestCollect:
-    def _make_config(self, tmp_path: Path) -> object:
-        from kennel.config import RepoConfig
-
-        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-
-        cfg = MagicMock()
-        cfg.repos = {"owner/repo": rc}
-        return cfg
-
     def test_kennel_up_with_uptime(self, tmp_path: Path) -> None:
-        cfg = self._make_config(tmp_path)
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
         fake_repo_status = RepoStatus(
             name="owner/repo",
             fido_running=False,
@@ -467,35 +458,28 @@ class TestCollect:
         )
         with (
             patch("kennel.status._kennel_pid", return_value=42),
+            patch("kennel.status._repos_from_pid", return_value=[rc]),
             patch("kennel.status._process_uptime_seconds", return_value=600),
             patch("kennel.status.repo_status", return_value=fake_repo_status),
         ):
-            result = collect(cfg)
+            result = collect()
 
         assert result.kennel_pid == 42
         assert result.kennel_uptime == 600
         assert len(result.repos) == 1
 
-    def test_kennel_down(self, tmp_path: Path) -> None:
-        cfg = self._make_config(tmp_path)
-        fake_repo_status = RepoStatus(
-            name="owner/repo",
-            fido_running=False,
-            issue=None,
-            pending=0,
-            completed=0,
-            current_task=None,
-            claude_pid=None,
-            claude_uptime=None,
-        )
+    def test_kennel_down(self) -> None:
         with (
             patch("kennel.status._kennel_pid", return_value=None),
+            patch("kennel.status._repos_from_pid") as mock_repos,
             patch("kennel.status._process_uptime_seconds") as mock_uptime,
-            patch("kennel.status.repo_status", return_value=fake_repo_status),
+            patch("kennel.status.repo_status") as mock_repo_status,
         ):
-            result = collect(cfg)
+            result = collect()
 
         mock_uptime.assert_not_called()
+        mock_repos.assert_not_called()
+        mock_repo_status.assert_not_called()
         assert result.kennel_pid is None
         assert result.kennel_uptime is None
 
