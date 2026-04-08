@@ -712,11 +712,9 @@ class Worker:
         """Find or create the branch and draft PR for *issue*.
 
         Returns ``(pr_number, slug)`` for an open or freshly-created PR,
-        or ``None`` if the issue was already resolved (PR merged and issue
-        closed).
+        or ``None`` if setup produced no tasks.
 
         Workflow:
-        - **Existing merged PR**: close the issue, clear state, return None.
         - **Existing closed PR**: ignore it and create a fresh PR.
         - **Existing open PR**: check out the branch; run the setup sub-Claude
           if tasks.json is empty (planning not yet done).
@@ -730,64 +728,50 @@ class Worker:
         existing = self.gh.find_pr(repo_ctx.repo, issue, repo_ctx.gh_user)
 
         if existing is not None:
-            state = existing["state"]
             pr_number = existing["number"]
             slug = existing["headRefName"]
-
-            if state == "MERGED":
-                log.info(
-                    "PR #%s already merged — issue #%s auto-closed", pr_number, issue
-                )
-                clear_state(fido_dir)
-                self._git(["push", "origin", "--delete", slug], check=False)
-                return None
-
-            if state != "CLOSED":
-                # Open PR — resume
-                log.info("resuming PR #%s on branch %s", pr_number, slug)
-                self._git(["fetch", remote])
-                try:
-                    self._git(["checkout", slug])
-                except subprocess.CalledProcessError:
-                    self._git(["checkout", "-b", slug, "--track", f"{remote}/{slug}"])
+            # Open PR — resume
+            log.info("resuming PR #%s on branch %s", pr_number, slug)
+            self._git(["fetch", remote])
+            try:
+                self._git(["checkout", slug])
+            except subprocess.CalledProcessError:
+                self._git(["checkout", "-b", slug, "--track", f"{remote}/{slug}"])
+            task_list = tasks.list_tasks(self.work_dir)
+            if not task_list:
+                # Try seeding from PR body first (recovers from state reset)
+                self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
                 task_list = tasks.list_tasks(self.work_dir)
-                if not task_list:
-                    # Try seeding from PR body first (recovers from state reset)
-                    self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
-                    task_list = tasks.list_tasks(self.work_dir)
-                if not task_list:
-                    log.info("PR #%s has no tasks — running setup", pr_number)
-                    context = (
-                        f"Request: {request}\n"
-                        f"Repo: {repo_ctx.repo}\n"
-                        f"Branch: {slug}\n"
-                        f"PR: {pr_number}\n"
-                        f"Fork remote: {remote}\n"
-                        f"Upstream: {remote}/{repo_ctx.default_branch}\n"
-                        f"Work dir: {self.work_dir}"
-                    )
-                    build_prompt(fido_dir, "setup", context)
-                    session_id = claude_start(fido_dir)
-                    log.info("setup session: %s", session_id)
-                    state = load_state(fido_dir)
-                    state["setup_session_id"] = session_id
-                    save_state(fido_dir, state)
-                    if not tasks.list_tasks(self.work_dir):
-                        log.warning(
-                            "setup produced no tasks — skipping PR #%s, will retry",
-                            pr_number,
-                        )
-                        return None
-                log.info(
-                    "PR: #%s  https://github.com/%s/pull/%s",
-                    pr_number,
-                    repo_ctx.repo,
-                    pr_number,
+            if not task_list:
+                log.info("PR #%s has no tasks — running setup", pr_number)
+                context = (
+                    f"Request: {request}\n"
+                    f"Repo: {repo_ctx.repo}\n"
+                    f"Branch: {slug}\n"
+                    f"PR: {pr_number}\n"
+                    f"Fork remote: {remote}\n"
+                    f"Upstream: {remote}/{repo_ctx.default_branch}\n"
+                    f"Work dir: {self.work_dir}"
                 )
-                return pr_number, slug
-
-            # CLOSED — fall through to create a fresh PR
-            log.info("PR #%s closed without merge — creating fresh PR", pr_number)
+                build_prompt(fido_dir, "setup", context)
+                session_id = claude_start(fido_dir)
+                log.info("setup session: %s", session_id)
+                state = load_state(fido_dir)
+                state["setup_session_id"] = session_id
+                save_state(fido_dir, state)
+                if not tasks.list_tasks(self.work_dir):
+                    log.warning(
+                        "setup produced no tasks — skipping PR #%s, will retry",
+                        pr_number,
+                    )
+                    return None
+            log.info(
+                "PR: #%s  https://github.com/%s/pull/%s",
+                pr_number,
+                repo_ctx.repo,
+                pr_number,
+            )
+            return pr_number, slug
 
         # Generate branch slug via Haiku
         raw_slug = claude.generate_branch_name(
