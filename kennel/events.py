@@ -28,6 +28,9 @@ class Action:
     comment_body: str | None = None
     is_bot: bool = False
     context: dict[str, Any] | None = None  # {pr_title, file, diff_hunk, line, pr_body}
+    thread: dict[str, Any] | None = (
+        None  # {repo, pr, comment_id} for task prioritisation
+    )
 
 
 def _is_allowed(user: str, payload: dict[str, Any], config: Config) -> bool:
@@ -142,6 +145,9 @@ def dispatch(
                 "pr_body": (issue.get("body", "") or "")[:500],
                 "comment_id": comment_id,
             },
+            thread={"repo": repo, "pr": number, "comment_id": comment_id}
+            if number and comment_id
+            else None,
         )
 
     if event == "check_run" and action == "completed":

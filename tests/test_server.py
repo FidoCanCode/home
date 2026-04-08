@@ -395,7 +395,12 @@ class TestProcessAction:
             assert status == 200
             time.sleep(0.2)
             mock_ic.assert_called()
-            mock_task.assert_called()
+            mock_task.assert_called_once_with(
+                "do it",
+                cfg,
+                cfg.repos["owner/repo"],
+                thread={"repo": "owner/repo", "pr": 11, "comment_id": 300},
+            )
 
     def test_issue_comment_no_task_for_answer(self, server: tuple) -> None:
         url, cfg = server
