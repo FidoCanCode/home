@@ -215,6 +215,7 @@ def maybe_react(
             else ""
         )
     except subprocess.TimeoutExpired, FileNotFoundError:
+        log.warning("react subprocess timed out or claude not found")
         return
 
     valid = {"+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"}
@@ -318,6 +319,10 @@ def reply_to_comment(
         )
         body = result.stdout.strip() if result.returncode == 0 else ""
     except subprocess.TimeoutExpired, FileNotFoundError:
+        log.warning(
+            "Opus reply subprocess timed out or claude not found for comment %s",
+            info.get("comment_id"),
+        )
         body = ""
 
     if not body:
@@ -440,6 +445,7 @@ def needs_more_context(comment_body: str) -> bool:
         answer = result.stdout.strip().upper()
         return answer.startswith("YES")
     except Exception:
+        log.exception("needs_more_context subprocess failed")
         return False
 
 
@@ -463,7 +469,7 @@ def _triage(
             if prefix in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
                 return prefix, title
     except Exception:
-        pass
+        log.exception("triage subprocess failed")
     # Fallback: ACT for humans, DO for bots
     return ("DO" if is_bot else "ACT"), comment_body[:80]
 
@@ -523,6 +529,9 @@ def reply_to_issue_comment(
         )
         body = result.stdout.strip() if result.returncode == 0 else ""
     except subprocess.TimeoutExpired, FileNotFoundError:
+        log.warning(
+            "Opus reply subprocess timed out or claude not found for PR #%s", number
+        )
         body = ""
     if not body:
         body = "On it!" if category in ("ACT", "DO") else "Noted."

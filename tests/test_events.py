@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -70,15 +71,19 @@ class TestNeedsMoreContext:
                 "Please rename this variable to be more descriptive."
             )
 
-    def test_subprocess_exception_returns_false(self) -> None:
+    def test_subprocess_exception_returns_false(self, caplog) -> None:
         with patch("subprocess.run", side_effect=FileNotFoundError):
-            assert not needs_more_context("ditto")
+            with caplog.at_level(logging.WARNING, logger="kennel.events"):
+                assert not needs_more_context("ditto")
+        assert "needs_more_context subprocess failed" in caplog.text
 
-    def test_timeout_returns_false(self) -> None:
+    def test_timeout_returns_false(self, caplog) -> None:
         with patch(
             "subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 10)
         ):
-            assert not needs_more_context("same")
+            with caplog.at_level(logging.WARNING, logger="kennel.events"):
+                assert not needs_more_context("same")
+        assert "needs_more_context subprocess failed" in caplog.text
 
     def test_empty_output_returns_false(self) -> None:
         with patch("subprocess.run", return_value=_make_completed_run("")):
@@ -318,10 +323,12 @@ class TestTriage:
             cat, title = _triage("do stuff", is_bot=False)
         assert cat == "ACT"
 
-    def test_fallback_for_bot(self, tmp_path: Path) -> None:
+    def test_fallback_for_bot(self, tmp_path: Path, caplog) -> None:
         with patch("subprocess.run", side_effect=Exception("fail")):
-            cat, title = _triage("do stuff", is_bot=True)
+            with caplog.at_level(logging.WARNING, logger="kennel.events"):
+                cat, title = _triage("do stuff", is_bot=True)
         assert cat == "DO"
+        assert "triage subprocess failed" in caplog.text
 
     def test_with_context(self, tmp_path: Path) -> None:
         ctx = {"pr_title": "My PR", "file": "foo.py", "diff_hunk": "@@ -1 +1 @@"}
@@ -338,12 +345,14 @@ class TestTriage:
             cat, title = _triage("hi", is_bot=False)
         assert cat == "ACT"
 
-    def test_timeout_falls_back(self, tmp_path: Path) -> None:
+    def test_timeout_falls_back(self, tmp_path: Path, caplog) -> None:
         with patch(
             "subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 15)
         ):
-            cat, title = _triage("hi", is_bot=True)
+            with caplog.at_level(logging.WARNING, logger="kennel.events"):
+                cat, title = _triage("hi", is_bot=True)
         assert cat == "DO"
+        assert "triage subprocess failed" in caplog.text
 
     def test_task_category_falls_back(self, tmp_path: Path) -> None:
         """TASK is no longer a valid bot category — falls back to DO."""
@@ -402,17 +411,21 @@ class TestMaybeReact:
             maybe_react("ok", 99, "pulls", "owner/repo", cfg)
         mock_gh.add_reaction.assert_not_called()
 
-    def test_timeout_silently_returns(self, tmp_path: Path) -> None:
+    def test_timeout_warns_and_returns(self, tmp_path: Path, caplog) -> None:
         cfg = self._cfg(tmp_path)
         with patch(
             "subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 15)
         ):
-            maybe_react("hi", 1, "pulls", "owner/repo", cfg)  # should not raise
+            with caplog.at_level(logging.WARNING, logger="kennel.events"):
+                maybe_react("hi", 1, "pulls", "owner/repo", cfg)
+        assert "react subprocess timed out" in caplog.text
 
-    def test_file_not_found_silently_returns(self, tmp_path: Path) -> None:
+    def test_file_not_found_warns_and_returns(self, tmp_path: Path, caplog) -> None:
         cfg = self._cfg(tmp_path)
         with patch("subprocess.run", side_effect=FileNotFoundError):
-            maybe_react("hi", 1, "pulls", "owner/repo", cfg)  # should not raise
+            with caplog.at_level(logging.WARNING, logger="kennel.events"):
+                maybe_react("hi", 1, "pulls", "owner/repo", cfg)
+        assert "react subprocess timed out" in caplog.text
 
     def test_reads_persona_if_present(self, tmp_path: Path) -> None:
         sub_dir = tmp_path / "sub"
@@ -695,7 +708,7 @@ class TestReplyToComment:
         assert posted
         assert cat == "ACT"  # still succeeds with fallback body
 
-    def test_claude_timeout_uses_fallback(self, tmp_path: Path) -> None:
+    def test_claude_timeout_uses_fallback(self, tmp_path: Path, caplog) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -718,9 +731,13 @@ class TestReplyToComment:
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
-            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            with caplog.at_level(logging.WARNING, logger="kennel.events"):
+                posted, cat, title = reply_to_comment(
+                    action, cfg, self._repo_cfg(tmp_path)
+                )
         assert posted
         assert cat == "ACT"
+        assert "Opus reply subprocess timed out" in caplog.text
 
     def test_lock_race_returns_act(self, tmp_path: Path) -> None:
         """Second call with same comment_id is blocked by lock."""
@@ -1039,7 +1056,7 @@ class TestReplyToIssueComment:
             )
         assert cat == "ACT"
 
-    def test_timeout_fallback(self, tmp_path: Path) -> None:
+    def test_timeout_fallback(self, tmp_path: Path, caplog) -> None:
         cfg = self._cfg(tmp_path)
 
         def fake_run(args, **kwargs):
@@ -1054,10 +1071,12 @@ class TestReplyToIssueComment:
             patch("subprocess.run", side_effect=fake_run),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
-            cat, title = reply_to_issue_comment(
-                self._action(), cfg, self._repo_cfg(tmp_path)
-            )
+            with caplog.at_level(logging.WARNING, logger="kennel.events"):
+                cat, title = reply_to_issue_comment(
+                    self._action(), cfg, self._repo_cfg(tmp_path)
+                )
         assert cat == "ACT"
+        assert "Opus reply subprocess timed out" in caplog.text
 
     def test_post_exception_does_not_raise(self, tmp_path: Path) -> None:
         """comment_issue failure is caught and does not propagate."""
