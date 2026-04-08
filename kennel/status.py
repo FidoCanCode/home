@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kennel.config import Config, RepoConfig
+from kennel.config import RepoConfig
 
 
 @dataclass
@@ -95,9 +95,30 @@ def _process_uptime_seconds(pid: int) -> int | None:
         text = result.stdout.strip()
         if text:
             return int(text)
-    except OSError, ValueError:
+    except (OSError, ValueError):  # fmt: skip
         pass
     return None
+
+
+def _repos_from_pid(pid: int) -> list[RepoConfig]:
+    """Read repo specs from /proc/<pid>/cmdline, returning [] if unavailable."""
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    repos = []
+    for arg in cmdline.rstrip(b"\x00").split(b"\x00"):
+        try:
+            spec = arg.decode()
+        except UnicodeDecodeError:
+            continue
+        if ":" not in spec:
+            continue
+        name, path_str = spec.split(":", 1)
+        if "/" not in name:
+            continue
+        repos.append(RepoConfig(name=name, work_dir=Path(path_str).expanduser()))
+    return repos
 
 
 def _kennel_pid() -> int | None:
@@ -138,7 +159,7 @@ def _read_state(fido_dir: Path) -> dict[str, Any]:
             if not path.exists():
                 return {}
             return json.loads(path.read_text())
-    except json.JSONDecodeError, OSError:
+    except (json.JSONDecodeError, OSError):  # fmt: skip
         return {}
 
 
@@ -150,7 +171,7 @@ def _read_tasks(fido_dir: Path) -> list[dict[str, Any]]:
     try:
         data = json.loads(path.read_text())
         return data if isinstance(data, list) else []
-    except json.JSONDecodeError, OSError:
+    except (json.JSONDecodeError, OSError):  # fmt: skip
         return []
 
 
@@ -209,11 +230,12 @@ def repo_status(repo_config: RepoConfig) -> RepoStatus:
     )
 
 
-def collect(config: Config) -> KennelStatus:
+def collect() -> KennelStatus:
     """Collect the full kennel + per-repo status."""
     pid = _kennel_pid()
     uptime = _process_uptime_seconds(pid) if pid is not None else None
-    repos = [repo_status(rc) for rc in config.repos.values()]
+    repo_configs = _repos_from_pid(pid) if pid is not None else []
+    repos = [repo_status(rc) for rc in repo_configs]
     return KennelStatus(kennel_pid=pid, kennel_uptime=uptime, repos=repos)
 
 
