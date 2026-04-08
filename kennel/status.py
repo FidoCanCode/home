@@ -95,7 +95,7 @@ def _process_uptime_seconds(pid: int) -> int | None:
         text = result.stdout.strip()
         if text:
             return int(text)
-    except OSError, ValueError:
+    except (OSError, ValueError):  # fmt: skip
         pass
     return None
 
@@ -138,7 +138,7 @@ def _read_state(fido_dir: Path) -> dict[str, Any]:
             if not path.exists():
                 return {}
             return json.loads(path.read_text())
-    except json.JSONDecodeError, OSError:
+    except (json.JSONDecodeError, OSError):  # fmt: skip
         return {}
 
 
@@ -150,7 +150,7 @@ def _read_tasks(fido_dir: Path) -> list[dict[str, Any]]:
     try:
         data = json.loads(path.read_text())
         return data if isinstance(data, list) else []
-    except json.JSONDecodeError, OSError:
+    except (json.JSONDecodeError, OSError):  # fmt: skip
         return []
 
 
