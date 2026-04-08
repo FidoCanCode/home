@@ -8,6 +8,7 @@ import re
 import select
 import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -26,6 +27,14 @@ def _claude(
         text=True,
         timeout=timeout,
     )
+
+
+class ClaudeStreamError(Exception):
+    """Raised by _run_streaming when the subprocess exits with a non-zero code or times out."""
+
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode
+        super().__init__(f"claude exited with code {returncode}")
 
 
 # ── Stream-JSON helpers ───────────────────────────────────────────────────────
@@ -140,27 +149,23 @@ def _run_streaming(
     cmd: list[str],
     stdin_file: Path,
     idle_timeout: float = 1800.0,
-) -> tuple[str, int]:
+) -> Iterator[str]:
     """Run a command, streaming stdout with idle-timeout detection.
 
-    Reads stdout line by line.  If no new output arrives for
-    *idle_timeout* seconds, the process is killed.
-
-    Returns ``(stdout_text, returncode)``.  On idle timeout the process
-    is killed and returncode is ``-1``.
+    Yields each line of stdout as it arrives.  If no new output arrives for
+    *idle_timeout* seconds, the process is killed and ``ClaudeStreamError(-1)``
+    is raised.  If the process exits with a non-zero code,
+    ``ClaudeStreamError(returncode)`` is raised.  ``FileNotFoundError``
+    propagates naturally if the command is not found.
     """
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=stdin_file.open(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError:
-        return "", -1
+    proc = subprocess.Popen(
+        cmd,
+        stdin=stdin_file.open(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
-    lines: list[str] = []
     last_activity = time.monotonic()
 
     while True:
@@ -169,7 +174,8 @@ def _run_streaming(
             line = proc.stdout.readline()
             if not line:
                 break  # EOF
-            lines.append(line)
+            yield line
+            log.info(line.rstrip())
             last_activity = time.monotonic()
         elif proc.poll() is not None:
             break  # process exited
@@ -177,14 +183,15 @@ def _run_streaming(
             log.warning("claude idle for %.0fs — killing", idle_timeout)
             proc.kill()
             proc.wait()
-            return "".join(lines).strip(), -1
+            raise ClaudeStreamError(-1)
 
     proc.wait()
     # Drain any remaining output
     remaining = proc.stdout.read()
     if remaining:
-        lines.append(remaining)
-    return "".join(lines).strip(), proc.returncode
+        yield remaining
+    if proc.returncode != 0:
+        raise ClaudeStreamError(proc.returncode)
 
 
 def print_prompt_from_file(
@@ -211,8 +218,10 @@ def print_prompt_from_file(
         str(system_file),
         "--print",
     ]
-    output, rc = _run_streaming(cmd, prompt_file, idle_timeout)
-    return output if rc == 0 else ""
+    try:
+        return "".join(_run_streaming(cmd, prompt_file, idle_timeout)).strip()
+    except ClaudeStreamError, FileNotFoundError:
+        return ""
 
 
 def resume_session(
@@ -239,8 +248,10 @@ def resume_session(
         session_id,
         "--print",
     ]
-    output, rc = _run_streaming(cmd, prompt_file, idle_timeout)
-    return output if rc == 0 else ""
+    try:
+        return "".join(_run_streaming(cmd, prompt_file, idle_timeout)).strip()
+    except ClaudeStreamError, FileNotFoundError:
+        return ""
 
 
 # ── Specialised wrappers used by events.py ───────────────────────────────────
