@@ -14,7 +14,11 @@ from kennel.worker import (
     Worker,
     WorkerContext,
     WorkerThread,
+    _apply_queue_to_body,
+    _auto_complete_ask_tasks,
+    _format_work_queue,
     _pick_next_task,
+    _resolve_git_dir,
     _sanitize_slug,
     acquire_lock,
     build_prompt,
@@ -25,6 +29,8 @@ from kennel.worker import (
     load_state,
     run,
     save_state,
+    sync_tasks,
+    sync_tasks_background,
 )
 
 
@@ -1194,7 +1200,7 @@ class TestSetupHooks:
         (tmp_path / ".git" / "info").mkdir(parents=True)
         compact_cmd, sync_cmd = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
         assert compact_cmd.startswith("bash ")
-        assert sync_cmd.startswith("bash ")
+        assert "sync-tasks" in sync_cmd
 
     def test_compact_cmd_references_compact_script(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
@@ -1208,7 +1214,7 @@ class TestSetupHooks:
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
         _, sync_cmd = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
-        assert "sync-tasks.sh" in sync_cmd
+        assert "kennel sync-tasks" in sync_cmd
 
     def test_sync_cmd_includes_work_dir(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
@@ -2882,7 +2888,7 @@ class TestHandleCi:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("sid", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
@@ -2900,7 +2906,7 @@ class TestHandleCi:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("sid", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
@@ -2918,7 +2924,7 @@ class TestHandleCi:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 7, "branch")
         mock_status.assert_called_once_with("Fixing CI: unit-tests on PR #7")
@@ -2940,7 +2946,7 @@ class TestHandleCi:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         gh.get_run_log.assert_called_once_with("owner/repo", "55555")
@@ -2957,7 +2963,7 @@ class TestHandleCi:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         gh.get_run_log.assert_not_called()
@@ -2980,7 +2986,7 @@ class TestHandleCi:
             ),
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         log_section = captured_context["ctx"].split("Failure log")[1]
@@ -3000,7 +3006,7 @@ class TestHandleCi:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 42, "branch")
         gh.get_review_threads.assert_called_once_with("owner", "repo", 42)
@@ -3018,7 +3024,7 @@ class TestHandleCi:
             patch("kennel.worker.build_prompt") as mock_bp,
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 5, "fix-branch")
         mock_bp.assert_called_once()
@@ -3041,7 +3047,7 @@ class TestHandleCi:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("sess-1", "")) as mock_cr,
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         mock_cr.assert_called_once_with(fido_dir)
@@ -3059,7 +3065,7 @@ class TestHandleCi:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title") as mock_complete,
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         mock_complete.assert_called_once_with(tmp_path, "CI failure: my-check")
@@ -3077,13 +3083,10 @@ class TestHandleCi:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen") as mock_popen,
+            patch("kennel.worker.sync_tasks_background") as mock_sync,
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_popen.assert_called_once()
-        popen_args = mock_popen.call_args[0][0]
-        assert popen_args[0] == "bash"
-        assert "sync-tasks.sh" in popen_args[1]
+        mock_sync.assert_called_once_with(tmp_path, gh)
 
     def test_picks_first_failing_check(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -3100,7 +3103,7 @@ class TestHandleCi:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         # First failing check is "fail-check"
@@ -3121,7 +3124,7 @@ class TestHandleCi:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
             caplog.at_level(logging.INFO, logger="kennel"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
@@ -3643,7 +3646,7 @@ class TestHandleReviewFeedback:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("sid", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             result = worker.handle_review_feedback(
                 fido_dir, self._repo_ctx(), 1, "branch"
@@ -3658,7 +3661,7 @@ class TestHandleReviewFeedback:
             patch("kennel.worker.build_prompt") as mock_bp,
             patch("kennel.worker.claude_run", return_value=("sid", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_review_feedback(fido_dir, self._repo_ctx(), 5, "my-branch")
         mock_bp.assert_called_once()
@@ -3675,7 +3678,7 @@ class TestHandleReviewFeedback:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("sess-1", "")) as mock_cr,
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
         mock_cr.assert_called_once_with(fido_dir)
@@ -3688,7 +3691,7 @@ class TestHandleReviewFeedback:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title") as mock_complete,
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
         mock_complete.assert_called_once_with(
@@ -3703,13 +3706,10 @@ class TestHandleReviewFeedback:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen") as mock_popen,
+            patch("kennel.worker.sync_tasks_background") as mock_sync,
         ):
             worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_popen.assert_called_once()
-        popen_args = mock_popen.call_args[0][0]
-        assert popen_args[0] == "bash"
-        assert "sync-tasks.sh" in popen_args[1]
+        mock_sync.assert_called_once_with(tmp_path, gh)
 
     def test_logs_review_feedback(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -3721,7 +3721,7 @@ class TestHandleReviewFeedback:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
             caplog.at_level(logging.INFO, logger="kennel"),
         ):
             worker.handle_review_feedback(fido_dir, self._repo_ctx(), 1, "branch")
@@ -3792,7 +3792,7 @@ class TestHandleThreads:
         with (
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("sid", "")),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             result = worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
@@ -3812,7 +3812,7 @@ class TestHandleThreads:
         with (
             patch("kennel.worker.build_prompt") as mock_bp,
             patch("kennel.worker.claude_run", return_value=("sid", "")),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 5, "my-branch")
         mock_bp.assert_called_once()
@@ -3829,7 +3829,7 @@ class TestHandleThreads:
         with (
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("sess-1", "")) as mock_cr,
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
         mock_cr.assert_called_once_with(fido_dir)
@@ -3842,13 +3842,10 @@ class TestHandleThreads:
         with (
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
-            patch("subprocess.Popen") as mock_popen,
+            patch("kennel.worker.sync_tasks_background") as mock_sync,
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_popen.assert_called_once()
-        popen_args = mock_popen.call_args[0][0]
-        assert popen_args[0] == "bash"
-        assert "sync-tasks.sh" in popen_args[1]
+        mock_sync.assert_called_once_with(tmp_path, gh)
 
     def test_logs_thread_count(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -3860,7 +3857,7 @@ class TestHandleThreads:
         with (
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_run", return_value=("", "")),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
             caplog.at_level(logging.INFO, logger="kennel"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
@@ -4295,7 +4292,7 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("sid", "")),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
@@ -4311,7 +4308,7 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "my-branch")
         mock_status.assert_called_once_with("Working on: Write the tests")
@@ -4327,7 +4324,7 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 7, "fix-branch")
         _, skill, _ = mock_bp.call_args[0]
@@ -4344,7 +4341,7 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "my-slug")
         _, _, context = mock_bp.call_args[0]
@@ -4364,7 +4361,7 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         _, _, context = mock_bp.call_args[0]
@@ -4381,7 +4378,7 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("sess", "")) as mock_run,
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_run.assert_called_once_with(fido_dir)
@@ -4397,7 +4394,7 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch.object(worker, "ensure_pushed", return_value=True) as mock_push,
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "my-slug")
         mock_push.assert_called_once_with("origin", "my-slug")
@@ -4413,7 +4410,7 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title") as mock_complete,
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_called_once_with(tmp_path, "My task title")
@@ -4429,7 +4426,7 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch.object(worker, "ensure_pushed", return_value=False),
             patch("kennel.worker.tasks.complete_by_title") as mock_complete,
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_not_called()
@@ -4445,7 +4442,7 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch.object(worker, "ensure_pushed", return_value=False),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert result is True
@@ -4461,13 +4458,13 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch.object(worker, "ensure_pushed", return_value=False),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen") as mock_popen,
+            patch("kennel.worker.sync_tasks_background") as mock_sync,
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_popen.assert_not_called()
+        mock_sync.assert_not_called()
 
     def test_syncs_work_queue_after_completion(self, tmp_path: Path) -> None:
-        worker, _ = self._make_worker(tmp_path)
+        worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
         with (
@@ -4477,13 +4474,10 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen") as mock_popen,
+            patch("kennel.worker.sync_tasks_background") as mock_sync,
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_popen.assert_called_once()
-        args = mock_popen.call_args[0][0]
-        assert args[0] == "bash"
-        assert str(tmp_path) in args
+        mock_sync.assert_called_once_with(tmp_path, gh)
 
     def test_logs_task_name(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -4498,7 +4492,7 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("", "")),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
             caplog.at_level(logging.INFO, logger="kennel"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -4517,7 +4511,7 @@ class TestExecuteTask:
             patch("kennel.worker.claude_run", return_value=("my-session", "")),
             patch.object(worker, "ensure_pushed", return_value=True),
             patch("kennel.worker.tasks.complete_by_title"),
-            patch("subprocess.Popen"),
+            patch("kennel.worker.sync_tasks_background"),
             caplog.at_level(logging.INFO, logger="kennel"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -5378,6 +5372,472 @@ class TestRunPromoteMergeIntegration:
         ):
             worker.run()
         mock_hpm.assert_not_called()
+
+
+class TestResolveGitDirModuleLevel:
+    def test_returns_path_from_stdout(self, tmp_path: Path) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="/some/repo/.git\n")
+            result = _resolve_git_dir(tmp_path)
+        assert result == Path("/some/repo/.git")
+
+    def test_passes_absolute_git_dir_flag(self, tmp_path: Path) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="/repo/.git\n")
+            _resolve_git_dir(tmp_path)
+        args = mock_run.call_args[0][0]
+        assert "--absolute-git-dir" in args
+
+    def test_raises_on_subprocess_failure(self, tmp_path: Path) -> None:
+        with patch(
+            "subprocess.run", side_effect=subprocess.CalledProcessError(1, "git")
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                _resolve_git_dir(tmp_path)
+
+    def test_passes_cwd(self, tmp_path: Path) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="/repo/.git\n")
+            _resolve_git_dir(tmp_path)
+        assert mock_run.call_args.kwargs["cwd"] == tmp_path
+
+
+class TestFormatWorkQueue:
+    def test_empty_list_returns_empty_string(self) -> None:
+        assert _format_work_queue([]) == ""
+
+    def test_pending_task_appears_as_unchecked(self) -> None:
+        tasks = [{"title": "Do work", "status": "pending"}]
+        result = _format_work_queue(tasks)
+        assert "- [ ] Do work **→ next**" in result
+
+    def test_first_pending_has_next_marker(self) -> None:
+        tasks = [
+            {"title": "Task A", "status": "pending"},
+            {"title": "Task B", "status": "pending"},
+        ]
+        result = _format_work_queue(tasks)
+        assert "Task A **→ next**" in result
+        assert "Task B **→ next**" not in result
+
+    def test_completed_tasks_appear_in_details(self) -> None:
+        tasks = [{"title": "Done", "status": "completed"}]
+        result = _format_work_queue(tasks)
+        assert "<details>" in result
+        assert "- [x] Done" in result
+
+    def test_ci_failure_has_priority_over_others(self) -> None:
+        tasks = [
+            {"title": "Normal task", "status": "pending"},
+            {"title": "CI failure: lint", "status": "pending"},
+        ]
+        result = _format_work_queue(tasks)
+        lines = [ln for ln in result.splitlines() if "- [ ]" in ln]
+        assert "CI failure: lint" in lines[0]
+        assert "Normal task" in lines[1]
+
+    def test_thread_task_has_priority_over_other_pending(self) -> None:
+        tasks = [
+            {"title": "Normal", "status": "pending"},
+            {"title": "Thread task", "status": "pending", "thread": {"url": ""}},
+        ]
+        result = _format_work_queue(tasks)
+        lines = [ln for ln in result.splitlines() if "- [ ]" in ln]
+        assert "Thread task" in lines[0]
+        assert "Normal" in lines[1]
+
+    def test_thread_task_with_url_becomes_link(self) -> None:
+        tasks = [
+            {
+                "title": "Fix it",
+                "status": "pending",
+                "thread": {"url": "https://github.com/comment/1"},
+            }
+        ]
+        result = _format_work_queue(tasks)
+        assert "[Fix it](https://github.com/comment/1)" in result
+
+    def test_completed_count_in_summary(self) -> None:
+        tasks = [
+            {"title": "A", "status": "completed"},
+            {"title": "B", "status": "completed"},
+        ]
+        result = _format_work_queue(tasks)
+        assert "Completed (2)" in result
+
+    def test_in_progress_treated_as_pending(self) -> None:
+        tasks = [{"title": "Running", "status": "in_progress"}]
+        result = _format_work_queue(tasks)
+        assert "- [ ] Running" in result
+
+
+class TestApplyQueueToBody:
+    def test_replaces_queue_section(self) -> None:
+        body = "Before\n<!-- WORK_QUEUE_START -->\nold\n<!-- WORK_QUEUE_END -->\nAfter"
+        result = _apply_queue_to_body(body, "new")
+        assert "new" in result
+        assert "old" not in result
+
+    def test_preserves_content_before_and_after(self) -> None:
+        body = "Before\n<!-- WORK_QUEUE_START -->\nold\n<!-- WORK_QUEUE_END -->\nAfter"
+        result = _apply_queue_to_body(body, "new")
+        assert result.startswith("Before")
+        assert result.endswith("After")
+
+    def test_returns_body_unchanged_when_no_start_marker(self) -> None:
+        body = "No markers here\n<!-- WORK_QUEUE_END -->"
+        result = _apply_queue_to_body(body, "queue")
+        assert result == body
+
+    def test_returns_body_unchanged_when_no_end_marker(self) -> None:
+        body = "<!-- WORK_QUEUE_START -->\nno end marker"
+        result = _apply_queue_to_body(body, "queue")
+        assert result == body
+
+    def test_returns_body_unchanged_when_no_markers(self) -> None:
+        body = "plain body text"
+        result = _apply_queue_to_body(body, "queue")
+        assert result == body
+
+
+class TestAutoCompleteAskTasks:
+    def _ask_task(self, comment_id: int) -> dict:
+        return {
+            "title": "ASK: some question",
+            "status": "pending",
+            "thread": {"comment_id": comment_id, "url": "https://example.com"},
+        }
+
+    def _resolved_node(self, db_id: int) -> dict:
+        return {
+            "isResolved": True,
+            "comments": {"nodes": [{"databaseId": db_id}]},
+        }
+
+    def _threads_data(self, nodes: list) -> dict:
+        return {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+
+    def test_no_ask_tasks_does_nothing(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        gh.get_review_threads.assert_not_called()
+
+    def test_completes_ask_task_when_thread_resolved(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        task = self._ask_task(42)
+        gh.get_review_threads.return_value = self._threads_data(
+            [self._resolved_node(42)]
+        )
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+        ):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete.assert_called_once_with(tmp_path, "ASK: some question")
+
+    def test_does_not_complete_ask_task_when_thread_not_resolved(
+        self, tmp_path: Path
+    ) -> None:
+        gh = MagicMock()
+        task = self._ask_task(42)
+        gh.get_review_threads.return_value = self._threads_data(
+            [{"isResolved": False, "comments": {"nodes": [{"databaseId": 42}]}}]
+        )
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+        ):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete.assert_not_called()
+
+    def test_get_review_threads_exception_logged(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        task = self._ask_task(1)
+        gh.get_review_threads.side_effect = RuntimeError("api fail")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+        ):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete.assert_not_called()
+
+    def test_non_ask_tasks_ignored(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        task = {
+            "title": "Normal task",
+            "status": "pending",
+            "thread": {"comment_id": 1},
+        }
+        gh.get_review_threads.return_value = self._threads_data(
+            [self._resolved_node(1)]
+        )
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+        ):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete.assert_not_called()
+
+    def test_ask_task_without_thread_ignored(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        task = {"title": "ASK: question", "status": "pending"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+        ):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete.assert_not_called()
+        gh.get_review_threads.assert_not_called()
+
+    def test_resolved_node_without_database_id_skipped(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        task = self._ask_task(42)
+        gh.get_review_threads.return_value = self._threads_data(
+            [{"isResolved": True, "comments": {"nodes": [{}]}}]
+        )
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+        ):
+            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete.assert_not_called()
+
+
+class TestSyncTasks:
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _state_with_issue(self, fido_dir: Path, issue: int = 1) -> None:
+        (fido_dir / "state.json").write_text(f'{{"issue": {issue}}}')
+
+    def test_warns_when_git_dir_not_resolved(self, tmp_path: Path, caplog) -> None:
+        import logging
+
+        gh = MagicMock()
+        with (
+            patch(
+                "kennel.worker._resolve_git_dir",
+                side_effect=subprocess.CalledProcessError(1, "git"),
+            ),
+            caplog.at_level(logging.WARNING, logger="kennel"),
+        ):
+            sync_tasks(tmp_path, gh)
+        assert "could not resolve git dir" in caplog.text
+
+    def test_returns_early_when_no_issue_in_state(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        with patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent):
+            sync_tasks(tmp_path, gh)
+        gh.find_pr.assert_not_called()
+
+    def test_returns_early_when_lock_held(self, tmp_path: Path) -> None:
+        import fcntl
+
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        sync_lock_path = fido_dir / "sync.lock"
+        with open(sync_lock_path, "w") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            with patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent):
+                sync_tasks(tmp_path, gh)
+        gh.find_pr.assert_not_called()
+
+    def test_returns_early_when_no_open_pr(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = None
+        with patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent):
+            sync_tasks(tmp_path, gh)
+        gh.get_pr_body.assert_not_called()
+
+    def test_returns_early_when_pr_not_open(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "MERGED"}
+        with patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent):
+            sync_tasks(tmp_path, gh)
+        gh.get_pr_body.assert_not_called()
+
+    def test_returns_early_when_no_tasks(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        with (
+            patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker._auto_complete_ask_tasks"),
+        ):
+            sync_tasks(tmp_path, gh)
+        gh.get_pr_body.assert_not_called()
+
+    def test_syncs_pr_body_when_queue_markers_present(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        body = "desc\n<!-- WORK_QUEUE_START -->\nold\n<!-- WORK_QUEUE_END -->\nfooter"
+        gh.get_pr_body.return_value = body
+        task = {"title": "Do it", "status": "pending"}
+        with (
+            patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent),
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch("kennel.worker._auto_complete_ask_tasks"),
+        ):
+            sync_tasks(tmp_path, gh)
+        gh.edit_pr_body.assert_called_once()
+        new_body = gh.edit_pr_body.call_args[0][2]
+        assert "Do it" in new_body
+        assert "old" not in new_body
+
+    def test_skips_edit_when_no_queue_markers(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        gh.get_pr_body.return_value = "no markers here"
+        task = {"title": "Do it", "status": "pending"}
+        with (
+            patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent),
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch("kennel.worker._auto_complete_ask_tasks"),
+        ):
+            sync_tasks(tmp_path, gh)
+        gh.edit_pr_body.assert_not_called()
+
+    def test_get_repo_info_exception_logged(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.side_effect = RuntimeError("no remote")
+        with patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent):
+            sync_tasks(tmp_path, gh)
+        gh.find_pr.assert_not_called()
+
+    def test_get_pr_body_exception_breaks_loop(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        gh.get_pr_body.side_effect = RuntimeError("api down")
+        task = {"title": "Do it", "status": "pending"}
+        with (
+            patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent),
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch("kennel.worker._auto_complete_ask_tasks"),
+        ):
+            sync_tasks(tmp_path, gh)
+        gh.edit_pr_body.assert_not_called()
+
+    def test_edit_pr_body_exception_breaks_loop(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        body = "desc\n<!-- WORK_QUEUE_START -->\nold\n<!-- WORK_QUEUE_END -->"
+        gh.get_pr_body.return_value = body
+        gh.edit_pr_body.side_effect = RuntimeError("api down")
+        task = {"title": "Do it", "status": "pending"}
+        with (
+            patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent),
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch("kennel.worker._auto_complete_ask_tasks"),
+        ):
+            sync_tasks(tmp_path, gh)  # should not raise
+
+    def test_resyncs_when_tasks_file_changes_during_sync(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        body = "desc\n<!-- WORK_QUEUE_START -->\nold\n<!-- WORK_QUEUE_END -->"
+        gh.get_pr_body.return_value = body
+        task = {"title": "Do it", "status": "pending"}
+        task_file = fido_dir / "tasks.json"
+        call_count = 0
+
+        def fake_edit(repo, pr, new_body):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Simulate tasks.json appearing after sync started (file didn't exist before)
+                task_file.write_text("[]")
+
+        gh.edit_pr_body.side_effect = fake_edit
+        # task_file does NOT exist before sync starts — mtime_before will be 0
+
+        with (
+            patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent),
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch("kennel.worker._auto_complete_ask_tasks"),
+        ):
+            sync_tasks(tmp_path, gh)
+        assert call_count == 2
+
+
+class TestSyncTasksBackground:
+    def test_starts_daemon_thread(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        started_threads = []
+
+        def capture_start(self_t):
+            started_threads.append(self_t)
+            # Don't actually start the thread to avoid real sync
+
+        with patch("threading.Thread.start", capture_start):
+            sync_tasks_background(tmp_path, gh)
+
+        assert len(started_threads) == 1
+        assert started_threads[0].daemon is True
+
+    def test_thread_name_includes_dir_name(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        captured = []
+
+        def capture_start(self_t):
+            captured.append(self_t)
+
+        with patch("threading.Thread.start", capture_start):
+            sync_tasks_background(tmp_path, gh)
+
+        assert tmp_path.name in captured[0].name
+
+    def test_thread_target_is_sync_tasks(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        captured = []
+
+        def capture_start(self_t):
+            captured.append(self_t)
+
+        with patch("threading.Thread.start", capture_start):
+            sync_tasks_background(tmp_path, gh)
+
+        assert captured[0]._target is sync_tasks
 
 
 class TestWorkerThread:

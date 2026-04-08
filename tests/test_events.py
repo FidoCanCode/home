@@ -1167,19 +1167,21 @@ class TestLaunchSync:
     def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
         return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
-    def test_launches_popen(self, tmp_path: Path) -> None:
+    def test_calls_sync_tasks_background(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        mock_proc = MagicMock()
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+        with (
+            patch("kennel.worker.sync_tasks_background") as mock_sync,
+            patch("kennel.events.get_github") as mock_gh,
+        ):
             launch_sync(cfg, self._repo_cfg(tmp_path))
-        assert mock_popen.called
-        args = mock_popen.call_args[0][0]
-        assert "bash" in args
-        assert "sync-tasks.sh" in args[1]
+        mock_sync.assert_called_once_with(tmp_path, mock_gh.return_value)
 
-    def test_popen_exception_does_not_raise(self, tmp_path: Path) -> None:
+    def test_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with patch("subprocess.Popen", side_effect=Exception("fail")):
+        with (
+            patch("kennel.worker.sync_tasks_background"),
+            patch("kennel.events.get_github"),
+        ):
             launch_sync(cfg, self._repo_cfg(tmp_path))  # should not raise
 
 

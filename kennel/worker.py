@@ -50,14 +50,6 @@ def _sub_dir() -> Path:
     return Path(__file__).parent.parent / "sub"
 
 
-def _sync_script() -> Path:
-    """Return the path to sync-tasks.sh.
-
-    TODO: remove once sync-tasks.sh is rewritten to Python.
-    """
-    return Path(__file__).parent.parent / "sync-tasks.sh"
-
-
 def acquire_lock(fido_dir: Path) -> IO[str]:
     """Acquire the fido lock file exclusively (non-blocking).
 
@@ -146,6 +138,224 @@ def _sanitize_slug(raw: str, fallback: str) -> str:
     return slug
 
 
+def _resolve_git_dir(work_dir: Path) -> Path:
+    """Return the absolute .git directory for *work_dir*."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--absolute-git-dir"],
+        cwd=work_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return Path(result.stdout.strip())
+
+
+def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
+    """Format a task list into work-queue markdown.
+
+    Priority order: CI failures → comment-originated → others.
+    Completed tasks appear in a collapsible ``<details>`` section.
+    """
+    ci_pending: list[str] = []
+    comment_pending: list[str] = []
+    other_pending: list[str] = []
+    completed: list[str] = []
+
+    def _fmt(t: dict[str, Any]) -> str:
+        title = t.get("title", "")
+        url = (t.get("thread") or {}).get("url", "")
+        return f"[{title}]({url})" if url else title
+
+    for t in task_list:
+        status = t.get("status", "pending")
+        if status == "completed":
+            completed.append(_fmt(t))
+        elif status in ("pending", "in_progress"):
+            title = t.get("title", "")
+            if title.startswith("CI failure:"):
+                ci_pending.append(_fmt(t))
+            elif t.get("thread"):
+                comment_pending.append(_fmt(t))
+            else:
+                other_pending.append(_fmt(t))
+
+    pending = ci_pending + comment_pending + other_pending
+    lines: list[str] = []
+    for i, display in enumerate(pending):
+        suffix = " **→ next**" if i == 0 else ""
+        lines.append(f"- [ ] {display}{suffix}")
+
+    if completed:
+        lines.append("")
+        lines.append(f"<details><summary>Completed ({len(completed)})</summary>")
+        lines.append("")
+        for display in completed:
+            lines.append(f"- [x] {display}")
+        lines.append("</details>")
+
+    return "\n".join(lines)
+
+
+def _apply_queue_to_body(body: str, queue: str) -> str:
+    """Replace the WORK_QUEUE_START/END section in a PR body with *queue*.
+
+    Returns *body* unchanged if the markers are absent.
+    """
+    start_marker = "<!-- WORK_QUEUE_START -->"
+    end_marker = "<!-- WORK_QUEUE_END -->"
+    start = body.find(start_marker)
+    end = body.find(end_marker)
+    if start == -1 or end == -1:
+        return body
+    start += len(start_marker)
+    return body[:start] + "\n" + queue + "\n" + body[end:]
+
+
+def _auto_complete_ask_tasks(
+    work_dir: Path,
+    gh: GitHub,
+    repo: str,
+    pr_number: int | str,
+) -> None:
+    """Mark pending ASK tasks complete when their review thread is resolved."""
+    task_list = tasks.list_tasks(work_dir)
+    ask_tasks = [
+        t
+        for t in task_list
+        if t.get("status") == "pending"
+        and t.get("title", "").upper().startswith("ASK:")
+        and t.get("thread")
+    ]
+    if not ask_tasks:
+        return
+
+    try:
+        owner, repo_name = repo.split("/", 1)
+        threads_data = gh.get_review_threads(owner, repo_name, pr_number)
+    except Exception:
+        log.exception("sync_tasks: failed to fetch review threads for ASK resolution")
+        return
+
+    resolved_ids: set[int] = set()
+    for node in (
+        threads_data.get("data", {})
+        .get("repository", {})
+        .get("pullRequest", {})
+        .get("reviewThreads", {})
+        .get("nodes", [])
+    ):
+        if node.get("isResolved"):
+            comments = node.get("comments", {}).get("nodes", [])
+            if comments and comments[0].get("databaseId"):
+                resolved_ids.add(int(comments[0]["databaseId"]))
+
+    for task in ask_tasks:
+        comment_id = (task.get("thread") or {}).get("comment_id")
+        if comment_id and int(comment_id) in resolved_ids:
+            log.info(
+                "sync_tasks: ASK task thread resolved — completing: %s", task["title"]
+            )
+            tasks.complete_by_title(work_dir, task["title"])
+
+
+def sync_tasks(work_dir: Path, gh: GitHub) -> None:
+    """Sync tasks.json → PR body work queue.
+
+    Python replacement for sync-tasks.sh.  Protected by a flock so concurrent
+    calls silently skip rather than race.  Re-runs if tasks.json changes while
+    the body is being updated.
+    """
+    try:
+        git_dir = _resolve_git_dir(work_dir)
+    except subprocess.CalledProcessError:
+        log.warning("sync_tasks: could not resolve git dir for %s", work_dir)
+        return
+
+    fido_dir = git_dir / "fido"
+    fido_dir.mkdir(parents=True, exist_ok=True)
+    sync_lock_path = fido_dir / "sync.lock"
+    sync_lock_fd = open(sync_lock_path, "w")  # noqa: SIM115
+    try:
+        fcntl.flock(sync_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log.info("sync_tasks: another sync running — skipping")
+        sync_lock_fd.close()
+        return
+
+    try:
+        state = load_state(fido_dir)
+        issue = state.get("issue")
+        if issue is None:
+            log.info("sync_tasks: no current issue — nothing to sync")
+            return
+
+        try:
+            repo = gh.get_repo_info(cwd=work_dir)
+            user = gh.get_user()
+        except Exception:
+            log.exception("sync_tasks: failed to get repo info or user")
+            return
+
+        pr_data = gh.find_pr(repo, issue, user)
+        if pr_data is None or pr_data.get("state") != "OPEN":
+            log.info("sync_tasks: no open PR for issue #%s — nothing to sync", issue)
+            return
+
+        pr_number = pr_data["number"]
+        _auto_complete_ask_tasks(work_dir, gh, repo, pr_number)
+
+        task_file = fido_dir / "tasks.json"
+        while True:
+            mtime_before = task_file.stat().st_mtime if task_file.exists() else 0
+            task_list = tasks.list_tasks(work_dir)
+            if not task_list:
+                log.info("sync_tasks: no tasks — nothing to sync")
+                break
+
+            queue = _format_work_queue(task_list)
+            log.info("sync_tasks: syncing task list → PR #%s", pr_number)
+
+            try:
+                body = gh.get_pr_body(repo, pr_number)
+            except Exception:
+                log.exception("sync_tasks: failed to get PR body")
+                break
+
+            if "WORK_QUEUE_START" not in body:
+                log.info(
+                    "sync_tasks: PR #%s has no work queue markers — skipping",
+                    pr_number,
+                )
+                break
+
+            new_body = _apply_queue_to_body(body, queue)
+            try:
+                gh.edit_pr_body(repo, pr_number, new_body)
+                log.info("sync_tasks: PR #%s work queue synced", pr_number)
+            except Exception:
+                log.exception("sync_tasks: failed to update PR body")
+                break
+
+            mtime_after = task_file.stat().st_mtime if task_file.exists() else 0
+            if mtime_after != mtime_before:
+                log.info("sync_tasks: tasks.json changed during sync — re-syncing")
+                continue
+            break
+    finally:
+        sync_lock_fd.close()
+
+
+def sync_tasks_background(work_dir: Path, gh: GitHub) -> None:
+    """Launch :func:`sync_tasks` in a daemon background thread."""
+    t = threading.Thread(
+        target=sync_tasks,
+        args=(work_dir, gh),
+        name=f"sync-{work_dir.name}",
+        daemon=True,
+    )
+    t.start()
+
+
 def claude_start(
     fido_dir: Path,
     model: str = "claude-sonnet-4-6",
@@ -228,14 +438,7 @@ class Worker:
 
     def resolve_git_dir(self) -> Path:
         """Return the absolute .git directory for self.work_dir."""
-        result = subprocess.run(
-            ["git", "rev-parse", "--absolute-git-dir"],
-            cwd=self.work_dir,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return Path(result.stdout.strip())
+        return _resolve_git_dir(self.work_dir)
 
     def create_context(self) -> WorkerContext:
         """Build a WorkerContext for self.work_dir, acquiring the fido lock.
@@ -263,8 +466,7 @@ class Worker:
         hooks.ensure_gitexcluded(self.work_dir)
         compact_script = create_compact_script(fido_dir)
         compact_cmd = f"bash {compact_script}"
-        # TODO: replace with Python sync once sync-tasks.sh is removed
-        sync_cmd = f"bash {_sync_script()} {self.work_dir} &"
+        sync_cmd = f"uv run kennel sync-tasks {self.work_dir} &"
         hooks.add_hooks(self.work_dir, compact_cmd, sync_cmd)
         return compact_cmd, sync_cmd
 
@@ -699,9 +901,7 @@ class Worker:
         log.info("CI fix done (session=%s)", session_id)
 
         tasks.complete_by_title(self.work_dir, f"CI failure: {check_name}")
-        subprocess.Popen(  # noqa: S603
-            ["bash", str(_sync_script()), str(self.work_dir)],
-        )
+        sync_tasks_background(self.work_dir, self.gh)
         return True
 
     def _filter_threads(
@@ -841,9 +1041,7 @@ class Worker:
         tasks.complete_by_title(
             self.work_dir, f"Address review feedback from {repo_ctx.owner}"
         )
-        subprocess.Popen(  # noqa: S603
-            ["bash", str(_sync_script()), str(self.work_dir)],
-        )
+        sync_tasks_background(self.work_dir, self.gh)
         return True
 
     def handle_threads(
@@ -879,9 +1077,7 @@ class Worker:
         build_prompt(fido_dir, "comments", context)
         session_id, _ = claude_run(fido_dir)
         log.info("threads done (session=%s)", session_id)
-        subprocess.Popen(  # noqa: S603
-            ["bash", str(_sync_script()), str(self.work_dir)],
-        )
+        sync_tasks_background(self.work_dir, self.gh)
         return True
 
     def ensure_pushed(self, remote: str, slug: str) -> bool:
@@ -941,9 +1137,7 @@ class Worker:
         if not self.ensure_pushed("origin", slug):
             return True
         tasks.complete_by_title(self.work_dir, task_title)
-        subprocess.Popen(  # noqa: S603
-            ["bash", str(_sync_script()), str(self.work_dir)],
-        )
+        sync_tasks_background(self.work_dir, self.gh)
         return True
 
     def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:

@@ -13,6 +13,14 @@ def main(argv: list[str] | None = None) -> None:
         from kennel.cli import main as task_main
 
         task_main(args[1:])
+    elif args and args[0] == "sync-tasks":
+        from pathlib import Path
+
+        from kennel.github import GitHub
+        from kennel.worker import sync_tasks
+
+        work_dir = Path(args[1]) if len(args) > 1 else Path.cwd()
+        sync_tasks(work_dir, GitHub())
     else:
         from kennel.server import run as server_run
 

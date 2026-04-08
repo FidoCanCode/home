@@ -568,21 +568,11 @@ def create_task(
 
 
 def launch_sync(config: Config, repo_cfg: RepoConfig) -> None:
-    """Launch sync-tasks.sh in background.
+    """Sync tasks.json → PR body in a background thread."""
+    from kennel.worker import sync_tasks_background
 
-    TODO: remove once sync-tasks.sh is rewritten to Python.
-    """
-    sync_script = config.sub_dir.parent / "sync-tasks.sh"
-    try:
-        subprocess.Popen(
-            ["bash", str(sync_script), str(repo_cfg.work_dir)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        log.info("sync-tasks launched")
-    except Exception:
-        log.exception("failed to launch sync-tasks")
+    sync_tasks_background(repo_cfg.work_dir, get_github())
+    log.info("sync-tasks launched")
 
 
 def launch_worker(repo_cfg: RepoConfig, registry: WorkerRegistry) -> None:
