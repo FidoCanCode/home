@@ -2164,7 +2164,10 @@ class TestFindOrCreatePr:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value="sess"),
             patch.object(worker, "_build_pr_body", return_value="body"),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                return_value=[{"title": "Do thing", "status": "pending"}],
+            ),
         ):
             result = worker.find_or_create_pr(
                 fido_dir, self._make_repo_ctx(), 5, "Fix the bug"
@@ -2224,7 +2227,10 @@ class TestFindOrCreatePr:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
             patch.object(worker, "_build_pr_body", return_value="pr-body"),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                return_value=[{"title": "t", "status": "pending"}],
+            ),
         ):
             worker.find_or_create_pr(fido_dir, repo_ctx, 7, "Do the work")
         gh.create_pr.assert_called_once_with(
@@ -2304,7 +2310,10 @@ class TestFindOrCreatePr:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
             patch.object(worker, "_build_pr_body", return_value="body"),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                return_value=[{"title": "t", "status": "pending"}],
+            ),
         ):
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result is not None
@@ -2325,7 +2334,10 @@ class TestFindOrCreatePr:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
             patch.object(worker, "_build_pr_body", return_value="body"),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                return_value=[{"title": "t", "status": "pending"}],
+            ),
         ):
             result = worker.find_or_create_pr(
                 fido_dir, self._make_repo_ctx(), 5, "title"
@@ -2366,7 +2378,10 @@ class TestFindOrCreatePr:
             patch("kennel.worker.build_prompt"),
             patch("kennel.worker.claude_start", return_value=""),
             patch.object(worker, "_build_pr_body", return_value="body"),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch(
+                "kennel.worker.tasks.list_tasks",
+                return_value=[{"title": "t", "status": "pending"}],
+            ),
             caplog.at_level(logging.INFO, logger="kennel"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")

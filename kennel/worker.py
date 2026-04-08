@@ -545,6 +545,10 @@ class Worker:
         session_id = claude_start(fido_dir)
         log.info("setup session: %s", session_id)
 
+        if not tasks.list_tasks(self.work_dir):
+            log.warning("setup produced no tasks — skipping PR creation, will retry")
+            return None
+
         # Build PR body with tasks already populated by setup
         pr_body = self._build_pr_body(request, issue)
 
