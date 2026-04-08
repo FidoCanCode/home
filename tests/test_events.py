@@ -256,7 +256,12 @@ class TestDispatchIssueComment:
         payload = {
             **_payload(),
             "action": "created",
-            "comment": {"id": 456, "body": "looks good", "user": {"login": "owner"}},
+            "comment": {
+                "id": 456,
+                "body": "looks good",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/10#issuecomment-456",
+            },
             "issue": {
                 "number": 10,
                 "title": "test pr",
@@ -267,6 +272,11 @@ class TestDispatchIssueComment:
         result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
         assert result is not None
         assert result.comment_body == "looks good"
+        assert result.thread is not None
+        assert (
+            result.thread["url"]
+            == "https://github.com/owner/repo/pull/10#issuecomment-456"
+        )
 
     def test_non_pr_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)

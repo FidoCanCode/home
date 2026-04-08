@@ -376,7 +376,12 @@ class TestProcessAction:
         payload = {
             **self._payload(),
             "action": "created",
-            "comment": {"id": 300, "body": "looks good", "user": {"login": "owner"}},
+            "comment": {
+                "id": 300,
+                "body": "looks good",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/11#issuecomment-300",
+            },
             "issue": {
                 "number": 11,
                 "title": "my pr",
@@ -399,7 +404,12 @@ class TestProcessAction:
                 "do it",
                 cfg,
                 cfg.repos["owner/repo"],
-                thread={"repo": "owner/repo", "pr": 11, "comment_id": 300},
+                thread={
+                    "repo": "owner/repo",
+                    "pr": 11,
+                    "comment_id": 300,
+                    "url": "https://github.com/owner/repo/pull/11#issuecomment-300",
+                },
             )
 
     def test_issue_comment_no_task_for_answer(self, server: tuple) -> None:

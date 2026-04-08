@@ -145,7 +145,12 @@ def dispatch(
                 "pr_body": (issue.get("body", "") or "")[:500],
                 "comment_id": comment_id,
             },
-            thread={"repo": repo, "pr": number, "comment_id": comment_id}
+            thread={
+                "repo": repo,
+                "pr": number,
+                "comment_id": comment_id,
+                "url": comment.get("html_url", ""),
+            }
             if number and comment_id
             else None,
         )
