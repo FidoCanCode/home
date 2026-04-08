@@ -480,9 +480,15 @@ class Worker:
     names.  See :ref:`dependency-injection` in CLAUDE.md.
     """
 
-    def __init__(self, work_dir: Path, gh: GitHub) -> None:
+    def __init__(
+        self,
+        work_dir: Path,
+        gh: GitHub,
+        abort_task: threading.Event | None = None,
+    ) -> None:
         self.work_dir = work_dir
         self.gh = gh
+        self._abort_task = abort_task if abort_task is not None else threading.Event()
 
     def resolve_git_dir(self) -> Path:
         """Return the absolute .git directory for self.work_dir."""
@@ -1523,10 +1529,16 @@ class WorkerThread(threading.Thread):
         self.work_dir = work_dir
         self._gh = gh
         self._wake = threading.Event()
+        self._abort_task = threading.Event()
         self._stop = False
 
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
+        self._wake.set()
+
+    def abort_task(self) -> None:
+        """Signal the worker to abort the current task after claude_run returns."""
+        self._abort_task.set()
         self._wake.set()
 
     def stop(self) -> None:
@@ -1538,7 +1550,7 @@ class WorkerThread(threading.Thread):
         """Main loop — runs until :meth:`stop` is called."""
         while not self._stop:
             try:
-                result = Worker(self.work_dir, self._gh).run()
+                result = Worker(self.work_dir, self._gh, self._abort_task).run()
             except Exception:
                 log.exception("WorkerThread %s: unexpected error", self.name)
                 self._wake.wait(timeout=_ERROR_TIMEOUT)

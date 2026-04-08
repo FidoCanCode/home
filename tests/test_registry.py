@@ -93,6 +93,18 @@ class TestWorkerRegistry:
         factory.return_value.stop.assert_not_called()
         factory.return_value.join.assert_not_called()
 
+    def test_abort_task_calls_thread_abort_task(self, tmp_path: Path) -> None:
+        reg, factory = self._make_registry()
+        cfg = _repo("foo/bar", tmp_path)
+        reg.start(cfg)
+        reg.abort_task("foo/bar")
+        factory.return_value.abort_task.assert_called_once()
+
+    def test_abort_task_unknown_repo_is_noop(self) -> None:
+        reg, factory = self._make_registry()
+        reg.abort_task("unknown/repo")  # must not raise
+        factory.return_value.abort_task.assert_not_called()
+
     def test_stop_and_join_default_timeout(self, tmp_path: Path) -> None:
         reg, factory = self._make_registry()
         reg.start(_repo("foo/bar", tmp_path))

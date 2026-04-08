@@ -7156,3 +7156,40 @@ class TestWorkerThread:
 
         # clear() called after each wait
         assert mock_wake.clear.call_count == 2
+
+    # ── abort_task ────────────────────────────────────────────────────────
+
+    def test_abort_task_sets_abort_event(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert not wt._abort_task.is_set()
+        wt.abort_task()
+        assert wt._abort_task.is_set()
+
+    def test_abort_task_also_wakes_thread(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert not wt._wake.is_set()
+        wt.abort_task()
+        assert wt._wake.is_set()
+
+    def test_abort_event_passed_to_worker(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        captured: list = []
+
+        def fake_worker_init(self_w, work_dir, gh, abort_task=None):
+            captured.append(abort_task)
+            self_w.work_dir = work_dir
+            self_w.gh = gh
+            self_w._abort_task = abort_task
+
+        def fake_worker_run(self_w):
+            wt._stop = True
+            return 0
+
+        with (
+            patch.object(Worker, "__init__", fake_worker_init),
+            patch.object(Worker, "run", fake_worker_run),
+        ):
+            wt.run()
+
+        assert len(captured) == 1
+        assert captured[0] is wt._abort_task
