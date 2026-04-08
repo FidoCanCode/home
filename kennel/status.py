@@ -1,0 +1,260 @@
+"""kennel status — reads per-repo fido state and formats a one-shot summary."""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from kennel.config import Config, RepoConfig
+
+
+@dataclass
+class RepoStatus:
+    name: str
+    fido_running: bool
+    issue: int | None
+    pending: int
+    completed: int
+    current_task: str | None  # title of first in_progress or pending task
+    claude_pid: int | None
+    claude_uptime: int | None  # seconds
+
+
+@dataclass
+class KennelStatus:
+    kennel_pid: int | None
+    kennel_uptime: int | None  # seconds
+    repos: list[RepoStatus]
+
+
+def _format_uptime(seconds: int) -> str:
+    """Format seconds as a compact human-readable string (e.g. '2h13m', '45s')."""
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    mins = minutes % 60
+    if mins:
+        return f"{hours}h{mins}m"
+    return f"{hours}h"
+
+
+def _fido_running(lock_path: Path) -> bool:
+    """Return True if the fido lock file is held by another process."""
+    if not lock_path.exists():
+        return False
+    try:
+        fd = open(lock_path)  # noqa: SIM115
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        except BlockingIOError:
+            return True
+        finally:
+            fd.close()
+    except OSError:
+        return False
+
+
+def _pgrep(pattern: str) -> list[int]:
+    """Return PIDs whose command line matches pattern via pgrep -f."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", pattern],
+            capture_output=True,
+            text=True,
+        )
+        pids = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    pids.append(int(line))
+                except ValueError:
+                    pass
+        return pids
+    except OSError:
+        return []
+
+
+def _process_uptime_seconds(pid: int) -> int | None:
+    """Return elapsed seconds since the process started, or None if unavailable."""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "etimes="],
+            capture_output=True,
+            text=True,
+        )
+        text = result.stdout.strip()
+        if text:
+            return int(text)
+    except OSError, ValueError:
+        pass
+    return None
+
+
+def _kennel_pid() -> int | None:
+    """Return the PID of the running kennel server, or None."""
+    pids = _pgrep("kennel --port")
+    return pids[0] if pids else None
+
+
+def _claude_pid(fido_dir: Path) -> int | None:
+    """Return the PID of the claude process using fido_dir/system, or None."""
+    pids = _pgrep(str(fido_dir / "system"))
+    return pids[0] if pids else None
+
+
+def _git_dir(work_dir: Path) -> Path | None:
+    """Return the absolute git directory for work_dir, or None if unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--absolute-git-dir"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(result.stdout.strip())
+    except subprocess.CalledProcessError:
+        return None
+
+
+def _read_state(fido_dir: Path) -> dict[str, Any]:
+    """Read state.json from fido_dir, returning {} if absent or unreadable."""
+    path = fido_dir / "state.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError, OSError:
+        return {}
+
+
+def _read_tasks(fido_dir: Path) -> list[dict[str, Any]]:
+    """Read tasks.json from fido_dir, returning [] if absent or unreadable."""
+    path = fido_dir / "tasks.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, list) else []
+    except json.JSONDecodeError, OSError:
+        return []
+
+
+def _current_task(task_list: list[dict[str, Any]]) -> str | None:
+    """Return the title of the first in_progress task, then the first pending task."""
+    for t in task_list:
+        if t.get("status") == "in_progress":
+            return t.get("title")
+    for t in task_list:
+        if t.get("status") == "pending":
+            return t.get("title")
+    return None
+
+
+def repo_status(repo_config: RepoConfig) -> RepoStatus:
+    """Collect status for a single repo."""
+    git_dir = _git_dir(repo_config.work_dir)
+    if git_dir is None:
+        return RepoStatus(
+            name=repo_config.name,
+            fido_running=False,
+            issue=None,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+        )
+
+    fido_dir = git_dir / "fido"
+    running = _fido_running(fido_dir / "lock")
+
+    state = _read_state(fido_dir)
+    issue = state.get("issue")
+
+    task_list = _read_tasks(fido_dir)
+    pending = sum(1 for t in task_list if t.get("status") == "pending")
+    completed = sum(1 for t in task_list if t.get("status") == "completed")
+
+    current = _current_task(task_list)
+
+    claude_pid = _claude_pid(fido_dir)
+    claude_uptime = (
+        _process_uptime_seconds(claude_pid) if claude_pid is not None else None
+    )
+
+    return RepoStatus(
+        name=repo_config.name,
+        fido_running=running,
+        issue=issue,
+        pending=pending,
+        completed=completed,
+        current_task=current,
+        claude_pid=claude_pid,
+        claude_uptime=claude_uptime,
+    )
+
+
+def collect(config: Config) -> KennelStatus:
+    """Collect the full kennel + per-repo status."""
+    pid = _kennel_pid()
+    uptime = _process_uptime_seconds(pid) if pid is not None else None
+    repos = [repo_status(rc) for rc in config.repos.values()]
+    return KennelStatus(kennel_pid=pid, kennel_uptime=uptime, repos=repos)
+
+
+def format_status(status: KennelStatus) -> str:
+    """Format a KennelStatus as a human-readable string."""
+    lines = []
+
+    # Kennel server line
+    if status.kennel_pid is not None:
+        uptime_str = (
+            f", uptime {_format_uptime(status.kennel_uptime)}"
+            if status.kennel_uptime is not None
+            else ""
+        )
+        lines.append(f"kennel: UP (pid {status.kennel_pid}{uptime_str})")
+    else:
+        lines.append("kennel: DOWN")
+
+    # Per-repo lines
+    for repo in status.repos:
+        parts = []
+
+        if repo.fido_running:
+            parts.append("fido running")
+        else:
+            parts.append("fido idle")
+
+        if repo.issue is not None:
+            total = repo.pending + repo.completed
+            issue_str = f"issue #{repo.issue}"
+            if repo.current_task:
+                done = repo.completed
+                issue_str += f', task {done + 1}/{total} "{repo.current_task}"'
+            elif total > 0:
+                issue_str += f", {repo.pending} pending"
+            parts.append(issue_str)
+        else:
+            parts.append("no assigned issues")
+
+        if repo.claude_pid is not None:
+            claude_str = f"claude pid {repo.claude_pid}"
+            if repo.claude_uptime is not None:
+                claude_str += f" (running {_format_uptime(repo.claude_uptime)})"
+            parts.append(claude_str)
+
+        lines.append(f"{repo.name}: {' — '.join(parts)}")
+
+    return "\n".join(lines)
