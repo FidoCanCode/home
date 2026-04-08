@@ -238,7 +238,10 @@ class TestReplyInstruction:
     def test_defer_out_of_scope(self) -> None:
         result = reply_instruction("DEFER", "big refactor", "defer", {})
         assert "out of scope" in result
-        assert "Do NOT promise" in result
+
+    def test_defer_may_mention_issue(self) -> None:
+        result = reply_instruction("DEFER", "big refactor", "defer", {})
+        assert "opening an issue" in result
 
     def test_dump_politely_declines(self) -> None:
         result = reply_instruction("DUMP", "bad idea", "decline", {})
@@ -296,9 +299,9 @@ class TestIssueReplyInstruction:
         result = issue_reply_instruction("DEFER", "add feature", "defer", {})
         assert "out of scope" in result
 
-    def test_defer_no_promises(self) -> None:
+    def test_defer_may_mention_issue(self) -> None:
         result = issue_reply_instruction("DEFER", "add feature", "defer", {})
-        assert "Do NOT promise to open issues or create tasks" in result
+        assert "opening an issue" in result
 
     def test_dump_decline(self) -> None:
         result = issue_reply_instruction("DUMP", "bad idea", "decline", {})

@@ -120,7 +120,7 @@ def reply_instruction(
         return (
             f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
             f"out of scope for this PR. "
-            f"Do NOT promise to open issues or create tasks.\n\n{ctx}"
+            f"You may mention opening an issue to track it for later.\n\n{ctx}"
         )
     if category == "DUMP":
         return (
@@ -161,7 +161,7 @@ def issue_reply_instruction(
         return (
             f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
             f"out of scope for this PR. "
-            f"Do NOT promise to open issues or create tasks.\n\n{context_str}"
+            f"You may mention opening an issue to track it for later.\n\n{context_str}"
         )
     if category == "DUMP":
         return f"Write a short polite decline.\n\n{context_str}"
