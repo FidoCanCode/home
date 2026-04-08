@@ -19,11 +19,6 @@ def main(argv: list[str] | None = None) -> None:
 
         work_dir = Path(args[1]) if len(args) > 1 else Path.cwd()
         sys.exit(run(work_dir))
-    elif args and args[0] == "watchdog":
-        from kennel.watchdog import run
-
-        work_dir = Path(args[1]) if len(args) > 1 else Path.cwd()
-        sys.exit(run(work_dir))
     else:
         from kennel.server import run as server_run
 
