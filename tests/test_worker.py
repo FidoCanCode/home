@@ -1847,6 +1847,91 @@ class TestGit:
         assert mock_run.call_args[1]["text"] is True
 
 
+class TestGitClean:
+    """Tests for Worker.git_clean."""
+
+    def _make_worker(self, tmp_path: Path) -> Worker:
+        return Worker(tmp_path, MagicMock())
+
+    def _git_result(self, stdout: str = "") -> MagicMock:
+        r = MagicMock()
+        r.stdout = stdout
+        return r
+
+    def test_runs_checkout_to_restore_tracked_files(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        calls: list[list[str]] = []
+
+        def capture(args, **kwargs):
+            calls.append(args)
+            return self._git_result()
+
+        with patch.object(worker, "_git", side_effect=capture):
+            worker.git_clean()
+
+        assert ["checkout", "--", "."] in calls
+
+    def test_runs_clean_to_remove_untracked_files(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        calls: list[list[str]] = []
+
+        def capture(args, **kwargs):
+            calls.append(args)
+            return self._git_result()
+
+        with patch.object(worker, "_git", side_effect=capture):
+            worker.git_clean()
+
+        assert ["clean", "-fd"] in calls
+
+    def test_logs_removed_files_when_output_present(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        worker = self._make_worker(tmp_path)
+
+        def fake_git(args, **kwargs):
+            if args == ["clean", "-fd"]:
+                return self._git_result("Removing foo.py\nRemoving bar/")
+            return self._git_result()
+
+        import logging
+
+        with patch.object(worker, "_git", side_effect=fake_git):
+            with caplog.at_level(logging.INFO):
+                worker.git_clean()
+
+        assert "Removing foo.py" in caplog.text
+
+    def test_logs_nothing_to_remove_when_output_empty(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        worker = self._make_worker(tmp_path)
+
+        with patch.object(worker, "_git", return_value=self._git_result("")):
+            import logging
+
+            with caplog.at_level(logging.INFO):
+                worker.git_clean()
+
+        assert "nothing to remove" in caplog.text
+
+    def test_checkout_called_before_clean(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        order: list[str] = []
+
+        def capture(args, **kwargs):
+            if args == ["checkout", "--", "."]:
+                order.append("checkout")
+            elif args == ["clean", "-fd"]:
+                order.append("clean")
+            return self._git_result()
+
+        with patch.object(worker, "_git", side_effect=capture):
+            worker.git_clean()
+
+        assert order == ["checkout", "clean"]
+
+
 class TestBuildPrBody:
     """Tests for Worker._build_pr_body."""
 
@@ -5002,6 +5087,191 @@ class TestExecuteTask:
         assert state.get("setup_session_id") == "new-sess"
         assert state.get("issue") == 99
 
+    def test_saves_current_task_id_to_state_before_claude_run(
+        self, tmp_path: Path
+    ) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 1})
+        task = {"id": "task-99", "title": "Do stuff", "status": "pending"}
+        captured: dict = {}
+
+        def capture(fd, *args, **kwargs):
+            captured.update(load_state(fd))
+            return ("sess", "")
+
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", side_effect=capture),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert captured.get("current_task_id") == "task-99"
+
+    def test_clears_current_task_id_after_completion(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 1})
+        task = {"id": "task-77", "title": "Complete me", "status": "pending"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sess", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert "current_task_id" not in load_state(fido_dir)
+
+    def test_preserves_other_state_keys_when_saving_current_task_id(
+        self, tmp_path: Path
+    ) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 5, "setup_session_id": "old-sess"})
+        task = {"id": "t-111", "title": "Preserve", "status": "pending"}
+        captured: dict = {}
+
+        def capture(fd, *args, **kwargs):
+            captured.update(load_state(fd))
+            return ("sess", "")
+
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", side_effect=capture),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 5, "br")
+        assert captured.get("issue") == 5
+        assert captured.get("setup_session_id") == "old-sess"
+        assert captured.get("current_task_id") == "t-111"
+
+    def test_current_task_id_not_cleared_when_push_fails(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 1})
+        task = {"id": "task-push-fail", "title": "Push me", "status": "pending"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sess", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=False),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert load_state(fido_dir).get("current_task_id") == "task-push-fail"
+
+    @staticmethod
+    def _git_same_sha():
+        """Mock _git so rev-parse HEAD always returns the same SHA (no new commits)."""
+        orig = MagicMock()
+
+        def side_effect(args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "aaa" if args == ["rev-parse", "HEAD"] else ""
+            result.stderr = ""
+            return result
+
+        orig.side_effect = side_effect
+        return orig
+
+    def test_abort_after_initial_run_removes_task_and_returns_true(
+        self, tmp_path: Path
+    ) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 1, "current_task_id": "t-abort"})
+        task = {"id": "t-abort", "title": "Abort me", "status": "pending"}
+        worker._abort_task.set()
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_same_sha()),
+            patch.object(worker, "git_clean") as mock_clean,
+            patch("kennel.worker.tasks.remove_task") as mock_remove,
+            patch("kennel.worker.sync_tasks") as mock_sync,
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert result is True
+        mock_clean.assert_called_once()
+        mock_remove.assert_called_once_with(tmp_path, "t-abort")
+        assert "current_task_id" not in load_state(fido_dir)
+        assert not worker._abort_task.is_set()
+        mock_sync.assert_called()
+
+    def test_abort_during_resume_loop_removes_task_and_returns_true(
+        self, tmp_path: Path
+    ) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 1})
+        task = {"id": "t-resume-abort", "title": "Resume abort", "status": "pending"}
+        call_count = 0
+
+        def set_abort_on_second(fd, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                worker._abort_task.set()
+            return ("sid", "")
+
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", side_effect=set_abort_on_second),
+            patch.object(worker, "_git", self._git_same_sha()),
+            patch.object(worker, "git_clean") as mock_clean,
+            patch("kennel.worker.tasks.remove_task") as mock_remove,
+            patch("kennel.worker.sync_tasks") as mock_sync,
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert result is True
+        mock_clean.assert_called_once()
+        mock_remove.assert_called_once_with(tmp_path, "t-resume-abort")
+        assert "current_task_id" not in load_state(fido_dir)
+        assert not worker._abort_task.is_set()
+        mock_sync.assert_called()
+
+    def test_abort_does_not_call_complete_by_title(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 1})
+        task = {"id": "t-no-complete", "title": "No complete", "status": "pending"}
+        worker._abort_task.set()
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_same_sha()),
+            patch.object(worker, "git_clean"),
+            patch("kennel.worker.tasks.remove_task"),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        mock_complete.assert_not_called()
+
 
 class TestRunExecuteTaskIntegration:
     """Tests that Worker.run() calls execute_task after handle_threads."""
@@ -7035,3 +7305,40 @@ class TestWorkerThread:
 
         # clear() called after each wait
         assert mock_wake.clear.call_count == 2
+
+    # ── abort_task ────────────────────────────────────────────────────────
+
+    def test_abort_task_sets_abort_event(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert not wt._abort_task.is_set()
+        wt.abort_task()
+        assert wt._abort_task.is_set()
+
+    def test_abort_task_also_wakes_thread(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert not wt._wake.is_set()
+        wt.abort_task()
+        assert wt._wake.is_set()
+
+    def test_abort_event_passed_to_worker(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        captured: list = []
+
+        def fake_worker_init(self_w, work_dir, gh, abort_task=None):
+            captured.append(abort_task)
+            self_w.work_dir = work_dir
+            self_w.gh = gh
+            self_w._abort_task = abort_task
+
+        def fake_worker_run(self_w):
+            wt._stop = True
+            return 0
+
+        with (
+            patch.object(Worker, "__init__", fake_worker_init),
+            patch.object(Worker, "run", fake_worker_run),
+        ):
+            wt.run()
+
+        assert len(captured) == 1
+        assert captured[0] is wt._abort_task

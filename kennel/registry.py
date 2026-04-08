@@ -46,6 +46,15 @@ class WorkerRegistry:
         if thread:
             thread.wake()
 
+    def abort_task(self, repo_name: str) -> None:
+        """Signal the worker for *repo_name* to abort its current task.
+
+        No-op if no thread is registered for that repo.
+        """
+        thread = self._threads.get(repo_name)
+        if thread:
+            thread.abort_task()
+
     def stop_all(self) -> None:
         """Request every managed thread to stop after its current iteration."""
         for thread in self._threads.values():

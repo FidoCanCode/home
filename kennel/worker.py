@@ -470,9 +470,15 @@ class Worker:
     names.  See :ref:`dependency-injection` in CLAUDE.md.
     """
 
-    def __init__(self, work_dir: Path, gh: GitHub) -> None:
+    def __init__(
+        self,
+        work_dir: Path,
+        gh: GitHub,
+        abort_task: threading.Event | None = None,
+    ) -> None:
         self.work_dir = work_dir
         self.gh = gh
+        self._abort_task = abort_task if abort_task is not None else threading.Event()
 
     def resolve_git_dir(self) -> Path:
         """Return the absolute .git directory for self.work_dir."""
@@ -641,6 +647,21 @@ class Worker:
             text=True,
             check=check,
         )
+
+    def git_clean(self) -> None:
+        """Discard uncommitted changes and untracked files in the work tree.
+
+        Runs ``git checkout -- .`` to restore tracked files to HEAD, then
+        ``git clean -fd`` to remove untracked files and directories.  Only
+        uncommitted changes are affected — pushed commits are never reverted.
+        """
+        self._git(["checkout", "--", "."])
+        result = self._git(["clean", "-fd"])
+        cleaned = result.stdout.strip()
+        if cleaned:
+            log.info("git clean removed:\n%s", cleaned)
+        else:
+            log.info("git clean: nothing to remove")
 
     def _build_pr_body(self, request: str, issue: int) -> str:
         """Build the draft PR body: generated description + work-queue section.
@@ -1154,6 +1175,25 @@ class Worker:
             return False
         return True
 
+    def _cleanup_aborted_task(
+        self, fido_dir: Path, task_id: str, task_title: str
+    ) -> None:
+        """Discard uncommitted changes and remove task after an abort signal.
+
+        Called when ``self._abort_task`` is set mid-execution.  Runs
+        ``git_clean`` to restore the working tree, removes the task from the
+        queue, clears ``current_task_id`` from state, resets the abort event,
+        and syncs the PR work queue.
+        """
+        log.info("task aborted: %s", task_title)
+        self.git_clean()
+        tasks.remove_task(self.work_dir, task_id)
+        state = load_state(fido_dir)
+        state.pop("current_task_id", None)
+        save_state(fido_dir, state)
+        self._abort_task.clear()
+        sync_tasks(self.work_dir, self.gh)
+
     def execute_task(
         self,
         fido_dir: Path,
@@ -1199,9 +1239,15 @@ class Worker:
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         state = load_state(fido_dir)
         setup_session_id = state.get("setup_session_id", "")
+        state["current_task_id"] = task["id"]
+        save_state(fido_dir, state)
         session_id, output = claude_run(fido_dir, session_id=setup_session_id)
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
+
+        if self._abort_task.is_set():
+            self._cleanup_aborted_task(fido_dir, task["id"], task_title)
+            return True
 
         # Resume loop: let Claude cook until commits appear
         attempt = 0
@@ -1223,6 +1269,10 @@ class Worker:
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
 
+            if self._abort_task.is_set():
+                self._cleanup_aborted_task(fido_dir, task["id"], task_title)
+                return True
+
         if session_id:
             state = load_state(fido_dir)
             state["setup_session_id"] = session_id
@@ -1231,6 +1281,9 @@ class Worker:
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
             tasks.complete_by_title(self.work_dir, task_title)
+            state = load_state(fido_dir)
+            state.pop("current_task_id", None)
+            save_state(fido_dir, state)
             sync_tasks(self.work_dir, self.gh)
         return True
 
@@ -1508,10 +1561,16 @@ class WorkerThread(threading.Thread):
         self.work_dir = work_dir
         self._gh = gh
         self._wake = threading.Event()
+        self._abort_task = threading.Event()
         self._stop = False
 
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
+        self._wake.set()
+
+    def abort_task(self) -> None:
+        """Signal the worker to abort the current task after claude_run returns."""
+        self._abort_task.set()
         self._wake.set()
 
     def stop(self) -> None:
@@ -1523,7 +1582,7 @@ class WorkerThread(threading.Thread):
         """Main loop — runs until :meth:`stop` is called."""
         while not self._stop:
             try:
-                result = Worker(self.work_dir, self._gh).run()
+                result = Worker(self.work_dir, self._gh, self._abort_task).run()
             except Exception:
                 log.exception("WorkerThread %s: unexpected error", self.name)
                 self._wake.wait(timeout=_ERROR_TIMEOUT)
