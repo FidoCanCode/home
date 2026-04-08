@@ -1185,6 +1185,25 @@ class Worker:
             return False
         return True
 
+    def _cleanup_aborted_task(
+        self, fido_dir: Path, task_id: str, task_title: str
+    ) -> None:
+        """Discard uncommitted changes and remove task after an abort signal.
+
+        Called when ``self._abort_task`` is set mid-execution.  Runs
+        ``git_clean`` to restore the working tree, removes the task from the
+        queue, clears ``current_task_id`` from state, resets the abort event,
+        and syncs the PR work queue.
+        """
+        log.info("task aborted: %s", task_title)
+        self.git_clean()
+        tasks.remove_task(self.work_dir, task_id)
+        state = load_state(fido_dir)
+        state.pop("current_task_id", None)
+        save_state(fido_dir, state)
+        self._abort_task.clear()
+        sync_tasks(self.work_dir, self.gh)
+
     def execute_task(
         self,
         fido_dir: Path,
@@ -1236,6 +1255,10 @@ class Worker:
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
 
+        if self._abort_task.is_set():
+            self._cleanup_aborted_task(fido_dir, task["id"], task_title)
+            return True
+
         # Resume loop: let Claude cook until commits appear
         attempt = 0
         while head_before == head_after:
@@ -1255,6 +1278,10 @@ class Worker:
                 session_id, output = claude_run(fido_dir)
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
+
+            if self._abort_task.is_set():
+                self._cleanup_aborted_task(fido_dir, task["id"], task_title)
+                return True
 
         if session_id:
             state = load_state(fido_dir)
