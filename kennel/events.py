@@ -267,14 +267,14 @@ def reply_to_comment(
     prompts = Prompts(persona)
     comment = action.comment_body
 
-    # Enrich context with sibling threads when the comment is terse
+    # Enrich context with sibling threads when the comment needs more context
     context: dict[str, Any] = dict(action.context) if action.context else {}
-    if is_terse(comment) and info.get("repo") and info.get("pr"):
+    if needs_more_context(comment) and info.get("repo") and info.get("pr"):
         siblings = get_github().fetch_sibling_threads(info["repo"], info["pr"])
         if siblings:
             context["sibling_threads"] = siblings
             log.info(
-                "terse comment — fetched %d sibling thread(s) for context",
+                "needs-more-context comment — fetched %d sibling thread(s) for context",
                 len(siblings),
             )
 
@@ -404,22 +404,32 @@ def reply_to_review(
             already_replied.add(cid)
 
 
-_TERSE_PATTERNS = frozenset(
-    {"same", "here too", "this too", "ditto", "likewise", "^", "same here"}
-)
-_TERSE_MAX_LEN = 20
+def needs_more_context(comment_body: str) -> bool:
+    """Ask Haiku whether this comment needs sibling thread context to act on.
 
-
-def is_terse(comment_body: str) -> bool:
-    """Return True if the comment is too short or looks like a cross-reference.
-
-    Used to detect comments like "Here, too.", "Same.", "Ditto", "^" where
-    the reviewer is implicitly pointing at another thread.
+    Returns True if Haiku thinks the comment is too vague or cross-referential
+    to act on alone (e.g. "same", "ditto", "^"), False otherwise.
+    Falls back to False on any error.
     """
-    body = comment_body.strip()
-    if len(body) < _TERSE_MAX_LEN:
-        return True
-    return body.lower().rstrip(".,!") in _TERSE_PATTERNS
+    prompt = (
+        "A reviewer left this comment on a pull request:\n\n"
+        f"{comment_body!r}\n\n"
+        "Does this comment need context from sibling review threads to be understood "
+        "(e.g. it says 'same', 'ditto', '^', 'here too', or is otherwise too vague "
+        "to act on alone)?\n\n"
+        "Reply with exactly YES or NO."
+    )
+    try:
+        result = subprocess.run(
+            ["claude", "--model", "claude-haiku-4-5", "--print", "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        answer = result.stdout.strip().upper()
+        return answer.startswith("YES")
+    except Exception:
+        return False
 
 
 def _triage(

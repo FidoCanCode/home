@@ -12,10 +12,10 @@ from kennel.events import (
     _triage,
     create_task,
     dispatch,
-    is_terse,
     launch_sync,
     launch_worker,
     maybe_react,
+    needs_more_context,
     reply_to_comment,
     reply_to_issue_comment,
     reply_to_review,
@@ -47,53 +47,50 @@ def _payload(repo_owner: str = "owner") -> dict:
     }
 
 
-class TestIsTerse:
-    def test_short_comment_is_terse(self) -> None:
-        assert is_terse("short")
+class TestNeedsMoreContext:
+    def test_haiku_yes_returns_true(self) -> None:
+        with patch("subprocess.run", return_value=_make_completed_run("YES\n")):
+            assert needs_more_context("same")
 
-    def test_exactly_at_limit_is_terse(self) -> None:
-        # 19 chars — under the 20-char threshold
-        assert is_terse("a" * 19)
+    def test_haiku_yes_with_explanation_returns_true(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_make_completed_run("YES, this is vague\n")
+        ):
+            assert needs_more_context("^")
 
-    def test_at_limit_is_terse(self) -> None:
-        # exactly 20 chars — still under, since < 20 means len < 20
-        assert not is_terse("a" * 20)
+    def test_haiku_no_returns_false(self) -> None:
+        with patch("subprocess.run", return_value=_make_completed_run("NO\n")):
+            assert not needs_more_context("This is a detailed review comment.")
 
-    def test_long_generic_comment_is_not_terse(self) -> None:
-        assert not is_terse("This looks fine to me, no changes needed here.")
+    def test_haiku_no_with_explanation_returns_false(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_make_completed_run("NO, it's clear\n")
+        ):
+            assert not needs_more_context(
+                "Please rename this variable to be more descriptive."
+            )
 
-    def test_pattern_same(self) -> None:
-        assert is_terse("same")
+    def test_subprocess_exception_returns_false(self) -> None:
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert not needs_more_context("ditto")
 
-    def test_pattern_same_with_punctuation(self) -> None:
-        assert is_terse("same.")
+    def test_timeout_returns_false(self) -> None:
+        with patch(
+            "subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 10)
+        ):
+            assert not needs_more_context("same")
 
-    def test_pattern_ditto(self) -> None:
-        assert is_terse("ditto")
+    def test_empty_output_returns_false(self) -> None:
+        with patch("subprocess.run", return_value=_make_completed_run("")):
+            assert not needs_more_context("here too")
 
-    def test_pattern_here_too(self) -> None:
-        assert is_terse("here too")
-
-    def test_pattern_this_too(self) -> None:
-        assert is_terse("this too")
-
-    def test_pattern_likewise(self) -> None:
-        assert is_terse("likewise")
-
-    def test_pattern_caret(self) -> None:
-        assert is_terse("^")
-
-    def test_pattern_same_here(self) -> None:
-        assert is_terse("same here")
-
-    def test_pattern_case_insensitive(self) -> None:
-        assert is_terse("SAME")
-
-    def test_pattern_with_leading_whitespace(self) -> None:
-        assert is_terse("  ditto  ")
-
-    def test_long_non_pattern_is_not_terse(self) -> None:
-        assert not is_terse("likewise this approach works well and I agree")
+    def test_uses_haiku_model(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_make_completed_run("YES\n")
+        ) as mock_run:
+            needs_more_context("same")
+        args = mock_run.call_args[0][0]
+        assert "claude-haiku-4-5" in args
 
 
 class TestIsAllowed:
@@ -1426,12 +1423,12 @@ class TestReplyToCommentTerseEnrichment:
     def test_terse_comment_fetches_siblings_and_adds_to_context(
         self, tmp_path: Path
     ) -> None:
-        """When the comment is terse, sibling_threads are added to context for _triage."""
+        """When needs_more_context is True, sibling_threads are added to context for _triage."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
             reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 200},
-            comment_body="same",  # terse
+            comment_body="same",
             is_bot=False,
             context={"pr_title": "My PR", "file": "foo.py"},
         )
@@ -1453,6 +1450,7 @@ class TestReplyToCommentTerseEnrichment:
 
         with (
             patch("kennel.events._triage", side_effect=fake_triage),
+            patch("kennel.events.needs_more_context", return_value=True),
             patch("kennel.events.get_github", return_value=mock_gh),
             patch("subprocess.run", return_value=_make_completed_run("On it!\n")),
         ):
@@ -1463,7 +1461,7 @@ class TestReplyToCommentTerseEnrichment:
         assert len(captured_context["sibling_threads"]) == 1
 
     def test_non_terse_comment_skips_sibling_fetch(self, tmp_path: Path) -> None:
-        """Long non-terse comments do not trigger a sibling thread fetch."""
+        """When needs_more_context is False, sibling thread fetch is skipped."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -1483,6 +1481,7 @@ class TestReplyToCommentTerseEnrichment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.events.needs_more_context", return_value=False),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
@@ -1495,7 +1494,7 @@ class TestReplyToCommentTerseEnrichment:
         action = Action(
             prompt="comment",
             reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 202},
-            comment_body="ditto",  # terse
+            comment_body="ditto",
             is_bot=False,
         )
         mock_gh = MagicMock()
@@ -1511,6 +1510,7 @@ class TestReplyToCommentTerseEnrichment:
 
         with (
             patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.events.needs_more_context", return_value=True),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
@@ -1519,12 +1519,12 @@ class TestReplyToCommentTerseEnrichment:
         assert cat == "ACT"
 
     def test_terse_no_siblings_leaves_context_clean(self, tmp_path: Path) -> None:
-        """Empty pull_comments list → sibling_threads not added to context."""
+        """Empty sibling threads list → sibling_threads not added to context."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
             reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 203},
-            comment_body="^",  # terse
+            comment_body="^",
             is_bot=False,
             context={"pr_title": "My PR"},
         )
@@ -1540,6 +1540,7 @@ class TestReplyToCommentTerseEnrichment:
 
         with (
             patch("kennel.events._triage", side_effect=fake_triage),
+            patch("kennel.events.needs_more_context", return_value=True),
             patch("kennel.events.get_github", return_value=mock_gh),
             patch("subprocess.run", return_value=_make_completed_run("On it!\n")),
         ):
