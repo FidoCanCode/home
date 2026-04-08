@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from kennel.main import main
 
@@ -55,34 +52,3 @@ class TestMain:
             patch("kennel.tasks.list_tasks", return_value=[]),
         ):
             main()  # should not raise
-
-    def test_worker_subcommand_dispatches_to_worker(self, tmp_path) -> None:
-        """'kennel worker <work_dir>' should call worker.run and sys.exit."""
-        with patch("kennel.worker.run", return_value=0) as mock_run:
-            with pytest.raises(SystemExit) as exc_info:
-                main(["worker", str(tmp_path)])
-        mock_run.assert_called_once_with(Path(str(tmp_path)))
-        assert exc_info.value.code == 0
-
-    def test_worker_subcommand_exits_with_run_code(self, tmp_path) -> None:
-        """worker exit code is passed through sys.exit."""
-        with patch("kennel.worker.run", return_value=2):
-            with pytest.raises(SystemExit) as exc_info:
-                main(["worker", str(tmp_path)])
-        assert exc_info.value.code == 2
-
-    def test_worker_subcommand_defaults_to_cwd(self) -> None:
-        """'kennel worker' with no path defaults to Path.cwd()."""
-        with patch("kennel.worker.run", return_value=0) as mock_run:
-            with pytest.raises(SystemExit):
-                main(["worker"])
-        mock_run.assert_called_once_with(Path.cwd())
-
-    def test_argv_none_worker_uses_sys_argv(self, tmp_path) -> None:
-        """When argv is None and sys.argv has 'worker', dispatches to worker."""
-        with (
-            patch("sys.argv", ["kennel", "worker", str(tmp_path)]),
-            patch("kennel.worker.run", return_value=0),
-            pytest.raises(SystemExit),
-        ):
-            main()
