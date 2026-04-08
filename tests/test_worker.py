@@ -5002,6 +5002,96 @@ class TestExecuteTask:
         assert state.get("setup_session_id") == "new-sess"
         assert state.get("issue") == 99
 
+    def test_saves_current_task_id_to_state_before_claude_run(
+        self, tmp_path: Path
+    ) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 1})
+        task = {"id": "task-99", "title": "Do stuff", "status": "pending"}
+        captured: dict = {}
+
+        def capture(fd, *args, **kwargs):
+            captured.update(load_state(fd))
+            return ("sess", "")
+
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", side_effect=capture),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert captured.get("current_task_id") == "task-99"
+
+    def test_clears_current_task_id_after_completion(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 1})
+        task = {"id": "task-77", "title": "Complete me", "status": "pending"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sess", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert "current_task_id" not in load_state(fido_dir)
+
+    def test_preserves_other_state_keys_when_saving_current_task_id(
+        self, tmp_path: Path
+    ) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 5, "setup_session_id": "old-sess"})
+        task = {"id": "t-111", "title": "Preserve", "status": "pending"}
+        captured: dict = {}
+
+        def capture(fd, *args, **kwargs):
+            captured.update(load_state(fd))
+            return ("sess", "")
+
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", side_effect=capture),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 5, "br")
+        assert captured.get("issue") == 5
+        assert captured.get("setup_session_id") == "old-sess"
+        assert captured.get("current_task_id") == "t-111"
+
+    def test_current_task_id_not_cleared_when_push_fails(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        save_state(fido_dir, {"issue": 1})
+        task = {"id": "task-push-fail", "title": "Push me", "status": "pending"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("sess", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=False),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert load_state(fido_dir).get("current_task_id") == "task-push-fail"
+
 
 class TestRunExecuteTaskIntegration:
     """Tests that Worker.run() calls execute_task after handle_threads."""

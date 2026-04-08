@@ -1209,6 +1209,8 @@ class Worker:
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         state = load_state(fido_dir)
         setup_session_id = state.get("setup_session_id", "")
+        state["current_task_id"] = task["id"]
+        save_state(fido_dir, state)
         session_id, output = claude_run(fido_dir, session_id=setup_session_id)
         log.info("task done (session=%s)", session_id)
         head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
@@ -1241,6 +1243,9 @@ class Worker:
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
             tasks.complete_by_title(self.work_dir, task_title)
+            state = load_state(fido_dir)
+            state.pop("current_task_id", None)
+            save_state(fido_dir, state)
             sync_tasks(self.work_dir, self.gh)
         return True
 
