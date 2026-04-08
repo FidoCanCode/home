@@ -2098,6 +2098,40 @@ class TestFindOrCreatePr:
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
         mock_start.assert_called_once_with(fido_dir)
 
+    def test_open_pr_setup_no_tasks_returns_none(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value="sess"),
+        ):
+            result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
+        assert result is None
+
+    def test_open_pr_setup_produces_tasks_returns_pr(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        fido_dir = self._fido_dir(tmp_path)
+        task = {"title": "t", "status": "pending"}
+        call_count = 0
+
+        def list_tasks_side_effect(_work_dir):
+            nonlocal call_count
+            call_count += 1
+            return [] if call_count == 1 else [task]
+
+        with (
+            patch.object(worker, "_git"),
+            patch("kennel.worker.tasks.list_tasks", side_effect=list_tasks_side_effect),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_start", return_value="sess"),
+        ):
+            result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
+        assert result == (20, "my-br")
+
     def test_open_pr_skips_setup_when_tasks_exist(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
