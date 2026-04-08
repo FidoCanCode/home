@@ -1251,6 +1251,7 @@ class Worker:
         reviews = reviews_data.get("reviews", [])
         commits = reviews_data.get("commits", [])
         is_draft = reviews_data.get("isDraft", False)
+        requested_reviewers = reviews_data.get("requestedReviewers", [])
 
         is_approved = any(
             r.get("author", {}).get("login") == repo_ctx.owner
@@ -1301,7 +1302,8 @@ class Worker:
                 "PR #%s: changes requested — all addressed, re-requesting review",
                 pr_number,
             )
-            self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+            if repo_ctx.owner not in requested_reviewers:
+                self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
             return 0
 
         if is_draft:
@@ -1318,7 +1320,8 @@ class Worker:
                 repo_ctx.owner,
             )
             self.gh.pr_ready(repo_ctx.repo, pr_number)
-            self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+            if repo_ctx.owner not in requested_reviewers:
+                self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
             return 1
 
         log.info("PR #%s: no work", pr_number)
