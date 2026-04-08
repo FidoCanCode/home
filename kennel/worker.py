@@ -424,6 +424,28 @@ def _pick_next_task(task_list: list[dict[str, Any]]) -> dict[str, Any] | None:
     return pending[0]
 
 
+def should_rerequest_review(
+    owner_reviews: list[dict[str, Any]],
+    commits: list[dict[str, Any]],
+) -> bool:
+    """Return True if fido should re-request review from the owner.
+
+    True when the latest owner review is CHANGES_REQUESTED and either no
+    timestamps are available or the review pre-dates the latest commit
+    (meaning new work has been pushed that addresses the feedback).
+    """
+    if not owner_reviews:
+        return False
+    latest_review = owner_reviews[-1]
+    if latest_review.get("state") != "CHANGES_REQUESTED":
+        return False
+    review_at = latest_review.get("submittedAt", "")
+    latest_commit_date = max((c.get("committedDate", "") for c in commits), default="")
+    if review_at and latest_commit_date and review_at > latest_commit_date:
+        return False
+    return True
+
+
 class Worker:
     """Fido worker for a single repository.
 
@@ -1265,12 +1287,7 @@ class Worker:
         )
 
         if latest_state == "CHANGES_REQUESTED":
-            latest_review = owner_reviews[-1]
-            review_at = latest_review.get("submittedAt", "")
-            latest_commit_date = max(
-                (c.get("committedDate", "") for c in commits), default=""
-            )
-            if review_at and latest_commit_date and review_at > latest_commit_date:
+            if not should_rerequest_review(owner_reviews, commits):
                 log.info(
                     "PR #%s: CHANGES_REQUESTED review newer than latest commit — skipping re-request",
                     pr_number,

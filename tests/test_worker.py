@@ -29,6 +29,7 @@ from kennel.worker import (
     load_state,
     run,
     save_state,
+    should_rerequest_review,
     sync_tasks,
     sync_tasks_background,
 )
@@ -4615,6 +4616,79 @@ class TestRunExecuteTaskIntegration:
         ):
             worker.run()
         mock_execute.assert_not_called()
+
+
+class TestShouldRerequestReview:
+    """Tests for the should_rerequest_review module-level helper."""
+
+    def _review(
+        self,
+        state: str = "CHANGES_REQUESTED",
+        submitted_at: str = "",
+    ) -> dict:
+        r: dict = {"state": state}
+        if submitted_at:
+            r["submittedAt"] = submitted_at
+        return r
+
+    def _commit(self, committed_date: str) -> dict:
+        return {"committedDate": committed_date}
+
+    def test_empty_reviews_returns_false(self) -> None:
+        assert should_rerequest_review([], []) is False
+
+    def test_approved_returns_false(self) -> None:
+        assert should_rerequest_review([self._review("APPROVED")], []) is False
+
+    def test_commented_returns_false(self) -> None:
+        assert should_rerequest_review([self._review("COMMENTED")], []) is False
+
+    def test_changes_requested_no_dates_returns_true(self) -> None:
+        assert should_rerequest_review([self._review()], []) is True
+
+    def test_changes_requested_no_submitted_at_returns_true(self) -> None:
+        commits = [self._commit("2024-01-02T12:00:00Z")]
+        assert should_rerequest_review([self._review()], commits) is True
+
+    def test_changes_requested_no_commits_returns_true(self) -> None:
+        review = self._review(submitted_at="2024-01-02T12:00:00Z")
+        assert should_rerequest_review([review], []) is True
+
+    def test_review_older_than_commit_returns_true(self) -> None:
+        """Review pre-dates latest commit — we addressed it."""
+        review = self._review(submitted_at="2024-01-01T10:00:00Z")
+        commits = [self._commit("2024-01-02T12:00:00Z")]
+        assert should_rerequest_review([review], commits) is True
+
+    def test_review_newer_than_commit_returns_false(self) -> None:
+        """Review post-dates latest commit — new feedback, not yet addressed."""
+        review = self._review(submitted_at="2024-01-02T12:00:00Z")
+        commits = [self._commit("2024-01-01T10:00:00Z")]
+        assert should_rerequest_review([review], commits) is False
+
+    def test_uses_latest_commit_date(self) -> None:
+        """Max commit date is used, not the first one."""
+        review = self._review(submitted_at="2024-01-02T10:00:00Z")
+        commits = [
+            self._commit("2024-01-01T08:00:00Z"),
+            self._commit("2024-01-03T08:00:00Z"),
+        ]
+        assert should_rerequest_review([review], commits) is True
+
+    def test_uses_latest_owner_review(self) -> None:
+        """Only the last review matters."""
+        reviews = [
+            self._review("APPROVED"),
+            self._review("CHANGES_REQUESTED"),
+        ]
+        assert should_rerequest_review(reviews, []) is True
+
+    def test_last_review_approved_overrides_earlier_changes_requested(self) -> None:
+        reviews = [
+            self._review("CHANGES_REQUESTED"),
+            self._review("APPROVED"),
+        ]
+        assert should_rerequest_review(reviews, []) is False
 
 
 class TestHandlePromoteMerge:
