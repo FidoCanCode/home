@@ -717,8 +717,17 @@ class TestGHClass:
             result = gh.find_pr("o/r", 2, "fido")
         assert result is None
 
-    def test_find_pr_skips_merged_returns_subsequent_open_pr(self) -> None:
-        """When a merged PR and a later open PR both reference the issue, returns open."""
+    def test_find_pr_skips_closed(self) -> None:
+        """Closed (not merged) PRs are skipped — a reopened issue should get a fresh PR."""
+        gh = self._gh()
+        timeline = self._timeline_resp([self._cross_ref_event(4, "fido", "closes #2")])
+        pr = self._pr_resp(4, "fix", "closed", False, "fido")
+        with patch.object(gh._s, "get", side_effect=[timeline, pr]):
+            result = gh.find_pr("o/r", 2, "fido")
+        assert result is None
+
+    def test_find_pr_skips_non_open_returns_subsequent_open_pr(self) -> None:
+        """When a merged/closed PR and a later open PR reference the issue, returns open."""
         gh = self._gh()
         timeline = self._timeline_resp(
             [

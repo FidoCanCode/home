@@ -185,13 +185,12 @@ class GH:
                 continue
             pr_number = source_issue["number"]
             pr = self._get(f"/repos/{repo}/pulls/{pr_number}")
-            if pr.get("merged"):
+            if pr["state"] != "open":
                 continue
-            state = pr["state"].upper()
             return {
                 "number": pr["number"],
                 "headRefName": pr["head"]["ref"],
-                "state": state,
+                "state": "OPEN",
                 "author": {"login": pr["user"]["login"]},
             }
         return None
