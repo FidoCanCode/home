@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from kennel.claude import (
+    ClaudeStreamError,
     _claude,
     extract_result_text,
     extract_session_id,
@@ -189,32 +190,45 @@ class TestPrintPromptJson:
 
 
 class TestRunStreaming:
-    def test_returns_output_and_returncode(self, tmp_path: Path) -> None:
+    def test_yields_output_lines(self, tmp_path: Path) -> None:
         from kennel.claude import _run_streaming
 
         stdin_file = tmp_path / "input.txt"
         stdin_file.write_text("hello")
-        output, rc = _run_streaming(["echo", "hi"], stdin_file)
-        assert output == "hi"
-        assert rc == 0
+        lines = list(_run_streaming(["echo", "hi"], stdin_file))
+        assert "".join(lines).strip() == "hi"
 
-    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
+    def test_raises_on_file_not_found(self, tmp_path: Path) -> None:
         from kennel.claude import _run_streaming
 
         stdin_file = tmp_path / "input.txt"
         stdin_file.write_text("")
-        output, rc = _run_streaming(["/nonexistent/binary"], stdin_file)
-        assert output == ""
-        assert rc == -1
+        import pytest
 
-    def test_kills_on_idle_timeout(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            list(_run_streaming(["/nonexistent/binary"], stdin_file))
+
+    def test_raises_on_idle_timeout(self, tmp_path: Path) -> None:
         from kennel.claude import _run_streaming
 
         stdin_file = tmp_path / "input.txt"
         stdin_file.write_text("")
-        # sleep 60 will be killed after 0.1s idle timeout
-        output, rc = _run_streaming(["sleep", "60"], stdin_file, idle_timeout=0.1)
-        assert rc == -1
+        import pytest
+
+        with pytest.raises(ClaudeStreamError) as exc_info:
+            list(_run_streaming(["sleep", "60"], stdin_file, idle_timeout=0.1))
+        assert exc_info.value.returncode == -1
+
+    def test_raises_on_nonzero_exit(self, tmp_path: Path) -> None:
+        from kennel.claude import _run_streaming
+
+        stdin_file = tmp_path / "input.txt"
+        stdin_file.write_text("")
+        import pytest
+
+        with pytest.raises(ClaudeStreamError) as exc_info:
+            list(_run_streaming(["false"], stdin_file))
+        assert exc_info.value.returncode != 0
 
     def test_handles_process_exit_without_eof(self, tmp_path: Path) -> None:
         """Cover the proc.poll() is not None branch."""
@@ -240,9 +254,8 @@ class TestRunStreaming:
             # select returns NOT ready — forces poll() check
             patch("select.select", return_value=([], [], [])),
         ):
-            output, rc = _run_streaming(["fake"], stdin_file)
-        assert "leftover" in output
-        assert rc == 0
+            result = "".join(_run_streaming(["fake"], stdin_file))
+        assert "leftover" in result
 
     def test_drains_remaining_output(self, tmp_path: Path) -> None:
         """Cover the remaining = proc.stdout.read() branch."""
@@ -270,9 +283,9 @@ class TestRunStreaming:
             patch("subprocess.Popen", return_value=mock_proc),
             patch("select.select", return_value=([mock_stdout], [], [])),
         ):
-            output, rc = _run_streaming(["fake"], stdin_file)
-        assert "line1" in output
-        assert "extra" in output
+            result = "".join(_run_streaming(["fake"], stdin_file))
+        assert "line1" in result
+        assert "extra" in result
 
 
 class TestPrintPromptFromFile:
@@ -285,25 +298,33 @@ class TestPrintPromptFromFile:
 
     def test_returns_stdout_on_success(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
-        with patch("kennel.claude._run_streaming", return_value=("session output", 0)):
+        with patch(
+            "kennel.claude._run_streaming", return_value=iter(["session output"])
+        ):
             result = print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
         assert result == "session output"
 
     def test_returns_empty_on_nonzero(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
-        with patch("kennel.claude._run_streaming", return_value=("err", 1)):
+        with patch("kennel.claude._run_streaming", side_effect=ClaudeStreamError(1)):
             result = print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
         assert result == ""
 
     def test_returns_empty_on_idle_timeout(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
-        with patch("kennel.claude._run_streaming", return_value=("partial", -1)):
+        with patch("kennel.claude._run_streaming", side_effect=ClaudeStreamError(-1)):
+            result = print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
+        assert result == ""
+
+    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
+        sys, prompt = self._files(tmp_path)
+        with patch("kennel.claude._run_streaming", side_effect=FileNotFoundError):
             result = print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
         assert result == ""
 
     def test_passes_correct_cmd(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
-        with patch("kennel.claude._run_streaming", return_value=("out", 0)) as mock:
+        with patch("kennel.claude._run_streaming", return_value=iter(["out"])) as mock:
             print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
         cmd = mock.call_args[0][0]
         assert "--model" in cmd
@@ -314,7 +335,7 @@ class TestPrintPromptFromFile:
 
     def test_passes_idle_timeout(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
-        with patch("kennel.claude._run_streaming", return_value=("out", 0)) as mock:
+        with patch("kennel.claude._run_streaming", return_value=iter(["out"])) as mock:
             print_prompt_from_file(sys, prompt, "claude-sonnet-4-6", idle_timeout=600.0)
         assert mock.call_args[0][2] == 600.0
 
@@ -323,28 +344,35 @@ class TestResumeSession:
     def test_returns_stdout_on_success(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("continue")
-        with patch("kennel.claude._run_streaming", return_value=("continued", 0)):
+        with patch("kennel.claude._run_streaming", return_value=iter(["continued"])):
             result = resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
         assert result == "continued"
 
     def test_returns_empty_on_nonzero(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        with patch("kennel.claude._run_streaming", return_value=("", 1)):
+        with patch("kennel.claude._run_streaming", side_effect=ClaudeStreamError(1)):
             result = resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
         assert result == ""
 
     def test_returns_empty_on_idle_timeout(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        with patch("kennel.claude._run_streaming", return_value=("partial", -1)):
+        with patch("kennel.claude._run_streaming", side_effect=ClaudeStreamError(-1)):
+            result = resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
+        assert result == ""
+
+    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
+        prompt_file = tmp_path / "prompt.txt"
+        prompt_file.write_text("p")
+        with patch("kennel.claude._run_streaming", side_effect=FileNotFoundError):
             result = resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
         assert result == ""
 
     def test_passes_correct_cmd(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        with patch("kennel.claude._run_streaming", return_value=("out", 0)) as mock:
+        with patch("kennel.claude._run_streaming", return_value=iter(["out"])) as mock:
             resume_session("my-session-id", prompt_file, "claude-sonnet-4-6")
         cmd = mock.call_args[0][0]
         assert "--resume" in cmd
@@ -354,7 +382,7 @@ class TestResumeSession:
     def test_passes_idle_timeout(self, tmp_path: Path) -> None:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("p")
-        with patch("kennel.claude._run_streaming", return_value=("out", 0)) as mock:
+        with patch("kennel.claude._run_streaming", return_value=iter(["out"])) as mock:
             resume_session(
                 "sess-1", prompt_file, "claude-sonnet-4-6", idle_timeout=900.0
             )
