@@ -8,7 +8,6 @@ from kennel.config import Config, RepoConfig
 from kennel.events import (
     Action,
     _comment_lock,
-    _fetch_sibling_threads,
     _is_allowed,
     _triage,
     create_task,
@@ -1409,72 +1408,6 @@ class TestReplyToReviewAlreadyRepliedTracking:
         assert 501 not in already  # post failed — should not be marked as replied
 
 
-class TestFetchSiblingThreads:
-    def _raw_comment(
-        self,
-        cid: int,
-        body: str,
-        path: str = "foo.py",
-        line: int = 10,
-        author: str = "reviewer",
-        parent_id: int | None = None,
-    ) -> dict:
-        c = {
-            "id": cid,
-            "body": body,
-            "path": path,
-            "line": line,
-            "user": {"login": author},
-        }
-        if parent_id is not None:
-            c["in_reply_to_id"] = parent_id
-        return c
-
-    def test_groups_root_and_replies(self) -> None:
-        raw = [
-            self._raw_comment(1, "fix this", path="a.py", line=5),
-            self._raw_comment(2, "agreed", parent_id=1, author="fido"),
-            self._raw_comment(3, "nit here", path="b.py", line=20),
-        ]
-        mock_gh = MagicMock()
-        mock_gh.get_pull_comments.return_value = raw
-        with patch("kennel.events.get_github", return_value=mock_gh):
-            threads = _fetch_sibling_threads("owner/repo", 7)
-        assert len(threads) == 2
-        thread_a = next(t for t in threads if t["path"] == "a.py")
-        assert thread_a["line"] == 5
-        assert len(thread_a["comments"]) == 2
-        assert thread_a["comments"][0] == {"author": "reviewer", "body": "fix this"}
-        assert thread_a["comments"][1] == {"author": "fido", "body": "agreed"}
-        thread_b = next(t for t in threads if t["path"] == "b.py")
-        assert len(thread_b["comments"]) == 1
-
-    def test_returns_empty_on_exception(self) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_pull_comments.side_effect = RuntimeError("network fail")
-        with patch("kennel.events.get_github", return_value=mock_gh):
-            result = _fetch_sibling_threads("owner/repo", 7)
-        assert result == []
-
-    def test_returns_empty_list_when_no_comments(self) -> None:
-        mock_gh = MagicMock()
-        mock_gh.get_pull_comments.return_value = []
-        with patch("kennel.events.get_github", return_value=mock_gh):
-            result = _fetch_sibling_threads("owner/repo", 7)
-        assert result == []
-
-    def test_reply_without_matching_root_is_skipped(self) -> None:
-        """A reply whose parent_id has no root in the dict is silently skipped."""
-        raw = [
-            self._raw_comment(99, "orphan reply", parent_id=9999),
-        ]
-        mock_gh = MagicMock()
-        mock_gh.get_pull_comments.return_value = raw
-        with patch("kennel.events.get_github", return_value=mock_gh):
-            result = _fetch_sibling_threads("owner/repo", 7)
-        assert result == []
-
-
 class TestReplyToCommentTerseEnrichment:
     def _cfg(self, tmp_path: Path) -> Config:
         return Config(
@@ -1510,13 +1443,11 @@ class TestReplyToCommentTerseEnrichment:
             return ("ACT", "handle same comment")
 
         mock_gh = MagicMock()
-        mock_gh.get_pull_comments.return_value = [
+        mock_gh.fetch_sibling_threads.return_value = [
             {
-                "id": 1,
-                "body": "fix this",
                 "path": "bar.py",
                 "line": 1,
-                "user": {"login": "rev"},
+                "comments": [{"author": "rev", "body": "fix this"}],
             }
         ]
 
@@ -1527,7 +1458,7 @@ class TestReplyToCommentTerseEnrichment:
         ):
             reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
 
-        mock_gh.get_pull_comments.assert_called_once_with("owner/repo", 5)
+        mock_gh.fetch_sibling_threads.assert_called_once_with("owner/repo", 5)
         assert "sibling_threads" in captured_context
         assert len(captured_context["sibling_threads"]) == 1
 
@@ -1556,7 +1487,7 @@ class TestReplyToCommentTerseEnrichment:
         ):
             reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
 
-        mock_gh.get_pull_comments.assert_not_called()
+        mock_gh.fetch_sibling_threads.assert_not_called()
 
     def test_terse_fetch_exception_does_not_propagate(self, tmp_path: Path) -> None:
         """If sibling fetch fails, reply_to_comment proceeds without sibling_threads."""
@@ -1568,7 +1499,7 @@ class TestReplyToCommentTerseEnrichment:
             is_bot=False,
         )
         mock_gh = MagicMock()
-        mock_gh.get_pull_comments.side_effect = RuntimeError("network fail")
+        mock_gh.fetch_sibling_threads.return_value = []
 
         def fake_run(args, **kwargs):
             if "claude" in args:
@@ -1605,7 +1536,7 @@ class TestReplyToCommentTerseEnrichment:
             return ("ACT", "check caret comment")
 
         mock_gh = MagicMock()
-        mock_gh.get_pull_comments.return_value = []
+        mock_gh.fetch_sibling_threads.return_value = []
 
         with (
             patch("kennel.events._triage", side_effect=fake_triage),
