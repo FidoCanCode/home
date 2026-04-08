@@ -13,6 +13,7 @@ from kennel.worker import (
     RepoContext,
     Worker,
     WorkerContext,
+    WorkerThread,
     _pick_next_task,
     _sanitize_slug,
     acquire_lock,
@@ -5377,3 +5378,151 @@ class TestRunPromoteMergeIntegration:
         ):
             worker.run()
         mock_hpm.assert_not_called()
+
+
+class TestWorkerThread:
+    def _make_thread(self, tmp_path: Path) -> WorkerThread:
+        return WorkerThread(tmp_path, MagicMock())
+
+    # ── constructor / attributes ──────────────────────────────────────────
+
+    def test_is_daemon(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt.daemon is True
+
+    def test_name_includes_work_dir_name(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert tmp_path.name in wt.name
+
+    def test_work_dir_stored(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt.work_dir == tmp_path
+
+    # ── wake / stop ───────────────────────────────────────────────────────
+
+    def test_wake_sets_event(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert not wt._wake.is_set()
+        wt.wake()
+        assert wt._wake.is_set()
+
+    def test_stop_sets_flag_and_wakes(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        wt.stop()
+        assert wt._stop is True
+        assert wt._wake.is_set()
+
+    # ── loop behaviour ────────────────────────────────────────────────────
+
+    def _run_thread(self, wt: "WorkerThread", timeout: float = 5.0) -> None:
+        """Start thread and join with timeout. Fail if it hangs."""
+        wt.start()
+        wt.join(timeout=timeout)
+        assert not wt.is_alive(), "WorkerThread hung — did not exit within timeout"
+
+    def test_return_1_loops_immediately_without_waiting(self, tmp_path: Path) -> None:
+        """Return 1 (did work) should never call _wake.wait."""
+        wt = self._make_thread(tmp_path)
+        mock_wake = MagicMock()
+        wt._wake = mock_wake
+        calls: list[int] = []
+
+        def fake_worker_run(self_ignored=None) -> int:
+            calls.append(len(calls))
+            if len(calls) < 3:
+                return 1
+            wt._stop = True
+            return 1
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        assert len(calls) == 3
+        mock_wake.wait.assert_not_called()
+
+    def test_return_0_waits_with_idle_timeout(self, tmp_path: Path) -> None:
+        """Return 0 (no work) should call _wake.wait with _IDLE_TIMEOUT."""
+        import kennel.worker as wmod
+
+        wt = self._make_thread(tmp_path)
+        mock_wake = MagicMock()
+        wt._wake = mock_wake
+
+        def fake_worker_run(self_ignored=None) -> int:
+            wt._stop = True
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        mock_wake.wait.assert_called_once_with(timeout=wmod._IDLE_TIMEOUT)
+
+    def test_return_2_waits_with_retry_timeout(self, tmp_path: Path) -> None:
+        """Return 2 (lock contended) should call _wake.wait with _RETRY_TIMEOUT."""
+        import kennel.worker as wmod
+
+        wt = self._make_thread(tmp_path)
+        mock_wake = MagicMock()
+        wt._wake = mock_wake
+
+        def fake_worker_run(self_ignored=None) -> int:
+            wt._stop = True
+            return 2
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        mock_wake.wait.assert_called_once_with(timeout=wmod._RETRY_TIMEOUT)
+
+    def test_exception_is_caught_and_loop_continues(self, tmp_path: Path) -> None:
+        """An unexpected exception should be caught; loop continues after wait."""
+        import kennel.worker as wmod
+
+        wt = self._make_thread(tmp_path)
+        mock_wake = MagicMock()
+        wt._wake = mock_wake
+        call_count = 0
+
+        def fake_worker_run(self_ignored=None) -> int:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("boom")
+            wt._stop = True
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        assert call_count == 2
+        assert mock_wake.wait.call_count == 2
+        first_timeout = mock_wake.wait.call_args_list[0].kwargs["timeout"]
+        assert first_timeout == wmod._ERROR_TIMEOUT
+
+    def test_stop_flag_exits_loop_before_next_iteration(self, tmp_path: Path) -> None:
+        """Setting stop before run() starts should cause immediate exit."""
+        wt = self._make_thread(tmp_path)
+        wt.stop()
+        with patch.object(Worker, "run") as mock_run:
+            wt.run()
+        mock_run.assert_not_called()
+
+    def test_wake_clears_event_after_wait(self, tmp_path: Path) -> None:
+        """_wake event is cleared after each wait so the next idle wait blocks."""
+        wt = self._make_thread(tmp_path)
+        mock_wake = MagicMock()
+        wt._wake = mock_wake
+        call_count = 0
+
+        def fake_worker_run(self_ignored=None) -> int:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                wt._stop = True
+            return 0
+
+        with patch.object(Worker, "run", fake_worker_run):
+            self._run_thread(wt)
+
+        # clear() called after each wait
+        assert mock_wake.clear.call_count == 2
