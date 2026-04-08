@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from kennel.config import RepoConfig
-from kennel.registry import WorkerRegistry, _make_thread, make_registry
+from kennel.registry import WorkerActivity, WorkerRegistry, _make_thread, make_registry
 
 
 def _repo(name: str, work_dir: Path) -> RepoConfig:
@@ -128,6 +128,41 @@ class TestWorkerRegistry:
     def test_is_alive_false_for_unknown_repo(self) -> None:
         reg, _ = self._make_registry()
         assert reg.is_alive("unknown/repo") is False
+
+    def test_report_activity_stores_entry(self) -> None:
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "Working on: #1", busy=True)
+        activities = reg.get_all_activities()
+        assert activities == [WorkerActivity("foo/bar", "Working on: #1", busy=True)]
+
+    def test_report_activity_overwrites_previous(self) -> None:
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "Working on: #1", busy=True)
+        reg.report_activity("foo/bar", "Napping", busy=False)
+        activities = reg.get_all_activities()
+        assert activities == [WorkerActivity("foo/bar", "Napping", busy=False)]
+
+    def test_get_all_activities_returns_all_repos(self) -> None:
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "Working on: #1", busy=True)
+        reg.report_activity("foo/baz", "Napping", busy=False)
+        activities = reg.get_all_activities()
+        assert sorted(activities, key=lambda a: a.repo_name) == [
+            WorkerActivity("foo/bar", "Working on: #1", busy=True),
+            WorkerActivity("foo/baz", "Napping", busy=False),
+        ]
+
+    def test_get_all_activities_empty_initially(self) -> None:
+        reg, _ = self._make_registry()
+        assert reg.get_all_activities() == []
+
+    def test_get_all_activities_returns_snapshot(self) -> None:
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "Working on: #1", busy=True)
+        snapshot = reg.get_all_activities()
+        reg.report_activity("foo/bar", "Napping", busy=False)
+        # snapshot must not reflect the later update
+        assert snapshot == [WorkerActivity("foo/bar", "Working on: #1", busy=True)]
 
     def test_start_replaces_existing_thread_entry(self, tmp_path: Path) -> None:
         threads = [MagicMock(), MagicMock()]
