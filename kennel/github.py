@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -10,6 +11,8 @@ from typing import Any
 from urllib.parse import quote
 
 import requests as _requests
+
+log = logging.getLogger(__name__)
 
 # ── Requests-based GitHub API client ─────────────────────────────────────────
 
@@ -98,6 +101,40 @@ class GH:
     def get_pull_comments(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
         """Return all inline review comments on a pull request."""
         return self._get(f"/repos/{repo}/pulls/{pr}/comments")
+
+    def fetch_sibling_threads(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
+        """Return all review-comment threads for a PR as a structured list.
+
+        Each entry is {path, line, comments: [{author, body}, ...]}.
+        Root comments (no in_reply_to_id) start a new thread; replies are appended.
+        Returns [] on any error.
+        """
+        try:
+            raw = self.get_pull_comments(repo, pr)
+        except Exception:
+            log.exception("failed to fetch sibling threads for %s#%s", repo, pr)
+            return []
+
+        threads: dict[int, dict[str, Any]] = {}
+        for c in raw:
+            cid = c["id"]
+            parent_id = c.get("in_reply_to_id")
+            entry = {
+                "author": c.get("user", {}).get("login", ""),
+                "body": c.get("body", ""),
+            }
+            if parent_id is None:
+                threads[cid] = {
+                    "path": c.get("path", ""),
+                    "line": c.get("line"),
+                    "comments": [entry],
+                }
+            else:
+                root = threads.get(parent_id)
+                if root is not None:
+                    root["comments"].append(entry)
+
+        return list(threads.values())
 
     def get_review_comments(
         self, repo: str, pr: int | str, review_id: int | str
@@ -401,6 +438,10 @@ class GitHub:
     def get_pull_comments(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
         """Return all inline review comments on a pull request."""
         return self._gh.get_pull_comments(repo, pr)
+
+    def fetch_sibling_threads(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
+        """Return all review-comment threads for a PR as a structured list."""
+        return self._gh.fetch_sibling_threads(repo, pr)
 
     def find_pr(
         self, repo: str, issue_number: int | str, user: str

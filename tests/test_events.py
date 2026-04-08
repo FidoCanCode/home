@@ -15,6 +15,7 @@ from kennel.events import (
     launch_sync,
     launch_worker,
     maybe_react,
+    needs_more_context,
     reply_to_comment,
     reply_to_issue_comment,
     reply_to_review,
@@ -44,6 +45,52 @@ def _payload(repo_owner: str = "owner") -> dict:
             "owner": {"login": repo_owner},
         },
     }
+
+
+class TestNeedsMoreContext:
+    def test_haiku_yes_returns_true(self) -> None:
+        with patch("subprocess.run", return_value=_make_completed_run("YES\n")):
+            assert needs_more_context("same")
+
+    def test_haiku_yes_with_explanation_returns_true(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_make_completed_run("YES, this is vague\n")
+        ):
+            assert needs_more_context("^")
+
+    def test_haiku_no_returns_false(self) -> None:
+        with patch("subprocess.run", return_value=_make_completed_run("NO\n")):
+            assert not needs_more_context("This is a detailed review comment.")
+
+    def test_haiku_no_with_explanation_returns_false(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_make_completed_run("NO, it's clear\n")
+        ):
+            assert not needs_more_context(
+                "Please rename this variable to be more descriptive."
+            )
+
+    def test_subprocess_exception_returns_false(self) -> None:
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert not needs_more_context("ditto")
+
+    def test_timeout_returns_false(self) -> None:
+        with patch(
+            "subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 10)
+        ):
+            assert not needs_more_context("same")
+
+    def test_empty_output_returns_false(self) -> None:
+        with patch("subprocess.run", return_value=_make_completed_run("")):
+            assert not needs_more_context("here too")
+
+    def test_uses_haiku_model(self) -> None:
+        with patch(
+            "subprocess.run", return_value=_make_completed_run("YES\n")
+        ) as mock_run:
+            needs_more_context("same")
+        args = mock_run.call_args[0][0]
+        assert "claude-haiku-4-5" in args
 
 
 class TestIsAllowed:
@@ -1356,3 +1403,147 @@ class TestReplyToReviewAlreadyRepliedTracking:
                 action, cfg, self._repo_cfg(tmp_path), already_replied=already
             )
         assert 501 not in already  # post failed — should not be marked as replied
+
+
+class TestReplyToCommentTerseEnrichment:
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        return RepoConfig(name="owner/repo", work_dir=tmp_path)
+
+    def test_terse_comment_fetches_siblings_and_adds_to_context(
+        self, tmp_path: Path
+    ) -> None:
+        """When needs_more_context is True, sibling_threads are added to context for _triage."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 200},
+            comment_body="same",
+            is_bot=False,
+            context={"pr_title": "My PR", "file": "foo.py"},
+        )
+        captured_context: dict = {}
+
+        def fake_triage(body, is_bot, context=None):
+            if context is not None:
+                captured_context.update(context)
+            return ("ACT", "handle same comment")
+
+        mock_gh = MagicMock()
+        mock_gh.fetch_sibling_threads.return_value = [
+            {
+                "path": "bar.py",
+                "line": 1,
+                "comments": [{"author": "rev", "body": "fix this"}],
+            }
+        ]
+
+        with (
+            patch("kennel.events._triage", side_effect=fake_triage),
+            patch("kennel.events.needs_more_context", return_value=True),
+            patch("kennel.events.get_github", return_value=mock_gh),
+            patch("subprocess.run", return_value=_make_completed_run("On it!\n")),
+        ):
+            reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+
+        mock_gh.fetch_sibling_threads.assert_called_once_with("owner/repo", 5)
+        assert "sibling_threads" in captured_context
+        assert len(captured_context["sibling_threads"]) == 1
+
+    def test_non_terse_comment_skips_sibling_fetch(self, tmp_path: Path) -> None:
+        """When needs_more_context is False, sibling thread fetch is skipped."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 201},
+            comment_body="This is a detailed comment explaining the issue clearly.",
+            is_bot=False,
+        )
+        mock_gh = MagicMock()
+
+        def fake_run(args, **kwargs):
+            if "claude" in args:
+                text = args[-1]
+                if "Triage" in text:
+                    return _make_completed_run("ACT: do it\n")
+                return _make_completed_run("Got it.\n")
+            return _make_completed_run("")
+
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.events.needs_more_context", return_value=False),
+            patch("kennel.events.get_github", return_value=mock_gh),
+        ):
+            reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+
+        mock_gh.fetch_sibling_threads.assert_not_called()
+
+    def test_terse_fetch_exception_does_not_propagate(self, tmp_path: Path) -> None:
+        """If sibling fetch fails, reply_to_comment proceeds without sibling_threads."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 202},
+            comment_body="ditto",
+            is_bot=False,
+        )
+        mock_gh = MagicMock()
+        mock_gh.fetch_sibling_threads.return_value = []
+
+        def fake_run(args, **kwargs):
+            if "claude" in args:
+                text = args[-1]
+                if "Triage" in text:
+                    return _make_completed_run("ACT: do it\n")
+                return _make_completed_run("On it.\n")
+            return _make_completed_run("")
+
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.events.needs_more_context", return_value=True),
+            patch("kennel.events.get_github", return_value=mock_gh),
+        ):
+            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+
+        assert posted
+        assert cat == "ACT"
+
+    def test_terse_no_siblings_leaves_context_clean(self, tmp_path: Path) -> None:
+        """Empty sibling threads list → sibling_threads not added to context."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 203},
+            comment_body="^",
+            is_bot=False,
+            context={"pr_title": "My PR"},
+        )
+        captured_context: dict = {}
+
+        def fake_triage(body, is_bot, context=None):
+            if context is not None:
+                captured_context.update(context)
+            return ("ACT", "check caret comment")
+
+        mock_gh = MagicMock()
+        mock_gh.fetch_sibling_threads.return_value = []
+
+        with (
+            patch("kennel.events._triage", side_effect=fake_triage),
+            patch("kennel.events.needs_more_context", return_value=True),
+            patch("kennel.events.get_github", return_value=mock_gh),
+            patch("subprocess.run", return_value=_make_completed_run("On it!\n")),
+        ):
+            reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+
+        assert "sibling_threads" not in captured_context

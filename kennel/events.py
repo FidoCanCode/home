@@ -267,12 +267,23 @@ def reply_to_comment(
     prompts = Prompts(persona)
     comment = action.comment_body
 
+    # Enrich context with sibling threads when the comment needs more context
+    context: dict[str, Any] = dict(action.context) if action.context else {}
+    if needs_more_context(comment) and info.get("repo") and info.get("pr"):
+        siblings = get_github().fetch_sibling_threads(info["repo"], info["pr"])
+        if siblings:
+            context["sibling_threads"] = siblings
+            log.info(
+                "needs-more-context comment — fetched %d sibling thread(s) for context",
+                len(siblings),
+            )
+
     # Step 1: Haiku triage
-    category, title = _triage(comment, action.is_bot, action.context)
+    category, title = _triage(comment, action.is_bot, context)
     log.info("triage: %s — %s", category, title)
 
     # Step 2: Opus reply based on triage
-    instr = reply_instruction(category, comment, title, action.context)
+    instr = reply_instruction(category, comment, title, context)
 
     log.info(
         "generating %s reply for PR #%s comment %s",
@@ -391,6 +402,34 @@ def reply_to_review(
         )
         if posted and already_replied is not None:
             already_replied.add(cid)
+
+
+def needs_more_context(comment_body: str) -> bool:
+    """Ask Haiku whether this comment needs sibling thread context to act on.
+
+    Returns True if Haiku thinks the comment is too vague or cross-referential
+    to act on alone (e.g. "same", "ditto", "^"), False otherwise.
+    Falls back to False on any error.
+    """
+    prompt = (
+        "A reviewer left this comment on a pull request:\n\n"
+        f"{comment_body!r}\n\n"
+        "Does this comment need context from sibling review threads to be understood "
+        "(e.g. it says 'same', 'ditto', '^', 'here too', or is otherwise too vague "
+        "to act on alone)?\n\n"
+        "Reply with exactly YES or NO."
+    )
+    try:
+        result = subprocess.run(
+            ["claude", "--model", "claude-haiku-4-5", "--print", "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        answer = result.stdout.strip().upper()
+        return answer.startswith("YES")
+    except Exception:
+        return False
 
 
 def _triage(

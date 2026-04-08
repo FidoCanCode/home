@@ -210,6 +210,13 @@ class TestGitHubClass:
         with patch.object(gh._gh._s, "get", return_value=mock_resp):
             assert gh.get_pull_comments("o/r", 7) == comments
 
+    def test_fetch_sibling_threads_delegates(self) -> None:
+        gh = self._github()
+        with patch.object(gh._gh, "fetch_sibling_threads", return_value=[]) as mock_m:
+            result = gh.fetch_sibling_threads("o/r", 7)
+        mock_m.assert_called_once_with("o/r", 7)
+        assert result == []
+
     def test_find_pr_delegates(self) -> None:
         gh = self._github()
         search_resp = MagicMock()
@@ -1042,3 +1049,69 @@ class TestGHClass:
         with patch.object(gh._s, "get", side_effect=[jobs_resp, log_resp]):
             result = gh.get_run_log("o/r", 55)
         assert result == "timed out log\n"
+
+    def _raw_comment(
+        self,
+        cid: int,
+        body: str,
+        path: str = "foo.py",
+        line: int = 10,
+        author: str = "reviewer",
+        parent_id: int | None = None,
+    ) -> dict:
+        c = {
+            "id": cid,
+            "body": body,
+            "path": path,
+            "line": line,
+            "user": {"login": author},
+        }
+        if parent_id is not None:
+            c["in_reply_to_id"] = parent_id
+        return c
+
+    def test_fetch_sibling_threads_groups_root_and_replies(self) -> None:
+        gh = self._gh()
+        raw = [
+            self._raw_comment(1, "fix this", path="a.py", line=5),
+            self._raw_comment(2, "agreed", parent_id=1, author="fido"),
+            self._raw_comment(3, "nit here", path="b.py", line=20),
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = raw
+        with patch.object(gh._s, "get", return_value=mock_resp):
+            threads = gh.fetch_sibling_threads("o/r", 7)
+        assert len(threads) == 2
+        thread_a = next(t for t in threads if t["path"] == "a.py")
+        assert thread_a["line"] == 5
+        assert len(thread_a["comments"]) == 2
+        assert thread_a["comments"][0] == {"author": "reviewer", "body": "fix this"}
+        assert thread_a["comments"][1] == {"author": "fido", "body": "agreed"}
+        thread_b = next(t for t in threads if t["path"] == "b.py")
+        assert len(thread_b["comments"]) == 1
+
+    def test_fetch_sibling_threads_returns_empty_on_exception(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = RuntimeError("network fail")
+        with patch.object(gh._s, "get", return_value=mock_resp):
+            result = gh.fetch_sibling_threads("o/r", 7)
+        assert result == []
+
+    def test_fetch_sibling_threads_empty_pr(self) -> None:
+        gh = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        with patch.object(gh._s, "get", return_value=mock_resp):
+            result = gh.fetch_sibling_threads("o/r", 7)
+        assert result == []
+
+    def test_fetch_sibling_threads_orphan_reply_skipped(self) -> None:
+        """A reply whose parent_id has no root in the dict is silently skipped."""
+        gh = self._gh()
+        raw = [self._raw_comment(99, "orphan reply", parent_id=9999)]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = raw
+        with patch.object(gh._s, "get", return_value=mock_resp):
+            result = gh.fetch_sibling_threads("o/r", 7)
+        assert result == []
