@@ -6,6 +6,7 @@ import fcntl
 import json
 import subprocess
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -65,10 +66,10 @@ def _fido_running(lock_path: Path) -> bool:
         return False
 
 
-def _pgrep(pattern: str) -> list[int]:
+def _pgrep(pattern: str, *, _run: Callable[..., Any] = subprocess.run) -> list[int]:
     """Return PIDs whose command line matches pattern via pgrep -f."""
     try:
-        result = subprocess.run(
+        result = _run(
             ["pgrep", "-f", pattern],
             capture_output=True,
             text=True,
@@ -86,10 +87,12 @@ def _pgrep(pattern: str) -> list[int]:
         return []
 
 
-def _process_uptime_seconds(pid: int) -> int | None:
+def _process_uptime_seconds(
+    pid: int, *, _run: Callable[..., Any] = subprocess.run
+) -> int | None:
     """Return elapsed seconds since the process started, or None if unavailable."""
     try:
-        result = subprocess.run(
+        result = _run(
             ["ps", "-p", str(pid), "-o", "etimes="],
             capture_output=True,
             text=True,
@@ -145,12 +148,12 @@ def _port_from_pid(pid: int) -> int | None:
     return None
 
 
-def _fetch_activities(port: int) -> dict[str, str]:
+def _fetch_activities(
+    port: int, *, _urlopen: Callable[..., Any] = urllib.request.urlopen
+) -> dict[str, str]:
     """Query GET /status on the kennel server, returning {repo_name: what}."""
     try:
-        with urllib.request.urlopen(
-            f"http://localhost:{port}/status", timeout=2
-        ) as resp:
+        with _urlopen(f"http://localhost:{port}/status", timeout=2) as resp:
             data = json.loads(resp.read())
         return {
             item["repo_name"]: item["what"]
@@ -167,10 +170,12 @@ def _claude_pid(fido_dir: Path) -> int | None:
     return pids[0] if pids else None
 
 
-def _git_dir(work_dir: Path) -> Path | None:
+def _git_dir(
+    work_dir: Path, *, _run: Callable[..., Any] = subprocess.run
+) -> Path | None:
     """Return the absolute git directory for work_dir, or None if unavailable."""
     try:
-        result = subprocess.run(
+        result = _run(
             ["git", "rev-parse", "--absolute-git-dir"],
             cwd=work_dir,
             capture_output=True,
