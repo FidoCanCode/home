@@ -1570,6 +1570,13 @@ class Worker:
                     pr_number,
                 )
                 return 0
+            if pending:
+                log.info(
+                    "PR #%s: %d tasks still pending — not promoting yet",
+                    pr_number,
+                    len(pending),
+                )
+                return 0
             log.info("PR #%s: work complete — marking ready", pr_number)
             self.gh.pr_ready(repo_ctx.repo, pr_number)
             if repo_ctx.owner not in requested_reviewers:
