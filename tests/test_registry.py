@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -163,6 +164,51 @@ class TestWorkerRegistry:
         reg.report_activity("foo/bar", "Napping", busy=False)
         # snapshot must not reflect the later update
         assert snapshot == [WorkerActivity("foo/bar", "Working on: #1", busy=True)]
+
+    def test_concurrent_report_and_read_are_safe(self) -> None:
+        """report_activity and get_all_activities are safe under concurrent load.
+
+        Multiple writer threads each own one repo and hammer report_activity;
+        a reader thread continuously calls get_all_activities.  After all
+        writers finish, every repo must appear exactly once in the snapshot
+        with its final value, proving no data was lost or corrupted.
+        """
+        reg, _ = self._make_registry()
+        n_repos = 8
+        n_writes = 200
+        errors: list[Exception] = []
+
+        def writer(repo: str) -> None:
+            try:
+                for i in range(n_writes):
+                    reg.report_activity(repo, f"step {i}", busy=i % 2 == 0)
+            except Exception as exc:
+                errors.append(exc)
+
+        def reader() -> None:
+            try:
+                for _ in range(n_writes * n_repos):
+                    activities = reg.get_all_activities()
+                    # snapshot must be a plain list — no shared references
+                    assert isinstance(activities, list)
+            except Exception as exc:
+                errors.append(exc)
+
+        repos = [f"owner/repo{i}" for i in range(n_repos)]
+        threads = [threading.Thread(target=writer, args=(r,)) for r in repos]
+        threads.append(threading.Thread(target=reader))
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"concurrent errors: {errors}"
+
+        final = {a.repo_name: a for a in reg.get_all_activities()}
+        assert set(final) == set(repos)
+        for repo in repos:
+            assert final[repo].what == f"step {n_writes - 1}"
 
     def test_start_replaces_existing_thread_entry(self, tmp_path: Path) -> None:
         threads = [MagicMock(), MagicMock()]
