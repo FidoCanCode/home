@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -209,28 +208,14 @@ def maybe_react(
         persona = ""
 
     prompts = Prompts(persona)
-    try:
-        result = subprocess.run(
-            [
-                "claude",
-                "--model",
-                "claude-opus-4-6",
-                "--print",
-                "-p",
-                prompts.react_prompt(comment_body),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
+    reaction = (
+        claude.print_prompt(
+            prompts.react_prompt(comment_body), "claude-opus-4-6", timeout=15
         )
-        reaction = (
-            result.stdout.strip().lower().split("\n")[0].strip()
-            if result.returncode == 0
-            else ""
-        )
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        log.warning("react subprocess timed out or claude not found")
-        return
+        .lower()
+        .split("\n")[0]
+        .strip()
+    )
 
     valid = {"+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"}
     if reaction not in valid:
@@ -317,27 +302,9 @@ def reply_to_comment(
         info["pr"],
         info["comment_id"],
     )
-    try:
-        result = subprocess.run(
-            [
-                "claude",
-                "--model",
-                "claude-opus-4-6",
-                "--print",
-                "-p",
-                prompts.persona_wrap(instr),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        body = result.stdout.strip() if result.returncode == 0 else ""
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        log.warning(
-            "Opus reply subprocess timed out or claude not found for comment %s",
-            info.get("comment_id"),
-        )
-        body = ""
+    body = claude.print_prompt(
+        prompts.persona_wrap(instr), "claude-opus-4-6", timeout=30
+    )
 
     if not body:
         body = (
@@ -449,18 +416,8 @@ def needs_more_context(comment_body: str) -> bool:
         "to act on alone)?\n\n"
         "Reply with exactly YES or NO."
     )
-    try:
-        result = subprocess.run(
-            ["claude", "--model", "claude-haiku-4-5", "--print", "-p", prompt],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        answer = result.stdout.strip().upper()
-        return answer.startswith("YES")
-    except Exception:
-        log.exception("needs_more_context subprocess failed")
-        return False
+    answer = claude.print_prompt(prompt, "claude-haiku-4-5", timeout=10).upper()
+    return answer.startswith("YES")
 
 
 def _triage(
@@ -468,22 +425,14 @@ def _triage(
 ) -> tuple[str, str]:
     """Ask Haiku to triage a comment. Returns (prefix, title)."""
     prompt = triage_prompt(comment_body, is_bot, context)
-    try:
-        result = subprocess.run(
-            ["claude", "--model", "claude-opus-4-6", "--print", "-p", prompt],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-        if ":" in line:
-            prefix, title = line.split(":", 1)
-            prefix = prefix.strip().upper()
-            title = title.strip()
-            if prefix in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
-                return prefix, title
-    except Exception:
-        log.exception("triage subprocess failed")
+    text = claude.print_prompt(prompt, "claude-opus-4-6", timeout=15)
+    line = text.splitlines()[0] if text else ""
+    if ":" in line:
+        prefix, title = line.split(":", 1)
+        prefix = prefix.strip().upper()
+        title = title.strip()
+        if prefix in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
+            return prefix, title
     # Fallback: ACT for humans, DO for bots
     return ("DO" if is_bot else "ACT"), comment_body[:80]
 
@@ -527,26 +476,9 @@ def reply_to_issue_comment(
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
-    try:
-        result = subprocess.run(
-            [
-                "claude",
-                "--model",
-                "claude-opus-4-6",
-                "--print",
-                "-p",
-                prompts.persona_wrap(instr),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        body = result.stdout.strip() if result.returncode == 0 else ""
-    except subprocess.TimeoutExpired, FileNotFoundError:
-        log.warning(
-            "Opus reply subprocess timed out or claude not found for PR #%s", number
-        )
-        body = ""
+    body = claude.print_prompt(
+        prompts.persona_wrap(instr), "claude-opus-4-6", timeout=30
+    )
     if not body:
         body = "On it!" if category in ("ACT", "DO") else "Noted."
 
