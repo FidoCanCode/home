@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import logging
-import subprocess
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
@@ -50,52 +48,39 @@ def _payload(repo_owner: str = "owner") -> dict:
 
 class TestNeedsMoreContext:
     def test_haiku_yes_returns_true(self) -> None:
-        with patch("subprocess.run", return_value=_make_completed_run("YES\n")):
+        with patch("kennel.claude.print_prompt", return_value="YES"):
             assert needs_more_context("same")
 
     def test_haiku_yes_with_explanation_returns_true(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_make_completed_run("YES, this is vague\n")
-        ):
+        with patch("kennel.claude.print_prompt", return_value="YES, this is vague"):
             assert needs_more_context("^")
 
     def test_haiku_no_returns_false(self) -> None:
-        with patch("subprocess.run", return_value=_make_completed_run("NO\n")):
+        with patch("kennel.claude.print_prompt", return_value="NO"):
             assert not needs_more_context("This is a detailed review comment.")
 
     def test_haiku_no_with_explanation_returns_false(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_make_completed_run("NO, it's clear\n")
-        ):
+        with patch("kennel.claude.print_prompt", return_value="NO, it's clear"):
             assert not needs_more_context(
                 "Please rename this variable to be more descriptive."
             )
 
-    def test_subprocess_exception_returns_false(self, caplog) -> None:
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            with caplog.at_level(logging.WARNING, logger="kennel.events"):
-                assert not needs_more_context("ditto")
-        assert "needs_more_context subprocess failed" in caplog.text
+    def test_subprocess_exception_returns_false(self) -> None:
+        with patch("kennel.claude.print_prompt", return_value=""):
+            assert not needs_more_context("ditto")
 
-    def test_timeout_returns_false(self, caplog) -> None:
-        with patch(
-            "subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 10)
-        ):
-            with caplog.at_level(logging.WARNING, logger="kennel.events"):
-                assert not needs_more_context("same")
-        assert "needs_more_context subprocess failed" in caplog.text
+    def test_timeout_returns_false(self) -> None:
+        with patch("kennel.claude.print_prompt", return_value=""):
+            assert not needs_more_context("same")
 
     def test_empty_output_returns_false(self) -> None:
-        with patch("subprocess.run", return_value=_make_completed_run("")):
+        with patch("kennel.claude.print_prompt", return_value=""):
             assert not needs_more_context("here too")
 
     def test_uses_haiku_model(self) -> None:
-        with patch(
-            "subprocess.run", return_value=_make_completed_run("YES\n")
-        ) as mock_run:
+        with patch("kennel.claude.print_prompt", return_value="YES") as mock_pp:
             needs_more_context("same")
-        args = mock_run.call_args[0][0]
-        assert "claude-haiku-4-5" in args
+        assert mock_pp.call_args.args[1] == "claude-haiku-4-5"
 
 
 class TestIsAllowed:
@@ -305,13 +290,6 @@ class TestDispatchUnknown:
 # ── New coverage tests ──────────────────────────────────────────────────────
 
 
-def _make_completed_run(stdout: str = "", returncode: int = 0) -> MagicMock:
-    m = MagicMock()
-    m.stdout = stdout
-    m.returncode = returncode
-    return m
-
-
 class TestCommentLock:
     def test_creates_lock_file(self, tmp_path: Path) -> None:
         path = _comment_lock(tmp_path, 42)
@@ -321,54 +299,40 @@ class TestCommentLock:
 
 class TestTriage:
     def test_returns_parsed_category(self, tmp_path: Path) -> None:
-        with patch(
-            "subprocess.run", return_value=_make_completed_run("ACT: add tests\n")
-        ):
+        with patch("kennel.claude.print_prompt", return_value="ACT: add tests"):
             cat, title = _triage("please add tests", is_bot=False)
         assert cat == "ACT"
         assert title == "add tests"
 
     def test_fallback_on_bad_response(self, tmp_path: Path) -> None:
-        with patch("subprocess.run", return_value=_make_completed_run("")):
+        with patch("kennel.claude.print_prompt", return_value=""):
             cat, title = _triage("do stuff", is_bot=False)
         assert cat == "ACT"
 
-    def test_fallback_for_bot(self, tmp_path: Path, caplog) -> None:
-        with patch("subprocess.run", side_effect=Exception("fail")):
-            with caplog.at_level(logging.WARNING, logger="kennel.events"):
-                cat, title = _triage("do stuff", is_bot=True)
+    def test_fallback_for_bot(self, tmp_path: Path) -> None:
+        with patch("kennel.claude.print_prompt", return_value=""):
+            cat, title = _triage("do stuff", is_bot=True)
         assert cat == "DO"
-        assert "triage subprocess failed" in caplog.text
 
     def test_with_context(self, tmp_path: Path) -> None:
         ctx = {"pr_title": "My PR", "file": "foo.py", "diff_hunk": "@@ -1 +1 @@"}
-        with patch(
-            "subprocess.run", return_value=_make_completed_run("DEFER: out of scope\n")
-        ):
+        with patch("kennel.claude.print_prompt", return_value="DEFER: out of scope"):
             cat, title = _triage("nit comment", is_bot=False, context=ctx)
         assert cat == "DEFER"
 
     def test_unrecognized_category_falls_back(self, tmp_path: Path) -> None:
-        with patch(
-            "subprocess.run", return_value=_make_completed_run("WEIRD: something")
-        ):
+        with patch("kennel.claude.print_prompt", return_value="WEIRD: something"):
             cat, title = _triage("hi", is_bot=False)
         assert cat == "ACT"
 
-    def test_timeout_falls_back(self, tmp_path: Path, caplog) -> None:
-        with patch(
-            "subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 15)
-        ):
-            with caplog.at_level(logging.WARNING, logger="kennel.events"):
-                cat, title = _triage("hi", is_bot=True)
+    def test_timeout_falls_back(self, tmp_path: Path) -> None:
+        with patch("kennel.claude.print_prompt", return_value=""):
+            cat, title = _triage("hi", is_bot=True)
         assert cat == "DO"
-        assert "triage subprocess failed" in caplog.text
 
     def test_task_category_falls_back(self, tmp_path: Path) -> None:
         """TASK is no longer a valid bot category — falls back to DO."""
-        with patch(
-            "subprocess.run", return_value=_make_completed_run("TASK: add caching\n")
-        ):
+        with patch("kennel.claude.print_prompt", return_value="TASK: add caching"):
             cat, title = _triage("cache results", is_bot=True)
         assert cat == "DO"
 
@@ -376,11 +340,11 @@ class TestTriage:
         """Ensure bot-specific categories (DO/DEFER/DUMP) are used when is_bot=True."""
         captured = {}
 
-        def fake_run(args, **kwargs):
-            captured["prompt"] = args[-1]
-            return _make_completed_run("DO: implement feature")
+        def fake_pp(prompt, model, **kwargs):
+            captured["prompt"] = prompt
+            return "DO: implement feature"
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with patch("kennel.claude.print_prompt", side_effect=fake_pp):
             cat, _ = _triage("implement feature", is_bot=True)
         assert cat == "DO"
         assert "DO" in captured["prompt"]
@@ -404,7 +368,7 @@ class TestMaybeReact:
 
         mock_gh = MagicMock()
         with (
-            patch("subprocess.run", return_value=_make_completed_run("heart\n")),
+            patch("kennel.claude.print_prompt", return_value="heart"),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             maybe_react("great work!", 99, "pulls", "owner/repo", cfg)
@@ -415,27 +379,21 @@ class TestMaybeReact:
 
         mock_gh = MagicMock()
         with (
-            patch("subprocess.run", return_value=_make_completed_run("NONE\n")),
+            patch("kennel.claude.print_prompt", return_value="NONE"),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             maybe_react("ok", 99, "pulls", "owner/repo", cfg)
         mock_gh.add_reaction.assert_not_called()
 
-    def test_timeout_warns_and_returns(self, tmp_path: Path, caplog) -> None:
+    def test_timeout_warns_and_returns(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with patch(
-            "subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 15)
-        ):
-            with caplog.at_level(logging.WARNING, logger="kennel.events"):
-                maybe_react("hi", 1, "pulls", "owner/repo", cfg)
-        assert "react subprocess timed out" in caplog.text
+        with patch("kennel.claude.print_prompt", return_value=""):
+            maybe_react("hi", 1, "pulls", "owner/repo", cfg)
 
-    def test_file_not_found_warns_and_returns(self, tmp_path: Path, caplog) -> None:
+    def test_file_not_found_warns_and_returns(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            with caplog.at_level(logging.WARNING, logger="kennel.events"):
-                maybe_react("hi", 1, "pulls", "owner/repo", cfg)
-        assert "react subprocess timed out" in caplog.text
+        with patch("kennel.claude.print_prompt", return_value=""):
+            maybe_react("hi", 1, "pulls", "owner/repo", cfg)
 
     def test_reads_persona_if_present(self, tmp_path: Path) -> None:
         sub_dir = tmp_path / "sub"
@@ -452,13 +410,12 @@ class TestMaybeReact:
         )
         captured = {}
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                captured["prompt"] = args[-1]
-            return _make_completed_run("eyes\n")
+        def fake_pp(prompt, model, **kwargs):
+            captured["prompt"] = prompt
+            return "eyes"
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             maybe_react("look at this", 1, "pulls", "owner/repo", cfg)
@@ -512,16 +469,15 @@ class TestReplyToComment:
             },
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: add logging\n")
-                return _make_completed_run("I will add logging.\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: add logging"
+            return "I will add logging."
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
@@ -538,16 +494,15 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ASK: need more info\n")
-                return _make_completed_run("What specifically?\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ASK: need more info"
+            return "What specifically?"
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
@@ -563,16 +518,15 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ANSWER: explain choice\n")
-                return _make_completed_run("I did this because...\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ANSWER: explain choice"
+            return "I did this because..."
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
@@ -588,17 +542,16 @@ class TestReplyToComment:
             is_bot=True,
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("DO: add result caching\n")
-                return _make_completed_run("On it!\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "DO: add result caching"
+            return "On it!"
 
         mock_gh = MagicMock()
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
@@ -616,18 +569,17 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("DEFER: out of scope\n")
-                return _make_completed_run("That's out of scope for this PR.\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "DEFER: out of scope"
+            return "That's out of scope for this PR."
 
         mock_gh = MagicMock()
         mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/99"
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
@@ -648,16 +600,15 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("DUMP: not applicable\n")
-                return _make_completed_run("Not applicable here.\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "DUMP: not applicable"
+            return "Not applicable here."
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
@@ -674,18 +625,17 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("DEFER: out of scope\n")
-                return _make_completed_run("That's out of scope for this PR.\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "DEFER: out of scope"
+            return "That's out of scope for this PR."
 
         mock_gh = MagicMock()
         mock_gh.create_issue.side_effect = RuntimeError("network fail")
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
@@ -701,24 +651,22 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: do it\n")
-                # claude returns empty body
-                return _make_completed_run("")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return ""  # empty reply triggers fallback
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert posted
         assert cat == "ACT"  # still succeeds with fallback body
 
-    def test_claude_timeout_uses_fallback(self, tmp_path: Path, caplog) -> None:
+    def test_claude_timeout_uses_fallback(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -726,28 +674,21 @@ class TestReplyToComment:
             comment_body="do something",
             is_bot=False,
         )
-        call_count = [0]
 
-        def fake_run(args, **kwargs):
-            call_count[0] += 1
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: do it\n")
-                raise subprocess.TimeoutExpired("claude", 30)
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return ""  # simulates timeout — print_prompt returns "" on failure
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
-            with caplog.at_level(logging.WARNING, logger="kennel.events"):
-                posted, cat, title = reply_to_comment(
-                    action, cfg, self._repo_cfg(tmp_path)
-                )
+            posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert posted
         assert cat == "ACT"
-        assert "Opus reply subprocess timed out" in caplog.text
 
     def test_lock_race_returns_act(self, tmp_path: Path) -> None:
         """Second call with same comment_id is blocked by lock."""
@@ -782,16 +723,15 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: do it\n")
-                return _make_completed_run("ok\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return "ok"
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             posted, cat, title = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
@@ -827,18 +767,17 @@ class TestReplyToReview:
             review_comments={"repo": "owner/repo", "pr": 5, "review_id": 777},
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: fix it\n")
-                return _make_completed_run("Will fix.\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: fix it"
+            return "Will fix."
 
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = [(100, "fix this"), (200, "nit")]
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             reply_to_review(action, cfg, self._repo_cfg(tmp_path))
@@ -852,21 +791,21 @@ class TestReplyToReview:
         already = {100, 200}
         calls = []
 
-        def fake_run(args, **kwargs):
-            calls.append(args)
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            calls.append((prompt, model))
+            return ""
 
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = [(100, "fix this"), (200, "nit")]
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             reply_to_review(
                 action, cfg, self._repo_cfg(tmp_path), already_replied=already
             )
         # no claude calls since all comments already replied
-        assert not any("claude" in a for a in calls)
+        assert not calls
 
     def test_fetch_exception_returns_early(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -917,16 +856,13 @@ class TestReplyToIssueComment:
     def test_act_reply(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: fix the bug\n")
-                return _make_completed_run("I'll fix that.\n")
-            return _make_completed_run("https://github.com/owner/repo.git\n")
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: fix the bug"
+            return "I'll fix that."
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(
@@ -937,16 +873,13 @@ class TestReplyToIssueComment:
     def test_ask_reply(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ASK: unclear\n")
-                return _make_completed_run("What do you mean?\n")
-            return _make_completed_run("https://github.com/owner/repo.git\n")
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ASK: unclear"
+            return "What do you mean?"
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(
@@ -957,16 +890,13 @@ class TestReplyToIssueComment:
     def test_answer_reply(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ANSWER: it works this way\n")
-                return _make_completed_run("Yes, because...\n")
-            return _make_completed_run("https://github.com/owner/repo.git\n")
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ANSWER: it works this way"
+            return "Yes, because..."
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(
@@ -977,16 +907,13 @@ class TestReplyToIssueComment:
     def test_dump_reply(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("DUMP: nope\n")
-                return _make_completed_run("That won't work here.\n")
-            return _make_completed_run("https://github.com/owner/repo.git\n")
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "DUMP: nope"
+            return "That won't work here."
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(
@@ -997,19 +924,16 @@ class TestReplyToIssueComment:
     def test_defer_reply(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("DEFER: later\n")
-                return _make_completed_run("Out of scope.\n")
-            return _make_completed_run("https://github.com/owner/repo.git\n")
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "DEFER: later"
+            return "Out of scope."
 
         mock_gh = MagicMock()
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/5"
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             cat, title = reply_to_issue_comment(
@@ -1026,19 +950,16 @@ class TestReplyToIssueComment:
         """DEFER still posts a reply even when create_issue raises."""
         cfg = self._cfg(tmp_path)
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("DEFER: later\n")
-                return _make_completed_run("Out of scope.\n")
-            return _make_completed_run("https://github.com/owner/repo.git\n")
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "DEFER: later"
+            return "Out of scope."
 
         mock_gh = MagicMock()
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.create_issue.side_effect = RuntimeError("network fail")
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             cat, title = reply_to_issue_comment(
@@ -1049,16 +970,13 @@ class TestReplyToIssueComment:
     def test_empty_body_fallback(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: do it\n")
-                return _make_completed_run("")  # empty reply triggers fallback
-            return _make_completed_run("https://github.com/owner/repo.git\n")
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return ""  # empty reply triggers fallback
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(
@@ -1066,27 +984,22 @@ class TestReplyToIssueComment:
             )
         assert cat == "ACT"
 
-    def test_timeout_fallback(self, tmp_path: Path, caplog) -> None:
+    def test_timeout_fallback(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: do it\n")
-                raise subprocess.TimeoutExpired("claude", 30)
-            return _make_completed_run("https://github.com/owner/repo.git\n")
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return ""  # simulates timeout — print_prompt returns "" on failure
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
-            with caplog.at_level(logging.WARNING, logger="kennel.events"):
-                cat, title = reply_to_issue_comment(
-                    self._action(), cfg, self._repo_cfg(tmp_path)
-                )
+            cat, title = reply_to_issue_comment(
+                self._action(), cfg, self._repo_cfg(tmp_path)
+            )
         assert cat == "ACT"
-        assert "Opus reply subprocess timed out" in caplog.text
 
     def test_post_exception_does_not_raise(self, tmp_path: Path) -> None:
         """comment_issue failure is caught and does not propagate."""
@@ -1099,18 +1012,15 @@ class TestReplyToIssueComment:
             context={"pr_title": "My PR"},  # no comment_id → react block skipped
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: do it\n")
-                return _make_completed_run("ok\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return "ok"
 
         mock_gh = MagicMock()
         mock_gh.comment_issue.side_effect = Exception("gh fail")
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             cat, title = reply_to_issue_comment(action, cfg, self._repo_cfg(tmp_path))
@@ -1125,16 +1035,13 @@ class TestReplyToIssueComment:
             context={"pr_title": "My PR"},  # no comment_id
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: do it\n")
-                return _make_completed_run("ok\n")
-            return _make_completed_run("https://github.com/owner/repo.git\n")
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return "ok"
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=MagicMock()),
         ):
             cat, title = reply_to_issue_comment(action, cfg, self._repo_cfg(tmp_path))
@@ -1706,7 +1613,7 @@ class TestMaybeReactGhException:
         mock_gh = MagicMock()
         mock_gh.add_reaction.side_effect = RuntimeError("network down")
         with (
-            patch("subprocess.run", return_value=_make_completed_run("heart\n")),
+            patch("kennel.claude.print_prompt", return_value="heart"),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             maybe_react("great job", 77, "pulls", "owner/repo", cfg)  # must not raise
@@ -1742,14 +1649,11 @@ class TestReplyToCommentElseBranch:
         # fallback "ACT"/"DO". We need to force an unlisted category past _triage.
         # Monkey-patch _triage directly to return a fake category.
         with patch("kennel.events._triage", return_value=("UNKNOWN_CAT", "do it")):
-
-            def fake_run(args, **kwargs):
-                if "claude" in args:
-                    return _make_completed_run("I'll look into this.\n")
-                return _make_completed_run("")
-
             with (
-                patch("subprocess.run", side_effect=fake_run),
+                patch(
+                    "kennel.claude.print_prompt", return_value="I'll look into this."
+                ),
+                patch("kennel.events.needs_more_context", return_value=False),
                 patch("kennel.events.get_github", return_value=MagicMock()),
             ):
                 posted, cat, title = reply_to_comment(
@@ -1768,18 +1672,17 @@ class TestReplyToCommentElseBranch:
             is_bot=False,
         )
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: fix it\n")
-                return _make_completed_run("I'll fix it.\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: fix it"
+            return "I'll fix it."
 
         mock_gh = MagicMock()
         mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             posted, cat, title = reply_to_comment(
@@ -1813,18 +1716,17 @@ class TestReplyToReviewAlreadyRepliedTracking:
         )
         already: set[int] = set()
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: fix it\n")
-                return _make_completed_run("Will fix.\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: fix it"
+            return "Will fix."
 
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = [(500, "please fix")]
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             reply_to_review(
@@ -1843,19 +1745,18 @@ class TestReplyToReviewAlreadyRepliedTracking:
         )
         already: set[int] = set()
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: fix it\n")
-                return _make_completed_run("Will fix.\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: fix it"
+            return "Will fix."
 
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = [(501, "please fix")]
         mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
             reply_to_review(
@@ -1911,7 +1812,7 @@ class TestReplyToCommentTerseEnrichment:
             patch("kennel.events._triage", side_effect=fake_triage),
             patch("kennel.events.needs_more_context", return_value=True),
             patch("kennel.events.get_github", return_value=mock_gh),
-            patch("subprocess.run", return_value=_make_completed_run("On it!\n")),
+            patch("kennel.claude.print_prompt", return_value="On it!"),
         ):
             reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
 
@@ -1930,16 +1831,13 @@ class TestReplyToCommentTerseEnrichment:
         )
         mock_gh = MagicMock()
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: do it\n")
-                return _make_completed_run("Got it.\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return "Got it."
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.needs_more_context", return_value=False),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
@@ -1959,16 +1857,13 @@ class TestReplyToCommentTerseEnrichment:
         mock_gh = MagicMock()
         mock_gh.fetch_sibling_threads.return_value = []
 
-        def fake_run(args, **kwargs):
-            if "claude" in args:
-                text = args[-1]
-                if "Triage" in text:
-                    return _make_completed_run("ACT: do it\n")
-                return _make_completed_run("On it.\n")
-            return _make_completed_run("")
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return "On it."
 
         with (
-            patch("subprocess.run", side_effect=fake_run),
+            patch("kennel.claude.print_prompt", side_effect=fake_pp),
             patch("kennel.events.needs_more_context", return_value=True),
             patch("kennel.events.get_github", return_value=mock_gh),
         ):
@@ -2001,7 +1896,7 @@ class TestReplyToCommentTerseEnrichment:
             patch("kennel.events._triage", side_effect=fake_triage),
             patch("kennel.events.needs_more_context", return_value=True),
             patch("kennel.events.get_github", return_value=mock_gh),
-            patch("subprocess.run", return_value=_make_completed_run("On it!\n")),
+            patch("kennel.claude.print_prompt", return_value="On it!"),
         ):
             reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
 
