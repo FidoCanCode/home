@@ -5422,7 +5422,7 @@ class TestExecuteTask:
                 worker, "_squash_wip_commit", return_value=False
             ) as mock_squash,
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.tasks.complete_by_id"),
             patch("kennel.worker.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 7, "feat-branch")
@@ -5451,7 +5451,7 @@ class TestExecuteTask:
                 "ensure_pushed",
                 side_effect=lambda *a: call_order.append("push") or True,
             ),
-            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.tasks.complete_by_id"),
             patch("kennel.worker.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
@@ -5469,7 +5469,7 @@ class TestExecuteTask:
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "_squash_wip_commit", return_value=True),
             patch.object(worker, "ensure_pushed", return_value=None),
-            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+            patch("kennel.worker.tasks.complete_by_id") as mock_complete,
             patch("kennel.worker.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
