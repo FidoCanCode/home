@@ -6432,23 +6432,21 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewer.assert_not_called()
 
-    def test_draft_pending_tasks_ignored_for_promote_decision(
-        self, tmp_path: Path
-    ) -> None:
-        """Pending tasks don't prevent promote — only completed count matters."""
+    def test_draft_pending_tasks_block_promote(self, tmp_path: Path) -> None:
+        """Pending tasks prevent promote — all tasks must be complete."""
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
         tasks_list = [
-            {"id": "t1", "title": "Done", "status": "completed"},
-            {"id": "t2", "title": "Next", "status": "pending"},
+            {"id": "t1", "title": "Done", "status": "completed", "type": "spec"},
+            {"id": "t2", "title": "Next", "status": "pending", "type": "spec"},
         ]
         with patch("kennel.worker.tasks.list_tasks", return_value=tasks_list):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
-        assert result == 1
-        gh.pr_ready.assert_called_once()
+        assert result == 0
+        gh.pr_ready.assert_not_called()
 
     # --- CI gate on draft promotion ---
 
@@ -6846,6 +6844,35 @@ class TestHandlePromoteMerge:
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "open questions" in caplog.text
+
+    def test_does_not_promote_draft_when_pending_tasks_remain(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=True, state="NONE")
+        completed = {"id": "t1", "title": "Done", "status": "completed", "type": "spec"}
+        pending = {"id": "t2", "title": "Not done", "status": "pending", "type": "spec"}
+        with patch("kennel.worker.tasks.list_tasks", return_value=[completed, pending]):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 1, "branch", 1
+            )
+        assert result == 0
+        gh.pr_ready.assert_not_called()
+
+    def test_promotes_draft_when_all_tasks_completed(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(is_draft=True, state="NONE")
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        completed = {"id": "t1", "title": "Done", "status": "completed", "type": "spec"}
+        with patch("kennel.worker.tasks.list_tasks", return_value=[completed]):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 1, "branch", 1
+            )
+        assert result == 1
+        gh.pr_ready.assert_called_once()
 
 
 class TestRunPromoteMergeIntegration:
