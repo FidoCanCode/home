@@ -571,9 +571,13 @@ class Worker:
 
         prompts = Prompts(persona)
 
+        # Single-entry activities list; replaced with full registry snapshot in set_status
+        # once the registry is injected (next task).
+        activities = [(self.work_dir.name, what, busy)]
+
         # Call 1: generate status text
         text, session_id = claude.generate_status_with_session(
-            prompt=prompts.status_text_prompt(what),
+            prompt=prompts.status_text_prompt(activities),
             system_prompt=prompts.status_text_system_prompt(),
         )
         if not text:

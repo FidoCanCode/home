@@ -242,16 +242,31 @@ class Prompts:
             f"{plain}"
         )
 
-    def status_text_prompt(self, what: str) -> str:
-        """Build the user prompt for GitHub status text generation."""
-        return f"{self.persona}\n\nWhat you're doing right now: {what}"
+    def status_text_prompt(self, activities: list[tuple[str, str, bool]]) -> str:
+        """Build the user prompt for GitHub status text generation.
+
+        *activities* is a list of ``(repo_name, what, busy)`` tuples for every
+        worker.  The prompt presents the full picture so Claude can produce a
+        unified status: busy work takes priority over idle.
+        """
+        if not activities:
+            activity_block = "No active workers."
+        else:
+            lines = [
+                f"- {repo}: {what} ({'busy' if busy else 'idle'})"
+                for repo, what, busy in activities
+            ]
+            activity_block = "\n".join(lines)
+        return f"{self.persona}\n\nCurrent activity across all repos:\n{activity_block}"
 
     def status_text_system_prompt(self) -> str:
         """Return the system prompt for GitHub status text generation."""
         return (
             "You are writing your GitHub profile status as Fido the dog. "
             "Output ONLY the status text — no emoji, no quotes, no preamble. "
-            "Keep it under 80 characters."
+            "Keep it under 80 characters. "
+            "If any worker is busy, reflect that active work. "
+            "If all workers are idle, indicate you are napping."
         )
 
     def status_emoji_prompt(self, text: str) -> str:

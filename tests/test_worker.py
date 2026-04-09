@@ -441,7 +441,7 @@ class TestWorker:
             Worker(tmp_path, gh).set_status("working")
         # persona file missing — generate_status_with_session still called with empty persona
         prompt_arg = mock_gen.call_args[1]["prompt"]
-        assert "What you're doing right now: working" in prompt_arg
+        assert "working (busy)" in prompt_arg
 
     def test_set_status_passes_system_prompt_to_generate_status_with_session(
         self, tmp_path: Path
