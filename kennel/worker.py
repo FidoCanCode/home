@@ -194,9 +194,9 @@ def _sanitize_slug(raw: str, fallback: str) -> str:
     return slug
 
 
-def _resolve_git_dir(work_dir: Path) -> Path:
+def _resolve_git_dir(work_dir: Path, *, _run=subprocess.run) -> Path:
     """Return the absolute .git directory for *work_dir*."""
-    result = subprocess.run(
+    result = _run(
         ["git", "rev-parse", "--absolute-git-dir"],
         cwd=work_dir,
         capture_output=True,
@@ -275,9 +275,12 @@ def _auto_complete_ask_tasks(
     gh: GitHub,
     repo: str,
     pr_number: int | str,
+    *,
+    _list_tasks=tasks.list_tasks,
+    _complete_by_id=tasks.complete_by_id,
 ) -> None:
     """Mark pending ASK tasks complete when their review thread is resolved."""
-    task_list = tasks.list_tasks(work_dir)
+    task_list = _list_tasks(work_dir)
     ask_tasks = [
         t
         for t in task_list
@@ -314,10 +317,17 @@ def _auto_complete_ask_tasks(
             log.info(
                 "sync_tasks: ASK task thread resolved — completing: %s", task["title"]
             )
-            tasks.complete_by_id(work_dir, task["id"])
+            _complete_by_id(work_dir, task["id"])
 
 
-def sync_tasks(work_dir: Path, gh: GitHub) -> None:
+def sync_tasks(
+    work_dir: Path,
+    gh: GitHub,
+    *,
+    _resolve_git_dir_fn=_resolve_git_dir,
+    _list_tasks=tasks.list_tasks,
+    _auto_complete_ask_tasks_fn=_auto_complete_ask_tasks,
+) -> None:
     """Sync tasks.json → PR body work queue.
 
     Python replacement for sync-tasks.sh.  Protected by a flock so concurrent
@@ -325,7 +335,7 @@ def sync_tasks(work_dir: Path, gh: GitHub) -> None:
     the body is being updated.
     """
     try:
-        git_dir = _resolve_git_dir(work_dir)
+        git_dir = _resolve_git_dir_fn(work_dir)
     except subprocess.CalledProcessError:
         log.warning("sync_tasks: could not resolve git dir for %s", work_dir)
         return
@@ -361,9 +371,9 @@ def sync_tasks(work_dir: Path, gh: GitHub) -> None:
             return
 
         pr_number = pr_data["number"]
-        _auto_complete_ask_tasks(work_dir, gh, repo, pr_number)
+        _auto_complete_ask_tasks_fn(work_dir, gh, repo, pr_number)
 
-        task_list = tasks.list_tasks(work_dir)
+        task_list = _list_tasks(work_dir)
         if not task_list:
             log.info("sync_tasks: no tasks — nothing to sync")
             return
@@ -394,7 +404,9 @@ def sync_tasks(work_dir: Path, gh: GitHub) -> None:
         sync_lock_fd.close()
 
 
-def sync_tasks_background(work_dir: Path, gh: GitHub) -> None:
+def sync_tasks_background(
+    work_dir: Path, gh: GitHub, *, _start=threading.Thread.start
+) -> None:
     """Launch :func:`sync_tasks` in a daemon background thread."""
     t = threading.Thread(
         target=sync_tasks,
@@ -402,7 +414,7 @@ def sync_tasks_background(work_dir: Path, gh: GitHub) -> None:
         name=f"sync-{work_dir.name}",
         daemon=True,
     )
-    t.start()
+    _start(t)
 
 
 def claude_start(
@@ -547,16 +559,16 @@ class Worker:
         self._repo_name = repo_name
         self._registry = registry
 
-    def resolve_git_dir(self) -> Path:
+    def resolve_git_dir(self, *, _run=subprocess.run) -> Path:
         """Return the absolute .git directory for self.work_dir."""
-        return _resolve_git_dir(self.work_dir)
+        return _resolve_git_dir(self.work_dir, _run=_run)
 
-    def create_context(self) -> WorkerContext:
+    def create_context(self, *, _run=subprocess.run) -> WorkerContext:
         """Build a WorkerContext for self.work_dir, acquiring the fido lock.
 
         Raises LockHeld if the lock is already held.
         """
-        git_dir = self.resolve_git_dir()
+        git_dir = self.resolve_git_dir(_run=_run)
         fido_dir = git_dir / "fido"
         lock_fd = acquire_lock(fido_dir)
         return WorkerContext(
@@ -621,7 +633,16 @@ class Worker:
             return None
         return int(issue)
 
-    def set_status(self, what: str, busy: bool = True) -> None:
+    def set_status(
+        self,
+        what: str,
+        busy: bool = True,
+        *,
+        _generate_status_with_session=claude.generate_status_with_session,
+        _generate_status_emoji=claude.generate_status_emoji,
+        _resume_status=claude.resume_status,
+        _sub_dir_fn=_sub_dir,
+    ) -> None:
         """Set the authenticated user's GitHub status using Claude-generated text.
 
         Makes two separate Opus calls: the first generates short status text
@@ -630,7 +651,7 @@ class Worker:
         then truncates as a last resort.  Silently skips if Claude returns an
         empty response for the text call.
         """
-        persona_path = _sub_dir() / "persona.md"
+        persona_path = _sub_dir_fn() / "persona.md"
         try:
             persona = persona_path.read_text()
         except OSError:
@@ -648,7 +669,7 @@ class Worker:
             activities = [(self.work_dir.name, what, busy)]
 
         # Call 1: generate status text
-        text, session_id = claude.generate_status_with_session(
+        text, session_id = _generate_status_with_session(
             prompt=prompts.status_text_prompt(activities),
             system_prompt=prompts.status_text_system_prompt(),
         )
@@ -659,7 +680,7 @@ class Worker:
         for _ in range(3):
             if len(text) <= 80 or not session_id:
                 break
-            retry_raw = claude.resume_status(
+            retry_raw = _resume_status(
                 session_id,
                 f"The status text is {len(text)} characters — please shorten it to 80 characters or fewer.",
             )
@@ -671,7 +692,7 @@ class Worker:
             text = text[:80]
 
         # Call 2: generate emoji
-        emoji = claude.generate_status_emoji(
+        emoji = _generate_status_emoji(
             prompt=prompts.status_emoji_prompt(text),
             system_prompt=prompts.status_emoji_system_prompt(),
         )
@@ -713,10 +734,10 @@ class Worker:
         return None
 
     def _git(
-        self, args: list[str], check: bool = True
+        self, args: list[str], check: bool = True, *, _run=subprocess.run
     ) -> subprocess.CompletedProcess[str]:
         """Run a git command in self.work_dir."""
-        return subprocess.run(
+        return _run(
             ["git", *args],
             cwd=self.work_dir,
             capture_output=True,
