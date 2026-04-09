@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from kennel.config import RepoConfig
 from kennel.github import GitHub
 from kennel.worker import WorkerThread
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class WorkerActivity:
+    """Snapshot of what one worker is currently doing."""
+
+    repo_name: str
+    what: str
+    busy: bool
 
 
 class WorkerRegistry:
@@ -29,6 +40,8 @@ class WorkerRegistry:
     def __init__(self, thread_factory: Callable[[RepoConfig], WorkerThread]) -> None:
         self._threads: dict[str, WorkerThread] = {}
         self._factory = thread_factory
+        self._activities: dict[str, WorkerActivity] = {}
+        self._activity_lock = threading.Lock()
 
     def start(self, repo_cfg: RepoConfig) -> None:
         """Create and start a WorkerThread for *repo_cfg*."""
@@ -55,6 +68,18 @@ class WorkerRegistry:
         if thread:
             thread.abort_task()
 
+    def report_activity(self, repo_name: str, what: str, busy: bool) -> None:
+        """Record what *repo_name*'s worker is currently doing."""
+        with self._activity_lock:
+            self._activities[repo_name] = WorkerActivity(
+                repo_name=repo_name, what=what, busy=busy
+            )
+
+    def get_all_activities(self) -> list[WorkerActivity]:
+        """Return a snapshot of all registered workers' current activities."""
+        with self._activity_lock:
+            return list(self._activities.values())
+
     def stop_all(self) -> None:
         """Request every managed thread to stop after its current iteration."""
         for thread in self._threads.values():
@@ -76,9 +101,9 @@ class WorkerRegistry:
         return thread is not None and thread.is_alive()
 
 
-def _make_thread(repo_cfg: RepoConfig) -> WorkerThread:
+def _make_thread(repo_cfg: RepoConfig, registry: WorkerRegistry) -> WorkerThread:
     """Default factory: create a WorkerThread with a live GitHub client."""
-    return WorkerThread(repo_cfg.work_dir, GitHub())
+    return WorkerThread(repo_cfg.work_dir, repo_cfg.name, GitHub(), registry)
 
 
 def make_registry(repos: dict[str, RepoConfig]) -> WorkerRegistry:
@@ -88,7 +113,11 @@ def make_registry(repos: dict[str, RepoConfig]) -> WorkerRegistry:
     live :class:`~kennel.github.GitHub` client.  Pass a custom registry
     directly (with a mock factory) in tests instead of calling this.
     """
-    registry = WorkerRegistry(_make_thread)
+
+    def factory(cfg: RepoConfig) -> WorkerThread:
+        return _make_thread(cfg, registry)
+
+    registry = WorkerRegistry(factory)
     for repo_cfg in repos.values():
         registry.start(repo_cfg)
     return registry

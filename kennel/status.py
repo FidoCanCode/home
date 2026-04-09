@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import subprocess
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ class RepoStatus:
     current_task: str | None  # title of first in_progress or pending task
     claude_pid: int | None
     claude_uptime: int | None  # seconds
+    worker_what: str | None  # activity text from the live registry
 
 
 @dataclass
@@ -127,6 +129,38 @@ def _kennel_pid() -> int | None:
     return pids[0] if pids else None
 
 
+def _port_from_pid(pid: int) -> int | None:
+    """Extract the --port value from kennel's /proc/<pid>/cmdline, or None."""
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    args = cmdline.rstrip(b"\x00").split(b"\x00")
+    for i, arg in enumerate(args):
+        if arg == b"--port" and i + 1 < len(args):
+            try:
+                return int(args[i + 1])
+            except ValueError:
+                return None
+    return None
+
+
+def _fetch_activities(port: int) -> dict[str, str]:
+    """Query GET /status on the kennel server, returning {repo_name: what}."""
+    try:
+        with urllib.request.urlopen(
+            f"http://localhost:{port}/status", timeout=2
+        ) as resp:
+            data = json.loads(resp.read())
+        return {
+            item["repo_name"]: item["what"]
+            for item in data
+            if "repo_name" in item and "what" in item
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _claude_pid(fido_dir: Path) -> int | None:
     """Return the PID of the claude process using fido_dir/system, or None."""
     pids = _pgrep(str(fido_dir / "system"))
@@ -186,7 +220,7 @@ def _current_task(task_list: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def repo_status(repo_config: RepoConfig) -> RepoStatus:
+def repo_status(repo_config: RepoConfig, worker_what: str | None = None) -> RepoStatus:
     """Collect status for a single repo."""
     git_dir = _git_dir(repo_config.work_dir)
     if git_dir is None:
@@ -199,6 +233,7 @@ def repo_status(repo_config: RepoConfig) -> RepoStatus:
             current_task=None,
             claude_pid=None,
             claude_uptime=None,
+            worker_what=worker_what,
         )
 
     fido_dir = git_dir / "fido"
@@ -227,6 +262,7 @@ def repo_status(repo_config: RepoConfig) -> RepoStatus:
         current_task=current,
         claude_pid=claude_pid,
         claude_uptime=claude_uptime,
+        worker_what=worker_what,
     )
 
 
@@ -235,7 +271,16 @@ def collect() -> KennelStatus:
     pid = _kennel_pid()
     uptime = _process_uptime_seconds(pid) if pid is not None else None
     repo_configs = _repos_from_pid(pid) if pid is not None else []
-    repos = [repo_status(rc) for rc in repo_configs]
+
+    activities: dict[str, str] = {}
+    if pid is not None:
+        port = _port_from_pid(pid)
+        if port is not None:
+            activities = _fetch_activities(port)
+
+    repos = [
+        repo_status(rc, worker_what=activities.get(rc.name)) for rc in repo_configs
+    ]
     return KennelStatus(kennel_pid=pid, kennel_uptime=uptime, repos=repos)
 
 
@@ -262,6 +307,9 @@ def format_status(status: KennelStatus) -> str:
             parts.append("fido running")
         else:
             parts.append("fido idle")
+
+        if repo.worker_what:
+            parts.append(repo.worker_what)
 
         if repo.issue is not None:
             total = repo.pending + repo.completed

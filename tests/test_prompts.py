@@ -364,6 +364,14 @@ class TestStatusTextSystemPrompt:
         result = Prompts("persona").status_text_system_prompt()
         assert "Fido" in result
 
+    def test_instructs_busy_priority(self) -> None:
+        result = Prompts("persona").status_text_system_prompt()
+        assert "busy" in result
+
+    def test_instructs_idle_napping(self) -> None:
+        result = Prompts("persona").status_text_system_prompt()
+        assert "idle" in result or "napping" in result.lower()
+
 
 class TestStatusEmojiSystemPrompt:
     def test_returns_string(self) -> None:
@@ -438,17 +446,51 @@ class TestPromptsReactPrompt:
 
 class TestPromptsStatusTextPrompt:
     def test_includes_persona(self) -> None:
-        result = Prompts("I am Fido.").status_text_prompt("writing tests")
+        result = Prompts("I am Fido.").status_text_prompt(
+            [("owner/repo", "writing tests", True)]
+        )
         assert "I am Fido." in result
 
     def test_includes_what(self) -> None:
-        result = Prompts("persona").status_text_prompt("reviewing PRs")
+        result = Prompts("persona").status_text_prompt(
+            [("owner/repo", "reviewing PRs", True)]
+        )
         assert "reviewing PRs" in result
 
-    def test_what_is_framed_as_doing(self) -> None:
-        result = Prompts("persona").status_text_prompt("fixing a bug")
-        assert "What you're doing right now" in result
-        assert "fixing a bug" in result
+    def test_includes_repo_name(self) -> None:
+        result = Prompts("persona").status_text_prompt(
+            [("rhencke/kennel", "fixing a bug", True)]
+        )
+        assert "rhencke/kennel" in result
+
+    def test_busy_worker_labeled(self) -> None:
+        result = Prompts("persona").status_text_prompt(
+            [("owner/repo", "working hard", True)]
+        )
+        assert "busy" in result
+
+    def test_idle_worker_labeled(self) -> None:
+        result = Prompts("persona").status_text_prompt(
+            [("owner/repo", "napping", False)]
+        )
+        assert "idle" in result
+
+    def test_multiple_repos_all_present(self) -> None:
+        result = Prompts("persona").status_text_prompt(
+            [
+                ("a/busy", "Writing code", True),
+                ("b/idle", "Napping", False),
+            ]
+        )
+        assert "a/busy" in result
+        assert "Writing code" in result
+        assert "b/idle" in result
+        assert "Napping" in result
+
+    def test_empty_activities(self) -> None:
+        result = Prompts("persona").status_text_prompt([])
+        assert isinstance(result, str)
+        assert "No active workers" in result
 
 
 class TestPromptsPickupCommentPrompt:
@@ -492,6 +534,7 @@ class TestPromptsStoresPersona:
     def test_different_personas_independent(self) -> None:
         p1 = Prompts("persona A")
         p2 = Prompts("persona B")
-        assert "persona A" in p1.status_text_prompt("working")
-        assert "persona B" in p2.status_text_prompt("working")
-        assert "persona A" not in p2.status_text_prompt("working")
+        activities = [("owner/repo", "working", True)]
+        assert "persona A" in p1.status_text_prompt(activities)
+        assert "persona B" in p2.status_text_prompt(activities)
+        assert "persona A" not in p2.status_text_prompt(activities)

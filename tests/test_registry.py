@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from kennel.config import RepoConfig
-from kennel.registry import WorkerRegistry, _make_thread, make_registry
+from kennel.registry import WorkerActivity, WorkerRegistry, _make_thread, make_registry
 
 
 def _repo(name: str, work_dir: Path) -> RepoConfig:
@@ -129,6 +130,86 @@ class TestWorkerRegistry:
         reg, _ = self._make_registry()
         assert reg.is_alive("unknown/repo") is False
 
+    def test_report_activity_stores_entry(self) -> None:
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "Working on: #1", busy=True)
+        activities = reg.get_all_activities()
+        assert activities == [WorkerActivity("foo/bar", "Working on: #1", busy=True)]
+
+    def test_report_activity_overwrites_previous(self) -> None:
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "Working on: #1", busy=True)
+        reg.report_activity("foo/bar", "Napping", busy=False)
+        activities = reg.get_all_activities()
+        assert activities == [WorkerActivity("foo/bar", "Napping", busy=False)]
+
+    def test_get_all_activities_returns_all_repos(self) -> None:
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "Working on: #1", busy=True)
+        reg.report_activity("foo/baz", "Napping", busy=False)
+        activities = reg.get_all_activities()
+        assert sorted(activities, key=lambda a: a.repo_name) == [
+            WorkerActivity("foo/bar", "Working on: #1", busy=True),
+            WorkerActivity("foo/baz", "Napping", busy=False),
+        ]
+
+    def test_get_all_activities_empty_initially(self) -> None:
+        reg, _ = self._make_registry()
+        assert reg.get_all_activities() == []
+
+    def test_get_all_activities_returns_snapshot(self) -> None:
+        reg, _ = self._make_registry()
+        reg.report_activity("foo/bar", "Working on: #1", busy=True)
+        snapshot = reg.get_all_activities()
+        reg.report_activity("foo/bar", "Napping", busy=False)
+        # snapshot must not reflect the later update
+        assert snapshot == [WorkerActivity("foo/bar", "Working on: #1", busy=True)]
+
+    def test_concurrent_report_and_read_are_safe(self) -> None:
+        """report_activity and get_all_activities are safe under concurrent load.
+
+        Multiple writer threads each own one repo and hammer report_activity;
+        a reader thread continuously calls get_all_activities.  After all
+        writers finish, every repo must appear exactly once in the snapshot
+        with its final value, proving no data was lost or corrupted.
+        """
+        reg, _ = self._make_registry()
+        n_repos = 8
+        n_writes = 200
+        errors: list[Exception] = []
+
+        def writer(repo: str) -> None:
+            try:
+                for i in range(n_writes):
+                    reg.report_activity(repo, f"step {i}", busy=i % 2 == 0)
+            except Exception as exc:
+                errors.append(exc)
+
+        def reader() -> None:
+            try:
+                for _ in range(n_writes * n_repos):
+                    activities = reg.get_all_activities()
+                    # snapshot must be a plain list — no shared references
+                    assert isinstance(activities, list)
+            except Exception as exc:
+                errors.append(exc)
+
+        repos = [f"owner/repo{i}" for i in range(n_repos)]
+        threads = [threading.Thread(target=writer, args=(r,)) for r in repos]
+        threads.append(threading.Thread(target=reader))
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"concurrent errors: {errors}"
+
+        final = {a.repo_name: a for a in reg.get_all_activities()}
+        assert set(final) == set(repos)
+        for repo in repos:
+            assert final[repo].what == f"step {n_writes - 1}"
+
     def test_start_replaces_existing_thread_entry(self, tmp_path: Path) -> None:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
@@ -147,12 +228,15 @@ class TestMakeThread:
         self, tmp_path: Path
     ) -> None:
         cfg = _repo("foo/bar", tmp_path)
+        mock_registry = MagicMock()
         with (
             patch("kennel.registry.GitHub") as mock_gh_cls,
             patch("kennel.registry.WorkerThread") as mock_wt_cls,
         ):
-            result = _make_thread(cfg)
-        mock_wt_cls.assert_called_once_with(tmp_path, mock_gh_cls.return_value)
+            result = _make_thread(cfg, mock_registry)
+        mock_wt_cls.assert_called_once_with(
+            tmp_path, "foo/bar", mock_gh_cls.return_value, mock_registry
+        )
         assert result is mock_wt_cls.return_value
 
     def test_uses_repo_work_dir(self, tmp_path: Path) -> None:
@@ -163,7 +247,7 @@ class TestMakeThread:
             patch("kennel.registry.GitHub"),
             patch("kennel.registry.WorkerThread") as mock_wt_cls,
         ):
-            _make_thread(cfg)
+            _make_thread(cfg, MagicMock())
         assert mock_wt_cls.call_args[0][0] == work_dir
 
 

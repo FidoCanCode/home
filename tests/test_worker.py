@@ -441,7 +441,7 @@ class TestWorker:
             Worker(tmp_path, gh).set_status("working")
         # persona file missing — generate_status_with_session still called with empty persona
         prompt_arg = mock_gen.call_args[1]["prompt"]
-        assert "What you're doing right now: working" in prompt_arg
+        assert "working (busy)" in prompt_arg
 
     def test_set_status_passes_system_prompt_to_generate_status_with_session(
         self, tmp_path: Path
@@ -458,6 +458,56 @@ class TestWorker:
             (tmp_path / "persona.md").write_text("I am Fido.")
             Worker(tmp_path, gh).set_status("working")
         assert mock_gen.call_args[1]["system_prompt"] is not None
+
+    def test_set_status_reports_activity_to_registry(self, tmp_path: Path) -> None:
+        gh = self._make_gh()
+        registry = MagicMock()
+        registry.get_all_activities.return_value = []
+        with (
+            patch(
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=("working", "sess-1"),
+            ),
+            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(
+                tmp_path, gh, repo_name="owner/myrepo", registry=registry
+            ).set_status("working", busy=True)
+        registry.report_activity.assert_called_once_with(
+            "owner/myrepo", "working", True
+        )
+
+    def test_set_status_uses_full_registry_snapshot_for_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        gh = self._make_gh()
+        registry = MagicMock()
+        activity_a = MagicMock()
+        activity_a.repo_name = "owner/repo-a"
+        activity_a.what = "fixing bug"
+        activity_a.busy = True
+        activity_b = MagicMock()
+        activity_b.repo_name = "owner/repo-b"
+        activity_b.what = "napping"
+        activity_b.busy = False
+        registry.get_all_activities.return_value = [activity_a, activity_b]
+        with (
+            patch(
+                "kennel.worker.claude.generate_status_with_session",
+                return_value=("fixing bug", "sess-1"),
+            ) as mock_gen,
+            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
+            patch("kennel.worker._sub_dir", return_value=tmp_path),
+        ):
+            (tmp_path / "persona.md").write_text("I am Fido.")
+            Worker(
+                tmp_path, gh, repo_name="owner/repo-a", registry=registry
+            ).set_status("fixing bug")
+        prompt_arg = mock_gen.call_args[1]["prompt"]
+        assert "owner/repo-a" in prompt_arg
+        assert "owner/repo-b" in prompt_arg
 
     # --- get_current_issue ---
 
@@ -7161,7 +7211,7 @@ class TestSyncTasksBackground:
 
 class TestWorkerThread:
     def _make_thread(self, tmp_path: Path) -> WorkerThread:
-        return WorkerThread(tmp_path, MagicMock())
+        return WorkerThread(tmp_path, "owner/repo", MagicMock())
 
     # ── constructor / attributes ──────────────────────────────────────────
 
@@ -7324,7 +7374,9 @@ class TestWorkerThread:
         wt = self._make_thread(tmp_path)
         captured: list = []
 
-        def fake_worker_init(self_w, work_dir, gh, abort_task=None):
+        def fake_worker_init(
+            self_w, work_dir, gh, abort_task=None, repo_name="", registry=None
+        ):
             captured.append(abort_task)
             self_w.work_dir = work_dir
             self_w.gh = gh
