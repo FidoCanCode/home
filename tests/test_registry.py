@@ -228,12 +228,15 @@ class TestMakeThread:
         self, tmp_path: Path
     ) -> None:
         cfg = _repo("foo/bar", tmp_path)
+        mock_registry = MagicMock()
         with (
             patch("kennel.registry.GitHub") as mock_gh_cls,
             patch("kennel.registry.WorkerThread") as mock_wt_cls,
         ):
-            result = _make_thread(cfg)
-        mock_wt_cls.assert_called_once_with(tmp_path, mock_gh_cls.return_value)
+            result = _make_thread(cfg, mock_registry)
+        mock_wt_cls.assert_called_once_with(
+            tmp_path, "foo/bar", mock_gh_cls.return_value, mock_registry
+        )
         assert result is mock_wt_cls.return_value
 
     def test_uses_repo_work_dir(self, tmp_path: Path) -> None:
@@ -244,7 +247,7 @@ class TestMakeThread:
             patch("kennel.registry.GitHub"),
             patch("kennel.registry.WorkerThread") as mock_wt_cls,
         ):
-            _make_thread(cfg)
+            _make_thread(cfg, MagicMock())
         assert mock_wt_cls.call_args[0][0] == work_dir
 
 

@@ -10,7 +10,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Protocol
 
 from kennel import claude, hooks, tasks
 from kennel.github import GitHub
@@ -19,6 +19,19 @@ from kennel.prompts import Prompts
 _CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
 
 log = logging.getLogger(__name__)
+
+
+class ActivityReporter(Protocol):
+    """Structural protocol satisfied by WorkerRegistry.
+
+    Workers use this to report their activity and query the full registry
+    snapshot for status generation, without a direct import of WorkerRegistry
+    (which would create a circular dependency).
+    """
+
+    def report_activity(self, repo_name: str, what: str, busy: bool) -> None: ...
+
+    def get_all_activities(self) -> list[Any]: ...
 
 
 class LockHeld(Exception):
@@ -475,10 +488,14 @@ class Worker:
         work_dir: Path,
         gh: GitHub,
         abort_task: threading.Event | None = None,
+        repo_name: str = "",
+        registry: ActivityReporter | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
         self._abort_task = abort_task if abort_task is not None else threading.Event()
+        self._repo_name = repo_name
+        self._registry = registry
 
     def resolve_git_dir(self) -> Path:
         """Return the absolute .git directory for self.work_dir."""
@@ -571,9 +588,14 @@ class Worker:
 
         prompts = Prompts(persona)
 
-        # Single-entry activities list; replaced with full registry snapshot in set_status
-        # once the registry is injected (next task).
-        activities = [(self.work_dir.name, what, busy)]
+        if self._registry is not None:
+            self._registry.report_activity(self._repo_name, what, busy)
+            activities = [
+                (a.repo_name, a.what, a.busy)
+                for a in self._registry.get_all_activities()
+            ]
+        else:
+            activities = [(self.work_dir.name, what, busy)]
 
         # Call 1: generate status text
         text, session_id = claude.generate_status_with_session(
@@ -1560,10 +1582,18 @@ class WorkerThread(threading.Thread):
     Call :meth:`stop` to request a clean shutdown.
     """
 
-    def __init__(self, work_dir: Path, gh: GitHub) -> None:
+    def __init__(
+        self,
+        work_dir: Path,
+        repo_name: str,
+        gh: GitHub,
+        registry: ActivityReporter | None = None,
+    ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
         self.work_dir = work_dir
+        self._repo_name = repo_name
         self._gh = gh
+        self._registry = registry
         self._wake = threading.Event()
         self._abort_task = threading.Event()
         self._stop = False
@@ -1586,7 +1616,13 @@ class WorkerThread(threading.Thread):
         """Main loop — runs until :meth:`stop` is called."""
         while not self._stop:
             try:
-                result = Worker(self.work_dir, self._gh, self._abort_task).run()
+                result = Worker(
+                    self.work_dir,
+                    self._gh,
+                    self._abort_task,
+                    self._repo_name,
+                    self._registry,
+                ).run()
             except Exception:
                 log.exception("WorkerThread %s: unexpected error", self.name)
                 self._wake.wait(timeout=_ERROR_TIMEOUT)

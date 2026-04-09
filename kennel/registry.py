@@ -101,9 +101,9 @@ class WorkerRegistry:
         return thread is not None and thread.is_alive()
 
 
-def _make_thread(repo_cfg: RepoConfig) -> WorkerThread:
+def _make_thread(repo_cfg: RepoConfig, registry: WorkerRegistry) -> WorkerThread:
     """Default factory: create a WorkerThread with a live GitHub client."""
-    return WorkerThread(repo_cfg.work_dir, GitHub())
+    return WorkerThread(repo_cfg.work_dir, repo_cfg.name, GitHub(), registry)
 
 
 def make_registry(repos: dict[str, RepoConfig]) -> WorkerRegistry:
@@ -113,7 +113,11 @@ def make_registry(repos: dict[str, RepoConfig]) -> WorkerRegistry:
     live :class:`~kennel.github.GitHub` client.  Pass a custom registry
     directly (with a mock factory) in tests instead of calling this.
     """
-    registry = WorkerRegistry(_make_thread)
+
+    def factory(cfg: RepoConfig) -> WorkerThread:
+        return _make_thread(cfg, registry)
+
+    registry = WorkerRegistry(factory)
     for repo_cfg in repos.values():
         registry.start(repo_cfg)
     return registry
