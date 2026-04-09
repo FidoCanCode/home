@@ -92,21 +92,18 @@ class TestResolveGitDir:
         return Worker(tmp_path, MagicMock())
 
     def test_returns_path(self, tmp_path: Path) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="/some/repo/.git\n")
-            result = self._make_worker(tmp_path).resolve_git_dir()
+        mock_run = MagicMock(return_value=MagicMock(stdout="/some/repo/.git\n"))
+        result = self._make_worker(tmp_path).resolve_git_dir(_run=mock_run)
         assert result == Path("/some/repo/.git")
 
     def test_strips_whitespace(self, tmp_path: Path) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="  /a/b/.git  \n")
-            result = self._make_worker(tmp_path).resolve_git_dir()
+        mock_run = MagicMock(return_value=MagicMock(stdout="  /a/b/.git  \n"))
+        result = self._make_worker(tmp_path).resolve_git_dir(_run=mock_run)
         assert result == Path("/a/b/.git")
 
     def test_calls_correct_command(self, tmp_path: Path) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="/a/.git")
-            self._make_worker(tmp_path).resolve_git_dir()
+        mock_run = MagicMock(return_value=MagicMock(stdout="/a/.git"))
+        self._make_worker(tmp_path).resolve_git_dir(_run=mock_run)
         mock_run.assert_called_once_with(
             ["git", "rev-parse", "--absolute-git-dir"],
             cwd=tmp_path,
@@ -116,10 +113,9 @@ class TestResolveGitDir:
         )
 
     def test_propagates_called_process_error(self, tmp_path: Path) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.CalledProcessError(128, "git")
-            with pytest.raises(subprocess.CalledProcessError):
-                self._make_worker(tmp_path).resolve_git_dir()
+        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, "git"))
+        with pytest.raises(subprocess.CalledProcessError):
+            self._make_worker(tmp_path).resolve_git_dir(_run=mock_run)
 
 
 class TestAcquireLock:
@@ -169,12 +165,13 @@ class TestAcquireLock:
 
 
 class TestCreateContext:
+    def _mock_run(self, git_dir: Path) -> MagicMock:
+        return MagicMock(return_value=MagicMock(stdout=str(git_dir) + "\n"))
+
     def test_returns_worker_context(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
-        worker = Worker(tmp_path, MagicMock())
-        with patch.object(worker, "resolve_git_dir", return_value=git_dir):
-            ctx = worker.create_context()
+        ctx = Worker(tmp_path, MagicMock()).create_context(_run=self._mock_run(git_dir))
         assert isinstance(ctx, WorkerContext)
         assert ctx.work_dir == tmp_path
         assert ctx.git_dir == git_dir
@@ -184,9 +181,7 @@ class TestCreateContext:
     def test_creates_fido_dir(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
-        worker = Worker(tmp_path, MagicMock())
-        with patch.object(worker, "resolve_git_dir", return_value=git_dir):
-            ctx = worker.create_context()
+        ctx = Worker(tmp_path, MagicMock()).create_context(_run=self._mock_run(git_dir))
         assert ctx.fido_dir.is_dir()
         ctx.lock_fd.close()
 
@@ -194,14 +189,14 @@ class TestCreateContext:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
         fido_dir = git_dir / "fido"
-        worker = Worker(tmp_path, MagicMock())
-        with patch.object(worker, "resolve_git_dir", return_value=git_dir):
-            fd1 = acquire_lock(fido_dir)
-            try:
-                with pytest.raises(LockHeld):
-                    worker.create_context()
-            finally:
-                fd1.close()
+        fd1 = acquire_lock(fido_dir)
+        try:
+            with pytest.raises(LockHeld):
+                Worker(tmp_path, MagicMock()).create_context(
+                    _run=self._mock_run(git_dir)
+                )
+        finally:
+            fd1.close()
 
 
 class TestRepoContext:
@@ -284,60 +279,61 @@ class TestWorker:
 
     # --- set_status ---
 
+    def _ss(
+        self,
+        tmp_path: Path,
+        *,
+        text: str = "ok",
+        session_id: str = "sess-1",
+        emoji: str = "🐕",
+        resume_side_effect=None,
+        sub_dir: Path | None = None,
+    ) -> dict:
+        """Return keyword args for set_status injection."""
+        if sub_dir is None:
+            sub_dir = tmp_path
+        return {
+            "_generate_status_with_session": MagicMock(return_value=(text, session_id)),
+            "_generate_status_emoji": MagicMock(return_value=emoji),
+            "_resume_status": MagicMock(
+                side_effect=resume_side_effect,
+                return_value="" if resume_side_effect is None else None,
+            ),
+            "_sub_dir_fn": lambda: sub_dir,
+        }
+
     def test_set_status_calls_set_user_status_on_success(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=("writing tests", "sess-1"),
-            ),
-            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("writing tests")
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        Worker(tmp_path, gh).set_status(
+            "writing tests", **self._ss(tmp_path, text="writing tests")
+        )
         gh.set_user_status.assert_called_once_with("writing tests", "🐕", busy=True)
 
     def test_set_status_busy_false_forwarded(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=("napping", "sess-1"),
-            ),
-            patch("kennel.worker.claude.generate_status_emoji", return_value="😴"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("napping", busy=False)
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        Worker(tmp_path, gh).set_status(
+            "napping", busy=False, **self._ss(tmp_path, text="napping", emoji="😴")
+        )
         gh.set_user_status.assert_called_once_with("napping", "😴", busy=False)
 
     def test_set_status_skips_when_claude_returns_empty(self, tmp_path: Path) -> None:
         gh = self._make_gh()
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=("", ""),
-            ),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("idle")
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        Worker(tmp_path, gh).set_status(
+            "idle", **self._ss(tmp_path, text="", session_id="")
+        )
         gh.set_user_status.assert_not_called()
 
     def test_set_status_emoji_fallback_when_empty(self, tmp_path: Path) -> None:
         # generate_status_emoji returns empty → :dog: fallback
         gh = self._make_gh()
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=("Sniffing out endpoints", "sess-1"),
-            ),
-            patch("kennel.worker.claude.generate_status_emoji", return_value=""),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("idle")
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        Worker(tmp_path, gh).set_status(
+            "idle",
+            **self._ss(tmp_path, text="Sniffing out endpoints", emoji=""),
+        )
         gh.set_user_status.assert_called_once_with(
             "Sniffing out endpoints", ":dog:", busy=True
         )
@@ -346,17 +342,11 @@ class TestWorker:
         # All retries fail (return empty) → fall back to truncation
         gh = self._make_gh()
         long_text = "x" * 100
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=(long_text, "sess-1"),
-            ),
-            patch("kennel.worker.claude.resume_status", return_value=""),
-            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("something")
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        Worker(tmp_path, gh).set_status(
+            "something",
+            **self._ss(tmp_path, text=long_text, resume_side_effect=[""]),
+        )
         called_text = gh.set_user_status.call_args[0][0]
         assert len(called_text) == 80
 
@@ -365,20 +355,15 @@ class TestWorker:
     ) -> None:
         gh = self._make_gh()
         long_text = "y" * 90
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=(long_text, "sess-99"),
-            ),
-            patch(
-                "kennel.worker.claude.resume_status",
-                return_value="shorter text",
-            ) as mock_resume,
-            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("something")
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        mock_resume = MagicMock(return_value="shorter text")
+        Worker(tmp_path, gh).set_status(
+            "something",
+            **{
+                **self._ss(tmp_path, text=long_text, session_id="sess-99"),
+                "_resume_status": mock_resume,
+            },
+        )
         mock_resume.assert_called_once_with("sess-99", ANY)
         gh.set_user_status.assert_called_once_with("shorter text", "🐕", busy=True)
 
@@ -386,57 +371,45 @@ class TestWorker:
         # Second retry produces short text → no third retry
         gh = self._make_gh()
         long_text = "z" * 90
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=(long_text, "sess-7"),
-            ),
-            patch(
-                "kennel.worker.claude.resume_status",
-                side_effect=["z" * 85, "good"],
-            ) as mock_resume,
-            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("something")
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        mock_resume = MagicMock(side_effect=["z" * 85, "good"])
+        Worker(tmp_path, gh).set_status(
+            "something",
+            **{
+                **self._ss(tmp_path, text=long_text, session_id="sess-7"),
+                "_resume_status": mock_resume,
+            },
+        )
         assert mock_resume.call_count == 2
         gh.set_user_status.assert_called_once_with("good", "🐕", busy=True)
 
     def test_set_status_retries_up_to_3_times_max(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         long_text = "w" * 90
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=(long_text, "sess-3"),
-            ),
-            patch(
-                "kennel.worker.claude.resume_status",
-                return_value=long_text,
-            ) as mock_resume,
-            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("something")
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        mock_resume = MagicMock(return_value=long_text)
+        Worker(tmp_path, gh).set_status(
+            "something",
+            **{
+                **self._ss(tmp_path, text=long_text, session_id="sess-3"),
+                "_resume_status": mock_resume,
+            },
+        )
         assert mock_resume.call_count == 3
 
     def test_set_status_skips_retry_when_no_session_id(self, tmp_path: Path) -> None:
         # No session_id → retry loop is skipped, truncation applied directly
         gh = self._make_gh()
         long_text = "v" * 100
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=(long_text, ""),
-            ),
-            patch("kennel.worker.claude.resume_status") as mock_resume,
-            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("something")
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        mock_resume = MagicMock()
+        Worker(tmp_path, gh).set_status(
+            "something",
+            **{
+                **self._ss(tmp_path, text=long_text, session_id=""),
+                "_resume_status": mock_resume,
+            },
+        )
         mock_resume.assert_not_called()
         called_text = gh.set_user_status.call_args[0][0]
         assert len(called_text) == 80
@@ -447,33 +420,22 @@ class TestWorker:
         import logging
 
         gh = self._make_gh()
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=("", ""),
-            ),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            with caplog.at_level(logging.WARNING, logger="kennel"):
-                Worker(tmp_path, gh).set_status("idle")
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        with caplog.at_level(logging.WARNING, logger="kennel"):
+            Worker(tmp_path, gh).set_status(
+                "idle", **self._ss(tmp_path, text="", session_id="")
+            )
         assert "empty" in caplog.text
 
     def test_set_status_logs_info_on_success(self, tmp_path: Path, caplog) -> None:
         import logging
 
         gh = self._make_gh()
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=("fetching", "sess-1"),
-            ),
-            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            with caplog.at_level(logging.INFO, logger="kennel"):
-                Worker(tmp_path, gh).set_status("fetching")
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        with caplog.at_level(logging.INFO, logger="kennel"):
+            Worker(tmp_path, gh).set_status(
+                "fetching", **self._ss(tmp_path, text="fetching")
+            )
         assert "set_status" in caplog.text
 
     def test_set_status_falls_back_to_empty_persona_on_oserror(
@@ -481,15 +443,14 @@ class TestWorker:
     ) -> None:
         gh = self._make_gh()
         missing_dir = tmp_path / "no_such_dir"
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=("working", "sess-1"),
-            ) as mock_gen,
-            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=missing_dir),
-        ):
-            Worker(tmp_path, gh).set_status("working")
+        mock_gen = MagicMock(return_value=("working", "sess-1"))
+        Worker(tmp_path, gh).set_status(
+            "working",
+            **{
+                **self._ss(tmp_path, text="working", sub_dir=missing_dir),
+                "_generate_status_with_session": mock_gen,
+            },
+        )
         # persona file missing — generate_status_with_session still called with empty persona
         prompt_arg = mock_gen.call_args[1]["prompt"]
         assert "working (busy)" in prompt_arg
@@ -498,34 +459,25 @@ class TestWorker:
         self, tmp_path: Path
     ) -> None:
         gh = self._make_gh()
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=("working", "sess-1"),
-            ) as mock_gen,
-            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(tmp_path, gh).set_status("working")
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        mock_gen = MagicMock(return_value=("working", "sess-1"))
+        Worker(tmp_path, gh).set_status(
+            "working",
+            **{
+                **self._ss(tmp_path, text="working"),
+                "_generate_status_with_session": mock_gen,
+            },
+        )
         assert mock_gen.call_args[1]["system_prompt"] is not None
 
     def test_set_status_reports_activity_to_registry(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         registry = MagicMock()
         registry.get_all_activities.return_value = []
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=("working", "sess-1"),
-            ),
-            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(
-                tmp_path, gh, repo_name="owner/myrepo", registry=registry
-            ).set_status("working", busy=True)
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        Worker(tmp_path, gh, repo_name="owner/myrepo", registry=registry).set_status(
+            "working", busy=True, **self._ss(tmp_path, text="working")
+        )
         registry.report_activity.assert_called_once_with(
             "owner/myrepo", "working", True
         )
@@ -544,18 +496,15 @@ class TestWorker:
         activity_b.what = "napping"
         activity_b.busy = False
         registry.get_all_activities.return_value = [activity_a, activity_b]
-        with (
-            patch(
-                "kennel.worker.claude.generate_status_with_session",
-                return_value=("fixing bug", "sess-1"),
-            ) as mock_gen,
-            patch("kennel.worker.claude.generate_status_emoji", return_value="🐕"),
-            patch("kennel.worker._sub_dir", return_value=tmp_path),
-        ):
-            (tmp_path / "persona.md").write_text("I am Fido.")
-            Worker(
-                tmp_path, gh, repo_name="owner/repo-a", registry=registry
-            ).set_status("fixing bug")
+        (tmp_path / "persona.md").write_text("I am Fido.")
+        mock_gen = MagicMock(return_value=("fixing bug", "sess-1"))
+        Worker(tmp_path, gh, repo_name="owner/repo-a", registry=registry).set_status(
+            "fixing bug",
+            **{
+                **self._ss(tmp_path, text="fixing bug"),
+                "_generate_status_with_session": mock_gen,
+            },
+        )
         prompt_arg = mock_gen.call_args[1]["prompt"]
         assert "owner/repo-a" in prompt_arg
         assert "owner/repo-b" in prompt_arg
@@ -1906,48 +1855,38 @@ class TestGit:
     """Tests for Worker._git helper."""
 
     def test_calls_subprocess_run_with_git_prefix(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            worker._git(["status"])
+        mock_run = MagicMock(return_value=MagicMock(returncode=0))
+        Worker(tmp_path, MagicMock())._git(["status"], _run=mock_run)
         mock_run.assert_called_once()
         args = mock_run.call_args[0][0]
         assert args[0] == "git"
         assert args[1] == "status"
 
     def test_passes_work_dir_as_cwd(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            worker._git(["status"])
+        mock_run = MagicMock(return_value=MagicMock(returncode=0))
+        Worker(tmp_path, MagicMock())._git(["status"], _run=mock_run)
         assert mock_run.call_args[1]["cwd"] == tmp_path
 
     def test_check_true_by_default(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            worker._git(["status"])
+        mock_run = MagicMock(return_value=MagicMock(returncode=0))
+        Worker(tmp_path, MagicMock())._git(["status"], _run=mock_run)
         assert mock_run.call_args[1]["check"] is True
 
     def test_check_false_propagated(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1)
-            worker._git(["status"], check=False)
+        mock_run = MagicMock(return_value=MagicMock(returncode=1))
+        Worker(tmp_path, MagicMock())._git(["status"], check=False, _run=mock_run)
         assert mock_run.call_args[1]["check"] is False
 
     def test_propagates_called_process_error(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.CalledProcessError(1, "git")
-            with pytest.raises(subprocess.CalledProcessError):
-                worker._git(["checkout", "no-such-branch"])
+        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, "git"))
+        with pytest.raises(subprocess.CalledProcessError):
+            Worker(tmp_path, MagicMock())._git(
+                ["checkout", "no-such-branch"], _run=mock_run
+            )
 
     def test_capture_output_and_text_set(self, tmp_path: Path) -> None:
-        worker = Worker(tmp_path, MagicMock())
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            worker._git(["log"])
+        mock_run = MagicMock(return_value=MagicMock(returncode=0))
+        Worker(tmp_path, MagicMock())._git(["log"], _run=mock_run)
         assert mock_run.call_args[1]["capture_output"] is True
         assert mock_run.call_args[1]["text"] is True
 
@@ -7039,29 +6978,22 @@ class TestRunPromoteMergeIntegration:
 
 class TestResolveGitDirModuleLevel:
     def test_returns_path_from_stdout(self, tmp_path: Path) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="/some/repo/.git\n")
-            result = _resolve_git_dir(tmp_path)
-        assert result == Path("/some/repo/.git")
+        mock_run = MagicMock(return_value=MagicMock(stdout="/some/repo/.git\n"))
+        assert _resolve_git_dir(tmp_path, _run=mock_run) == Path("/some/repo/.git")
 
     def test_passes_absolute_git_dir_flag(self, tmp_path: Path) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="/repo/.git\n")
-            _resolve_git_dir(tmp_path)
-        args = mock_run.call_args[0][0]
-        assert "--absolute-git-dir" in args
+        mock_run = MagicMock(return_value=MagicMock(stdout="/repo/.git\n"))
+        _resolve_git_dir(tmp_path, _run=mock_run)
+        assert "--absolute-git-dir" in mock_run.call_args[0][0]
 
     def test_raises_on_subprocess_failure(self, tmp_path: Path) -> None:
-        with patch(
-            "subprocess.run", side_effect=subprocess.CalledProcessError(1, "git")
-        ):
-            with pytest.raises(subprocess.CalledProcessError):
-                _resolve_git_dir(tmp_path)
+        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, "git"))
+        with pytest.raises(subprocess.CalledProcessError):
+            _resolve_git_dir(tmp_path, _run=mock_run)
 
     def test_passes_cwd(self, tmp_path: Path) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="/repo/.git\n")
-            _resolve_git_dir(tmp_path)
+        mock_run = MagicMock(return_value=MagicMock(stdout="/repo/.git\n"))
+        _resolve_git_dir(tmp_path, _run=mock_run)
         assert mock_run.call_args.kwargs["cwd"] == tmp_path
 
 
@@ -7201,8 +7133,9 @@ class TestAutoCompleteAskTasks:
 
     def test_no_ask_tasks_does_nothing(self, tmp_path: Path) -> None:
         gh = MagicMock()
-        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
-            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        _auto_complete_ask_tasks(
+            tmp_path, gh, "owner/repo", 1, _list_tasks=MagicMock(return_value=[])
+        )
         gh.get_review_threads.assert_not_called()
 
     def test_completes_ask_task_when_thread_resolved(self, tmp_path: Path) -> None:
@@ -7211,11 +7144,15 @@ class TestAutoCompleteAskTasks:
         gh.get_review_threads.return_value = self._threads_data(
             [self._resolved_node(42)]
         )
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch("kennel.worker.tasks.complete_by_id") as mock_complete,
-        ):
-            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete = MagicMock()
+        _auto_complete_ask_tasks(
+            tmp_path,
+            gh,
+            "owner/repo",
+            1,
+            _list_tasks=MagicMock(return_value=[task]),
+            _complete_by_id=mock_complete,
+        )
         mock_complete.assert_called_once_with(tmp_path, "ask-1")
 
     def test_does_not_complete_ask_task_when_thread_not_resolved(
@@ -7226,22 +7163,30 @@ class TestAutoCompleteAskTasks:
         gh.get_review_threads.return_value = self._threads_data(
             [{"isResolved": False, "comments": {"nodes": [{"databaseId": 42}]}}]
         )
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch("kennel.worker.tasks.complete_by_id") as mock_complete,
-        ):
-            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete = MagicMock()
+        _auto_complete_ask_tasks(
+            tmp_path,
+            gh,
+            "owner/repo",
+            1,
+            _list_tasks=MagicMock(return_value=[task]),
+            _complete_by_id=mock_complete,
+        )
         mock_complete.assert_not_called()
 
     def test_get_review_threads_exception_logged(self, tmp_path: Path) -> None:
         gh = MagicMock()
         task = self._ask_task(1)
         gh.get_review_threads.side_effect = RuntimeError("api fail")
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch("kennel.worker.tasks.complete_by_id") as mock_complete,
-        ):
-            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete = MagicMock()
+        _auto_complete_ask_tasks(
+            tmp_path,
+            gh,
+            "owner/repo",
+            1,
+            _list_tasks=MagicMock(return_value=[task]),
+            _complete_by_id=mock_complete,
+        )
         mock_complete.assert_not_called()
 
     def test_non_ask_tasks_ignored(self, tmp_path: Path) -> None:
@@ -7254,21 +7199,29 @@ class TestAutoCompleteAskTasks:
         gh.get_review_threads.return_value = self._threads_data(
             [self._resolved_node(1)]
         )
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch("kennel.worker.tasks.complete_by_id") as mock_complete,
-        ):
-            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete = MagicMock()
+        _auto_complete_ask_tasks(
+            tmp_path,
+            gh,
+            "owner/repo",
+            1,
+            _list_tasks=MagicMock(return_value=[task]),
+            _complete_by_id=mock_complete,
+        )
         mock_complete.assert_not_called()
 
     def test_ask_task_without_thread_ignored(self, tmp_path: Path) -> None:
         gh = MagicMock()
         task = {"title": "ASK: question", "status": "pending"}
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch("kennel.worker.tasks.complete_by_id") as mock_complete,
-        ):
-            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete = MagicMock()
+        _auto_complete_ask_tasks(
+            tmp_path,
+            gh,
+            "owner/repo",
+            1,
+            _list_tasks=MagicMock(return_value=[task]),
+            _complete_by_id=mock_complete,
+        )
         mock_complete.assert_not_called()
         gh.get_review_threads.assert_not_called()
 
@@ -7278,11 +7231,15 @@ class TestAutoCompleteAskTasks:
         gh.get_review_threads.return_value = self._threads_data(
             [{"isResolved": True, "comments": {"nodes": [{}]}}]
         )
-        with (
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch("kennel.worker.tasks.complete_by_id") as mock_complete,
-        ):
-            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        mock_complete = MagicMock()
+        _auto_complete_ask_tasks(
+            tmp_path,
+            gh,
+            "owner/repo",
+            1,
+            _list_tasks=MagicMock(return_value=[task]),
+            _complete_by_id=mock_complete,
+        )
         mock_complete.assert_not_called()
 
 
@@ -7295,25 +7252,36 @@ class TestSyncTasks:
     def _state_with_issue(self, fido_dir: Path, issue: int = 1) -> None:
         (fido_dir / "state.json").write_text(f'{{"issue": {issue}}}')
 
+    def _sync_kwargs(
+        self,
+        fido_dir: Path,
+        task_list: list | None = None,
+    ) -> dict:
+        """Return injection kwargs for sync_tasks pointing _resolve_git_dir at fido_dir.parent."""
+        return {
+            "_resolve_git_dir_fn": MagicMock(return_value=fido_dir.parent),
+            "_list_tasks": MagicMock(return_value=task_list or []),
+            "_auto_complete_ask_tasks_fn": MagicMock(),
+        }
+
     def test_warns_when_git_dir_not_resolved(self, tmp_path: Path, caplog) -> None:
         import logging
 
         gh = MagicMock()
-        with (
-            patch(
-                "kennel.worker._resolve_git_dir",
-                side_effect=subprocess.CalledProcessError(1, "git"),
-            ),
-            caplog.at_level(logging.WARNING, logger="kennel"),
-        ):
-            sync_tasks(tmp_path, gh)
+        with caplog.at_level(logging.WARNING, logger="kennel"):
+            sync_tasks(
+                tmp_path,
+                gh,
+                _resolve_git_dir_fn=MagicMock(
+                    side_effect=subprocess.CalledProcessError(1, "git")
+                ),
+            )
         assert "could not resolve git dir" in caplog.text
 
     def test_returns_early_when_no_issue_in_state(self, tmp_path: Path) -> None:
         gh = MagicMock()
         fido_dir = self._fido_dir(tmp_path)
-        with patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent):
-            sync_tasks(tmp_path, gh)
+        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.find_pr.assert_not_called()
 
     def test_returns_early_when_lock_held(self, tmp_path: Path) -> None:
@@ -7325,8 +7293,7 @@ class TestSyncTasks:
         sync_lock_path = fido_dir / "sync.lock"
         with open(sync_lock_path, "w") as lock_fd:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            with patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent):
-                sync_tasks(tmp_path, gh)
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.find_pr.assert_not_called()
 
     def test_returns_early_when_no_open_pr(self, tmp_path: Path) -> None:
@@ -7336,8 +7303,7 @@ class TestSyncTasks:
         gh.get_repo_info.return_value = "owner/repo"
         gh.get_user.return_value = "fido-bot"
         gh.find_pr.return_value = None
-        with patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent):
-            sync_tasks(tmp_path, gh)
+        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.get_pr_body.assert_not_called()
 
     def test_returns_early_when_pr_not_open(self, tmp_path: Path) -> None:
@@ -7347,8 +7313,7 @@ class TestSyncTasks:
         gh.get_repo_info.return_value = "owner/repo"
         gh.get_user.return_value = "fido-bot"
         gh.find_pr.return_value = {"number": 5, "state": "MERGED"}
-        with patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent):
-            sync_tasks(tmp_path, gh)
+        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.get_pr_body.assert_not_called()
 
     def test_returns_early_when_no_tasks(self, tmp_path: Path) -> None:
@@ -7358,12 +7323,7 @@ class TestSyncTasks:
         gh.get_repo_info.return_value = "owner/repo"
         gh.get_user.return_value = "fido-bot"
         gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
-        with (
-            patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent),
-            patch("kennel.worker.tasks.list_tasks", return_value=[]),
-            patch("kennel.worker._auto_complete_ask_tasks"),
-        ):
-            sync_tasks(tmp_path, gh)
+        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[]))
         gh.get_pr_body.assert_not_called()
 
     def test_syncs_pr_body_when_queue_markers_present(self, tmp_path: Path) -> None:
@@ -7376,12 +7336,7 @@ class TestSyncTasks:
         body = "desc\n<!-- WORK_QUEUE_START -->\nold\n<!-- WORK_QUEUE_END -->\nfooter"
         gh.get_pr_body.return_value = body
         task = {"title": "Do it", "status": "pending"}
-        with (
-            patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent),
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch("kennel.worker._auto_complete_ask_tasks"),
-        ):
-            sync_tasks(tmp_path, gh)
+        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
         gh.edit_pr_body.assert_called_once()
         new_body = gh.edit_pr_body.call_args[0][2]
         assert "Do it" in new_body
@@ -7396,12 +7351,7 @@ class TestSyncTasks:
         gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
         gh.get_pr_body.return_value = "no markers here"
         task = {"title": "Do it", "status": "pending"}
-        with (
-            patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent),
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch("kennel.worker._auto_complete_ask_tasks"),
-        ):
-            sync_tasks(tmp_path, gh)
+        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
         gh.edit_pr_body.assert_not_called()
 
     def test_get_repo_info_exception_logged(self, tmp_path: Path) -> None:
@@ -7409,8 +7359,7 @@ class TestSyncTasks:
         fido_dir = self._fido_dir(tmp_path)
         self._state_with_issue(fido_dir)
         gh.get_repo_info.side_effect = RuntimeError("no remote")
-        with patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent):
-            sync_tasks(tmp_path, gh)
+        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.find_pr.assert_not_called()
 
     def test_get_pr_body_exception_breaks_loop(self, tmp_path: Path) -> None:
@@ -7422,12 +7371,7 @@ class TestSyncTasks:
         gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
         gh.get_pr_body.side_effect = RuntimeError("api down")
         task = {"title": "Do it", "status": "pending"}
-        with (
-            patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent),
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch("kennel.worker._auto_complete_ask_tasks"),
-        ):
-            sync_tasks(tmp_path, gh)
+        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
         gh.edit_pr_body.assert_not_called()
 
     def test_edit_pr_body_exception_breaks_loop(self, tmp_path: Path) -> None:
@@ -7441,51 +7385,29 @@ class TestSyncTasks:
         gh.get_pr_body.return_value = body
         gh.edit_pr_body.side_effect = RuntimeError("api down")
         task = {"title": "Do it", "status": "pending"}
-        with (
-            patch("kennel.worker._resolve_git_dir", return_value=fido_dir.parent),
-            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
-            patch("kennel.worker._auto_complete_ask_tasks"),
-        ):
-            sync_tasks(tmp_path, gh)  # should not raise
+        sync_tasks(
+            tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task])
+        )  # should not raise
 
 
 class TestSyncTasksBackground:
     def test_starts_daemon_thread(self, tmp_path: Path) -> None:
         gh = MagicMock()
-        started_threads = []
-
-        def capture_start(self_t):
-            started_threads.append(self_t)
-            # Don't actually start the thread to avoid real sync
-
-        with patch("threading.Thread.start", capture_start):
-            sync_tasks_background(tmp_path, gh)
-
-        assert len(started_threads) == 1
-        assert started_threads[0].daemon is True
+        started: list = []
+        sync_tasks_background(tmp_path, gh, _start=started.append)
+        assert len(started) == 1
+        assert started[0].daemon is True
 
     def test_thread_name_includes_dir_name(self, tmp_path: Path) -> None:
         gh = MagicMock()
-        captured = []
-
-        def capture_start(self_t):
-            captured.append(self_t)
-
-        with patch("threading.Thread.start", capture_start):
-            sync_tasks_background(tmp_path, gh)
-
+        captured: list = []
+        sync_tasks_background(tmp_path, gh, _start=captured.append)
         assert tmp_path.name in captured[0].name
 
     def test_thread_target_is_sync_tasks(self, tmp_path: Path) -> None:
         gh = MagicMock()
-        captured = []
-
-        def capture_start(self_t):
-            captured.append(self_t)
-
-        with patch("threading.Thread.start", capture_start):
-            sync_tasks_background(tmp_path, gh)
-
+        captured: list = []
+        sync_tasks_background(tmp_path, gh, _start=captured.append)
         assert captured[0]._target is sync_tasks
 
 

@@ -18,11 +18,14 @@ log = logging.getLogger(__name__)
 # ── Requests-based GitHub API client ─────────────────────────────────────────
 
 
-def _gh_token() -> str:
+def _gh_token(
+    runner: Any = subprocess.run,
+    environ: Any = os.environ,
+) -> str:
     """Return a GitHub token from env or the gh CLI."""
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = environ.get("GITHUB_TOKEN", "")
     if not token:
-        result = subprocess.run(
+        result = runner(
             ["gh", "auth", "token"],
             capture_output=True,
             text=True,
@@ -37,8 +40,8 @@ class GH:
 
     BASE = "https://api.github.com"
 
-    def __init__(self, token: str) -> None:
-        self._s = _requests.Session()
+    def __init__(self, token: str, session: _requests.Session | None = None) -> None:
+        self._s = session if session is not None else _requests.Session()
         self._s.headers.update(
             {
                 "Authorization": f"Bearer {token}",
@@ -204,9 +207,13 @@ class GH:
         data = self._get("/user")
         return data["login"]
 
-    def get_repo_info(self, cwd: Path | str | None = None) -> str:
+    def get_repo_info(
+        self,
+        cwd: Path | str | None = None,
+        runner: Any = subprocess.run,
+    ) -> str:
         """Return 'owner/repo' for the repo at cwd, parsed from the git remote."""
-        result = subprocess.run(
+        result = runner(
             ["git", "remote", "get-url", "origin"],
             capture_output=True,
             text=True,
@@ -461,30 +468,38 @@ class GH:
 
 
 @functools.cache
-def _get_gh() -> GH:
+def _get_gh(token: str | None = None) -> GH:
     """Return the shared GH instance, creating it on first call."""
-    return GH(_gh_token())
+    return GH(token if token is not None else _gh_token())
 
 
 class GitHub:
     """Facade that stores a single GH client as self._gh and exposes named methods."""
 
-    def __init__(self, token: str | None = None) -> None:
-        self._gh = GH(token if token is not None else _gh_token())
+    def __init__(
+        self,
+        token: str | None = None,
+        session: _requests.Session | None = None,
+    ) -> None:
+        self._gh = GH(token if token is not None else _gh_token(), session=session)
 
     # ── Repo / user context ───────────────────────────────────────────────────
 
-    def get_repo_info(self, cwd: Path | str | None = None) -> str:
+    def get_repo_info(
+        self, cwd: Path | str | None = None, runner: Any = subprocess.run
+    ) -> str:
         """Return 'owner/repo' for the repo at cwd."""
-        return self._gh.get_repo_info(cwd=cwd)
+        return self._gh.get_repo_info(cwd=cwd, runner=runner)
 
     def get_user(self) -> str:
         """Return the authenticated GitHub username."""
         return self._gh.get_user()
 
-    def get_default_branch(self, cwd: Path | str | None = None) -> str:
+    def get_default_branch(
+        self, cwd: Path | str | None = None, runner: Any = subprocess.run
+    ) -> str:
         """Return the default branch name for the repo at cwd."""
-        repo = self._gh.get_repo_info(cwd=cwd)
+        repo = self._gh.get_repo_info(cwd=cwd, runner=runner)
         return self._gh.get_default_branch(repo)
 
     def set_user_status(self, msg: str, emoji: str, busy: bool = True) -> None:
@@ -624,6 +639,6 @@ class GitHub:
 
 
 @functools.cache
-def get_github() -> GitHub:
+def get_github(token: str | None = None) -> GitHub:
     """Return the shared GitHub facade instance, creating it on first call."""
-    return GitHub()
+    return GitHub(token)

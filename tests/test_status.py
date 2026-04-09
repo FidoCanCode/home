@@ -90,38 +90,28 @@ class TestFidoRunning:
 
 class TestPgrep:
     def test_returns_pids(self) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="12345\n67890\n")
-            result = _pgrep("some pattern")
-        assert result == [12345, 67890]
+        mock_run = MagicMock(return_value=MagicMock(stdout="12345\n67890\n"))
+        assert _pgrep("some pattern", _run=mock_run) == [12345, 67890]
 
     def test_strips_whitespace(self) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="  42  \n")
-            result = _pgrep("pattern")
-        assert result == [42]
+        mock_run = MagicMock(return_value=MagicMock(stdout="  42  \n"))
+        assert _pgrep("pattern", _run=mock_run) == [42]
 
     def test_empty_output(self) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="")
-            result = _pgrep("pattern")
-        assert result == []
+        mock_run = MagicMock(return_value=MagicMock(stdout=""))
+        assert _pgrep("pattern", _run=mock_run) == []
 
     def test_skips_non_integer_lines(self) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="123\nnot-a-pid\n456\n")
-            result = _pgrep("pattern")
-        assert result == [123, 456]
+        mock_run = MagicMock(return_value=MagicMock(stdout="123\nnot-a-pid\n456\n"))
+        assert _pgrep("pattern", _run=mock_run) == [123, 456]
 
     def test_oserror_returns_empty(self) -> None:
-        with patch("subprocess.run", side_effect=OSError("no pgrep")):
-            result = _pgrep("pattern")
-        assert result == []
+        mock_run = MagicMock(side_effect=OSError("no pgrep"))
+        assert _pgrep("pattern", _run=mock_run) == []
 
     def test_passes_pattern_to_pgrep(self) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="")
-            _pgrep("kennel --port")
+        mock_run = MagicMock(return_value=MagicMock(stdout=""))
+        _pgrep("kennel --port", _run=mock_run)
         mock_run.assert_called_once_with(
             ["pgrep", "-f", "kennel --port"],
             capture_output=True,
@@ -131,32 +121,24 @@ class TestPgrep:
 
 class TestProcessUptimeSeconds:
     def test_returns_elapsed_time(self) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="  3742  ")
-            result = _process_uptime_seconds(12345)
-        assert result == 3742
+        mock_run = MagicMock(return_value=MagicMock(stdout="  3742  "))
+        assert _process_uptime_seconds(12345, _run=mock_run) == 3742
 
     def test_none_when_no_output(self) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="")
-            result = _process_uptime_seconds(99)
-        assert result is None
+        mock_run = MagicMock(return_value=MagicMock(stdout=""))
+        assert _process_uptime_seconds(99, _run=mock_run) is None
 
     def test_none_on_oserror(self) -> None:
-        with patch("subprocess.run", side_effect=OSError):
-            result = _process_uptime_seconds(99)
-        assert result is None
+        mock_run = MagicMock(side_effect=OSError)
+        assert _process_uptime_seconds(99, _run=mock_run) is None
 
     def test_none_on_value_error(self) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="not-a-number")
-            result = _process_uptime_seconds(99)
-        assert result is None
+        mock_run = MagicMock(return_value=MagicMock(stdout="not-a-number"))
+        assert _process_uptime_seconds(99, _run=mock_run) is None
 
     def test_calls_ps_with_pid(self) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="100")
-            _process_uptime_seconds(42)
+        mock_run = MagicMock(return_value=MagicMock(stdout="100"))
+        _process_uptime_seconds(42, _run=mock_run)
         mock_run.assert_called_once_with(
             ["ps", "-p", "42", "-o", "etimes="],
             capture_output=True,
@@ -286,16 +268,18 @@ class TestPortFromPid:
 
 
 class TestFetchActivities:
-    def test_returns_repo_what_map(self) -> None:
-        data = json.dumps(
-            [{"repo_name": "owner/repo", "what": "Working on: #1", "busy": True}]
-        ).encode()
+    def _make_urlopen(self, data: bytes) -> MagicMock:
         mock_resp = MagicMock()
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.read.return_value = data
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = _fetch_activities(9000)
+        return MagicMock(return_value=mock_resp)
+
+    def test_returns_repo_what_map(self) -> None:
+        data = json.dumps(
+            [{"repo_name": "owner/repo", "what": "Working on: #1", "busy": True}]
+        ).encode()
+        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
         assert result == {"owner/repo": "Working on: #1"}
 
     def test_returns_multiple_repos(self) -> None:
@@ -305,47 +289,27 @@ class TestFetchActivities:
                 {"repo_name": "c/d", "what": "Fixing CI", "busy": True},
             ]
         ).encode()
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = data
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = _fetch_activities(9000)
+        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
         assert result == {"a/b": "Napping", "c/d": "Fixing CI"}
 
     def test_returns_empty_on_exception(self) -> None:
-        with patch("urllib.request.urlopen", side_effect=OSError("refused")):
-            result = _fetch_activities(9000)
-        assert result == {}
+        mock_urlopen = MagicMock(side_effect=OSError("refused"))
+        assert _fetch_activities(9000, _urlopen=mock_urlopen) == {}
 
     def test_skips_items_without_repo_name(self) -> None:
         data = json.dumps([{"what": "something", "busy": True}]).encode()
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = data
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = _fetch_activities(9000)
+        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
         assert result == {}
 
     def test_skips_items_without_what(self) -> None:
         data = json.dumps([{"repo_name": "a/b", "busy": True}]).encode()
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = data
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = _fetch_activities(9000)
+        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
         assert result == {}
 
     def test_calls_correct_url(self) -> None:
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = b"[]"
-        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
-            _fetch_activities(8888)
-        mock_open.assert_called_once_with("http://localhost:8888/status", timeout=2)
+        mock_urlopen = self._make_urlopen(b"[]")
+        _fetch_activities(8888, _urlopen=mock_urlopen)
+        mock_urlopen.assert_called_once_with("http://localhost:8888/status", timeout=2)
 
 
 class TestClaudePid:
@@ -370,22 +334,16 @@ class TestClaudePid:
 
 class TestGitDir:
     def test_returns_path(self, tmp_path: Path) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="/repo/.git\n")
-            result = _git_dir(tmp_path)
-        assert result == Path("/repo/.git")
+        mock_run = MagicMock(return_value=MagicMock(stdout="/repo/.git\n"))
+        assert _git_dir(tmp_path, _run=mock_run) == Path("/repo/.git")
 
     def test_strips_whitespace(self, tmp_path: Path) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="  /a/b/.git  \n")
-            result = _git_dir(tmp_path)
-        assert result == Path("/a/b/.git")
+        mock_run = MagicMock(return_value=MagicMock(stdout="  /a/b/.git  \n"))
+        assert _git_dir(tmp_path, _run=mock_run) == Path("/a/b/.git")
 
     def test_returns_none_on_error(self, tmp_path: Path) -> None:
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.CalledProcessError(128, "git")
-            result = _git_dir(tmp_path)
-        assert result is None
+        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, "git"))
+        assert _git_dir(tmp_path, _run=mock_run) is None
 
 
 class TestReadState:
