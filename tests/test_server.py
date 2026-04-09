@@ -611,6 +611,101 @@ class TestRun:
 
         mock_server.serve_forever.assert_called_once()
 
+    def test_run_creates_per_repo_log_handlers(self, tmp_path: Path) -> None:
+        from kennel.config import Config, RepoConfig
+        from kennel.server import run
+        from kennel.worker import RepoContextFilter, RepoNameFilter
+
+        fake_cfg = Config(
+            port=0,
+            secret=b"test",
+            repos={
+                "owner/myrepo": RepoConfig(name="owner/myrepo", work_dir=tmp_path),
+                "owner/other": RepoConfig(name="owner/other", work_dir=tmp_path),
+            },
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
+        )
+
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+
+        captured_handlers: list = []
+
+        def fake_basic_config(**kwargs):
+            captured_handlers.extend(kwargs.get("handlers", []))
+
+        with (
+            patch("kennel.server.Config.from_args", return_value=fake_cfg),
+            patch("kennel.server.HTTPServer", return_value=mock_server),
+            patch("kennel.server.make_registry"),
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("logging.basicConfig", side_effect=fake_basic_config),
+        ):
+            run()
+
+        # Two shared handlers (file + no tty stderr) + two per-repo handlers
+        assert len(captured_handlers) == 3  # shared file + 2 per-repo (no tty)
+        repo_handlers = [
+            h
+            for h in captured_handlers
+            if any(isinstance(f, RepoNameFilter) for f in h.filters)
+        ]
+        assert len(repo_handlers) == 2
+        short_names = {
+            f.short_name
+            for h in repo_handlers
+            for f in h.filters
+            if isinstance(f, RepoNameFilter)
+        }
+        assert short_names == {"myrepo", "other"}
+        for handler in repo_handlers:
+            assert any(isinstance(f, RepoContextFilter) for f in handler.filters)
+
+    def test_run_per_repo_log_file_path(self, tmp_path: Path) -> None:
+        from kennel.config import Config, RepoConfig
+        from kennel.server import run
+        from kennel.worker import RepoNameFilter
+
+        fake_cfg = Config(
+            port=0,
+            secret=b"test",
+            repos={"owner/myrepo": RepoConfig(name="owner/myrepo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            self_repo=None,
+            sub_dir=tmp_path / "sub",
+        )
+
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+
+        captured_handlers: list = []
+
+        def fake_basic_config(**kwargs):
+            captured_handlers.extend(kwargs.get("handlers", []))
+
+        with (
+            patch("kennel.server.Config.from_args", return_value=fake_cfg),
+            patch("kennel.server.HTTPServer", return_value=mock_server),
+            patch("kennel.server.make_registry"),
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("logging.basicConfig", side_effect=fake_basic_config),
+        ):
+            run()
+
+        repo_handler = next(
+            h
+            for h in captured_handlers
+            if any(isinstance(f, RepoNameFilter) for f in h.filters)
+        )
+        import logging
+
+        assert isinstance(repo_handler, logging.FileHandler)
+        assert repo_handler.baseFilename.endswith("kennel-myrepo.log")
+
 
 def _self_restart_cfg(tmp_path: Path) -> Config:
     return Config(

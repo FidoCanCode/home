@@ -36,6 +36,22 @@ class RepoContextFilter(logging.Filter):
         return True
 
 
+class RepoNameFilter(logging.Filter):
+    """Only pass log records whose repo_name matches *short_name*.
+
+    Intended for per-repo file handlers so each log file receives only
+    records from that repo's worker thread.  Must be applied after
+    :class:`RepoContextFilter` has injected ``repo_name`` onto the record.
+    """
+
+    def __init__(self, short_name: str) -> None:
+        super().__init__()
+        self.short_name = short_name
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return getattr(record, "repo_name", "-") == self.short_name
+
+
 class ActivityReporter(Protocol):
     """Structural protocol satisfied by WorkerRegistry.
 

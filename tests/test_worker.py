@@ -13,6 +13,7 @@ from kennel.worker import (
     LockHeld,
     RepoContext,
     RepoContextFilter,
+    RepoNameFilter,
     Worker,
     WorkerContext,
     WorkerThread,
@@ -60,6 +61,30 @@ class TestRepoContextFilter:
         _thread_repo.__dict__.pop("repo_name", None)
         record = logging.LogRecord("", logging.WARNING, "", 0, "", (), None)
         assert RepoContextFilter().filter(record) is True
+
+
+class TestRepoNameFilter:
+    def _record_with_repo(self, repo_name: str) -> logging.LogRecord:
+        record = logging.LogRecord("", logging.INFO, "", 0, "", (), None)
+        record.repo_name = repo_name  # type: ignore[attr-defined]
+        return record
+
+    def test_passes_matching_repo(self) -> None:
+        f = RepoNameFilter("kennel")
+        assert f.filter(self._record_with_repo("kennel")) is True
+
+    def test_blocks_other_repo(self) -> None:
+        f = RepoNameFilter("kennel")
+        assert f.filter(self._record_with_repo("confusio")) is False
+
+    def test_blocks_default_dash(self) -> None:
+        f = RepoNameFilter("kennel")
+        assert f.filter(self._record_with_repo("-")) is False
+
+    def test_blocks_record_without_repo_name(self) -> None:
+        f = RepoNameFilter("kennel")
+        record = logging.LogRecord("", logging.INFO, "", 0, "", (), None)
+        assert f.filter(record) is False
 
 
 class TestResolveGitDir:
