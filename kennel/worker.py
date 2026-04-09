@@ -1412,6 +1412,7 @@ class Worker:
             state["setup_session_id"] = session_id
             save_state(fido_dir, state)
 
+        self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
             tasks.complete_by_title(self.work_dir, task_title)

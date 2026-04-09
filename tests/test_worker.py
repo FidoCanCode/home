@@ -5673,6 +5673,74 @@ class TestExecuteTask:
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_not_called()
 
+    def test_calls_squash_wip_commit_with_correct_args(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Do work")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(
+                worker, "_squash_wip_commit", return_value=False
+            ) as mock_squash,
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 7, "feat-branch")
+        mock_squash.assert_called_once_with("origin", "feat-branch", "main")
+
+    def test_squash_wip_commit_called_before_ensure_pushed(
+        self, tmp_path: Path
+    ) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Do work")
+        call_order: list[str] = []
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(
+                worker,
+                "_squash_wip_commit",
+                side_effect=lambda *a: call_order.append("squash") or False,
+            ),
+            patch.object(
+                worker,
+                "ensure_pushed",
+                side_effect=lambda *a: call_order.append("push") or True,
+            ),
+            patch("kennel.worker.tasks.complete_by_title"),
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert call_order == ["squash", "push"]
+
+    def test_task_completes_when_squash_returns_true(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("First task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "_squash_wip_commit", return_value=True),
+            patch.object(worker, "ensure_pushed", return_value=None),
+            patch("kennel.worker.tasks.complete_by_title") as mock_complete,
+            patch("kennel.worker.sync_tasks"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert result is True
+        mock_complete.assert_called_once()
+
 
 class TestRunExecuteTaskIntegration:
     """Tests that Worker.run() calls execute_task after handle_threads."""
