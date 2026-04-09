@@ -101,12 +101,22 @@ class WorkerRegistry:
         return thread is not None and thread.is_alive()
 
 
-def _make_thread(repo_cfg: RepoConfig, registry: WorkerRegistry) -> WorkerThread:
+def _make_thread(
+    repo_cfg: RepoConfig,
+    registry: WorkerRegistry,
+    *,
+    _GitHub=GitHub,
+    _WorkerThread=WorkerThread,
+) -> WorkerThread:
     """Default factory: create a WorkerThread with a live GitHub client."""
-    return WorkerThread(repo_cfg.work_dir, repo_cfg.name, GitHub(), registry)
+    return _WorkerThread(repo_cfg.work_dir, repo_cfg.name, _GitHub(), registry)
 
 
-def make_registry(repos: dict[str, RepoConfig]) -> WorkerRegistry:
+def make_registry(
+    repos: dict[str, RepoConfig],
+    *,
+    _thread_factory=_make_thread,
+) -> WorkerRegistry:
     """Create a :class:`WorkerRegistry` and start threads for all repos.
 
     Uses :func:`_make_thread` as the factory so each thread gets its own
@@ -115,7 +125,7 @@ def make_registry(repos: dict[str, RepoConfig]) -> WorkerRegistry:
     """
 
     def factory(cfg: RepoConfig) -> WorkerThread:
-        return _make_thread(cfg, registry)
+        return _thread_factory(cfg, registry)
 
     registry = WorkerRegistry(factory)
     for repo_cfg in repos.values():

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from kennel.config import RepoConfig
 from kennel.registry import WorkerActivity, WorkerRegistry, _make_thread, make_registry
@@ -229,11 +229,11 @@ class TestMakeThread:
     ) -> None:
         cfg = _repo("foo/bar", tmp_path)
         mock_registry = MagicMock()
-        with (
-            patch("kennel.registry.GitHub") as mock_gh_cls,
-            patch("kennel.registry.WorkerThread") as mock_wt_cls,
-        ):
-            result = _make_thread(cfg, mock_registry)
+        mock_gh_cls = MagicMock()
+        mock_wt_cls = MagicMock()
+        result = _make_thread(
+            cfg, mock_registry, _GitHub=mock_gh_cls, _WorkerThread=mock_wt_cls
+        )
         mock_wt_cls.assert_called_once_with(
             tmp_path, "foo/bar", mock_gh_cls.return_value, mock_registry
         )
@@ -243,11 +243,8 @@ class TestMakeThread:
         work_dir = tmp_path / "myrepo"
         work_dir.mkdir()
         cfg = _repo("foo/bar", work_dir)
-        with (
-            patch("kennel.registry.GitHub"),
-            patch("kennel.registry.WorkerThread") as mock_wt_cls,
-        ):
-            _make_thread(cfg, MagicMock())
+        mock_wt_cls = MagicMock()
+        _make_thread(cfg, MagicMock(), _GitHub=MagicMock(), _WorkerThread=mock_wt_cls)
         assert mock_wt_cls.call_args[0][0] == work_dir
 
 
@@ -255,18 +252,17 @@ class TestMakeRegistry:
     def test_returns_worker_registry(self, tmp_path: Path) -> None:
         cfg = _repo("foo/bar", tmp_path)
         mock_thread = MagicMock()
-        with patch("kennel.registry._make_thread", return_value=mock_thread):
-            result = make_registry({"foo/bar": cfg})
+        result = make_registry(
+            {"foo/bar": cfg}, _thread_factory=MagicMock(return_value=mock_thread)
+        )
         assert isinstance(result, WorkerRegistry)
 
     def test_starts_thread_for_each_repo(self, tmp_path: Path) -> None:
         cfg1 = _repo("foo/bar", tmp_path)
         cfg2 = _repo("foo/baz", tmp_path)
         mock_thread = MagicMock()
-        with patch(
-            "kennel.registry._make_thread", return_value=mock_thread
-        ) as mock_factory:
-            make_registry({"foo/bar": cfg1, "foo/baz": cfg2})
+        mock_factory = MagicMock(return_value=mock_thread)
+        make_registry({"foo/bar": cfg1, "foo/baz": cfg2}, _thread_factory=mock_factory)
         assert mock_factory.call_count == 2
         assert mock_thread.start.call_count == 2
 
@@ -279,6 +275,7 @@ class TestMakeRegistry:
         cfg = _repo("foo/bar", tmp_path)
         mock_thread = MagicMock()
         mock_thread.is_alive.return_value = True
-        with patch("kennel.registry._make_thread", return_value=mock_thread):
-            reg = make_registry({"foo/bar": cfg})
+        reg = make_registry(
+            {"foo/bar": cfg}, _thread_factory=MagicMock(return_value=mock_thread)
+        )
         assert reg.is_alive("foo/bar") is True
