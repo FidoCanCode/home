@@ -20,6 +20,21 @@ _CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
 
 log = logging.getLogger(__name__)
 
+_thread_repo: threading.local = threading.local()
+
+
+class RepoContextFilter(logging.Filter):
+    """Inject the current worker thread's repo name into every log record.
+
+    Set ``_thread_repo.repo_name`` before entering a worker loop to tag all
+    log records emitted on that thread with the repo's short name.  Records
+    from threads that never set the context default to ``"-"``.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.repo_name = getattr(_thread_repo, "repo_name", "-")  # type: ignore[attr-defined]
+        return True
+
 
 class ActivityReporter(Protocol):
     """Structural protocol satisfied by WorkerRegistry.
@@ -1614,6 +1629,7 @@ class WorkerThread(threading.Thread):
 
     def run(self) -> None:
         """Main loop — runs until :meth:`stop` is called."""
+        _thread_repo.repo_name = self._repo_name.split("/")[-1]
         while not self._stop:
             try:
                 result = Worker(

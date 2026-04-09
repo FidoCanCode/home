@@ -21,6 +21,7 @@ from kennel.events import (
     reply_to_review,
 )
 from kennel.registry import WorkerRegistry, make_registry
+from kennel.worker import RepoContextFilter
 
 log = logging.getLogger(__name__)
 
@@ -219,13 +220,16 @@ def run() -> None:
     log_file = Path.home() / "log" / "kennel.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
+    repo_filter = RepoContextFilter()
     handlers: list[logging.Handler] = [logging.FileHandler(log_file)]
     if sys.stderr.isatty():
         handlers.append(logging.StreamHandler(sys.stderr))
+    for handler in handlers:
+        handler.addFilter(repo_filter)
 
     logging.basicConfig(
         level=getattr(logging, config.log_level, logging.INFO),
-        format="%(asctime)s %(levelname)-5s %(message)s",
+        format="%(asctime)s %(levelname)-5s [%(repo_name)s] %(message)s",
         datefmt="%H:%M:%S",
         handlers=handlers,
     )
