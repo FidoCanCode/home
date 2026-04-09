@@ -1206,6 +1206,60 @@ class Worker:
             return False
         return True
 
+    def _squash_wip_commit(self, remote: str, slug: str, default_branch: str) -> bool:
+        """Drop the empty 'wip: start' sentinel if it is the branch root.
+
+        Checks the first commit on the branch (relative to *remote*'s
+        *default_branch*).  If its message is ``wip: start`` and it carries no
+        file changes, rebases to remove it and force-pushes, returning ``True``.
+        Returns ``False`` if the sentinel is not present (first commit has a
+        different message, branch has no commits beyond the base, or any git
+        operation fails).
+        """
+        # Find the merge-base between HEAD and the remote default branch
+        base = self._git(
+            ["merge-base", "HEAD", f"{remote}/{default_branch}"],
+            check=False,
+        )
+        if base.returncode != 0:
+            return False
+        base_sha = base.stdout.strip()
+
+        # List commits on branch in reverse (oldest first)
+        log_result = self._git(
+            ["log", "--format=%H %s", f"{base_sha}..HEAD", "--reverse"],
+            check=False,
+        )
+        if log_result.returncode != 0 or not log_result.stdout.strip():
+            return False
+
+        first_line = log_result.stdout.strip().splitlines()[0]
+        wip_sha, _, subject = first_line.partition(" ")
+        if subject != "wip: start":
+            return False
+
+        # Confirm it is truly empty (no file diff vs its parent)
+        diff = self._git(["diff-tree", "--no-commit-id", "-r", wip_sha], check=False)
+        if diff.returncode != 0 or diff.stdout.strip():
+            return False
+
+        # Drop the wip commit by rebasing everything after it onto base_sha
+        rebase = self._git(["rebase", "--onto", base_sha, wip_sha, slug], check=False)
+        if rebase.returncode != 0:
+            log.warning("squash wip: start rebase failed: %s", rebase.stderr.strip())
+            return False
+
+        # Force-push the cleaned branch
+        push = self._git(
+            ["push", "--force-with-lease", "-u", remote, slug], check=False
+        )
+        if push.returncode != 0:
+            log.warning("squash wip: start force-push failed: %s", push.stderr.strip())
+            return False
+
+        log.info("squashed wip: start sentinel from %s", slug)
+        return True
+
     def _cleanup_aborted_task(
         self, fido_dir: Path, task_id: str, task_title: str
     ) -> None:
@@ -1313,6 +1367,7 @@ class Worker:
             state["setup_session_id"] = session_id
             save_state(fido_dir, state)
 
+        self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
             tasks.complete_by_id(self.work_dir, task["id"])

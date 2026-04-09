@@ -4392,6 +4392,243 @@ class TestEnsurePushed:
         assert push_call == ["push", "-u", "fork", "feature-branch"]
 
 
+class TestSquashWipCommit:
+    """Tests for Worker._squash_wip_commit."""
+
+    def _make_worker(self, tmp_path: Path) -> Worker:
+        return Worker(tmp_path, MagicMock())
+
+    def _ok(self, stdout: str = "") -> MagicMock:
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = stdout
+        r.stderr = ""
+        return r
+
+    def _fail(self, stderr: str = "") -> MagicMock:
+        r = MagicMock()
+        r.returncode = 1
+        r.stdout = ""
+        r.stderr = stderr
+        return r
+
+    def _wip_git_side_effects(
+        self,
+        base_sha: str = "base000",
+        wip_sha: str = "wip111",
+        extra_subject: str = "feat: real work",
+    ) -> list[MagicMock]:
+        """Return _git side effects for the happy path."""
+        return [
+            self._ok(stdout=base_sha + "\n"),  # merge-base
+            self._ok(stdout=f"{wip_sha} wip: start\nabc123 {extra_subject}\n"),  # log
+            self._ok(stdout=""),  # diff-tree (empty commit)
+            self._ok(),  # rebase
+            self._ok(),  # push --force-with-lease
+        ]
+
+    def test_returns_true_on_success(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(worker, "_git", side_effect=self._wip_git_side_effects()):
+            result = worker._squash_wip_commit("origin", "my-branch", "main")
+        assert result is True
+
+    def test_returns_false_when_merge_base_fails(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(worker, "_git", side_effect=[self._fail()]):
+            result = worker._squash_wip_commit("origin", "my-branch", "main")
+        assert result is False
+
+    def test_returns_false_when_log_empty(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=[
+                self._ok(stdout="base000\n"),  # merge-base
+                self._ok(stdout=""),  # empty log
+            ],
+        ):
+            result = worker._squash_wip_commit("origin", "my-branch", "main")
+        assert result is False
+
+    def test_returns_false_when_log_fails(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=[
+                self._ok(stdout="base000\n"),  # merge-base
+                self._fail(),  # log fails
+            ],
+        ):
+            result = worker._squash_wip_commit("origin", "my-branch", "main")
+        assert result is False
+
+    def test_returns_false_when_first_commit_not_wip(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=[
+                self._ok(stdout="base000\n"),
+                self._ok(stdout="abc123 feat: already real\n"),
+            ],
+        ):
+            result = worker._squash_wip_commit("origin", "my-branch", "main")
+        assert result is False
+
+    def test_returns_false_when_diff_tree_fails(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=[
+                self._ok(stdout="base000\n"),
+                self._ok(stdout="wip111 wip: start\n"),
+                self._fail(),  # diff-tree fails
+            ],
+        ):
+            result = worker._squash_wip_commit("origin", "my-branch", "main")
+        assert result is False
+
+    def test_returns_false_when_wip_commit_has_files(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=[
+                self._ok(stdout="base000\n"),
+                self._ok(stdout="wip111 wip: start\n"),
+                self._ok(stdout="100644 blob abc  file.txt\n"),  # non-empty diff-tree
+            ],
+        ):
+            result = worker._squash_wip_commit("origin", "my-branch", "main")
+        assert result is False
+
+    def test_returns_false_when_rebase_fails(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=[
+                self._ok(stdout="base000\n"),
+                self._ok(stdout="wip111 wip: start\nabc123 feat: real\n"),
+                self._ok(stdout=""),  # diff-tree empty
+                self._fail(stderr="conflict"),  # rebase fails
+            ],
+        ):
+            result = worker._squash_wip_commit("origin", "my-branch", "main")
+        assert result is False
+
+    def test_logs_warning_when_rebase_fails(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        worker = self._make_worker(tmp_path)
+        with (
+            patch.object(
+                worker,
+                "_git",
+                side_effect=[
+                    self._ok(stdout="base000\n"),
+                    self._ok(stdout="wip111 wip: start\nabc123 feat: real\n"),
+                    self._ok(stdout=""),
+                    self._fail(stderr="conflict error"),
+                ],
+            ),
+            caplog.at_level(logging.WARNING, logger="kennel"),
+        ):
+            worker._squash_wip_commit("origin", "my-branch", "main")
+        assert "rebase failed" in caplog.text
+
+    def test_returns_false_when_force_push_fails(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=[
+                self._ok(stdout="base000\n"),
+                self._ok(stdout="wip111 wip: start\nabc123 feat: real\n"),
+                self._ok(stdout=""),
+                self._ok(),  # rebase ok
+                self._fail(stderr="rejected"),  # push fails
+            ],
+        ):
+            result = worker._squash_wip_commit("origin", "my-branch", "main")
+        assert result is False
+
+    def test_logs_warning_when_force_push_fails(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        worker = self._make_worker(tmp_path)
+        with (
+            patch.object(
+                worker,
+                "_git",
+                side_effect=[
+                    self._ok(stdout="base000\n"),
+                    self._ok(stdout="wip111 wip: start\nabc123 feat: real\n"),
+                    self._ok(stdout=""),
+                    self._ok(),
+                    self._fail(stderr="push rejected"),
+                ],
+            ),
+            caplog.at_level(logging.WARNING, logger="kennel"),
+        ):
+            worker._squash_wip_commit("origin", "my-branch", "main")
+        assert "force-push failed" in caplog.text
+
+    def test_logs_info_on_success(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        worker = self._make_worker(tmp_path)
+        with (
+            patch.object(worker, "_git", side_effect=self._wip_git_side_effects()),
+            caplog.at_level(logging.INFO, logger="kennel"),
+        ):
+            worker._squash_wip_commit("origin", "my-branch", "main")
+        assert "squashed wip: start" in caplog.text
+
+    def test_uses_correct_remote_and_default_branch(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker, "_git", side_effect=self._wip_git_side_effects()
+        ) as mock_git:
+            worker._squash_wip_commit("fork", "feat-branch", "develop")
+        merge_base_call = mock_git.call_args_list[0][0][0]
+        assert merge_base_call == ["merge-base", "HEAD", "fork/develop"]
+
+    def test_force_push_uses_correct_args(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=self._wip_git_side_effects(wip_sha="wip999"),
+        ) as mock_git:
+            worker._squash_wip_commit("origin", "my-branch", "main")
+        push_call = mock_git.call_args_list[4][0][0]
+        assert push_call == ["push", "--force-with-lease", "-u", "origin", "my-branch"]
+
+    def test_rebase_uses_correct_args(self, tmp_path: Path) -> None:
+        worker = self._make_worker(tmp_path)
+        base = "baseaaa"
+        wip = "wip999"
+        with patch.object(
+            worker,
+            "_git",
+            side_effect=self._wip_git_side_effects(base_sha=base, wip_sha=wip),
+        ) as mock_git:
+            worker._squash_wip_commit("origin", "my-branch", "main")
+        rebase_call = mock_git.call_args_list[3][0][0]
+        assert rebase_call == ["rebase", "--onto", base, wip, "my-branch"]
+
+
 class TestExecuteTask:
     """Tests for Worker.execute_task."""
 
@@ -5170,6 +5407,74 @@ class TestExecuteTask:
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_not_called()
+
+    def test_calls_squash_wip_commit_with_correct_args(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Do work")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(
+                worker, "_squash_wip_commit", return_value=False
+            ) as mock_squash,
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_id"),
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 7, "feat-branch")
+        mock_squash.assert_called_once_with("origin", "feat-branch", "main")
+
+    def test_squash_wip_commit_called_before_ensure_pushed(
+        self, tmp_path: Path
+    ) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Do work")
+        call_order: list[str] = []
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(
+                worker,
+                "_squash_wip_commit",
+                side_effect=lambda *a: call_order.append("squash") or False,
+            ),
+            patch.object(
+                worker,
+                "ensure_pushed",
+                side_effect=lambda *a: call_order.append("push") or True,
+            ),
+            patch("kennel.worker.tasks.complete_by_id"),
+            patch("kennel.worker.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert call_order == ["squash", "push"]
+
+    def test_task_completes_when_squash_returns_true(self, tmp_path: Path) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("First task")
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", return_value=("", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "_squash_wip_commit", return_value=True),
+            patch.object(worker, "ensure_pushed", return_value=None),
+            patch("kennel.worker.tasks.complete_by_id") as mock_complete,
+            patch("kennel.worker.sync_tasks"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        assert result is True
+        mock_complete.assert_called_once()
 
 
 class TestRunExecuteTaskIntegration:
