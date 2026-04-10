@@ -1591,12 +1591,22 @@ class Worker:
                     pr_number,
                 )
                 return 0
-            log.info(
-                "PR #%s: changes requested — all addressed, re-requesting review",
-                pr_number,
-            )
             if repo_ctx.owner not in requested_reviewers:
-                self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+                checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
+                required = self.gh.get_required_checks(
+                    repo_ctx.repo, repo_ctx.default_branch
+                )
+                if ci_ready_for_review(checks, required):
+                    log.info(
+                        "PR #%s: changes requested — all addressed, CI passing — re-requesting review",
+                        pr_number,
+                    )
+                    self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+                else:
+                    log.info(
+                        "PR #%s: changes requested — all addressed, but CI not yet passing — deferring re-request",
+                        pr_number,
+                    )
             return 0
 
         if is_draft:
