@@ -39,10 +39,18 @@ if [[ -z "$CURRENT_ISSUE" ]]; then
 fi
 
 GH_USER=$(gh api user --jq .login)
-_PR_JSON=$(gh pr list --repo "$REPO" --state open --json number,headRefName,author \
-  --search "#$CURRENT_ISSUE in:body" 2>/dev/null \
-  | jq -r --arg user "$GH_USER" '[.[] | select(.author.login == $user)] | .[0] // empty')
-PR=$(printf '%s' "$_PR_JSON" | jq -r '.number // empty')
+PR=$(gh api --paginate "repos/$REPO/issues/$CURRENT_ISSUE/timeline" \
+  --jq '.[]' 2>/dev/null \
+  | jq -rs --arg user "$GH_USER" --arg issue "$CURRENT_ISSUE" \
+      '[.[] | select(
+        .event == "cross-referenced" and
+        (.source.issue.pull_request // null) != null and
+        .source.issue.user.login == $user and
+        .source.issue.state == "open" and
+        (.source.issue.body // "" | test(
+          "(?i)\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#" + $issue + "\\b"
+        ))
+      ) | .source.issue.number] | .[0] // empty' 2>/dev/null || true)
 
 if [[ -z "$PR" ]]; then
   log "no open PR for issue #$CURRENT_ISSUE — nothing to sync"
