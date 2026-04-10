@@ -933,6 +933,20 @@ class TestGHClass:
         mock_s.post.return_value.json.return_value = self._gql_timeline([node])
         assert gh.find_pr("o/r", 5, "fido") is None
 
+    def test_find_pr_returns_none_on_graphql_error(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.post.return_value.json.return_value = {
+            "errors": [{"message": "something went wrong"}]
+        }
+        assert gh.find_pr("o/r", 1, "fido") is None
+
+    def test_find_pr_returns_none_on_empty_timeline(self) -> None:
+        gh, mock_s = self._gh()
+        mock_s.post.return_value.json.return_value = {
+            "data": {"repository": {"issue": {"timelineItems": {}}}}
+        }
+        assert gh.find_pr("o/r", 1, "fido") is None
+
     def test_get_user(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
