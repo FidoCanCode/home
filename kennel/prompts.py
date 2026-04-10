@@ -36,6 +36,12 @@ def triage_context_block(context: dict[str, Any] | None) -> str:
         parts.append(f"File: {ctx['file']}")
     if ctx.get("diff_hunk"):
         parts.append(f"Diff:\n{ctx['diff_hunk']}")
+    if ctx.get("comment_thread"):
+        lines = [
+            f"  {c.get('author', '')}: {c.get('body', '')}"
+            for c in ctx["comment_thread"]
+        ]
+        parts.append("Comment thread:\n" + "\n".join(lines))
     if ctx.get("sibling_threads"):
         thread_parts: list[str] = []
         for thread in ctx["sibling_threads"]:
@@ -48,6 +54,8 @@ def triage_context_block(context: dict[str, Any] | None) -> str:
             ]
             thread_parts.append(header + "\n" + "\n".join(comment_lines))
         parts.append("Sibling threads:\n" + "\n\n".join(thread_parts))
+    if ctx.get("conversation"):
+        parts.append(ctx["conversation"])
     return "\n".join(parts)
 
 

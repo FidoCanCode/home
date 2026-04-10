@@ -279,8 +279,16 @@ def reply_to_comment(
     prompts = Prompts(persona)
     comment = action.comment_body
 
-    # Enrich context with sibling threads when the comment needs more context
     context: dict[str, Any] = dict(action.context) if action.context else {}
+
+    # Always fetch the full thread for this comment
+    if info.get("repo") and info.get("pr") and info.get("comment_id"):
+        thread = gh.fetch_comment_thread(info["repo"], info["pr"], info["comment_id"])
+        if thread:
+            context["comment_thread"] = thread
+            log.info("fetched %d comment(s) in thread for context", len(thread))
+
+    # Enrich context with sibling threads when the comment needs more context
     if (
         needs_more_context(comment, _print_prompt=_print_prompt)
         and info.get("repo")

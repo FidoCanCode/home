@@ -147,6 +147,30 @@ class TestTriageContextBlock:
         result = triage_context_block({"sibling_threads": []})
         assert "Sibling threads:" not in result
 
+    def test_comment_thread_rendered(self) -> None:
+        result = triage_context_block(
+            {
+                "comment_thread": [
+                    {"author": "alice", "body": "fix this please"},
+                    {"author": "fido", "body": "done in latest commit"},
+                ]
+            }
+        )
+        assert "Comment thread:" in result
+        assert "alice: fix this please" in result
+        assert "fido: done in latest commit" in result
+
+    def test_empty_comment_thread_omitted(self) -> None:
+        result = triage_context_block({"comment_thread": []})
+        assert "Comment thread:" not in result
+
+    def test_conversation_rendered(self) -> None:
+        result = triage_context_block(
+            {"conversation": "\n\nFull conversation:\nalice: hi"}
+        )
+        assert "Full conversation:" in result
+        assert "alice: hi" in result
+
 
 # ── triage_prompt ─────────────────────────────────────────────────────────────
 
