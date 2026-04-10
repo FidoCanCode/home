@@ -209,8 +209,18 @@ class GH:
                 number=int(issue_number),
                 cursor=cursor,
             )
-            items = data["data"]["repository"]["issue"]["timelineItems"]
-            for node in items["nodes"]:
+            if "errors" in data:
+                log.warning("find_pr GraphQL error: %s", data["errors"])
+                return None
+            items = (
+                data.get("data", {})
+                .get("repository", {})
+                .get("issue", {})
+                .get("timelineItems", {})
+            )
+            if not items:
+                return None
+            for node in items.get("nodes", []):
                 typename = node["__typename"]
                 if typename == "CrossReferencedEvent":
                     pr = node.get("source") or {}
@@ -234,9 +244,10 @@ class GH:
                     pr = node.get("subject") or {}
                     if pr.get("__typename") == "PullRequest":
                         sidebar_prs.discard(pr["number"])
-            if not items["pageInfo"]["hasNextPage"]:
+            page_info = items.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
                 break
-            cursor = items["pageInfo"]["endCursor"]
+            cursor = page_info.get("endCursor")
         eligible = keyword_prs | sidebar_prs
         for pr_num, pr in pr_cache.items():
             if pr_num not in eligible or pr.get("state") != "OPEN":
