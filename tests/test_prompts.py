@@ -197,7 +197,7 @@ class TestTriagePrompt:
 
     def test_includes_example(self) -> None:
         result = triage_prompt("x", is_bot=False)
-        assert "Example:" in result
+        assert "Example" in result
 
     def test_requires_imperative_action_item_title(self) -> None:
         result = triage_prompt("x", is_bot=False)

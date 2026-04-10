@@ -262,18 +262,20 @@ def reply_to_comment(
     *,
     _print_prompt=None,
     _gh=None,
-) -> tuple[bool, str, str]:
+) -> tuple[bool, str, list[str]]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
 
-    Returns (posted, triage_category, task_title).
+    Returns (posted, triage_category, task_titles).
     posted is True only when the reply was successfully sent to GitHub.
+    task_titles is a list: one entry for non-task categories (used as reply
+    context), or one or more entries for ACT/DO (each becomes a task).
     Uses a per-comment lockfile to prevent races with work.sh.
     """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     info = action.reply_to
     if not info or not action.comment_body:
-        return (False, "ACT", action.comment_body or action.prompt)
+        return (False, "ACT", [action.comment_body or action.prompt])
 
     # Per-comment lock — prevents kennel and work.sh from both replying
     cid = info.get("comment_id")
@@ -285,7 +287,7 @@ def reply_to_comment(
         except OSError:
             log.info("comment %s locked by another process — skipping", cid)
             lock_fd.close()
-            return (False, "ACT", action.comment_body[:80])
+            return (False, "ACT", [action.comment_body[:80]])
     else:
         lock_fd = None
 
@@ -317,19 +319,21 @@ def reply_to_comment(
             )
 
     # Step 1: Haiku triage
-    category, title = _triage(
+    category, titles = _triage(
         comment, action.is_bot, context, _print_prompt=_print_prompt
     )
-    log.info("triage: %s — %s", category, title)
+    log.info("triage: %s — %s", category, titles)
 
     # Step 2: For DEFER, open a tracking issue before crafting the reply
     issue_url: str | None = None
     if category == "DEFER" and info.get("repo"):
         pr_url = f"https://github.com/{info['repo']}/pull/{info['pr']}"
-        issue_url = _open_defer_issue(gh, info["repo"], pr_url, title, comment)
+        issue_url = _open_defer_issue(gh, info["repo"], pr_url, titles[0], comment)
 
     # Step 3: Opus reply based on triage
-    instr = reply_instruction(category, comment, title, context, issue_url=issue_url)
+    instr = reply_instruction(
+        category, comment, ", ".join(titles), context, issue_url=issue_url
+    )
 
     log.info(
         "generating %s reply for PR #%s comment %s",
@@ -379,7 +383,7 @@ def reply_to_comment(
     if lock_fd:
         lock_fd.close()
 
-    return (posted, category, title)
+    return (posted, category, titles)
 
 
 def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
@@ -507,23 +511,37 @@ def _triage(
     context: dict[str, Any] | None = None,
     *,
     _print_prompt=None,
-) -> tuple[str, str]:
-    """Ask Opus to triage a comment. Returns (prefix, title)."""
+) -> tuple[str, list[str]]:
+    """Ask Opus to triage a comment. Returns (category, titles).
+
+    A comment may produce zero or many tasks: titles is a list with one entry
+    for ANSWER/ASK/DEFER/DUMP (used as reply context), or one or more entries
+    for ACT/DO (each becomes a separate work-queue task).
+    """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     prompt = triage_prompt(comment_body, is_bot, context)
     text = _print_prompt(prompt, "claude-opus-4-6", timeout=15)
-    line = text.splitlines()[0] if text else ""
-    if ":" in line:
+    category: str | None = None
+    titles: list[str] = []
+    for line in text.splitlines() if text else []:
+        if ":" not in line:
+            continue
         prefix, title = line.split(":", 1)
         prefix = prefix.strip().upper()
         title = title.strip()
-        if prefix in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
-            return prefix, title
+        if prefix not in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
+            continue
+        if category is None:
+            category = prefix
+        if prefix == category and title:
+            titles.append(title)
+    if category is not None and titles:
+        return category, titles
     # Fallback: ACT for humans, DO for bots; summarize comment into action item
     category = "DO" if is_bot else "ACT"
     title = _summarize_as_action_item(comment_body, _print_prompt=_print_prompt)
-    return category, title
+    return category, [title]
 
 
 def reply_to_issue_comment(
@@ -533,7 +551,7 @@ def reply_to_issue_comment(
     *,
     _print_prompt=None,
     _gh=None,
-) -> tuple[str, str]:
+) -> tuple[str, list[str]]:
     """Triage and reply to a top-level PR comment (issue_comment event)."""
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
@@ -569,19 +587,19 @@ def reply_to_issue_comment(
         context["conversation"] = conversation_context
 
     prompts = Prompts(_load_persona(config))
-    category, title = _triage(
+    category, titles = _triage(
         comment, action.is_bot, context or None, _print_prompt=_print_prompt
     )
-    log.info("issue comment triage: %s — %s", category, title)
+    log.info("issue comment triage: %s — %s", category, titles)
 
     # For DEFER, open a tracking issue before crafting the reply
     issue_url: str | None = None
     if category == "DEFER":
         pr_url = f"https://github.com/{repo_full}/pull/{number}" if number else ""
-        issue_url = _open_defer_issue(gh, repo_full, pr_url, title, comment)
+        issue_url = _open_defer_issue(gh, repo_full, pr_url, titles[0], comment)
 
     instr = issue_reply_instruction(
-        category, comment, title, action.context, issue_url=issue_url
+        category, comment, ", ".join(titles), action.context, issue_url=issue_url
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
@@ -614,7 +632,7 @@ def reply_to_issue_comment(
             _gh=gh,
         )
 
-    return (category, title)
+    return (category, titles)
 
 
 _TYPE_PRIORITY = {TaskType.CI: 0, TaskType.THREAD: 1, TaskType.SPEC: 2}

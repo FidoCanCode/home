@@ -67,17 +67,20 @@ def triage_prompt(
 ) -> str:
     """Build a triage prompt for Haiku/Opus.
 
-    Returns a prompt that asks the model to classify the comment and return a
-    category + short task title in the form ``CATEGORY: title``.
+    Returns a prompt that asks the model to classify the comment and return one
+    or more ``CATEGORY: title`` lines.  A single comment may produce zero tasks
+    (ANSWER/ASK/DEFER/DUMP) or multiple tasks (multiple ACT/DO lines).
     """
     categories = triage_categories(is_bot)
     ctx_str = triage_context_block(context)
     return (
-        f"Triage this PR comment into exactly one category: {categories}\n\n"
+        f"Triage this PR comment into one or more categories: {categories}\n\n"
         f"{ctx_str}\n\nComment: {comment_body}\n\n"
-        "Reply with ONLY the category word (e.g. ACT or DEFER), then a colon, then a short imperative task title. "
-        "The title must be an action item starting with a verb — never quote or paraphrase the comment text. "
-        "Example: ACT: add unit tests for parser"
+        "Reply with one line per task: category word, colon, short imperative task title. "
+        "For ACT/DO, list each distinct required change on its own line. "
+        "Task titles must start with a verb — never quote or paraphrase the comment text. "
+        "Example (one task): ACT: add unit tests for parser\n"
+        "Example (two tasks): ACT: add unit tests for parser\nACT: update documentation"
     )
 
 

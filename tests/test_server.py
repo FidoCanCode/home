@@ -252,7 +252,7 @@ class TestProcessAction:
             },
             "pull_request": {"number": 3, "title": "My PR", "body": "desc"},
         }
-        mock_reply = MagicMock(return_value=(True, "ACT", "add logging"))
+        mock_reply = MagicMock(return_value=(True, "ACT", ["add logging"]))
         mock_task = MagicMock()
         WebhookHandler._fn_reply_to_comment = mock_reply
         WebhookHandler._fn_create_task = mock_task
@@ -279,7 +279,7 @@ class TestProcessAction:
             },
             "pull_request": {"number": 4, "title": "My PR", "body": ""},
         }
-        mock_reply = MagicMock(return_value=(True, "DUMP", "nope"))
+        mock_reply = MagicMock(return_value=(True, "DUMP", ["nope"]))
         mock_task = MagicMock()
         WebhookHandler._fn_reply_to_comment = mock_reply
         WebhookHandler._fn_create_task = mock_task
@@ -309,7 +309,7 @@ class TestProcessAction:
         }
         mock_task = MagicMock()
         WebhookHandler._fn_reply_to_comment = MagicMock(
-            return_value=(True, "DEFER", "big refactor")
+            return_value=(True, "DEFER", ["big refactor"])
         )
         WebhookHandler._fn_create_task = mock_task
         WebhookHandler._fn_launch_worker = MagicMock()
@@ -341,7 +341,7 @@ class TestProcessAction:
             task_titles.append(title)
 
         WebhookHandler._fn_reply_to_comment = MagicMock(
-            return_value=(True, "DO", "add result caching")
+            return_value=(True, "DO", ["add result caching"])
         )
         WebhookHandler._fn_create_task = capture_task
         WebhookHandler._fn_launch_worker = MagicMock()
@@ -419,7 +419,7 @@ class TestProcessAction:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        mock_ic = MagicMock(return_value=("ACT", "do it"))
+        mock_ic = MagicMock(return_value=("ACT", ["do it"]))
         mock_task = MagicMock()
         WebhookHandler._fn_reply_to_issue_comment = mock_ic
         WebhookHandler._fn_create_task = mock_task
@@ -454,7 +454,7 @@ class TestProcessAction:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        mock_ic = MagicMock(return_value=("ANSWER", "because"))
+        mock_ic = MagicMock(return_value=("ANSWER", ["because"]))
         mock_task = MagicMock()
         WebhookHandler._fn_reply_to_issue_comment = mock_ic
         WebhookHandler._fn_create_task = mock_task
