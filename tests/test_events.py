@@ -2001,7 +2001,6 @@ class TestReorderTasksBackground:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
@@ -2113,7 +2112,6 @@ class TestNotifyThreadChange:
             repos={},
             allowed_bots=frozenset(),
             log_level="WARNING",
-            self_repo=None,
             sub_dir=tmp_path / "sub",
         )
 
