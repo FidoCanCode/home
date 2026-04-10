@@ -1203,11 +1203,13 @@ class Worker:
     def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:
         """Seed tasks.json from the PR body work-queue markers if tasks.json is empty.
 
-        Extracts unchecked task items (``- [ ] ...``) between
+        Extracts ONLY unchecked task items (``- [ ] ...``) between
         ``WORK_QUEUE_START`` and ``WORK_QUEUE_END`` markers and adds them via
-        :func:`~kennel.tasks.add_task`.  Lines without a ``<!-- type:X -->``
-        comment are skipped with a warning (e.g. stale multi-line task bodies
-        from older PR bodies).
+        :func:`~kennel.tasks.add_task`.  Completed (``- [x]``) tasks are
+        skipped — the work is already in the git history; re-creating them
+        as pending would send fido into a "no commits produced" retry loop.
+        Lines without a ``<!-- type:X -->`` comment are skipped with a
+        warning (e.g. stale multi-line task bodies from older PR bodies).
 
         No-op if tasks.json is already non-empty, or if no markers /
         unchecked items are found.
@@ -1225,7 +1227,7 @@ class Worker:
             return
         parsed: list[tuple[str, TaskType]] = []
         for line in match.group(1).splitlines():
-            m = re.match(r"^- \[[ x]\] (.+)$", line)
+            m = re.match(r"^- \[ \] (.+)$", line)
             if not m:
                 continue
             rest = m.group(1)
