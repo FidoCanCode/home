@@ -2019,6 +2019,37 @@ class TestReorderTasksBackground:
         )
         assert started[0]._args == (tmp_path, "feat: add parser")
 
+    def test_on_changes_callback_notifies_thread_changes(self, tmp_path: Path) -> None:
+        started: list = []
+        mock_gh = MagicMock()
+        _reorder_tasks_background(
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _gh=mock_gh,
+        )
+        on_changes = started[0]._kwargs["_on_changes"]
+        change = {
+            "task": {
+                "id": "t1",
+                "title": "Fix it",
+                "status": "pending",
+                "type": "thread",
+                "thread": {
+                    "repo": "owner/repo",
+                    "pr": 1,
+                    "comment_id": 42,
+                    "url": "https://github.com/owner/repo/pull/1#issuecomment-42",
+                    "author": "bob",
+                },
+            },
+            "kind": "dropped",
+        }
+        with patch("kennel.events._notify_thread_change") as mock_notify:
+            on_changes([change])
+        mock_notify.assert_called_once_with(change, self._cfg(tmp_path), _gh=mock_gh)
+
 
 class TestNotifyThreadChange:
     def _cfg(self, tmp_path: Path) -> Config:
@@ -2156,6 +2187,14 @@ class TestNotifyThreadChange:
         _notify_thread_change(
             change, cfg, _print_prompt=MagicMock(return_value="ok"), _gh=mock_gh
         )
+
+    def test_default_print_prompt_uses_claude(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        change = {"task": self._task(), "kind": "dropped"}
+        with patch("kennel.events.claude.print_prompt", return_value="Auto reply"):
+            _notify_thread_change(change, cfg, _gh=mock_gh)
+        mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Auto reply")
 
 
 class TestLaunchSync:
