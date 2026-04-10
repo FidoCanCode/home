@@ -64,7 +64,8 @@ def triage_prompt(
     return (
         f"Triage this PR comment into exactly one category: {categories}\n\n"
         f"{ctx_str}\n\nComment: {comment_body}\n\n"
-        "Reply with ONLY the category word (e.g. ACT or DEFER), then a colon, then a short task title. "
+        "Reply with ONLY the category word (e.g. ACT or DEFER), then a colon, then a short imperative task title. "
+        "The title must be an action item starting with a verb — never quote or paraphrase the comment text. "
         "Example: ACT: add unit tests for parser"
     )
 

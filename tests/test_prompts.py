@@ -162,6 +162,12 @@ class TestTriagePrompt:
         result = triage_prompt("x", is_bot=False)
         assert "Example:" in result
 
+    def test_requires_imperative_action_item_title(self) -> None:
+        result = triage_prompt("x", is_bot=False)
+        assert "imperative" in result
+        assert "verb" in result
+        assert "never quote" in result.lower()
+
     def test_no_context(self) -> None:
         # Prompt with empty context still works — just has an empty ctx_str
         result = triage_prompt("hello", is_bot=False, context=None)
