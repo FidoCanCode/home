@@ -3,6 +3,8 @@ from __future__ import annotations
 import fcntl
 import logging
 import re
+import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -659,18 +661,64 @@ def _maybe_abort_for_new_task(
         registry.abort_task(repo_cfg.name)
 
 
+def _get_commit_summary(work_dir: Path) -> str:
+    """Return a short ``git log --oneline`` summary of recent commits.
+
+    Used to give Opus context about what has already been implemented when
+    it reorders the pending task list.  Returns an empty string on any error
+    (e.g. not a git repository, git not found, timeout).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-20"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _reorder_tasks_background(
+    work_dir: Path,
+    commit_summary: str,
+    *,
+    _start=threading.Thread.start,
+) -> None:
+    """Run :func:`~kennel.tasks.reorder_tasks` in a daemon background thread."""
+    from kennel.tasks import reorder_tasks
+
+    t = threading.Thread(
+        target=reorder_tasks,
+        args=(work_dir, commit_summary),
+        name=f"reorder-{work_dir.name}",
+        daemon=True,
+    )
+    _start(t)
+
+
 def create_task(
     prompt: str,
     config: Config,
     repo_cfg: RepoConfig,
     thread: dict[str, Any] | None = None,
     registry: WorkerRegistry | None = None,
+    *,
+    _get_commit_summary_fn=_get_commit_summary,
+    _reorder_background_fn=_reorder_tasks_background,
 ) -> dict[str, Any]:
     """Write a task to the shared task file, then trigger sync.
 
     PR comment tasks (those with a thread) carry a thread payload that causes
     ``_pick_next_task`` to prioritise them as NEXT (second only to CI failures),
     without inserting them out-of-order in the list.
+
+    When *thread* is set (a PR comment task), also triggers a background
+    dependency-analysis reorder via Opus so that remaining spec tasks are
+    resequenced to account for the new requirement.  Spec tasks created during
+    initial setup are not rescoped — the planner already ordered them.
 
     If *registry* is given, checks whether the new task has higher priority
     than the current in-progress task; if so, signals abort so the worker
@@ -684,6 +732,9 @@ def create_task(
         repo_cfg.work_dir, title=prompt, task_type=task_type, thread=thread
     )
     launch_sync(config, repo_cfg)
+    if thread:
+        commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)
+        _reorder_background_fn(repo_cfg.work_dir, commit_summary)
     if registry is not None:
         _maybe_abort_for_new_task(repo_cfg, new_task, registry)
     return new_task

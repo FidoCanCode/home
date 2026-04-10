@@ -7,7 +7,9 @@ from kennel.config import Config, RepoConfig
 from kennel.events import (
     Action,
     _comment_lock,
+    _get_commit_summary,
     _is_allowed,
+    _reorder_tasks_background,
     _summarize_as_action_item,
     _triage,
     create_task,
@@ -1724,6 +1726,164 @@ class TestCreateTask:
                 registry=registry,
             )
         registry.abort_task.assert_not_called()
+
+    def test_thread_task_triggers_reorder_background(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 5}
+        fake_task = {
+            "id": "t1",
+            "title": "Comment task",
+            "status": "pending",
+            "type": "thread",
+            "thread": thread,
+        }
+        reorder_called: list[tuple] = []
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task(
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                _get_commit_summary_fn=lambda wd: "abc1234 add thing",
+                _reorder_background_fn=lambda wd, cs: reorder_called.append((wd, cs)),
+            )
+        assert len(reorder_called) == 1
+        assert reorder_called[0][0] == tmp_path
+        assert reorder_called[0][1] == "abc1234 add thing"
+
+    def test_spec_task_does_not_trigger_reorder(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        fake_task = {
+            "id": "t1",
+            "title": "Spec task",
+            "status": "pending",
+            "type": "spec",
+        }
+        reorder_called: list = []
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task(
+                "Spec task",
+                cfg,
+                repo_cfg,
+                _reorder_background_fn=lambda *a: reorder_called.append(a),
+            )
+        assert reorder_called == []
+
+    def test_commit_summary_comes_from_get_commit_summary_fn(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 7}
+        fake_task = {
+            "id": "t1",
+            "title": "t",
+            "status": "pending",
+            "type": "thread",
+            "thread": thread,
+        }
+        summaries: list[str] = []
+        with (
+            patch("kennel.events.add_task", return_value=fake_task),
+            patch("kennel.events.launch_sync"),
+        ):
+            create_task(
+                "t",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                _get_commit_summary_fn=lambda wd: "custom summary",
+                _reorder_background_fn=lambda wd, cs: summaries.append(cs),
+            )
+        assert summaries == ["custom summary"]
+
+
+class TestGetCommitSummary:
+    def test_returns_git_log_output(self, tmp_path: Path) -> None:
+        import subprocess as sp
+
+        fake_result = sp.CompletedProcess(
+            args=[], returncode=0, stdout="abc123 add thing\n", stderr=""
+        )
+        with patch(
+            "kennel.events.subprocess.run", return_value=fake_result
+        ) as mock_run:
+            result = _get_commit_summary(tmp_path)
+        assert result == "abc123 add thing"
+        mock_run.assert_called_once_with(
+            ["git", "log", "--oneline", "-20"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
+        with patch("kennel.events.subprocess.run", side_effect=FileNotFoundError):
+            result = _get_commit_summary(tmp_path)
+        assert result == ""
+
+    def test_returns_empty_on_timeout(self, tmp_path: Path) -> None:
+        import subprocess as sp
+
+        with patch(
+            "kennel.events.subprocess.run",
+            side_effect=sp.TimeoutExpired(cmd="git", timeout=10),
+        ):
+            result = _get_commit_summary(tmp_path)
+        assert result == ""
+
+    def test_returns_empty_stdout_when_git_fails(self, tmp_path: Path) -> None:
+        import subprocess as sp
+
+        fake_result = sp.CompletedProcess(
+            args=[], returncode=128, stdout="", stderr="not a git repo"
+        )
+        with patch("kennel.events.subprocess.run", return_value=fake_result):
+            result = _get_commit_summary(tmp_path)
+        assert result == ""
+
+
+class TestReorderTasksBackground:
+    def test_starts_daemon_thread(self, tmp_path: Path) -> None:
+        started: list = []
+        _reorder_tasks_background(
+            tmp_path, "some commits", _start=lambda t: started.append(t)
+        )
+        assert len(started) == 1
+        t = started[0]
+        assert t.daemon is True
+
+    def test_thread_name_includes_dir_name(self, tmp_path: Path) -> None:
+        started: list = []
+        _reorder_tasks_background(
+            tmp_path, "commits", _start=lambda t: started.append(t)
+        )
+        assert tmp_path.name in started[0].name
+
+    def test_thread_target_is_reorder_tasks(self, tmp_path: Path) -> None:
+        from kennel.tasks import reorder_tasks
+
+        started: list = []
+        _reorder_tasks_background(
+            tmp_path, "commits", _start=lambda t: started.append(t)
+        )
+        assert started[0]._target is reorder_tasks
+
+    def test_thread_args_are_work_dir_and_commit_summary(self, tmp_path: Path) -> None:
+        started: list = []
+        _reorder_tasks_background(
+            tmp_path, "feat: add parser", _start=lambda t: started.append(t)
+        )
+        assert started[0]._args == (tmp_path, "feat: add parser")
 
 
 class TestLaunchSync:
