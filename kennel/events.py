@@ -109,6 +109,7 @@ def dispatch(
                 "pr": number,
                 "comment_id": comment_id,
                 "url": comment.get("html_url", ""),
+                "author": user,
             },
             comment_body=comment_body,
             is_bot=is_bot,
@@ -155,6 +156,7 @@ def dispatch(
                 "pr": number,
                 "comment_id": comment_id,
                 "url": comment.get("html_url", ""),
+                "author": user,
             }
             if number and comment_id
             else None,
@@ -726,12 +728,14 @@ def _notify_thread_change(
     repo = thread.get("repo", "")
     pr = thread.get("pr")
     url = thread.get("url", "")
+    author = thread.get("author", "")
     if not (comment_id and repo and pr):
         return
 
     kind = change["kind"]
     original_title = task.get("title", "")
     prompts = Prompts(_load_persona(config))
+    mention = f"@{author} " if author else ""
 
     if kind == "dropped":
         instruction = (
@@ -739,12 +743,14 @@ def _notify_thread_change(
             f"your work queue — a subsequent comment changed the requirements and "
             f"this work is no longer needed.\n\n"
             f"Original task: {original_title}\n"
+            f"Comment author: {author or '(unknown)'}\n"
             f"Comment: {url}\n\n"
-            "Write a very brief PR comment letting the reviewer know their original "
-            "task has been dropped and is no longer needed. Reference the comment URL."
+            "Write a very brief PR comment notifying the comment author (mention them "
+            "with @username if known) that their original task has been dropped and is "
+            "no longer needed. Reference the comment URL."
         )
         fallback = (
-            f"FYI — the task from your comment ('{original_title}') has been "
+            f"{mention}FYI — the task from your comment ('{original_title}') has been "
             f"removed from my queue: a subsequent change made it unnecessary."
         )
     else:
@@ -754,13 +760,15 @@ def _notify_thread_change(
             f"reflect new requirements.\n\n"
             f"Original task: {original_title}\n"
             f"Updated task: {new_title}\n"
+            f"Comment author: {author or '(unknown)'}\n"
             f"Comment: {url}\n\n"
-            "Write a very brief PR comment letting the reviewer know their original "
-            "task has been updated. Reference the comment URL."
+            "Write a very brief PR comment notifying the comment author (mention them "
+            "with @username if known) that their original task has been updated. "
+            "Reference the comment URL."
         )
         fallback = (
-            f"FYI — the task from your comment has been updated to: '{new_title}' "
-            f"based on new requirements."
+            f"{mention}FYI — the task from your comment has been updated to: "
+            f"'{new_title}' based on new requirements."
         )
 
     body = _print_prompt(

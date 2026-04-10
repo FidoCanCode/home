@@ -437,6 +437,7 @@ class TestProcessAction:
                 "pr": 11,
                 "comment_id": 300,
                 "url": "https://github.com/owner/repo/pull/11#issuecomment-300",
+                "author": "owner",
             },
             registry=WebhookHandler.registry,
         )

@@ -169,6 +169,29 @@ class TestDispatchReviewComment:
         assert result.reply_to is not None
         assert result.comment_body == "fix this"
 
+    def test_reply_to_includes_author(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        payload = {
+            **_payload(),
+            "action": "created",
+            "comment": {
+                "id": 124,
+                "body": "nit",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com/comment",
+                "path": "test.py",
+                "line": 1,
+                "diff_hunk": "@@ -1 +1 @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+        result = dispatch(
+            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        )
+        assert result is not None
+        assert result.reply_to is not None
+        assert result.reply_to["author"] == "owner"
+
     def test_self_comment_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
         payload = {
@@ -273,6 +296,7 @@ class TestDispatchIssueComment:
             result.thread["url"]
             == "https://github.com/owner/repo/pull/10#issuecomment-456"
         )
+        assert result.thread["author"] == "owner"
 
     def test_non_pr_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -2019,6 +2043,7 @@ class TestNotifyThreadChange:
                 "pr": 42,
                 "comment_id": 999,
                 "url": "https://github.com/owner/repo/pull/42#issuecomment-999",
+                "author": "alice",
             },
         }
         t.update(overrides)
@@ -2065,6 +2090,7 @@ class TestNotifyThreadChange:
         )
         body = mock_gh.comment_issue.call_args[0][2]
         assert "Fix the thing" in body
+        assert "@alice" in body
 
     def test_empty_opus_uses_fallback_for_modified(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -2080,6 +2106,36 @@ class TestNotifyThreadChange:
         )
         body = mock_gh.comment_issue.call_args[0][2]
         assert "New title" in body
+        assert "@alice" in body
+
+    def test_fallback_no_author_omits_mention(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        task = self._task()
+        task["thread"] = {
+            "repo": "owner/repo",
+            "pr": 42,
+            "comment_id": 999,
+            "url": "https://github.com/owner/repo/pull/42#issuecomment-999",
+        }
+        change = {"task": task, "kind": "dropped"}
+        _notify_thread_change(
+            change, cfg, _print_prompt=MagicMock(return_value=""), _gh=mock_gh
+        )
+        body = mock_gh.comment_issue.call_args[0][2]
+        assert "@" not in body
+
+    def test_author_in_opus_instruction(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        captured_prompt: list[str] = []
+
+        def fake_pp(prompt, model, **kwargs):
+            captured_prompt.append(prompt)
+            return "ok"
+
+        change = {"task": self._task(), "kind": "dropped"}
+        _notify_thread_change(change, cfg, _print_prompt=fake_pp, _gh=MagicMock())
+        assert "alice" in captured_prompt[0]
 
     def test_gh_none_uses_get_github(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
