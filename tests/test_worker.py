@@ -2942,6 +2942,43 @@ class TestSeedTasksFromPrBody:
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert mock_add.call_count == 3
 
+    def test_skips_completed_tasks(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {
+            "body": (
+                "<!-- WORK_QUEUE_START -->\n"
+                "- [x] Already done <!-- type:spec -->\n"
+                "- [x] Also done <!-- type:spec -->\n"
+                "- [ ] Still pending <!-- type:spec -->\n"
+                "<!-- WORK_QUEUE_END -->"
+            )
+        }
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker.tasks.add_task") as mock_add,
+        ):
+            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        # Only the unchecked task should have been added
+        assert mock_add.call_count == 1
+        assert mock_add.call_args.args[1] == "Still pending"
+
+    def test_skips_all_when_only_completed(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {
+            "body": (
+                "<!-- WORK_QUEUE_START -->\n"
+                "- [x] Done one <!-- type:spec -->\n"
+                "- [x] Done two <!-- type:spec -->\n"
+                "<!-- WORK_QUEUE_END -->"
+            )
+        }
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch("kennel.worker.tasks.add_task") as mock_add,
+        ):
+            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        mock_add.assert_not_called()
+
     def test_strips_next_marker(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {
