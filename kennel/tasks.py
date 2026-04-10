@@ -185,12 +185,11 @@ def remove_task(work_dir: Path, task_id: str) -> bool:
 def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
     """Format a task list into work-queue markdown.
 
-    Priority order: CI failures → comment-originated → others.
+    Priority order: CI failures → everything else (preserving list order).
     Completed tasks appear in a collapsible ``<details>`` section.
     Each line includes a ``<!-- type:X -->`` HTML comment for round-tripping.
     """
     ci_pending: list[tuple[str, str]] = []
-    comment_pending: list[tuple[str, str]] = []
     other_pending: list[tuple[str, str]] = []
     completed: list[tuple[str, str]] = []
 
@@ -209,12 +208,10 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
             title = t.get("title", "")
             if title.startswith("CI failure:"):
                 ci_pending.append((display, task_type))
-            elif t.get("thread"):
-                comment_pending.append((display, task_type))
             else:
                 other_pending.append((display, task_type))
 
-    pending = ci_pending + comment_pending + other_pending
+    pending = ci_pending + other_pending
     lines: list[str] = []
     for i, (display, task_type) in enumerate(pending):
         suffix = " **→ next**" if i == 0 else ""

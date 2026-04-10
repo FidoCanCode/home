@@ -850,9 +850,9 @@ def create_task(
 ) -> dict[str, Any]:
     """Write a task to the shared task file, then trigger sync.
 
-    PR comment tasks (those with a thread) carry a thread payload that causes
-    ``_pick_next_task`` to prioritise them as NEXT (second only to CI failures),
-    without inserting them out-of-order in the list.
+    PR comment tasks (those with a thread) are added to the task list at the
+    position determined by the rescoping reorder — they receive spec-level
+    priority (first in list wins among non-CI tasks).
 
     When *thread* is set (a PR comment task), also triggers a background
     dependency-analysis reorder via Opus so that remaining spec tasks are

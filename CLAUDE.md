@@ -95,7 +95,7 @@ kennel task <work_dir> list                                # list all tasks as J
 
 ### Priority order
 
-`_pick_next_task` selects by type: `ci` first, `thread` second, `spec` last.
+`_pick_next_task` selects by type: `ci` first, then first in list wins (thread and spec tasks share equal priority).
 
 ### Dynamic task reordering (rescoping)
 
