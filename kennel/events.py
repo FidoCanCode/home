@@ -458,8 +458,15 @@ def needs_more_context(comment_body: str, *, _print_prompt=None) -> bool:
     return answer.startswith("YES")
 
 
+_MAX_TITLE_LEN = 80
+
+
 def _summarize_as_action_item(comment_body: str, *, _print_prompt=None) -> str:
-    """Ask Opus to convert a comment into a short imperative action-item title."""
+    """Ask Opus to convert a comment into a short imperative action-item title.
+
+    If the result is too long, asks Claude to shorten it up to 3 times before
+    falling back to hard truncation.
+    """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     prompt = (
@@ -468,7 +475,16 @@ def _summarize_as_action_item(comment_body: str, *, _print_prompt=None) -> str:
         f"Comment: {comment_body}"
     )
     result = _print_prompt(prompt, "claude-opus-4-6", timeout=15).strip()
-    return result or comment_body[:80]
+    for _ in range(3):
+        if not result or len(result) <= _MAX_TITLE_LEN:
+            break
+        result = _print_prompt(
+            f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
+            f"Reply with ONLY the shortened title.\n\nTitle: {result}",
+            "claude-opus-4-6",
+            timeout=15,
+        ).strip()
+    return result[:_MAX_TITLE_LEN] if result else comment_body[:_MAX_TITLE_LEN]
 
 
 def _triage(

@@ -335,6 +335,35 @@ class TestSummarizeAsActionItem:
         mock_pp.assert_called_once()
         assert result == "add tests"
 
+    def test_short_result_returned_without_retry(self) -> None:
+        short_title = "add unit tests"
+        pp = MagicMock(return_value=short_title)
+        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
+        assert result == short_title
+        pp.assert_called_once()  # no retry needed
+
+    def test_retries_when_result_too_long(self) -> None:
+        long_title = "a" * 81
+        short_title = "add tests"
+        pp = MagicMock(side_effect=[long_title, short_title])
+        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
+        assert result == short_title
+        assert pp.call_count == 2
+
+    def test_retries_up_to_three_times_then_truncates(self) -> None:
+        long_title = "a" * 81
+        pp = MagicMock(return_value=long_title)
+        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
+        assert result == long_title[:80]
+        assert pp.call_count == 4  # 1 initial + 3 retries
+
+    def test_stops_retrying_once_short_enough(self) -> None:
+        titles = ["a" * 81, "b" * 81, "short title"]
+        pp = MagicMock(side_effect=titles)
+        result = _summarize_as_action_item("add some tests", _print_prompt=pp)
+        assert result == "short title"
+        assert pp.call_count == 3  # 1 initial + 2 retries
+
 
 class TestTriage:
     def test_returns_parsed_category(self, tmp_path: Path) -> None:
