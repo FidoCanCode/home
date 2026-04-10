@@ -267,11 +267,22 @@ ISSUE_TITLE=$(gh issue view "$CURRENT_ISSUE" --repo "$REPO" --json title --jq .t
 REQUEST="$ISSUE_TITLE (closes #$CURRENT_ISSUE)"
 
 # ── Find or create branch + PR ─────────────────────────────────────────────
-_PR_JSON=$(gh pr list --repo "$REPO" --state open --json number,headRefName,author \
-  --search "#$CURRENT_ISSUE in:body" 2>/dev/null \
-  | jq -r --arg user "$GH_USER" '[.[] | select(.author.login == $user)] | .[0] // empty')
-EXISTING_PR=$(printf '%s' "$_PR_JSON" | jq -r '.number // empty')
-EXISTING_SLUG=$(printf '%s' "$_PR_JSON" | jq -r '.headRefName // empty')
+EXISTING_PR=$(gh api --paginate "repos/$REPO/issues/$CURRENT_ISSUE/timeline" \
+  --jq '.[]' 2>/dev/null \
+  | jq -rs --arg user "$GH_USER" --arg issue "$CURRENT_ISSUE" \
+      '[.[] | select(
+        .event == "cross-referenced" and
+        (.source.issue.pull_request // null) != null and
+        .source.issue.user.login == $user and
+        .source.issue.state == "open" and
+        (.source.issue.body // "" | test(
+          "(?i)\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#" + $issue + "\\b"
+        ))
+      ) | .source.issue.number] | .[0] // empty' 2>/dev/null || true)
+EXISTING_SLUG=""
+if [[ -n "$EXISTING_PR" ]]; then
+  EXISTING_SLUG=$(gh api "repos/$REPO/pulls/$EXISTING_PR" --jq .head.ref 2>/dev/null || true)
+fi
 
 if [[ -n "$EXISTING_SLUG" ]]; then
   SLUG="$EXISTING_SLUG"
