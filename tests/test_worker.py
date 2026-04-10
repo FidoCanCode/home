@@ -34,6 +34,7 @@ from kennel.worker import (
     claude_start,
     clear_state,
     create_compact_script,
+    latest_decisive_review,
     load_state,
     run,
     save_state,
@@ -5610,6 +5611,45 @@ class TestRunExecuteTaskIntegration:
         mock_execute.assert_not_called()
 
 
+class TestLatestDecisiveReview:
+    """Tests for the latest_decisive_review module-level helper."""
+
+    def test_empty_returns_none(self) -> None:
+        assert latest_decisive_review([]) is None
+
+    def test_approved_returned(self) -> None:
+        r = {"state": "APPROVED"}
+        assert latest_decisive_review([r]) is r
+
+    def test_changes_requested_returned(self) -> None:
+        r = {"state": "CHANGES_REQUESTED"}
+        assert latest_decisive_review([r]) is r
+
+    def test_commented_returns_none(self) -> None:
+        assert latest_decisive_review([{"state": "COMMENTED"}]) is None
+
+    def test_returns_last_decisive_not_last_overall(self) -> None:
+        """APPROVED followed by COMMENTED → APPROVED is the decisive one."""
+        approved = {"state": "APPROVED"}
+        commented = {"state": "COMMENTED"}
+        assert latest_decisive_review([approved, commented]) is approved
+
+    def test_changes_requested_then_commented_returns_changes_requested(self) -> None:
+        cr = {"state": "CHANGES_REQUESTED"}
+        commented = {"state": "COMMENTED"}
+        assert latest_decisive_review([cr, commented]) is cr
+
+    def test_changes_requested_then_approved(self) -> None:
+        cr = {"state": "CHANGES_REQUESTED"}
+        approved = {"state": "APPROVED"}
+        assert latest_decisive_review([cr, approved]) is approved
+
+    def test_approved_then_changes_requested(self) -> None:
+        approved = {"state": "APPROVED"}
+        cr = {"state": "CHANGES_REQUESTED"}
+        assert latest_decisive_review([approved, cr]) is cr
+
+
 class TestShouldRerequestReview:
     """Tests for the should_rerequest_review module-level helper."""
 
@@ -5679,6 +5719,22 @@ class TestShouldRerequestReview:
         reviews = [
             self._review("CHANGES_REQUESTED"),
             self._review("APPROVED"),
+        ]
+        assert should_rerequest_review(reviews, []) is False
+
+    def test_changes_requested_then_commented_still_rerequests(self) -> None:
+        """COMMENTED after CHANGES_REQUESTED does not override the decisive state."""
+        reviews = [
+            self._review("CHANGES_REQUESTED"),
+            self._review("COMMENTED"),
+        ]
+        assert should_rerequest_review(reviews, []) is True
+
+    def test_approved_then_commented_returns_false(self) -> None:
+        """COMMENTED after APPROVED does not override the decisive APPROVED."""
+        reviews = [
+            self._review("APPROVED"),
+            self._review("COMMENTED"),
         ]
         assert should_rerequest_review(reviews, []) is False
 
@@ -5999,15 +6055,45 @@ class TestHandlePromoteMerge:
 
     # --- changes requested ---
 
-    def test_changes_requested_adds_reviewer(self, tmp_path: Path) -> None:
+    def test_changes_requested_ci_passing_adds_reviewer(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(
             state="CHANGES_REQUESTED", is_draft=False
         )
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+
+    def test_changes_requested_ci_failing_skips_reviewer(self, tmp_path: Path) -> None:
+        """CI not passing — re-request deferred until CI is green."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(
+            state="CHANGES_REQUESTED", is_draft=False
+        )
+        gh.pr_checks.return_value = [{"name": "ci", "state": "FAILURE"}]
+        gh.get_required_checks.return_value = ["ci"]
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_not_called()
+
+    def test_changes_requested_ci_failing_returns_0(self, tmp_path: Path) -> None:
+        """CI not passing — returns 0 (waiting for CI)."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = self._reviews(
+            state="CHANGES_REQUESTED", is_draft=False
+        )
+        gh.pr_checks.return_value = [{"name": "ci", "state": "FAILURE"}]
+        gh.get_required_checks.return_value = ["ci"]
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        assert result == 0
 
     def test_changes_requested_returns_0(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -6015,6 +6101,8 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(
             state="CHANGES_REQUESTED", is_draft=False
         )
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
@@ -6027,6 +6115,8 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(
             state="CHANGES_REQUESTED", is_draft=False
         )
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_not_called()
@@ -6327,6 +6417,8 @@ class TestHandlePromoteMerge:
             "commits": [{"committedDate": "2024-01-02T12:00:00Z"}],
             "isDraft": False,
         }
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
@@ -6349,6 +6441,8 @@ class TestHandlePromoteMerge:
             "commits": [{"committedDate": "2024-01-02T12:00:00Z"}],
             "isDraft": False,
         }
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
@@ -6364,6 +6458,8 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(
             state="CHANGES_REQUESTED", is_draft=False
         )
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewer.assert_called_once()
@@ -6383,6 +6479,8 @@ class TestHandlePromoteMerge:
             "commits": [],
             "isDraft": False,
         }
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewer.assert_called_once()
@@ -6433,6 +6531,87 @@ class TestHandlePromoteMerge:
         with patch("kennel.worker.tasks.list_tasks", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewer.assert_not_called()
+
+    # --- decisive review state (APPROVED/CHANGES_REQUESTED vs COMMENTED) ---
+
+    def test_approved_then_commented_merges(self, tmp_path: Path) -> None:
+        """APPROVED followed by COMMENTED: decisive state is APPROVED — must merge."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {"author": {"login": "rhencke"}, "state": "APPROVED"},
+                {"author": {"login": "rhencke"}, "state": "COMMENTED"},
+            ],
+            "commits": [],
+            "isDraft": False,
+        }
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git"),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_merge.assert_called_once()
+
+    def test_approved_then_commented_does_not_rerequest(self, tmp_path: Path) -> None:
+        """APPROVED followed by COMMENTED: should not re-request review."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {"author": {"login": "rhencke"}, "state": "APPROVED"},
+                {"author": {"login": "rhencke"}, "state": "COMMENTED"},
+            ],
+            "commits": [],
+            "isDraft": False,
+        }
+        gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[]),
+            patch.object(worker, "_git"),
+            patch.object(worker, "set_status"),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_not_called()
+
+    def test_changes_requested_then_commented_rerequests(self, tmp_path: Path) -> None:
+        """CHANGES_REQUESTED followed by COMMENTED: decisive state is
+        CHANGES_REQUESTED — should re-request review, not treat as COMMENTED."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {"author": {"login": "rhencke"}, "state": "CHANGES_REQUESTED"},
+                {"author": {"login": "rhencke"}, "state": "COMMENTED"},
+            ],
+            "commits": [],
+            "isDraft": False,
+        }
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.add_pr_reviewer.assert_called_once_with("rhencke/myrepo", 9, "rhencke")
+
+    def test_changes_requested_then_commented_does_not_merge(
+        self, tmp_path: Path
+    ) -> None:
+        """CHANGES_REQUESTED followed by COMMENTED: must not merge."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {"author": {"login": "rhencke"}, "state": "CHANGES_REQUESTED"},
+                {"author": {"login": "rhencke"}, "state": "COMMENTED"},
+            ],
+            "commits": [],
+            "isDraft": False,
+        }
+        with patch("kennel.worker.tasks.list_tasks", return_value=[]):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_merge.assert_not_called()
 
     # --- draft promote ---
 
@@ -6668,18 +6847,19 @@ class TestHandlePromoteMerge:
         gh.pr_checks.assert_not_called()
         gh.add_pr_reviewer.assert_not_called()
 
-    def test_non_draft_commented_review_skips_ci_check(self, tmp_path: Path) -> None:
-        """COMMENTED review state (not NONE) — falls through to idle, no CI poll."""
+    def test_non_draft_commented_review_polls_ci(self, tmp_path: Path) -> None:
+        """COMMENTED review has no decisive state — treated as NONE, CI polled."""
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(state="COMMENTED", is_draft=False)
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[]),
             patch.object(worker, "set_status"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        gh.pr_checks.assert_not_called()
-        gh.add_pr_reviewer.assert_not_called()
+        gh.pr_checks.assert_called_once()
 
     # --- idle / no work ---
 

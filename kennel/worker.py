@@ -508,20 +508,33 @@ def _has_pending_asks(task_list: list[dict[str, Any]]) -> bool:
     )
 
 
+_DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED"}
+
+
+def latest_decisive_review(
+    owner_reviews: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the most recent APPROVED or CHANGES_REQUESTED review, or None.
+
+    COMMENTED reviews are non-decisive and do not affect the merge/re-request
+    decision, so they are excluded.
+    """
+    decisive = [r for r in owner_reviews if r.get("state") in _DECISIVE_REVIEW_STATES]
+    return decisive[-1] if decisive else None
+
+
 def should_rerequest_review(
     owner_reviews: list[dict[str, Any]],
     commits: list[dict[str, Any]],
 ) -> bool:
     """Return True if fido should re-request review from the owner.
 
-    True when the latest owner review is CHANGES_REQUESTED and either no
-    timestamps are available or the review pre-dates the latest commit
+    True when the latest decisive owner review is CHANGES_REQUESTED and either
+    no timestamps are available or the review pre-dates the latest commit
     (meaning new work has been pushed that addresses the feedback).
     """
-    if not owner_reviews:
-        return False
-    latest_review = owner_reviews[-1]
-    if latest_review.get("state") != "CHANGES_REQUESTED":
+    latest_review = latest_decisive_review(owner_reviews)
+    if latest_review is None or latest_review.get("state") != "CHANGES_REQUESTED":
         return False
     review_at = latest_review.get("submittedAt", "")
     latest_commit_date = max((c.get("committedDate", "") for c in commits), default="")
@@ -1533,8 +1546,9 @@ class Worker:
         owner_reviews = [
             r for r in reviews if r.get("author", {}).get("login") == repo_ctx.owner
         ]
+        _latest_decisive = latest_decisive_review(owner_reviews)
         latest_state = (
-            owner_reviews[-1].get("state", "NONE") if owner_reviews else "NONE"
+            _latest_decisive.get("state", "NONE") if _latest_decisive else "NONE"
         )
         is_approved = latest_state == "APPROVED"
         task_list = tasks.list_tasks(self.work_dir)
@@ -1577,12 +1591,22 @@ class Worker:
                     pr_number,
                 )
                 return 0
-            log.info(
-                "PR #%s: changes requested — all addressed, re-requesting review",
-                pr_number,
-            )
             if repo_ctx.owner not in requested_reviewers:
-                self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+                checks = self.gh.pr_checks(repo_ctx.repo, pr_number)
+                required = self.gh.get_required_checks(
+                    repo_ctx.repo, repo_ctx.default_branch
+                )
+                if ci_ready_for_review(checks, required):
+                    log.info(
+                        "PR #%s: changes requested — all addressed, CI passing — re-requesting review",
+                        pr_number,
+                    )
+                    self.gh.add_pr_reviewer(repo_ctx.repo, pr_number, repo_ctx.owner)
+                else:
+                    log.info(
+                        "PR #%s: changes requested — all addressed, but CI not yet passing — deferring re-request",
+                        pr_number,
+                    )
             return 0
 
         if is_draft:
