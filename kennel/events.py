@@ -690,7 +690,7 @@ def create_task(
 
 def launch_sync(config: Config, repo_cfg: RepoConfig, *, _gh=None) -> None:
     """Sync tasks.json → PR body in a background thread."""
-    from kennel.worker import sync_tasks_background
+    from kennel.tasks import sync_tasks_background
 
     gh = _gh if _gh is not None else get_github()
     sync_tasks_background(repo_cfg.work_dir, gh)
