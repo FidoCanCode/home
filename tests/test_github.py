@@ -195,28 +195,21 @@ class TestGitHubClass:
 
     def test_find_pr_delegates(self) -> None:
         gh, mock_s = self._github()
-        pr = {
-            "__typename": "PullRequest",
+        pr_source = {
             "number": 1,
-            "headRefName": "feat",
-            "state": "OPEN",
-            "author": {"login": "fido"},
+            "state": "open",
             "body": "closes #5",
+            "user": {"login": "fido"},
+            "pull_request": {},
         }
-        mock_s.post.return_value.json.return_value = {
-            "data": {
-                "repository": {
-                    "issue": {
-                        "timelineItems": {
-                            "pageInfo": {"hasNextPage": False, "endCursor": None},
-                            "nodes": [
-                                {"__typename": "CrossReferencedEvent", "source": pr}
-                            ],
-                        }
-                    }
-                }
-            }
-        }
+        timeline_resp = MagicMock()
+        timeline_resp.json.return_value = [
+            {"event": "cross-referenced", "source": {"issue": pr_source}}
+        ]
+        timeline_resp.headers = {}
+        details_resp = MagicMock()
+        details_resp.json.return_value = {"number": 1, "head": {"ref": "feat"}}
+        mock_s.get.side_effect = [timeline_resp, details_resp]
         result = gh.find_pr("o/r", 5, "fido")
         assert result is not None
         assert result["number"] == 1
@@ -709,59 +702,52 @@ class TestGHClass:
         assert mock_s.get.call_count == 2
         assert mock_s.get.call_args_list[1].args[0] == next_url
 
-    def _gql_pr(
-        self, number: int, ref: str, state: str, user: str, body: str = ""
-    ) -> dict:
+    def _rest_pr(self, number: int, state: str, user: str, body: str = "") -> dict:
+        """PR object as it appears in a REST timeline event source.issue."""
         return {
-            "__typename": "PullRequest",
             "number": number,
-            "headRefName": ref,
             "state": state,
-            "author": {"login": user},
             "body": body,
+            "user": {"login": user},
+            "pull_request": {},
         }
 
-    def _gql_timeline(
-        self,
-        nodes: list[dict],
-        has_next: bool = False,
-        cursor: str | None = None,
-    ) -> dict:
-        return {
-            "data": {
-                "repository": {
-                    "issue": {
-                        "timelineItems": {
-                            "pageInfo": {
-                                "hasNextPage": has_next,
-                                "endCursor": cursor,
-                            },
-                            "nodes": nodes,
-                        }
-                    }
-                }
-            }
-        }
+    def _pr_details(self, number: int, ref: str) -> dict:
+        """PR details returned by GET /repos/{owner}/{repo}/pulls/{number}."""
+        return {"number": number, "head": {"ref": ref}}
 
-    def _cross_ref_node(self, pr: dict) -> dict:
-        return {"__typename": "CrossReferencedEvent", "source": pr}
+    def _timeline_resp(self, events: list[dict], next_url: str = "") -> MagicMock:
+        resp = MagicMock()
+        resp.json.return_value = events
+        resp.headers = {"Link": f'<{next_url}>; rel="next"'} if next_url else {}
+        return resp
 
-    def _connected_node(self, pr: dict) -> dict:
+    def _details_resp(self, details: dict) -> MagicMock:
+        resp = MagicMock()
+        resp.json.return_value = details
+        return resp
+
+    def _cross_ref_event(self, pr: dict) -> dict:
+        return {"event": "cross-referenced", "source": {"issue": pr}}
+
+    def _connected_event(self, pr: dict) -> dict:
         pr_no_body = {k: v for k, v in pr.items() if k != "body"}
-        return {"__typename": "ConnectedEvent", "subject": pr_no_body}
+        return {"event": "connected", "source": {"issue": pr_no_body}}
 
-    def _disconnected_node(self, pr_number: int) -> dict:
+    def _disconnected_event(self, pr_number: int) -> dict:
         return {
-            "__typename": "DisconnectedEvent",
-            "subject": {"__typename": "PullRequest", "number": pr_number},
+            "event": "disconnected",
+            "source": {"issue": {"number": pr_number, "pull_request": {}}},
         }
 
     def test_find_pr_returns_match(self) -> None:
         gh, mock_s = self._gh()
-        pr = self._gql_pr(1, "feat", "OPEN", "fido", "closes #5")
-        mock_s.post.return_value.json.return_value = self._gql_timeline(
-            [self._cross_ref_node(pr)]
-        )
+        pr = self._rest_pr(1, "open", "fido", "closes #5")
+        details = self._pr_details(1, "feat")
+        mock_s.get.side_effect = [
+            self._timeline_resp([self._cross_ref_event(pr)]),
+            self._details_resp(details),
+        ]
         result = gh.find_pr("o/r", 5, "fido")
         assert result == {
             "number": 1,
@@ -773,29 +759,29 @@ class TestGHClass:
     def test_find_pr_skips_merged(self) -> None:
         """Merged PRs are skipped — a reopened issue should get a fresh PR."""
         gh, mock_s = self._gh()
-        pr = self._gql_pr(3, "fix", "MERGED", "fido", "closes #2")
-        mock_s.post.return_value.json.return_value = self._gql_timeline(
-            [self._cross_ref_node(pr)]
-        )
+        pr = self._rest_pr(3, "closed", "fido", "closes #2")
+        mock_s.get.return_value = self._timeline_resp([self._cross_ref_event(pr)])
         assert gh.find_pr("o/r", 2, "fido") is None
 
     def test_find_pr_skips_closed(self) -> None:
-        """Closed (not merged) PRs are skipped — a reopened issue should get a fresh PR."""
+        """Closed PRs are skipped — a reopened issue should get a fresh PR."""
         gh, mock_s = self._gh()
-        pr = self._gql_pr(4, "fix", "CLOSED", "fido", "closes #2")
-        mock_s.post.return_value.json.return_value = self._gql_timeline(
-            [self._cross_ref_node(pr)]
-        )
+        pr = self._rest_pr(4, "closed", "fido", "closes #2")
+        mock_s.get.return_value = self._timeline_resp([self._cross_ref_event(pr)])
         assert gh.find_pr("o/r", 2, "fido") is None
 
     def test_find_pr_skips_non_open_returns_subsequent_open_pr(self) -> None:
-        """When a merged/closed PR and a later open PR reference the issue, returns open."""
+        """When a closed PR and a later open PR reference the issue, returns open."""
         gh, mock_s = self._gh()
-        merged = self._gql_pr(3, "fix", "MERGED", "fido", "closes #2")
-        open_pr = self._gql_pr(7, "fix-retry", "OPEN", "fido", "closes #2")
-        mock_s.post.return_value.json.return_value = self._gql_timeline(
-            [self._cross_ref_node(merged), self._cross_ref_node(open_pr)]
-        )
+        closed = self._rest_pr(3, "closed", "fido", "closes #2")
+        open_pr = self._rest_pr(7, "open", "fido", "closes #2")
+        details = self._pr_details(7, "fix-retry")
+        mock_s.get.side_effect = [
+            self._timeline_resp(
+                [self._cross_ref_event(closed), self._cross_ref_event(open_pr)]
+            ),
+            self._details_resp(details),
+        ]
         result = gh.find_pr("o/r", 2, "fido")
         assert result is not None
         assert result["number"] == 7
@@ -803,96 +789,88 @@ class TestGHClass:
 
     def test_find_pr_filters_by_user(self) -> None:
         gh, mock_s = self._gh()
-        pr = self._gql_pr(1, "feat", "OPEN", "other", "closes #5")
-        mock_s.post.return_value.json.return_value = self._gql_timeline(
-            [self._cross_ref_node(pr)]
-        )
+        pr = self._rest_pr(1, "open", "other", "closes #5")
+        mock_s.get.return_value = self._timeline_resp([self._cross_ref_event(pr)])
         assert gh.find_pr("o/r", 5, "fido") is None
 
     def test_find_pr_returns_none_on_empty(self) -> None:
         gh, mock_s = self._gh()
-        mock_s.post.return_value.json.return_value = self._gql_timeline([])
+        mock_s.get.return_value = self._timeline_resp([])
         assert gh.find_pr("o/r", 1, "fido") is None
 
     def test_find_pr_skips_non_pr_cross_reference(self) -> None:
         """Cross-referenced events from plain issues (not PRs) are ignored."""
         gh, mock_s = self._gh()
-        issue_ref = {"__typename": "Issue", "number": 9}
-        node = {"__typename": "CrossReferencedEvent", "source": issue_ref}
-        mock_s.post.return_value.json.return_value = self._gql_timeline([node])
+        issue_ref = {
+            "number": 9,
+            "state": "open",
+            "user": {"login": "fido"},
+            "body": "closes #5",
+        }
+        node = {"event": "cross-referenced", "source": {"issue": issue_ref}}
+        mock_s.get.return_value = self._timeline_resp([node])
         assert gh.find_pr("o/r", 5, "fido") is None
 
     def test_find_pr_skips_substring_match(self) -> None:
         """#9 must not match a PR body that only contains #90."""
         gh, mock_s = self._gh()
-        pr = self._gql_pr(99, "feat", "OPEN", "fido", "closes #90")
-        mock_s.post.return_value.json.return_value = self._gql_timeline(
-            [self._cross_ref_node(pr)]
-        )
+        pr = self._rest_pr(99, "open", "fido", "closes #90")
+        mock_s.get.return_value = self._timeline_resp([self._cross_ref_event(pr)])
         assert gh.find_pr("o/r", 9, "fido") is None
 
     def test_find_pr_skips_prefix_match(self) -> None:
         """#100 must not match a PR body that only contains closes #10."""
         gh, mock_s = self._gh()
-        pr = self._gql_pr(99, "feat", "OPEN", "fido", "closes #10")
-        mock_s.post.return_value.json.return_value = self._gql_timeline(
-            [self._cross_ref_node(pr)]
-        )
+        pr = self._rest_pr(99, "open", "fido", "closes #10")
+        mock_s.get.return_value = self._timeline_resp([self._cross_ref_event(pr)])
         assert gh.find_pr("o/r", 100, "fido") is None
 
     def test_find_pr_requires_closing_keyword(self) -> None:
         """Bare #N in PR body (no closing keyword) must not match."""
         gh, mock_s = self._gh()
-        pr = self._gql_pr(7, "feat", "OPEN", "fido", "see #5 for context")
-        mock_s.post.return_value.json.return_value = self._gql_timeline(
-            [self._cross_ref_node(pr)]
-        )
+        pr = self._rest_pr(7, "open", "fido", "see #5 for context")
+        mock_s.get.return_value = self._timeline_resp([self._cross_ref_event(pr)])
         assert gh.find_pr("o/r", 5, "fido") is None
 
     def test_find_pr_body_only_not_title(self) -> None:
         """Issue reference in PR title alone does not count — body only."""
         gh, mock_s = self._gh()
-        pr = self._gql_pr(7, "feat", "OPEN", "fido", "")
-        node = self._cross_ref_node(pr)
-        node["source"]["title"] = "closes #5"  # reference only in title
-        mock_s.post.return_value.json.return_value = self._gql_timeline([node])
+        pr = self._rest_pr(7, "open", "fido", "")
+        event = self._cross_ref_event(pr)
+        event["source"]["issue"]["title"] = "closes #5"  # reference only in title
+        mock_s.get.return_value = self._timeline_resp([event])
         assert gh.find_pr("o/r", 5, "fido") is None
 
-    def test_find_pr_uses_graphql(self) -> None:
+    def test_find_pr_uses_rest_timeline(self) -> None:
         gh, mock_s = self._gh()
-        mock_s.post.return_value.json.return_value = self._gql_timeline([])
+        mock_s.get.return_value = self._timeline_resp([])
         gh.find_pr("o/r", 5, "fido")
-        url = mock_s.post.call_args.args[0]
-        assert url.endswith("/graphql")
-        body = mock_s.post.call_args.kwargs["json"]
-        assert body["variables"]["owner"] == "o"
-        assert body["variables"]["repo"] == "r"
-        assert body["variables"]["number"] == 5
+        url = mock_s.get.call_args.args[0]
+        assert "repos/o/r/issues/5/timeline" in url
 
     def test_find_pr_follows_pagination(self) -> None:
-        """find_pr fetches additional pages when hasNextPage is true."""
+        """find_pr fetches additional pages via Link header."""
         gh, mock_s = self._gh()
-        pr = self._gql_pr(7, "feat", "OPEN", "fido", "closes #5")
-        page1 = self._gql_timeline(
-            [{"__typename": "LabeledEvent"}], has_next=True, cursor="abc"
-        )
-        page2 = self._gql_timeline([self._cross_ref_node(pr)])
-        mock_s.post.return_value.json.side_effect = [page1, page2]
+        pr = self._rest_pr(7, "open", "fido", "closes #5")
+        next_url = "https://api.github.com/repos/o/r/issues/5/timeline?page=2"
+        page1 = self._timeline_resp([{"event": "labeled"}], next_url=next_url)
+        page2 = self._timeline_resp([self._cross_ref_event(pr)])
+        details = self._details_resp(self._pr_details(7, "feat"))
+        mock_s.get.side_effect = [page1, page2, details]
         result = gh.find_pr("o/r", 5, "fido")
         assert result is not None
         assert result["number"] == 7
-        assert mock_s.post.call_count == 2
-        assert (
-            mock_s.post.call_args_list[1].kwargs["json"]["variables"]["cursor"] == "abc"
-        )
+        assert mock_s.get.call_args_list[1].args[0] == next_url
 
     def test_find_pr_connected_event(self) -> None:
         """PRs linked via Development sidebar (connected event) are found."""
         gh, mock_s = self._gh()
-        pr = self._gql_pr(7, "feat", "OPEN", "fido")
-        mock_s.post.return_value.json.return_value = self._gql_timeline(
-            [self._connected_node(pr)]
-        )
+        pr = self._rest_pr(7, "open", "fido")
+        details = self._details_resp(self._pr_details(7, "feat"))
+        mock_s.get.side_effect = [
+            self._timeline_resp([self._connected_event(pr)]),
+            details,
+        ]
         result = gh.find_pr("o/r", 5, "fido")
         assert result is not None
         assert result["number"] == 7
@@ -900,52 +878,35 @@ class TestGHClass:
     def test_find_pr_disconnected_event_excludes_pr(self) -> None:
         """A sidebar-connected-then-disconnected PR is not returned."""
         gh, mock_s = self._gh()
-        pr = self._gql_pr(7, "feat", "OPEN", "fido")
-        nodes = [self._connected_node(pr), self._disconnected_node(7)]
-        mock_s.post.return_value.json.return_value = self._gql_timeline(nodes)
+        pr = self._rest_pr(7, "open", "fido")
+        events = [self._connected_event(pr), self._disconnected_event(7)]
+        mock_s.get.return_value = self._timeline_resp(events)
         assert gh.find_pr("o/r", 5, "fido") is None
 
     def test_find_pr_disconnected_does_not_affect_keyword_linked(self) -> None:
-        """DisconnectedEvent does not remove a keyword-linked (cross-referenced) PR."""
+        """disconnected event does not remove a keyword-linked (cross-referenced) PR."""
         gh, mock_s = self._gh()
-        pr = self._gql_pr(7, "feat", "OPEN", "fido", "closes #5")
-        nodes = [self._cross_ref_node(pr), self._disconnected_node(7)]
-        mock_s.post.return_value.json.return_value = self._gql_timeline(nodes)
+        pr = self._rest_pr(7, "open", "fido", "closes #5")
+        events = [self._cross_ref_event(pr), self._disconnected_event(7)]
+        details = self._details_resp(self._pr_details(7, "feat"))
+        mock_s.get.side_effect = [self._timeline_resp(events), details]
         result = gh.find_pr("o/r", 5, "fido")
         assert result is not None
         assert result["number"] == 7
 
     def test_find_pr_connected_filters_by_user(self) -> None:
         gh, mock_s = self._gh()
-        pr = self._gql_pr(7, "feat", "OPEN", "other")
-        mock_s.post.return_value.json.return_value = self._gql_timeline(
-            [self._connected_node(pr)]
-        )
+        pr = self._rest_pr(7, "open", "other")
+        mock_s.get.return_value = self._timeline_resp([self._connected_event(pr)])
         assert gh.find_pr("o/r", 5, "fido") is None
 
     def test_find_pr_skips_non_pr_connected(self) -> None:
-        """Connected events where the subject is an Issue (not a PR) are ignored."""
+        """Connected events where the source is an issue (not a PR) are ignored."""
         gh, mock_s = self._gh()
-        node = {
-            "__typename": "ConnectedEvent",
-            "subject": {"__typename": "Issue", "number": 9},
-        }
-        mock_s.post.return_value.json.return_value = self._gql_timeline([node])
+        issue_ref = {"number": 9, "state": "open", "user": {"login": "fido"}}
+        event = {"event": "connected", "source": {"issue": issue_ref}}
+        mock_s.get.return_value = self._timeline_resp([event])
         assert gh.find_pr("o/r", 5, "fido") is None
-
-    def test_find_pr_returns_none_on_graphql_error(self) -> None:
-        gh, mock_s = self._gh()
-        mock_s.post.return_value.json.return_value = {
-            "errors": [{"message": "something went wrong"}]
-        }
-        assert gh.find_pr("o/r", 1, "fido") is None
-
-    def test_find_pr_returns_none_on_empty_timeline(self) -> None:
-        gh, mock_s = self._gh()
-        mock_s.post.return_value.json.return_value = {
-            "data": {"repository": {"issue": {"timelineItems": {}}}}
-        }
-        assert gh.find_pr("o/r", 1, "fido") is None
 
     def test_get_user(self) -> None:
         gh, mock_s = self._gh()
