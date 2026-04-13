@@ -844,6 +844,30 @@ class TestRun:
         assert isinstance(repo_handler, logging.FileHandler)
         assert repo_handler.baseFilename.endswith("kennel-myrepo.log")
 
+    def test_run_starts_watchdog_with_registry_and_repos(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = self._fake_cfg(tmp_path)
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_registry = MagicMock()
+        mock_make_registry = MagicMock(return_value=mock_registry)
+        mock_watchdog_cls = MagicMock()
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=mock_make_registry,
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
+            _Watchdog=mock_watchdog_cls,
+        )
+
+        mock_watchdog_cls.assert_called_once_with(mock_registry, fake_cfg.repos)
+        mock_watchdog_cls.return_value.start_thread.assert_called_once()
+
 
 def _self_restart_cfg(tmp_path: Path) -> Config:
     return Config(

@@ -28,6 +28,7 @@ from kennel.events import (
 )
 from kennel.github import GitHub
 from kennel.registry import WorkerRegistry, make_registry
+from kennel.watchdog import Watchdog
 from kennel.worker import RepoContextFilter, RepoNameFilter
 
 log = logging.getLogger(__name__)
@@ -433,6 +434,7 @@ def run(
     _signal=signal.signal,
     _kill_active_children=kill_active_children,
     _startup_pull=_startup_pull,
+    _Watchdog=Watchdog,
 ) -> None:
     config = _from_args()
 
@@ -466,7 +468,9 @@ def run(
     _populate_memberships(config)
 
     WebhookHandler.config = config
-    WebhookHandler.registry = _make_registry(config.repos)
+    registry = _make_registry(config.repos)
+    WebhookHandler.registry = registry
+    _Watchdog(registry, config.repos).start_thread()
 
     server = _HTTPServer(("", config.port), WebhookHandler)
 
