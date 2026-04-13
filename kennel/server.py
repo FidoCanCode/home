@@ -173,6 +173,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     registry: WorkerRegistry
     # Injectable callables — set as class attributes so HTTP-driven tests can
     # replace them without patching module-level names.
+    _fn_dispatch = dispatch
     _fn_reply_to_comment = reply_to_comment
     _fn_reply_to_review = reply_to_review
     _fn_reply_to_issue_comment = reply_to_issue_comment
@@ -223,34 +224,50 @@ class WebhookHandler(BaseHTTPRequestHandler):
             delivery,
         )
 
-        # Respond immediately — don't block on dispatch
-        self._respond(200, "ok")
-
-        # Check for self-restart: merged PR or push to default branch.
-        # _self_restart verifies via the runner clone's git remote that the
-        # webhook's repo actually matches kennel — if so it execs a new
-        # process and never returns.  For non-kennel repos it's a no-op.
-        if (
+        # Pre-compute self-restart triggers — needed for both registered and
+        # unregistered repos (_self_restart verifies the runner's git remote).
+        default_branch = payload.get("repository", {}).get("default_branch", "")
+        is_pr_merged = (
             event == "pull_request"
             and payload.get("action") == "closed"
-            and payload.get("pull_request", {}).get("merged")
-        ):
-            self._self_restart(repo_name, reason="PR merged")
-
-        default_branch = payload.get("repository", {}).get("default_branch", "")
-        if (
+            and bool(payload.get("pull_request", {}).get("merged"))
+        )
+        is_default_push = (
             event == "push"
-            and default_branch
+            and bool(default_branch)
             and payload.get("ref") == f"refs/heads/{default_branch}"
-        ):
-            self._self_restart(repo_name, reason=f"push to {default_branch}")
+        )
 
         if not repo_cfg:
-            log.debug("ignoring webhook for unregistered repo: %s", repo_name)
+            # Nothing to dispatch — ack immediately, then maybe self-restart.
+            self._respond(200, "ok")
+            if is_pr_merged:
+                self._self_restart(repo_name, reason="PR merged")
+            elif is_default_push:
+                self._self_restart(repo_name, reason=f"push to {default_branch}")
+            else:
+                log.debug("ignoring webhook for unregistered repo: %s", repo_name)
             return
 
-        # Process in background thread so we don't block the server
-        action = dispatch(event, payload, self.config, repo_cfg)
+        # Dispatch BEFORE acknowledging — if dispatch raises, return 500 so
+        # GitHub retries instead of treating the event as successfully handled.
+        try:
+            action = type(self)._fn_dispatch(event, payload, self.config, repo_cfg)
+        except Exception:
+            log.exception("dispatch failed for %s", repo_name)
+            self._respond(500, "dispatch error")
+            return
+
+        # Acknowledge only after dispatch succeeds.
+        self._respond(200, "ok")
+
+        # Self-restart after ack so the response reaches GitHub before exec.
+        if is_pr_merged:
+            self._self_restart(repo_name, reason="PR merged")
+        elif is_default_push:
+            self._self_restart(repo_name, reason=f"push to {default_branch}")
+
+        # Process in background thread so we don't block the server.
         if action:
             threading.Thread(
                 target=self._process_action,

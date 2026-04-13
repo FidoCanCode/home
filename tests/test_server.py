@@ -44,6 +44,7 @@ def _sign(body: bytes, secret: bytes) -> str:
 @pytest.fixture(autouse=True)
 def _restore_handler_fns():
     saved = {
+        "_fn_dispatch": WebhookHandler._fn_dispatch,
         "_fn_reply_to_comment": WebhookHandler._fn_reply_to_comment,
         "_fn_reply_to_review": WebhookHandler._fn_reply_to_review,
         "_fn_reply_to_issue_comment": WebhookHandler._fn_reply_to_issue_comment,
@@ -516,6 +517,52 @@ class TestProcessAction:
         assert status == 200
         time.sleep(0.2)
         # server still alive — no crash
+
+    def test_dispatch_error_returns_500(self, server: tuple) -> None:
+        """When dispatch raises, return 500 so GitHub retries the delivery."""
+        url, cfg = server
+        payload = {**self._payload(), "action": "created"}
+        WebhookHandler._fn_dispatch = MagicMock(side_effect=RuntimeError("boom"))
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        assert exc_info.value.code == 500
+
+    def test_dispatch_called_before_ack(self, server: tuple) -> None:
+        """dispatch() must be called before the HTTP response is written."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "created",
+            "comment": {
+                "id": 999,
+                "body": "hey",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com",
+                "path": "x.py",
+                "line": 1,
+                "diff_hunk": "@@ @@",
+            },
+            "pull_request": {"number": 99, "title": "T", "body": ""},
+        }
+        call_order: list[str] = []
+
+        def fake_dispatch(*_args, **_kwargs):
+            call_order.append("dispatch")
+            return None
+
+        original_respond = WebhookHandler._respond
+
+        def fake_respond(self, code, msg):
+            call_order.append(f"respond_{code}")
+            original_respond(self, code, msg)
+
+        WebhookHandler._fn_dispatch = fake_dispatch
+        WebhookHandler._respond = fake_respond  # type: ignore[method-assign]
+        try:
+            _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        finally:
+            WebhookHandler._respond = original_respond  # type: ignore[method-assign]
+        assert call_order == ["dispatch", "respond_200"]
 
 
 class TestPopulateMemberships:
@@ -1331,5 +1378,72 @@ class TestSelfRestart:
             time.sleep(0.2)
             mock_pull.assert_not_called()
             mock_exec.assert_not_called()
+        finally:
+            srv.shutdown()
+
+    def _make_unregistered_server(self, tmp_path: Path):
+        """Server whose config does NOT include the kennel repo."""
+        from kennel.config import RepoMembership
+
+        cfg = Config(
+            port=0,
+            secret=b"test-secret",
+            repos={
+                "owner/other": RepoConfig(
+                    name="owner/other",
+                    work_dir=tmp_path,
+                    membership=RepoMembership(collaborators=frozenset()),
+                )
+            },
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_registry = MagicMock()
+        WebhookHandler.config = cfg
+        WebhookHandler.registry = mock_registry
+        srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        return srv, f"http://127.0.0.1:{port}", cfg
+
+    def test_merged_pr_on_unregistered_repo_triggers_restart(
+        self, tmp_path: Path
+    ) -> None:
+        """Self-restart fires for merged PR even when the repo is not registered."""
+        srv, url, cfg = self._make_unregistered_server(tmp_path)
+        try:
+            WebhookHandler._fn_runner_dir = lambda: tmp_path
+            WebhookHandler._fn_get_self_repo = lambda _d: "owner/kennel"
+            WebhookHandler._fn_pull_with_backoff = lambda _d: True
+            mock_chdir = MagicMock()
+            mock_exec = MagicMock()
+            WebhookHandler._fn_os_chdir = mock_chdir
+            WebhookHandler._fn_os_execvp = mock_exec
+            status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
+            assert status == 200
+            time.sleep(0.2)
+            mock_exec.assert_called_once()
+        finally:
+            srv.shutdown()
+
+    def test_push_to_default_on_unregistered_repo_triggers_restart(
+        self, tmp_path: Path
+    ) -> None:
+        """Self-restart fires for push to default branch even when repo is not registered."""
+        srv, url, cfg = self._make_unregistered_server(tmp_path)
+        try:
+            WebhookHandler._fn_runner_dir = lambda: tmp_path
+            WebhookHandler._fn_get_self_repo = lambda _d: "owner/kennel"
+            WebhookHandler._fn_pull_with_backoff = lambda _d: True
+            mock_chdir = MagicMock()
+            mock_exec = MagicMock()
+            WebhookHandler._fn_os_chdir = mock_chdir
+            WebhookHandler._fn_os_execvp = mock_exec
+            status = _post_webhook(url, cfg, "push", _PUSH_PAYLOAD)
+            assert status == 200
+            time.sleep(0.2)
+            mock_exec.assert_called_once()
         finally:
             srv.shutdown()
