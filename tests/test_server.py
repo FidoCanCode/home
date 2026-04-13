@@ -143,12 +143,38 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_all_activities.return_value = [
             WorkerActivity(repo_name="owner/repo", what="Working on: #1", busy=True),
         ]
+        WebhookHandler.registry.get_crash_info.return_value = None
         resp = urllib.request.urlopen(f"{url}/status")
         assert resp.status == 200
         data = json.loads(resp.read())
         assert data == [
-            {"repo_name": "owner/repo", "what": "Working on: #1", "busy": True}
+            {
+                "repo_name": "owner/repo",
+                "what": "Working on: #1",
+                "busy": True,
+                "crash_count": 0,
+                "last_crash_error": None,
+            }
         ]
+
+    def test_status_endpoint_includes_crash_info(self, server: tuple) -> None:
+        from datetime import datetime
+
+        from kennel.registry import WorkerActivity, WorkerCrash
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(repo_name="owner/repo", what="Napping", busy=False),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = WorkerCrash(
+            death_count=3,
+            last_error="RuntimeError: boom",
+            last_crash_time=datetime(2026, 1, 1),
+        )
+        resp = urllib.request.urlopen(f"{url}/status")
+        data = json.loads(resp.read())
+        assert data[0]["crash_count"] == 3
+        assert data[0]["last_crash_error"] == "RuntimeError: boom"
 
     def test_status_endpoint_empty_when_no_activities(self, server: tuple) -> None:
         url, _ = server

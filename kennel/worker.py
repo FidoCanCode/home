@@ -1546,7 +1546,6 @@ class Worker:
 
 _IDLE_TIMEOUT = 60.0  # seconds to wait when there was no work to do
 _RETRY_TIMEOUT = 5.0  # seconds to wait when the lock was contended
-_ERROR_TIMEOUT = 30.0  # seconds to wait after an unexpected exception
 
 
 class WorkerThread(threading.Thread):
@@ -1556,7 +1555,7 @@ class WorkerThread(threading.Thread):
     - ``Worker.run()`` returns 1 → did work, loop immediately.
     - ``Worker.run()`` returns 0 → idle, wait up to ``_IDLE_TIMEOUT``.
     - ``Worker.run()`` returns 2 → lock held, wait up to ``_RETRY_TIMEOUT``.
-    - Unexpected exception → wait up to ``_ERROR_TIMEOUT``, then retry.
+    - Unexpected exception → propagates, killing the thread (watchdog restarts).
 
     Call :meth:`wake` to interrupt any wait early (e.g. when a webhook arrives).
     Call :meth:`stop` to request a clean shutdown.
@@ -1579,6 +1578,7 @@ class WorkerThread(threading.Thread):
         self._wake = threading.Event()
         self._abort_task = threading.Event()
         self._stop = False
+        self.crash_error: str | None = None
 
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
@@ -1597,8 +1597,8 @@ class WorkerThread(threading.Thread):
     def run(self) -> None:
         """Main loop — runs until :meth:`stop` is called."""
         _thread_repo.repo_name = self._repo_name.split("/")[-1]
-        while not self._stop:
-            try:
+        try:
+            while not self._stop:
                 result = Worker(
                     self.work_dir,
                     self._gh,
@@ -1607,19 +1607,18 @@ class WorkerThread(threading.Thread):
                     self._registry,
                     self._membership,
                 ).run()
-            except Exception:
-                log.exception("WorkerThread %s: unexpected error", self.name)
-                self._wake.wait(timeout=_ERROR_TIMEOUT)
+
+                if result == 1:
+                    # Did work — loop immediately without waiting.
+                    continue
+
+                timeout = _RETRY_TIMEOUT if result == 2 else _IDLE_TIMEOUT
+                self._wake.wait(timeout=timeout)
                 self._wake.clear()
-                continue
-
-            if result == 1:
-                # Did work — loop immediately without waiting.
-                continue
-
-            timeout = _RETRY_TIMEOUT if result == 2 else _IDLE_TIMEOUT
-            self._wake.wait(timeout=timeout)
-            self._wake.clear()
+        except Exception as exc:
+            self.crash_error = f"{type(exc).__name__}: {exc}"
+            log.exception("WorkerThread %s: unexpected error", self.name)
+            raise
 
 
 def run(work_dir: Path) -> int:

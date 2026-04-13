@@ -25,6 +25,8 @@ class RepoStatus:
     claude_pid: int | None
     claude_uptime: int | None  # seconds
     worker_what: str | None  # activity text from the live registry
+    crash_count: int  # number of unexpected worker deaths since kennel started
+    last_crash_error: str | None  # error from the most recent crash, if any
 
 
 @dataclass
@@ -150,13 +152,17 @@ def _port_from_pid(pid: int) -> int | None:
 
 def _fetch_activities(
     port: int, *, _urlopen: Callable[..., Any] = urllib.request.urlopen
-) -> dict[str, str]:
-    """Query GET /status on the kennel server, returning {repo_name: what}."""
+) -> dict[str, dict[str, Any]]:
+    """Query GET /status, returning {repo_name: {what, crash_count, last_crash_error}}."""
     try:
         with _urlopen(f"http://localhost:{port}/status", timeout=2) as resp:
             data = json.loads(resp.read())
         return {
-            item["repo_name"]: item["what"]
+            item["repo_name"]: {
+                "what": item["what"],
+                "crash_count": item["crash_count"],
+                "last_crash_error": item["last_crash_error"],
+            }
             for item in data
             if "repo_name" in item and "what" in item
         }
@@ -217,15 +223,20 @@ def _read_tasks(fido_dir: Path) -> list[dict[str, Any]]:
 def _current_task(task_list: list[dict[str, Any]]) -> str | None:
     """Return the title of the first in_progress task, then the first pending task."""
     for t in task_list:
-        if t.get("status") == "in_progress":
-            return t.get("title")
+        if t["status"] == "in_progress":
+            return t["title"]
     for t in task_list:
-        if t.get("status") == "pending":
-            return t.get("title")
+        if t["status"] == "pending":
+            return t["title"]
     return None
 
 
-def repo_status(repo_config: RepoConfig, worker_what: str | None = None) -> RepoStatus:
+def repo_status(
+    repo_config: RepoConfig,
+    worker_what: str | None = None,
+    crash_count: int = 0,
+    last_crash_error: str | None = None,
+) -> RepoStatus:
     """Collect status for a single repo."""
     git_dir = _git_dir(repo_config.work_dir)
     if git_dir is None:
@@ -239,6 +250,8 @@ def repo_status(repo_config: RepoConfig, worker_what: str | None = None) -> Repo
             claude_pid=None,
             claude_uptime=None,
             worker_what=worker_what,
+            crash_count=crash_count,
+            last_crash_error=last_crash_error,
         )
 
     fido_dir = git_dir / "fido"
@@ -248,8 +261,8 @@ def repo_status(repo_config: RepoConfig, worker_what: str | None = None) -> Repo
     issue = state.get("issue")
 
     task_list = _read_tasks(fido_dir)
-    pending = sum(1 for t in task_list if t.get("status") == "pending")
-    completed = sum(1 for t in task_list if t.get("status") == "completed")
+    pending = sum(1 for t in task_list if t["status"] == "pending")
+    completed = sum(1 for t in task_list if t["status"] == "completed")
 
     current = _current_task(task_list)
 
@@ -268,6 +281,8 @@ def repo_status(repo_config: RepoConfig, worker_what: str | None = None) -> Repo
         claude_pid=claude_pid,
         claude_uptime=claude_uptime,
         worker_what=worker_what,
+        crash_count=crash_count,
+        last_crash_error=last_crash_error,
     )
 
 
@@ -283,9 +298,17 @@ def collect() -> KennelStatus:
         if port is not None:
             activities = _fetch_activities(port)
 
-    repos = [
-        repo_status(rc, worker_what=activities.get(rc.name)) for rc in repo_configs
-    ]
+    repos = []
+    for rc in repo_configs:
+        info = activities.get(rc.name)
+        repos.append(
+            repo_status(
+                rc,
+                worker_what=info["what"] if info else None,
+                crash_count=info["crash_count"] if info else 0,
+                last_crash_error=info["last_crash_error"] if info else None,
+            )
+        )
     return KennelStatus(kennel_pid=pid, kennel_uptime=uptime, repos=repos)
 
 
@@ -333,6 +356,12 @@ def format_status(status: KennelStatus) -> str:
             if repo.claude_uptime is not None:
                 claude_str += f" (running {_format_uptime(repo.claude_uptime)})"
             parts.append(claude_str)
+
+        if repo.crash_count > 0:
+            crash_str = f"crashed {repo.crash_count}x"
+            if repo.last_crash_error:
+                crash_str += f": {repo.last_crash_error}"
+            parts.append(crash_str)
 
         lines.append(f"{repo.name}: {' — '.join(parts)}")
 

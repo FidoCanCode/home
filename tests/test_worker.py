@@ -7960,30 +7960,64 @@ class TestWorkerThread:
 
         mock_wake.wait.assert_called_once_with(timeout=wmod._RETRY_TIMEOUT)
 
-    def test_exception_is_caught_and_loop_continues(self, tmp_path: Path) -> None:
-        """An unexpected exception should be caught; loop continues after wait."""
-        import kennel.worker as wmod
-
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_exception_kills_thread(self, tmp_path: Path) -> None:
+        """An unexpected exception propagates and kills the thread."""
         wt = self._make_thread(tmp_path)
-        mock_wake = MagicMock()
-        wt._wake = mock_wake
-        call_count = 0
 
         def fake_worker_run(self_ignored=None) -> int:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise RuntimeError("boom")
-            wt._stop = True
-            return 0
+            raise RuntimeError("boom")
 
         with patch.object(Worker, "run", fake_worker_run):
-            self._run_thread(wt)
+            wt.start()
+            wt.join(timeout=5.0)
 
-        assert call_count == 2
-        assert mock_wake.wait.call_count == 2
-        first_timeout = mock_wake.wait.call_args_list[0].kwargs["timeout"]
-        assert first_timeout == wmod._ERROR_TIMEOUT
+        assert not wt.is_alive()
+
+    def test_crash_error_is_none_initially(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt.crash_error is None
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_crash_error_set_on_exception(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+
+        def fake_worker_run(self_ignored=None) -> int:
+            raise ValueError("bad value")
+
+        with patch.object(Worker, "run", fake_worker_run):
+            wt.start()
+            wt.join(timeout=5.0)
+
+        assert wt.crash_error == "ValueError: bad value"
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_crash_error_includes_exception_type(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+
+        def fake_worker_run(self_ignored=None) -> int:
+            raise RuntimeError("boom")
+
+        with patch.object(Worker, "run", fake_worker_run):
+            wt.start()
+            wt.join(timeout=5.0)
+
+        assert wt.crash_error is not None
+        assert wt.crash_error.startswith("RuntimeError:")
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_crash_error_logs_exception(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+
+        def fake_worker_run(self_ignored=None) -> int:
+            raise RuntimeError("boom")
+
+        with patch.object(Worker, "run", fake_worker_run):
+            with patch("kennel.worker.log") as mock_log:
+                wt.start()
+                wt.join(timeout=5.0)
+
+        mock_log.exception.assert_called_once()
 
     def test_stop_flag_exits_loop_before_next_iteration(self, tmp_path: Path) -> None:
         """Setting stop before run() starts should cause immediate exit."""

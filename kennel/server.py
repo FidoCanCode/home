@@ -343,10 +343,18 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/status":
-            activities = [
-                {"repo_name": a.repo_name, "what": a.what, "busy": a.busy}
-                for a in self.registry.get_all_activities()
-            ]
+            activities = []
+            for a in self.registry.get_all_activities():
+                crash = self.registry.get_crash_info(a.repo_name)
+                activities.append(
+                    {
+                        "repo_name": a.repo_name,
+                        "what": a.what,
+                        "busy": a.busy,
+                        "crash_count": crash.death_count if crash else 0,
+                        "last_crash_error": crash.last_error if crash else None,
+                    }
+                )
             body = json.dumps(activities).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
