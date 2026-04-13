@@ -322,9 +322,12 @@ class TestGitHubClass:
 
     def test_pr_merge_delegates(self) -> None:
         gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        mock_s.put.return_value = mock_resp
+        get_resp = MagicMock()
+        get_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
+        mock_s.get.return_value = get_resp
+        put_resp = MagicMock()
+        put_resp.json.return_value = {}
+        mock_s.put.return_value = put_resp
         gh.pr_merge("o/r", 10)
         assert mock_s.put.call_args.kwargs["json"]["merge_method"] == "squash"
 
@@ -1424,9 +1427,12 @@ class TestGHClass:
 
     def test_pr_merge_squash(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        mock_s.put.return_value = mock_resp
+        get_resp = MagicMock()
+        get_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
+        mock_s.get.return_value = get_resp
+        put_resp = MagicMock()
+        put_resp.json.return_value = {}
+        mock_s.put.return_value = put_resp
         gh.pr_merge("o/r", 10)
         url = mock_s.put.call_args.args[0]
         assert "repos/o/r/pulls/10/merge" in url
@@ -1434,16 +1440,19 @@ class TestGHClass:
 
     def test_pr_merge_no_squash(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        mock_s.put.return_value = mock_resp
+        get_resp = MagicMock()
+        get_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
+        mock_s.get.return_value = get_resp
+        put_resp = MagicMock()
+        put_resp.json.return_value = {}
+        mock_s.put.return_value = put_resp
         gh.pr_merge("o/r", 10, squash=False)
         assert mock_s.put.call_args.kwargs["json"]["merge_method"] == "merge"
 
     def test_pr_merge_auto(self) -> None:
         gh, mock_s = self._gh()
         pr_resp = MagicMock()
-        pr_resp.json.return_value = {"node_id": "PR_abc"}
+        pr_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
         graphql_resp = MagicMock()
         graphql_resp.json.return_value = {"data": {}}
         mock_s.get.return_value = pr_resp
@@ -1453,6 +1462,89 @@ class TestGHClass:
         assert "enablePullRequestAutoMerge" in body["query"]
         assert body["variables"]["mergeMethod"] == "SQUASH"
         assert body["variables"]["prId"] == "PR_abc"
+
+    def test_pr_merge_already_merged_returns_early(self) -> None:
+        """If the PR is already merged, skip the merge call silently."""
+        gh, mock_s = self._gh()
+        get_resp = MagicMock()
+        get_resp.json.return_value = {"merged": True, "node_id": "PR_abc"}
+        mock_s.get.return_value = get_resp
+        gh.pr_merge("o/r", 10)
+        mock_s.put.assert_not_called()
+        mock_s.post.assert_not_called()
+
+    def test_pr_merge_already_merged_auto_returns_early(self) -> None:
+        gh, mock_s = self._gh()
+        get_resp = MagicMock()
+        get_resp.json.return_value = {"merged": True, "node_id": "PR_abc"}
+        mock_s.get.return_value = get_resp
+        gh.pr_merge("o/r", 10, auto=True)
+        mock_s.post.assert_not_called()
+
+    def test_pr_merge_405_after_concurrent_merge_treated_as_success(self) -> None:
+        """Race: get_pr returns not-merged, but PR merges between our check and
+        the merge call.  405 response + recheck showing merged = treat as success."""
+        import requests as _requests
+
+        gh, mock_s = self._gh()
+        get_responses = [
+            MagicMock(
+                json=MagicMock(return_value={"merged": False, "node_id": "PR_x"})
+            ),
+            MagicMock(json=MagicMock(return_value={"merged": True, "node_id": "PR_x"})),
+        ]
+        mock_s.get.side_effect = get_responses
+        err = _requests.HTTPError("405 Method Not Allowed")
+        err.response = MagicMock(status_code=405)
+        put_resp = MagicMock()
+        put_resp.raise_for_status.side_effect = err
+        mock_s.put.return_value = put_resp
+        # Should not raise — 405 + recheck shows merged.
+        gh.pr_merge("o/r", 10)
+        assert mock_s.get.call_count == 2
+
+    def test_pr_merge_405_but_still_not_merged_reraises(self) -> None:
+        """405 with recheck showing not-merged means something else is wrong;
+        re-raise so the caller sees it."""
+        import requests as _requests
+
+        gh, mock_s = self._gh()
+        get_responses = [
+            MagicMock(
+                json=MagicMock(return_value={"merged": False, "node_id": "PR_x"})
+            ),
+            MagicMock(
+                json=MagicMock(return_value={"merged": False, "node_id": "PR_x"})
+            ),
+        ]
+        mock_s.get.side_effect = get_responses
+        err = _requests.HTTPError("405 Method Not Allowed")
+        err.response = MagicMock(status_code=405)
+        put_resp = MagicMock()
+        put_resp.raise_for_status.side_effect = err
+        mock_s.put.return_value = put_resp
+        import pytest as _pytest
+
+        with _pytest.raises(_requests.HTTPError):
+            gh.pr_merge("o/r", 10)
+
+    def test_pr_merge_non_405_error_reraises(self) -> None:
+        """Non-405 errors (e.g. 500) should not be swallowed."""
+        import requests as _requests
+
+        gh, mock_s = self._gh()
+        get_resp = MagicMock()
+        get_resp.json.return_value = {"merged": False, "node_id": "PR_x"}
+        mock_s.get.return_value = get_resp
+        err = _requests.HTTPError("500 Internal Server Error")
+        err.response = MagicMock(status_code=500)
+        put_resp = MagicMock()
+        put_resp.raise_for_status.side_effect = err
+        mock_s.put.return_value = put_resp
+        import pytest as _pytest
+
+        with _pytest.raises(_requests.HTTPError):
+            gh.pr_merge("o/r", 10)
 
     def test_get_pr_returns_dict(self) -> None:
         gh, mock_s = self._gh()
