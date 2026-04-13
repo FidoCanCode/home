@@ -13,6 +13,7 @@ from kennel.events import (
     _reorder_tasks_background,
     _rewrite_pr_description,
     _summarize_as_action_item,
+    _task_snapshot,
     _triage,
     create_task,
     dispatch,
@@ -3152,3 +3153,134 @@ class TestRewritePrDescription:
             )
         mock_state_cls.assert_called_once_with(tmp_path / ".git" / "fido")
         mock_gh.edit_pr_body.assert_not_called()
+
+    def test_does_not_retry_when_task_list_unchanged(self, tmp_path: Path) -> None:
+        """When task list is stable, description is written exactly once."""
+        task = {"id": "t1", "status": "pending", "title": "Do a thing"}
+        tasks = MagicMock()
+        tasks.list.return_value = [task]  # same list every call
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=tasks,
+        )
+        mock_gh.edit_pr_body.assert_called_once()
+
+    def test_retries_when_task_list_changes_during_opus(self, tmp_path: Path) -> None:
+        """If task list changes while Opus runs, the description is rewritten."""
+        task_before = {"id": "t1", "status": "pending", "title": "Do a thing"}
+        task_after = {"id": "t2", "status": "pending", "title": "New task"}
+        tasks = MagicMock()
+        # list() called: before attempt 1, after attempt 1, before attempt 2, after attempt 2
+        tasks.list.side_effect = [
+            [task_before],  # snapshot before attempt 1
+            [task_after],  # snapshot after attempt 1 (changed → retry)
+            [task_after],  # snapshot before attempt 2
+            [task_after],  # snapshot after attempt 2 (stable → done)
+        ]
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=tasks,
+        )
+        assert mock_gh.edit_pr_body.call_count == 2
+
+    def test_stops_after_max_retries(self, tmp_path: Path) -> None:
+        """Never retries more than _max_retries times even if task list keeps changing."""
+        tasks = MagicMock()
+        call_count = [0]
+
+        def ever_changing():
+            n = call_count[0]
+            call_count[0] += 1
+            return [{"id": str(n), "status": "pending", "title": f"task {n}"}]
+
+        tasks.list.side_effect = ever_changing
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=tasks,
+            _max_retries=3,
+        )
+        assert mock_gh.edit_pr_body.call_count == 3
+
+    def test_no_retry_when_write_skipped(self, tmp_path: Path) -> None:
+        """When _write_pr_description returns False (e.g. no divider), no retry."""
+        task_before = {"id": "t1", "status": "pending", "title": "Before"}
+        task_after = {"id": "t2", "status": "pending", "title": "After"}
+        tasks = MagicMock()
+        tasks.list.side_effect = [
+            [task_before],  # snapshot before
+            [task_after],  # snapshot after (would differ — but write was skipped)
+        ]
+        mock_gh = self._mock_gh(body="No divider here. Nothing.")
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=tasks,
+        )
+        mock_gh.edit_pr_body.assert_not_called()
+        assert tasks.list.call_count == 1  # no after-snapshot read
+
+    def test_refetches_pr_body_on_retry(self, tmp_path: Path) -> None:
+        """PR body is re-fetched on each attempt so work-queue stays current."""
+        task_before = {"id": "t1", "status": "pending", "title": "Before"}
+        task_after = {"id": "t2", "status": "pending", "title": "After"}
+        tasks = MagicMock()
+        tasks.list.side_effect = [
+            [task_before],
+            [task_after],  # changed → retry
+            [task_after],
+            [task_after],  # stable
+        ]
+        mock_gh = self._mock_gh()
+        _rewrite_pr_description(
+            tmp_path,
+            mock_gh,
+            _print_prompt=MagicMock(return_value="New desc.\n\nFixes #42."),
+            _state=self._mock_state(),
+            _tasks=tasks,
+        )
+        assert mock_gh.get_pr_body.call_count == 2  # once per attempt
+
+
+# ── _task_snapshot ────────────────────────────────────────────────────────────
+
+
+class TestTaskSnapshot:
+    def test_returns_id_status_title_tuples(self) -> None:
+        tasks = [
+            {"id": "a", "status": "pending", "title": "Do A"},
+            {"id": "b", "status": "completed", "title": "Done B"},
+        ]
+        assert _task_snapshot(tasks) == [
+            ("a", "pending", "Do A"),
+            ("b", "completed", "Done B"),
+        ]
+
+    def test_empty_list(self) -> None:
+        assert _task_snapshot([]) == []
+
+    def test_missing_fields_default_to_empty_string(self) -> None:
+        tasks = [{"id": "x"}]
+        assert _task_snapshot(tasks) == [("x", "", "")]
+
+    def test_order_is_preserved(self) -> None:
+        tasks = [
+            {"id": "z", "status": "pending", "title": "Z"},
+            {"id": "a", "status": "pending", "title": "A"},
+        ]
+        result = _task_snapshot(tasks)
+        assert result[0][0] == "z"
+        assert result[1][0] == "a"

@@ -799,6 +799,15 @@ def _notify_thread_change(
         log.exception("failed to notify thread %s", comment_id)
 
 
+def _task_snapshot(task_list: list[dict[str, Any]]) -> list[tuple]:
+    """Summarise task_list as an ordered list of (id, status, title) tuples.
+
+    Used by :func:`_rewrite_pr_description` to detect whether the task list
+    changed while Opus was generating the PR description.
+    """
+    return [(t["id"], t.get("status", ""), t.get("title", "")) for t in task_list]
+
+
 def _rewrite_pr_description(
     work_dir: Path,
     gh: Any,
@@ -806,6 +815,7 @@ def _rewrite_pr_description(
     _print_prompt=None,
     _state=None,
     _tasks=None,
+    _max_retries: int = 3,
 ) -> None:
     """Rewrite the PR description summary after a successful rescope.
 
@@ -815,6 +825,11 @@ def _rewrite_pr_description(
     Silently skips when there is no active issue or no open PR for it.
     Skips (and logs) when the PR body fetch fails or when the shared writer
     skips (no ``---`` divider, or Opus returned empty).
+
+    Retries up to *_max_retries* times when the task list changes while Opus
+    is generating the description, so the written description always reflects
+    the state of the task list at the moment Opus returned.  The PR body is
+    re-fetched on each retry so the work-queue section stays current.
     """
     from kennel.state import State
     from kennel.tasks import Tasks
@@ -844,20 +859,44 @@ def _rewrite_pr_description(
         return
 
     pr_number = pr_data["number"]
-    task_list = _tasks.list()
 
-    try:
-        body = gh.get_pr_body(repo, pr_number)
-    except Exception:
-        log.exception("_rewrite_pr_description: failed to get PR body")
-        return
+    for attempt in range(_max_retries):
+        task_list = _tasks.list()
+        snapshot_before = _task_snapshot(task_list)
 
-    try:
-        _write_pr_description(
-            gh, repo, pr_number, issue, task_list, body, _print_prompt=_print_prompt
+        try:
+            body = gh.get_pr_body(repo, pr_number)
+        except Exception:
+            log.exception("_rewrite_pr_description: failed to get PR body")
+            return
+
+        try:
+            written = _write_pr_description(
+                gh, repo, pr_number, issue, task_list, body, _print_prompt=_print_prompt
+            )
+        except Exception:
+            log.exception("_rewrite_pr_description: failed to update PR body")
+            return
+
+        if not written:
+            return
+
+        snapshot_after = _task_snapshot(_tasks.list())
+        if snapshot_after == snapshot_before:
+            return
+
+        log.info(
+            "_rewrite_pr_description: task list changed during rewrite — retrying"
+            " (attempt %d/%d)",
+            attempt + 1,
+            _max_retries,
         )
-    except Exception:
-        log.exception("_rewrite_pr_description: failed to update PR body")
+
+    log.warning(
+        "_rewrite_pr_description: task list still changing after %d attempts"
+        " — description may be slightly stale",
+        _max_retries,
+    )
 
 
 def _make_reorder_kwargs(
