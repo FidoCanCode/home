@@ -221,6 +221,7 @@ class TestDispatchReviewComment:
         assert result is not None
         assert result.reply_to is not None
         assert result.reply_to["author"] == "owner"
+        assert result.reply_to["comment_type"] == "pulls"
 
     def test_self_comment_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
@@ -327,6 +328,7 @@ class TestDispatchIssueComment:
             == "https://github.com/owner/repo/pull/10#issuecomment-456"
         )
         assert result.thread["author"] == "owner"
+        assert result.thread["comment_type"] == "issues"
 
     def test_non_pr_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)

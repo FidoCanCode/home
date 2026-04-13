@@ -118,6 +118,7 @@ def dispatch(
                 "comment_id": comment_id,
                 "url": comment.get("html_url", ""),
                 "author": user,
+                "comment_type": "pulls",
             },
             comment_body=comment_body,
             is_bot=is_bot,
@@ -165,6 +166,7 @@ def dispatch(
                 "comment_id": comment_id,
                 "url": comment.get("html_url", ""),
                 "author": user,
+                "comment_type": "issues",
             }
             if number and comment_id
             else None,
