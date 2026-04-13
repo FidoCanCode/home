@@ -3198,11 +3198,6 @@ class TestFilterCiThreads:
     def _make_worker(self, tmp_path: Path) -> Worker:
         return Worker(tmp_path, MagicMock())
 
-    def _make_threads_data(self, nodes: list) -> dict:
-        return {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-
     def _make_node(
         self,
         *,
@@ -3233,67 +3228,96 @@ class TestFilterCiThreads:
 
     def test_returns_empty_when_no_threads(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        assert w._filter_ci_threads({}, "fido-bot", "test") == []
+        assert w._filter_ci_threads([], "fido-bot", "test") == []
 
     def test_excludes_resolved_threads(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(resolved=True, first_body="ci failing")
-        data = self._make_threads_data([node])
-        assert w._filter_ci_threads(data, "reviewer", "test") == []
+        assert (
+            w._filter_ci_threads(
+                [self._make_node(resolved=True, first_body="ci failing")],
+                "reviewer",
+                "test",
+            )
+            == []
+        )
 
     def test_excludes_threads_where_last_author_is_gh_user(
         self, tmp_path: Path
     ) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(last_author="fido-bot", last_body="ci fix")
-        data = self._make_threads_data([node])
-        assert w._filter_ci_threads(data, "fido-bot", "test") == []
+        assert (
+            w._filter_ci_threads(
+                [self._make_node(last_author="fido-bot", last_body="ci fix")],
+                "fido-bot",
+                "test",
+            )
+            == []
+        )
 
     def test_excludes_threads_without_ci_keywords(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(first_body="style nit", last_body="please rename var")
-        data = self._make_threads_data([node])
-        assert w._filter_ci_threads(data, "fido-bot", "mycheck") == []
+        assert (
+            w._filter_ci_threads(
+                [
+                    self._make_node(
+                        first_body="style nit", last_body="please rename var"
+                    )
+                ],
+                "fido-bot",
+                "mycheck",
+            )
+            == []
+        )
 
     def test_includes_thread_matching_check_name(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(first_body="mycheck is red", last_body="please fix")
-        data = self._make_threads_data([node])
-        result = w._filter_ci_threads(data, "fido-bot", "mycheck")
+        result = w._filter_ci_threads(
+            [self._make_node(first_body="mycheck is red", last_body="please fix")],
+            "fido-bot",
+            "mycheck",
+        )
         assert len(result) == 1
 
     def test_includes_thread_mentioning_ci(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(first_body="CI broke after your commit")
-        data = self._make_threads_data([node])
-        result = w._filter_ci_threads(data, "fido-bot", "unrelated-check")
+        result = w._filter_ci_threads(
+            [self._make_node(first_body="CI broke after your commit")],
+            "fido-bot",
+            "unrelated-check",
+        )
         assert len(result) == 1
 
     def test_includes_thread_mentioning_lint(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(first_body="lint errors in this file")
-        data = self._make_threads_data([node])
-        result = w._filter_ci_threads(data, "fido-bot", "check")
+        result = w._filter_ci_threads(
+            [self._make_node(first_body="lint errors in this file")],
+            "fido-bot",
+            "check",
+        )
         assert len(result) == 1
 
     def test_includes_thread_mentioning_format(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(first_body="format issue here")
-        data = self._make_threads_data([node])
-        result = w._filter_ci_threads(data, "fido-bot", "check")
+        result = w._filter_ci_threads(
+            [self._make_node(first_body="format issue here")], "fido-bot", "check"
+        )
         assert len(result) == 1
 
     def test_maps_fields_correctly(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(
-            first_author="alice",
-            first_body="CI is red",
-            last_author="bob",
-            last_body="still red",
-            url="https://github.com/x",
+        result = w._filter_ci_threads(
+            [
+                self._make_node(
+                    first_author="alice",
+                    first_body="CI is red",
+                    last_author="bob",
+                    last_body="still red",
+                    url="https://github.com/x",
+                )
+            ],
+            "fido-bot",
+            "ci",
         )
-        data = self._make_threads_data([node])
-        result = w._filter_ci_threads(data, "fido-bot", "ci")
         assert result[0] == {
             "first_author": "alice",
             "first_body": "CI is red",
@@ -3304,9 +3328,9 @@ class TestFilterCiThreads:
 
     def test_case_insensitive_keyword_match(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(first_body="LINT errors found")
-        data = self._make_threads_data([node])
-        result = w._filter_ci_threads(data, "fido-bot", "check")
+        result = w._filter_ci_threads(
+            [self._make_node(first_body="LINT errors found")], "fido-bot", "check"
+        )
         assert len(result) == 1
 
     def test_single_comment_node(self, tmp_path: Path) -> None:
@@ -3323,8 +3347,7 @@ class TestFilterCiThreads:
                 ]
             },
         }
-        data = self._make_threads_data([node])
-        result = w._filter_ci_threads(data, "fido-bot", "check")
+        result = w._filter_ci_threads([node], "fido-bot", "check")
         assert len(result) == 1
         assert result[0]["first_author"] == "alice"
         assert result[0]["last_author"] == "alice"
@@ -3332,8 +3355,7 @@ class TestFilterCiThreads:
     def test_skips_nodes_with_empty_comments(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
         node = {"isResolved": False, "comments": {"nodes": []}}
-        data = self._make_threads_data([node])
-        assert w._filter_ci_threads(data, "fido-bot", "check") == []
+        assert w._filter_ci_threads([node], "fido-bot", "check") == []
 
 
 class TestHandleCi:
@@ -3379,7 +3401,7 @@ class TestHandleCi:
             {"name": "test", "state": "FAILURE", "link": "runs/99"},
         ]
         gh.get_run_log.return_value = "line1\nline2"
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
@@ -3397,7 +3419,7 @@ class TestHandleCi:
             {"name": "lint", "state": "ERROR", "link": ""},
         ]
         gh.get_run_log.return_value = ""
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
@@ -3415,7 +3437,7 @@ class TestHandleCi:
             {"name": "unit-tests", "state": "FAILURE", "link": ""},
         ]
         gh.get_run_log.return_value = ""
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status") as mock_status,
@@ -3437,7 +3459,7 @@ class TestHandleCi:
             }
         ]
         gh.get_run_log.return_value = "some log output"
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
@@ -3454,7 +3476,7 @@ class TestHandleCi:
         gh.pr_checks.return_value = [
             {"name": "build", "state": "FAILURE", "link": "no-run-id-here"},
         ]
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
@@ -3473,7 +3495,7 @@ class TestHandleCi:
         ]
         long_log = "\n".join(f"line {i}" for i in range(300))
         gh.get_run_log.return_value = long_log
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         captured_context = {}
         with (
@@ -3497,7 +3519,7 @@ class TestHandleCi:
             {"name": "test", "state": "FAILURE", "link": ""},
         ]
         gh.get_run_log.return_value = ""
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
@@ -3515,7 +3537,7 @@ class TestHandleCi:
             {"name": "my-check", "state": "FAILURE", "link": ""},
         ]
         gh.get_run_log.return_value = ""
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
@@ -3538,7 +3560,7 @@ class TestHandleCi:
             {"name": "test", "state": "FAILURE", "link": ""},
         ]
         gh.get_run_log.return_value = ""
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
@@ -3557,7 +3579,7 @@ class TestHandleCi:
             {"name": "my-check", "state": "FAILURE", "link": ""},
         ]
         gh.get_run_log.return_value = ""
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
@@ -3575,7 +3597,7 @@ class TestHandleCi:
             {"name": "test", "state": "FAILURE", "link": ""},
         ]
         gh.get_run_log.return_value = ""
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
@@ -3595,7 +3617,7 @@ class TestHandleCi:
             {"name": "err-check", "state": "ERROR", "link": ""},
         ]
         gh.get_run_log.return_value = ""
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status") as mock_status,
@@ -3616,7 +3638,7 @@ class TestHandleCi:
             {"name": "flaky", "state": "FAILURE", "link": ""},
         ]
         gh.get_run_log.return_value = ""
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
@@ -3750,11 +3772,6 @@ class TestFilterThreads:
     def _make_worker(self, tmp_path: Path) -> Worker:
         return Worker(tmp_path, MagicMock())
 
-    def _make_threads_data(self, nodes: list) -> dict:
-        return {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-
     def _make_node(
         self,
         *,
@@ -3802,66 +3819,85 @@ class TestFilterThreads:
 
     def test_returns_empty_when_no_nodes(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        assert w._filter_threads({}, "fido-bot", frozenset({"owner"})) == []
+        assert w._filter_threads([], "fido-bot", frozenset({"owner"})) == []
 
     def test_excludes_resolved_threads(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(resolved=True)
-        data = self._make_threads_data([node])
-        assert w._filter_threads(data, "fido-bot", frozenset({"owner"})) == []
+        assert (
+            w._filter_threads(
+                [self._make_node(resolved=True)], "fido-bot", frozenset({"owner"})
+            )
+            == []
+        )
 
     def test_excludes_threads_where_last_author_is_gh_user(
         self, tmp_path: Path
     ) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(last_author="fido-bot", last_body="done")
-        data = self._make_threads_data([node])
-        assert w._filter_threads(data, "fido-bot", frozenset({"owner"})) == []
+        assert (
+            w._filter_threads(
+                [self._make_node(last_author="fido-bot", last_body="done")],
+                "fido-bot",
+                frozenset({"owner"}),
+            )
+            == []
+        )
 
     def test_excludes_threads_where_last_author_is_neither_owner_nor_bot(
         self, tmp_path: Path
     ) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(last_author="random-user", last_body="comment")
-        data = self._make_threads_data([node])
-        assert w._filter_threads(data, "fido-bot", frozenset({"owner"})) == []
+        assert (
+            w._filter_threads(
+                [self._make_node(last_author="random-user", last_body="comment")],
+                "fido-bot",
+                frozenset({"owner"}),
+            )
+            == []
+        )
 
     def test_includes_thread_from_owner(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(last_author="owner")
-        data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", frozenset({"owner"}))
+        result = w._filter_threads(
+            [self._make_node(last_author="owner")], "fido-bot", frozenset({"owner"})
+        )
         assert len(result) == 1
 
     def test_includes_thread_from_bot(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(last_author="my-app[bot]", last_body="bot comment")
-        data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", frozenset({"owner"}))
+        result = w._filter_threads(
+            [self._make_node(last_author="my-app[bot]", last_body="bot comment")],
+            "fido-bot",
+            frozenset({"owner"}),
+        )
         assert len(result) == 1
 
     def test_includes_thread_from_any_collaborator(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(last_author="bob")
-        data = self._make_threads_data([node])
         result = w._filter_threads(
-            data, "fido-bot", frozenset({"alice", "bob", "carol"})
+            [self._make_node(last_author="bob")],
+            "fido-bot",
+            frozenset({"alice", "bob", "carol"}),
         )
         assert len(result) == 1
 
     def test_maps_fields_correctly(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(
-            node_id="tid-42",
-            first_author="owner",
-            first_db_id=99,
-            first_body="first comment",
-            last_author="owner",
-            last_body="last comment",
-            url="https://github.com/x",
+        result = w._filter_threads(
+            [
+                self._make_node(
+                    node_id="tid-42",
+                    first_author="owner",
+                    first_db_id=99,
+                    first_body="first comment",
+                    last_author="owner",
+                    last_body="last comment",
+                    url="https://github.com/x",
+                )
+            ],
+            "fido-bot",
+            frozenset({"owner"}),
         )
-        data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", frozenset({"owner"}))
         assert result[0]["id"] == "tid-42"
         assert result[0]["first_author"] == "owner"
         assert result[0]["first_db_id"] == 99
@@ -3873,41 +3909,48 @@ class TestFilterThreads:
 
     def test_is_bot_true_when_first_author_ends_with_bot(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(first_author="my-app[bot]", last_author="owner")
-        data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", frozenset({"owner"}))
+        result = w._filter_threads(
+            [self._make_node(first_author="my-app[bot]", last_author="owner")],
+            "fido-bot",
+            frozenset({"owner"}),
+        )
         assert result[0]["is_bot"] is True
 
     def test_is_bot_false_when_first_author_is_human(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(first_author="owner", last_author="owner")
-        data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", frozenset({"owner"}))
+        result = w._filter_threads(
+            [self._make_node(first_author="owner", last_author="owner")],
+            "fido-bot",
+            frozenset({"owner"}),
+        )
         assert result[0]["is_bot"] is False
 
     def test_excludes_threads_with_no_comments(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
         node = {"id": "x", "isResolved": False, "comments": {"nodes": []}}
-        data = self._make_threads_data([node])
-        assert w._filter_threads(data, "fido-bot", frozenset({"owner"})) == []
+        assert w._filter_threads([node], "fido-bot", frozenset({"owner"})) == []
 
     def test_total_counts_all_comments(self, tmp_path: Path) -> None:
         w = self._make_worker(tmp_path)
-        node = self._make_node(
-            first_author="owner",
-            last_author="owner",
-            last_body="final comment",
-            extra_comments=[
-                {
-                    "author": {"login": "owner"},
-                    "body": "mid",
-                    "url": "u",
-                    "databaseId": 2,
-                }
+        result = w._filter_threads(
+            [
+                self._make_node(
+                    first_author="owner",
+                    last_author="owner",
+                    last_body="final comment",
+                    extra_comments=[
+                        {
+                            "author": {"login": "owner"},
+                            "body": "mid",
+                            "url": "u",
+                            "databaseId": 2,
+                        }
+                    ],
+                )
             ],
+            "fido-bot",
+            frozenset({"owner"}),
         )
-        data = self._make_threads_data([node])
-        result = w._filter_threads(data, "fido-bot", frozenset({"owner"}))
         assert result[0]["total"] == 3
 
 
@@ -3927,11 +3970,6 @@ class TestResolveAddressedThreads:
             default_branch="main",
             membership=RepoMembership(collaborators=frozenset({"owner"})),
         )
-
-    def _make_threads_data(self, nodes: list) -> dict:
-        return {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
 
     def _make_node(
         self,
@@ -3963,15 +4001,14 @@ class TestResolveAddressedThreads:
 
     def test_returns_false_when_no_threads(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
         assert result is False
         gh.resolve_thread.assert_not_called()
 
     def test_returns_false_when_all_threads_resolved(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        node = self._make_node(resolved=True)
-        gh.get_review_threads.return_value = self._make_threads_data([node])
+        gh.get_review_threads.return_value = [self._make_node(resolved=True)]
         result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
         assert result is False
         gh.resolve_thread.assert_not_called()
@@ -3980,35 +4017,35 @@ class TestResolveAddressedThreads:
         self, tmp_path: Path
     ) -> None:
         worker, gh = self._make_worker(tmp_path)
-        node = self._make_node(last_author="owner")
-        gh.get_review_threads.return_value = self._make_threads_data([node])
+        gh.get_review_threads.return_value = [self._make_node(last_author="owner")]
         result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
         assert result is False
         gh.resolve_thread.assert_not_called()
 
     def test_returns_false_when_thread_has_no_comments(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        node = {"id": "t1", "isResolved": False, "comments": {"nodes": []}}
-        gh.get_review_threads.return_value = self._make_threads_data([node])
+        gh.get_review_threads.return_value = [
+            {"id": "t1", "isResolved": False, "comments": {"nodes": []}}
+        ]
         result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
         assert result is False
         gh.resolve_thread.assert_not_called()
 
     def test_resolves_thread_where_gh_user_is_last_author(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        node = self._make_node(node_id="tid-99", last_author="fido-bot")
-        gh.get_review_threads.return_value = self._make_threads_data([node])
+        gh.get_review_threads.return_value = [
+            self._make_node(node_id="tid-99", last_author="fido-bot")
+        ]
         result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
         assert result is True
         gh.resolve_thread.assert_called_once_with("tid-99")
 
     def test_resolves_multiple_threads(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        nodes = [
+        gh.get_review_threads.return_value = [
             self._make_node(node_id="t1", last_author="fido-bot"),
             self._make_node(node_id="t2", last_author="fido-bot"),
         ]
-        gh.get_review_threads.return_value = self._make_threads_data(nodes)
         result = worker.resolve_addressed_threads(self._repo_ctx(), 5)
         assert result is True
         assert gh.resolve_thread.call_count == 2
@@ -4017,17 +4054,16 @@ class TestResolveAddressedThreads:
 
     def test_skips_already_resolved_among_mixed(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        nodes = [
+        gh.get_review_threads.return_value = [
             self._make_node(node_id="t1", last_author="fido-bot", resolved=True),
             self._make_node(node_id="t2", last_author="fido-bot"),
         ]
-        gh.get_review_threads.return_value = self._make_threads_data(nodes)
         worker.resolve_addressed_threads(self._repo_ctx(), 1)
         gh.resolve_thread.assert_called_once_with("t2")
 
     def test_calls_get_review_threads_with_correct_args(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         worker.resolve_addressed_threads(self._repo_ctx(), 42)
         gh.get_review_threads.assert_called_once_with("owner", "repo", 42)
 
@@ -4048,7 +4084,7 @@ class TestResolveAddressedThreads:
                 ]
             },
         }
-        gh.get_review_threads.return_value = self._make_threads_data([node])
+        gh.get_review_threads.return_value = [node]
         from kennel.types import TaskType
 
         tasks_mod.add_task(
@@ -4081,7 +4117,7 @@ class TestResolveAddressedThreads:
                 ]
             },
         }
-        gh.get_review_threads.return_value = self._make_threads_data([node])
+        gh.get_review_threads.return_value = [node]
         # Task references reply comment (id=11), not the root (id=10)
         tasks_mod.add_task(
             tmp_path,
@@ -4107,7 +4143,7 @@ class TestResolveAddressedThreads:
                 ]
             },
         }
-        gh.get_review_threads.return_value = self._make_threads_data([node])
+        gh.get_review_threads.return_value = [node]
         from kennel.types import TaskType
 
         task = tasks_mod.add_task(
@@ -4144,11 +4180,6 @@ class TestHandleThreads:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def _threads_data_with_nodes(self, nodes: list) -> dict:
-        return {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-
     def _open_thread_node(
         self, *, last_author: str = "owner", first_author: str = "owner"
     ) -> dict:
@@ -4175,14 +4206,14 @@ class TestHandleThreads:
 
     def test_returns_false_when_no_threads(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         assert worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch") is False
 
     def test_returns_true_when_threads_exist(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         node = self._open_thread_node()
-        gh.get_review_threads.return_value = self._threads_data_with_nodes([node])
+        gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch("kennel.worker.build_prompt"),
@@ -4194,7 +4225,7 @@ class TestHandleThreads:
 
     def test_calls_get_review_threads_with_correct_args(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        gh.get_review_threads.return_value = {}
+        gh.get_review_threads.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         worker.handle_threads(fido_dir, self._repo_ctx(), 42, "branch")
         gh.get_review_threads.assert_called_once_with("owner", "repo", 42)
@@ -4202,7 +4233,7 @@ class TestHandleThreads:
     def test_builds_comments_prompt(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         node = self._open_thread_node()
-        gh.get_review_threads.return_value = self._threads_data_with_nodes([node])
+        gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch("kennel.worker.build_prompt") as mock_bp,
@@ -4219,7 +4250,7 @@ class TestHandleThreads:
     def test_runs_claude(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         node = self._open_thread_node()
-        gh.get_review_threads.return_value = self._threads_data_with_nodes([node])
+        gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch("kennel.worker.build_prompt"),
@@ -4232,7 +4263,7 @@ class TestHandleThreads:
     def test_spawns_sync_script(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         node = self._open_thread_node()
-        gh.get_review_threads.return_value = self._threads_data_with_nodes([node])
+        gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch("kennel.worker.build_prompt"),
@@ -4247,7 +4278,7 @@ class TestHandleThreads:
 
         worker, gh = self._make_worker(tmp_path)
         node = self._open_thread_node()
-        gh.get_review_threads.return_value = self._threads_data_with_nodes([node])
+        gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch("kennel.worker.build_prompt"),
@@ -7561,11 +7592,6 @@ class TestAutoCompleteAskTasks:
             "comments": {"nodes": [{"databaseId": db_id}]},
         }
 
-    def _threads_data(self, nodes: list) -> dict:
-        return {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-
     def test_no_ask_tasks_does_nothing(self, tmp_path: Path) -> None:
         gh = MagicMock()
         _auto_complete_ask_tasks(
@@ -7576,9 +7602,7 @@ class TestAutoCompleteAskTasks:
     def test_completes_ask_task_when_thread_resolved(self, tmp_path: Path) -> None:
         gh = MagicMock()
         task = self._ask_task(42)
-        gh.get_review_threads.return_value = self._threads_data(
-            [self._resolved_node(42)]
-        )
+        gh.get_review_threads.return_value = [self._resolved_node(42)]
         mock_complete = MagicMock()
         _auto_complete_ask_tasks(
             tmp_path,
@@ -7595,9 +7619,9 @@ class TestAutoCompleteAskTasks:
     ) -> None:
         gh = MagicMock()
         task = self._ask_task(42)
-        gh.get_review_threads.return_value = self._threads_data(
-            [{"isResolved": False, "comments": {"nodes": [{"databaseId": 42}]}}]
-        )
+        gh.get_review_threads.return_value = [
+            {"isResolved": False, "comments": {"nodes": [{"databaseId": 42}]}}
+        ]
         mock_complete = MagicMock()
         _auto_complete_ask_tasks(
             tmp_path,
@@ -7631,9 +7655,7 @@ class TestAutoCompleteAskTasks:
             "status": "pending",
             "thread": {"comment_id": 1},
         }
-        gh.get_review_threads.return_value = self._threads_data(
-            [self._resolved_node(1)]
-        )
+        gh.get_review_threads.return_value = [self._resolved_node(1)]
         mock_complete = MagicMock()
         _auto_complete_ask_tasks(
             tmp_path,
@@ -7663,9 +7685,9 @@ class TestAutoCompleteAskTasks:
     def test_resolved_node_without_database_id_skipped(self, tmp_path: Path) -> None:
         gh = MagicMock()
         task = self._ask_task(42)
-        gh.get_review_threads.return_value = self._threads_data(
-            [{"isResolved": True, "comments": {"nodes": [{}]}}]
-        )
+        gh.get_review_threads.return_value = [
+            {"isResolved": True, "comments": {"nodes": [{}]}}
+        ]
         mock_complete = MagicMock()
         _auto_complete_ask_tasks(
             tmp_path,

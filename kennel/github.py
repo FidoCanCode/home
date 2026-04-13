@@ -15,6 +15,15 @@ import requests as _requests
 
 log = logging.getLogger(__name__)
 
+
+class GraphQLError(Exception):
+    """Raised when a GitHub GraphQL response contains an errors field."""
+
+    def __init__(self, errors: list[Any]) -> None:
+        super().__init__(f"GraphQL errors: {errors}")
+        self.errors = errors
+
+
 # ── Requests-based GitHub API client ─────────────────────────────────────────
 
 
@@ -81,7 +90,10 @@ class GH:
             json={"query": query, "variables": variables},
         )
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        if "errors" in data:
+            raise GraphQLError(data["errors"])
+        return data
 
     def add_reaction(
         self, repo: str, comment_type: str, comment_id: int | str, content: str
@@ -234,18 +246,10 @@ class GH:
                 number=int(issue_number),
                 cursor=cursor,
             )
-            if "errors" in data:
-                log.warning("find_pr GraphQL error: %s", data["errors"])
-                return None
-            items = (
-                data.get("data", {})
-                .get("repository", {})
-                .get("issue", {})
-                .get("timelineItems", {})
-            )
+            items = data["data"]["repository"]["issue"]["timelineItems"]
             if not items:
                 return None
-            for node in items.get("nodes", []):
+            for node in items["nodes"]:
                 typename = node["__typename"]
                 if typename == "CrossReferencedEvent":
                     pr = node.get("source") or {}
@@ -271,10 +275,10 @@ class GH:
                     pr = node.get("subject") or {}
                     if pr.get("__typename") == "PullRequest":
                         sidebar_prs.discard(pr["number"])
-            page_info = items.get("pageInfo", {})
-            if not page_info.get("hasNextPage"):
+            page_info = items["pageInfo"]
+            if not page_info["hasNextPage"]:
                 break
-            cursor = page_info.get("endCursor")
+            cursor = page_info["endCursor"]
         eligible = keyword_prs | sidebar_prs
         for pr_num, pr in pr_cache.items():
             if pr_num not in eligible or pr.get("state") != "OPEN":
@@ -537,8 +541,8 @@ class GH:
 
     def get_review_threads(
         self, owner: str, repo: str, pr: int | str
-    ) -> dict[str, Any]:
-        """Return full review-thread data for a PR (GraphQL)."""
+    ) -> list[dict[str, Any]]:
+        """Return review-thread nodes for a PR."""
         query = (
             "query($owner:String!,$repo:String!,$pr:Int!){"
             "repository(owner:$owner,name:$repo){"
@@ -548,7 +552,8 @@ class GH:
             " comments(first:50){nodes{author{login} body url createdAt databaseId}}"
             "}}}}}"
         )
-        return self._graphql(query, owner=owner, repo=repo, pr=int(pr))
+        data = self._graphql(query, owner=owner, repo=repo, pr=int(pr))
+        return data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
 
     def resolve_thread(self, thread_id: str) -> None:
         """Resolve a review thread via GraphQL mutation."""
@@ -750,8 +755,8 @@ class GitHub:
 
     def get_review_threads(
         self, owner: str, repo: str, pr: int | str
-    ) -> dict[str, Any]:
-        """Return full review-thread data for a PR (GraphQL)."""
+    ) -> list[dict[str, Any]]:
+        """Return review-thread nodes for a PR."""
         return self._gh.get_review_threads(owner, repo, pr)
 
     def resolve_thread(self, thread_id: str) -> None:

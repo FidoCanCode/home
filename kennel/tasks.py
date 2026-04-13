@@ -267,21 +267,15 @@ def _auto_complete_ask_tasks(
 
     try:
         owner, repo_name = repo.split("/", 1)
-        threads_data = gh.get_review_threads(owner, repo_name, pr_number)
+        nodes = gh.get_review_threads(owner, repo_name, pr_number)
     except Exception:
         log.exception("sync_tasks: failed to fetch review threads for ASK resolution")
         return
 
     resolved_ids: set[int] = set()
-    for node in (
-        threads_data.get("data", {})
-        .get("repository", {})
-        .get("pullRequest", {})
-        .get("reviewThreads", {})
-        .get("nodes", [])
-    ):
-        if node.get("isResolved"):
-            comments = node.get("comments", {}).get("nodes", [])
+    for node in nodes:
+        if node["isResolved"]:
+            comments = node["comments"]["nodes"]
             if comments and comments[0].get("databaseId"):
                 resolved_ids.add(int(comments[0]["databaseId"]))
 
