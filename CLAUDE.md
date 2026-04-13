@@ -7,7 +7,7 @@ GitHub webhook listener + fido orchestrator. Receives GitHub events, triages com
 ```
 kennel (single process, runs from /home/rhencke/home-runner/)
   ├─ HTTP server: receives webhooks, routes by repo
-  ├─ Per-repo fido workers: bash work.sh (temporary, becoming Python threads)
+  ├─ Per-repo fido workers: WorkerThread (kennel/worker.py)
   ├─ Per-repo task sync: tasks.json → PR body
   └─ Self-restart: git pull runner clone, exec uv run kennel
 ```
@@ -65,9 +65,7 @@ uv run ruff format --check .
 
 | Script | Purpose |
 |--------|---------|
-| `work.sh` | Main fido worker loop |
 | `sync-tasks.sh` | Sync tasks.json → PR body |
-| `watchdog.sh` | Kill stale workers, restart |
 | `start.sh` | Env setup + exec kennel |
 
 ### Sub-skills (`sub/`)
