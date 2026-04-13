@@ -168,6 +168,9 @@ def print_prompt(
             text = result.stdout.strip()
             if text:
                 return text
+            if result.stderr:
+                log.warning("print_prompt: stderr=%r", result.stderr[:200])
+            log.debug("print_prompt: stdout=%r", result.stdout[:200])
             if attempt < _EMPTY_RETRY_COUNT:
                 log.warning(
                     "print_prompt: empty output on attempt %d — retrying",
@@ -480,6 +483,11 @@ def generate_status_with_session(
             sid = extract_session_id(raw)
             if text:
                 return text, sid
+            if result.stderr:
+                log.warning(
+                    "generate_status_with_session: stderr=%r", result.stderr[:200]
+                )
+            log.debug("generate_status_with_session: stdout=%r", result.stdout[:200])
             if attempt < _EMPTY_RETRY_COUNT:
                 log.warning(
                     "generate_status_with_session: empty output on attempt %d — retrying",

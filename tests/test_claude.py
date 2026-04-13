@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -27,10 +28,10 @@ from kennel.claude import (
 
 
 def _completed(
-    stdout: str = "", returncode: int = 0
+    stdout: str = "", returncode: int = 0, stderr: str = ""
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(
-        args=[], returncode=returncode, stdout=stdout, stderr=""
+        args=[], returncode=returncode, stdout=stdout, stderr=stderr
     )
 
 
@@ -145,6 +146,24 @@ class TestPrintPrompt:
         mock_run = MagicMock(return_value=_completed("ok"))
         print_prompt("q", "claude-opus-4-6", timeout=7, runner=mock_run)
         assert mock_run.call_args.kwargs["timeout"] == 7
+
+    def test_logs_stderr_at_warning_on_empty_output(self, caplog) -> None:
+        mock_run = MagicMock(return_value=_completed("", stderr="Rate limit exceeded"))
+        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+            print_prompt("q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock())
+        assert "Rate limit exceeded" in caplog.text
+
+    def test_logs_raw_stdout_at_debug_on_empty_output(self, caplog) -> None:
+        mock_run = MagicMock(return_value=_completed("   \n  "))
+        with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
+            print_prompt("q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock())
+        assert "stdout=" in caplog.text
+
+    def test_no_stderr_log_when_stderr_empty(self, caplog) -> None:
+        mock_run = MagicMock(return_value=_completed(""))
+        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+            print_prompt("q", "claude-opus-4-6", runner=mock_run, _sleep=MagicMock())
+        assert "stderr=" not in caplog.text
 
 
 class TestPrintPromptJson:
@@ -859,6 +878,35 @@ class TestGenerateStatusWithSession:
         ) == ("", "")
         assert mock_run.call_count == 3
         assert mock_sleep.call_count == 2
+
+    def test_logs_stderr_at_warning_on_empty_output(self, caplog) -> None:
+        empty_line = '{"type":"result","session_id":"s1"}'
+        mock_run = MagicMock(
+            return_value=_completed(empty_line, stderr="Rate limit exceeded")
+        )
+        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+            generate_status_with_session(
+                "working", "sys", runner=mock_run, _sleep=MagicMock()
+            )
+        assert "Rate limit exceeded" in caplog.text
+
+    def test_logs_raw_stdout_at_debug_on_empty_output(self, caplog) -> None:
+        empty_line = '{"type":"result","session_id":"s1"}'
+        mock_run = MagicMock(return_value=_completed(empty_line))
+        with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
+            generate_status_with_session(
+                "working", "sys", runner=mock_run, _sleep=MagicMock()
+            )
+        assert "stdout=" in caplog.text
+
+    def test_no_stderr_log_when_stderr_empty(self, caplog) -> None:
+        empty_line = '{"type":"result","session_id":"s1"}'
+        mock_run = MagicMock(return_value=_completed(empty_line))
+        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+            generate_status_with_session(
+                "working", "sys", runner=mock_run, _sleep=MagicMock()
+            )
+        assert "stderr=" not in caplog.text
 
 
 class TestGenerateStatusEmoji:
