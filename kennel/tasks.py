@@ -16,7 +16,7 @@ from typing import Any
 from kennel.claude import print_prompt as _claude_print_prompt
 from kennel.github import GitHub
 from kennel.prompts import rescope_prompt as _rescope_prompt_default
-from kennel.state import _resolve_git_dir, load_state
+from kennel.state import JsonFileStore, _resolve_git_dir, load_state
 from kennel.types import TaskStatus, TaskType
 
 log = logging.getLogger(__name__)
@@ -621,15 +621,25 @@ def sync_tasks_background(
     _start(t)
 
 
-class Tasks:
+class Tasks(JsonFileStore):
     """Encapsulates task file operations for a single worker directory.
 
     Abstracts all file access so callers never touch the filesystem directly.
     Instantiate with the work_dir path and inject wherever tasks are needed.
+
+    Inherits :meth:`~JsonFileStore.modify` for atomic read-modify-write of
+    the entire task list.
     """
 
     def __init__(self, work_dir: Path) -> None:
         self._work_dir = work_dir
+
+    @property
+    def _data_path(self) -> Path:
+        return _task_file(self._work_dir)
+
+    def _default(self) -> list:
+        return []
 
     def list(self) -> list[dict[str, Any]]:
         """Return all tasks."""

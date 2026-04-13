@@ -951,3 +951,19 @@ class TestTasks:
         task = add_task(work_dir, "Task F", TaskType.SPEC)
         Tasks(work_dir).update(task["id"], TaskStatus.IN_PROGRESS)
         assert list_tasks(work_dir)[0]["status"] == "in_progress"
+
+    def test_modify_yields_empty_list_when_no_tasks(self, tmp_path: Path) -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        with Tasks(work_dir).modify() as tasks:
+            assert tasks == []
+
+    def test_modify_persists_changes(self, tmp_path: Path) -> None:
+        from kennel.types import TaskType
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        add_task(work_dir, "Existing task", TaskType.SPEC)
+        with Tasks(work_dir).modify() as tasks:
+            tasks[0]["title"] = "Modified task"
+        assert list_tasks(work_dir)[0]["title"] == "Modified task"
