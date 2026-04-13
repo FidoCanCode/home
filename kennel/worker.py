@@ -18,10 +18,8 @@ from kennel.config import RepoMembership
 from kennel.github import GitHub
 from kennel.prompts import Prompts
 from kennel.state import (
+    State,
     _resolve_git_dir,
-    clear_state,
-    load_state,
-    save_state,
 )
 from kennel.tasks import Tasks
 from kennel.types import TaskStatus, TaskType
@@ -416,14 +414,14 @@ class Worker:
         If state.json records an issue that has been CLOSED on GitHub, the state
         is cleared (advancing to the next issue) and None is returned.
         """
-        state = load_state(fido_dir)
-        issue = state.get("issue")
+        state_obj = State(fido_dir)
+        issue = state_obj.load().get("issue")
         if issue is None:
             return None
         issue_data = self.gh.view_issue(repo, issue)
         if issue_data["state"] == "CLOSED":
             log.info("issue #%s: closed — advancing", issue)
-            clear_state(fido_dir)
+            state_obj.clear()
             return None
         return int(issue)
 
@@ -523,7 +521,7 @@ class Worker:
                 number = issue["number"]
                 title = issue["title"]
                 log.info("starting issue #%s: %s", number, title)
-                save_state(fido_dir, {"issue": number})
+                State(fido_dir).save({"issue": number})
                 self.set_status(f"Picking up issue #{number}: {title}")
                 return number
 
@@ -664,9 +662,8 @@ class Worker:
                 build_prompt(fido_dir, "setup", context)
                 session_id = claude_start(fido_dir, cwd=self.work_dir)
                 log.info("setup session: %s", session_id)
-                state = load_state(fido_dir)
-                state["setup_session_id"] = session_id
-                save_state(fido_dir, state)
+                with State(fido_dir).modify() as state:
+                    state["setup_session_id"] = session_id
                 if not self._tasks.list():
                     log.warning(
                         "setup produced no tasks — skipping PR #%s, will retry",
@@ -714,9 +711,8 @@ class Worker:
         build_prompt(fido_dir, "setup", context)
         session_id = claude_start(fido_dir, cwd=self.work_dir)
         log.info("setup session: %s", session_id)
-        state = load_state(fido_dir)
-        state["setup_session_id"] = session_id
-        save_state(fido_dir, state)
+        with State(fido_dir).modify() as state:
+            state["setup_session_id"] = session_id
 
         if not self._tasks.list():
             log.warning("setup produced no tasks — skipping PR creation, will retry")
@@ -1092,9 +1088,8 @@ class Worker:
         log.info("task aborted: %s", task_title)
         self.git_clean()
         self._tasks.remove(task_id)
-        state = load_state(fido_dir)
-        state.pop("current_task_id", None)
-        save_state(fido_dir, state)
+        with State(fido_dir).modify() as state:
+            state.pop("current_task_id", None)
         self._abort_task.clear()
         tasks.sync_tasks(self.work_dir, self.gh)
 
@@ -1141,10 +1136,9 @@ class Worker:
         context = "\n".join(context_parts)
         build_prompt(fido_dir, "task", context)
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
-        state = load_state(fido_dir)
-        setup_session_id = state.get("setup_session_id", "")
-        state["current_task_id"] = task["id"]
-        save_state(fido_dir, state)
+        with State(fido_dir).modify() as state:
+            setup_session_id = state.get("setup_session_id", "")
+            state["current_task_id"] = task["id"]
         session_id, output = claude_run(
             fido_dir, session_id=setup_session_id, cwd=self.work_dir
         )
@@ -1194,17 +1188,15 @@ class Worker:
                 return True
 
         if session_id:
-            state = load_state(fido_dir)
-            state["setup_session_id"] = session_id
-            save_state(fido_dir, state)
+            with State(fido_dir).modify() as state:
+                state["setup_session_id"] = session_id
 
         self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
             self._tasks.complete_by_id(task["id"])
-            state = load_state(fido_dir)
-            state.pop("current_task_id", None)
-            save_state(fido_dir, state)
+            with State(fido_dir).modify() as state:
+                state.pop("current_task_id", None)
             tasks.sync_tasks(self.work_dir, self.gh)
         return True
 
@@ -1358,7 +1350,7 @@ class Worker:
             log.info("PR #%s approved by %s — merging", pr_number, repo_ctx.owner)
             self.gh.pr_merge(repo_ctx.repo, pr_number, squash=True)
             (fido_dir / "tasks.json").write_text("[]")
-            clear_state(fido_dir)
+            State(fido_dir).clear()
             self._git(["checkout", repo_ctx.default_branch])
             self._git(
                 ["pull", "origin", repo_ctx.default_branch, "--ff-only"], check=False

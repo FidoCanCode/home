@@ -5,8 +5,9 @@ from __future__ import annotations
 import fcntl
 import json
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Generator
 
 
 def _state_lock(fido_dir: Path, exclusive: bool = False) -> IO[str]:
@@ -62,6 +63,25 @@ class State:
     def clear(self) -> None:
         """Remove state.json."""
         clear_state(self._fido_dir)
+
+    @contextmanager
+    def modify(self) -> Generator[dict[str, Any], None, None]:
+        """Atomic read-modify-write: hold the exclusive lock for the entire operation.
+
+        Yields the current state dict.  Any mutations are written back when
+        the ``with`` block exits, while the exclusive lock is still held —
+        preventing interleaved concurrent modifications.
+
+        Usage::
+
+            with state.modify() as data:
+                data["key"] = "value"
+        """
+        with _state_lock(self._fido_dir, exclusive=True):
+            state_path = self._fido_dir / "state.json"
+            data = json.loads(state_path.read_text()) if state_path.exists() else {}
+            yield data
+            state_path.write_text(json.dumps(data))
 
 
 def _resolve_git_dir(work_dir: Path, *, _run=subprocess.run) -> Path:
