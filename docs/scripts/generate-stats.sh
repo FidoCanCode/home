@@ -10,7 +10,8 @@
 # Both index and post layouts read this via site.data.stats[date].
 #
 # Sources — all from GitHub's GraphQL API (no local clones needed):
-#  - Commits: contributionsCollection.commitContributionsByRepository
+#  - Commits: PR commit totals (pre-squash) + contribution graph commits.
+#    PR totals give the real work done; contrib graph adds direct pushes.
 #  - PRs / issues / reviews: contributionsCollection totals
 #
 # Identity transition: before 2026-04-06 Fido's work was committed under
@@ -60,55 +61,108 @@ else
   login="$fido_login"
 fi
 
-# Single GraphQL query: commits by repo + PR/issue/review totals.
-query='query($login: String!, $from: DateTime!, $to: DateTime!) {
-  user(login: $login) {
-    contributionsCollection(from: $from, to: $to) {
-      totalIssueContributions
-      totalPullRequestContributions
-      totalPullRequestReviewContributions
-      commitContributionsByRepository {
-        repository { nameWithOwner }
-        contributions { totalCount }
-      }
-    }
-  }
-}'
+# Build search string covering all managed repos.
+repo_filter=""
+for repo in "${MANAGED_REPOS[@]}"; do
+  repo_filter+="repo:${repo} "
+done
 
-response=$(gh api graphql \
-  -F login="$login" \
-  -F from="$since" \
-  -F to="$until" \
-  -f query="$query")
-
+# Hand everything to Python — one process, clean pagination.
 MANAGED_REPOS_LIST="${MANAGED_REPOS[*]}" \
-RESPONSE_JSON="$response" \
-python3 - "$from" "$to" "$out" <<'PY'
+python3 - "$login" "$since" "$until" "$from" "$to" "$out" "$repo_filter" <<'PY'
 import json
 import os
+import subprocess
 import sys
 
-from_date, to_date, out_path = sys.argv[1:4]
-
+login, since, until, from_date, to_date, out_path, repo_filter = sys.argv[1:8]
 managed = set(os.environ["MANAGED_REPOS_LIST"].split())
-response = json.loads(os.environ["RESPONSE_JSON"])
-collection = response["data"]["user"]["contributionsCollection"]
 
+
+def gh_graphql(query, **variables):
+    cmd = ["gh", "api", "graphql", "-f", f"query={query}"]
+    for k, v in variables.items():
+        cmd += ["-F", f"{k}={v}"]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return json.loads(result.stdout)
+
+
+# 1. contributionsCollection: commit counts per repo + PR/issue/review totals.
+totals = gh_graphql(
+    """query($login: String!, $from: DateTime!, $to: DateTime!) {
+      user(login: $login) {
+        contributionsCollection(from: $from, to: $to) {
+          totalIssueContributions
+          totalPullRequestContributions
+          totalPullRequestReviewContributions
+          commitContributionsByRepository {
+            repository { nameWithOwner }
+            contributions { totalCount }
+          }
+        }
+      }
+    }""",
+    login=login,
+    **{"from": since, "to": until},
+)
+collection = totals["data"]["user"]["contributionsCollection"]
 issues = collection["totalIssueContributions"]
 prs = collection["totalPullRequestContributions"]
 reviews = collection["totalPullRequestReviewContributions"]
 
-total_commits = 0
-touched_repos = []
+# Baseline commit counts from contribution graph (squash merges = 1 each).
+contrib_commits: dict[str, int] = {}
 for entry in collection["commitContributionsByRepository"]:
     repo = entry["repository"]["nameWithOwner"]
-    count = entry["contributions"]["totalCount"]
-    if repo in managed and count > 0:
+    if repo in managed:
+        contrib_commits[repo] = entry["contributions"]["totalCount"]
+
+# 2. Merged PRs in window — paginate to get commits.totalCount from each.
+pr_query = """query($search: String!, $cursor: String) {
+  search(query: $search, type: ISSUE, first: 100, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {
+        repository { nameWithOwner }
+        commits { totalCount }
+      }
+    }
+  }
+}"""
+
+search_str = f"is:pr author:{login} is:merged merged:{from_date}..{to_date} {repo_filter}"
+all_nodes = []
+cursor = None
+while True:
+    variables = {"search": search_str}
+    if cursor:
+        variables["cursor"] = cursor
+    page = gh_graphql(pr_query, **variables)
+    search_data = page["data"]["search"]
+    all_nodes.extend(search_data["nodes"])
+    if search_data["pageInfo"]["hasNextPage"]:
+        cursor = search_data["pageInfo"]["endCursor"]
+    else:
+        break
+
+# 3. PR commit totals (pre-squash) + contrib graph commits.
+pr_commits_total: dict[str, int] = {}
+for node in all_nodes:
+    if not node:
+        continue
+    repo = node["repository"]["nameWithOwner"]
+    if repo in managed:
+        pr_commits_total[repo] = pr_commits_total.get(repo, 0) + node["commits"]["totalCount"]
+
+total_commits = 0
+touched_repos = []
+for repo in sorted(managed):
+    count = pr_commits_total.get(repo, 0) + contrib_commits.get(repo, 0)
+    if count > 0:
         total_commits += count
         touched_repos.append(repo)
 
-touched_repos.sort()
-
+# 4. Write output.
 with open(out_path, "w") as f:
     f.write("# Auto-generated by scripts/generate-stats.sh. Do not edit by hand.\n")
     f.write(f"date: {from_date}\n")
