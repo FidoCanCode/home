@@ -781,7 +781,7 @@ class Worker:
 
     def _filter_ci_threads(
         self,
-        threads_data: dict[str, Any],
+        nodes: list[dict[str, Any]],
         gh_user: str,
         check_name: str,
     ) -> list[dict[str, Any]]:
@@ -794,13 +794,6 @@ class Worker:
           "format" (case-insensitive).
         """
         keywords = {check_name.lower(), "ci", "lint", "format"}
-        nodes = (
-            threads_data.get("data", {})
-            .get("repository", {})
-            .get("pullRequest", {})
-            .get("reviewThreads", {})
-            .get("nodes", [])
-        )
         result = []
         for node in nodes:
             if node.get("isResolved"):
@@ -867,10 +860,11 @@ class Worker:
         else:
             failure_log = ""
 
-        threads_data = self.gh.get_review_threads(
-            repo_ctx.owner, repo_ctx.repo_name, pr_number
+        ci_threads = self._filter_ci_threads(
+            self.gh.get_review_threads(repo_ctx.owner, repo_ctx.repo_name, pr_number),
+            repo_ctx.gh_user,
+            check_name,
         )
-        ci_threads = self._filter_ci_threads(threads_data, repo_ctx.gh_user, check_name)
 
         context = (
             f"PR: {pr_number}\n"
@@ -893,7 +887,7 @@ class Worker:
 
     def _filter_threads(
         self,
-        threads_data: dict[str, Any],
+        nodes: list[dict[str, Any]],
         gh_user: str,
         collaborators: tuple[str, ...],
     ) -> list[dict[str, Any]]:
@@ -905,13 +899,6 @@ class Worker:
         - the last commenter is not *gh_user* (awaiting a response), and
         - the last commenter is either in *collaborators* or ends with ``[bot]``.
         """
-        nodes = (
-            threads_data.get("data", {})
-            .get("repository", {})
-            .get("pullRequest", {})
-            .get("reviewThreads", {})
-            .get("nodes", [])
-        )
         result = []
         for node in nodes:
             if node.get("isResolved"):
@@ -955,15 +942,8 @@ class Worker:
 
         Returns ``True`` if at least one thread was resolved.
         """
-        threads_data = self.gh.get_review_threads(
+        nodes = self.gh.get_review_threads(
             repo_ctx.owner, repo_ctx.repo_name, pr_number
-        )
-        nodes = (
-            threads_data.get("data", {})
-            .get("repository", {})
-            .get("pullRequest", {})
-            .get("reviewThreads", {})
-            .get("nodes", [])
         )
         resolved_any = False
         for node in nodes:
@@ -1003,11 +983,10 @@ class Worker:
         ``False`` if there are no actionable threads.
         """
         log.info("checking: threads")
-        threads_data = self.gh.get_review_threads(
-            repo_ctx.owner, repo_ctx.repo_name, pr_number
-        )
         threads = self._filter_threads(
-            threads_data, repo_ctx.gh_user, repo_ctx.collaborators
+            self.gh.get_review_threads(repo_ctx.owner, repo_ctx.repo_name, pr_number),
+            repo_ctx.gh_user,
+            repo_ctx.collaborators,
         )
         if not threads:
             return False

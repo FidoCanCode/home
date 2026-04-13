@@ -51,10 +51,7 @@ class Cmd:
                 return
 
             owner, repo_name = repo.split("/", 1)
-            data = self._github.get_review_threads(owner, repo_name, pr)
-            threads = data["data"]["repository"]["pullRequest"]["reviewThreads"][
-                "nodes"
-            ]
+            threads = self._github.get_review_threads(owner, repo_name, pr)
             for t in threads:
                 if t.get("isResolved"):
                     continue

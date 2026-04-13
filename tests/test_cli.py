@@ -211,23 +211,13 @@ class TestCmdComplete:
                 "created_at": "2024-01-02T00:00:00Z",
             },
         ]
-        mock_github.get_review_threads.return_value = {
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "reviewThreads": {
-                            "nodes": [
-                                {
-                                    "id": "thread_node_abc",
-                                    "isResolved": False,
-                                    "comments": {"nodes": [{"databaseId": 42}]},
-                                }
-                            ]
-                        }
-                    }
-                }
+        mock_github.get_review_threads.return_value = [
+            {
+                "id": "thread_node_abc",
+                "isResolved": False,
+                "comments": {"nodes": [{"databaseId": 42}]},
             }
-        }
+        ]
 
         with caplog.at_level(logging.INFO, logger="kennel"):
             Cmd(github=mock_github).complete(tmp_path, task["id"])
@@ -326,23 +316,13 @@ class TestCmdComplete:
                 "created_at": "2024-01-01T00:00:00Z",
             },
         ]
-        mock_github.get_review_threads.return_value = {
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "reviewThreads": {
-                            "nodes": [
-                                {
-                                    "id": "thread_node_abc",
-                                    "isResolved": True,
-                                    "comments": {"nodes": [{"databaseId": 42}]},
-                                }
-                            ]
-                        }
-                    }
-                }
+        mock_github.get_review_threads.return_value = [
+            {
+                "id": "thread_node_abc",
+                "isResolved": True,
+                "comments": {"nodes": [{"databaseId": 42}]},
             }
-        }
+        ]
 
         Cmd(github=mock_github).complete(tmp_path, task["id"])
 

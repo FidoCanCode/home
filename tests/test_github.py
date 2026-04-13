@@ -390,14 +390,14 @@ class TestGitHubClass:
 
     def test_get_review_threads_delegates(self) -> None:
         gh, mock_s = self._github()
-        payload = {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": []}}}}
-        }
+        nodes = [{"id": "T_1", "isResolved": False}]
         mock_resp = MagicMock()
-        mock_resp.json.return_value = payload
+        mock_resp.json.return_value = {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
         mock_s.post.return_value = mock_resp
         result = gh.get_review_threads("o", "r", 10)
-        assert result == payload
+        assert result == nodes
 
     def test_resolve_thread_delegates(self) -> None:
         gh, mock_s = self._github()
