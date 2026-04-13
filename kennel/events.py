@@ -24,6 +24,11 @@ from kennel.types import TaskType
 
 log = logging.getLogger(__name__)
 
+# Per-work_dir coalescing state for _reorder_tasks_background.
+# Ensures at most one Opus call in-flight + one pending per repo.
+_reorder_coalesce: dict[str, dict] = {}
+_reorder_coalesce_lock = threading.Lock()
+
 
 @dataclass
 class Action:
@@ -855,6 +860,38 @@ def _rewrite_pr_description(
         log.exception("_rewrite_pr_description: failed to update PR body")
 
 
+def _make_reorder_kwargs(
+    work_dir: Path,
+    config: Config,
+    repo_cfg: RepoConfig | None,
+    registry: WorkerRegistry | None,
+    gh: Any,
+    print_prompt: Any,
+    rewrite_fn: Any,
+) -> dict[str, Any]:
+    """Build the kwargs dict for a :func:`~kennel.tasks.reorder_tasks` call."""
+
+    def on_changes(changes: list[dict[str, Any]]) -> None:
+        for change in changes:
+            _notify_thread_change(change, config, _gh=gh)
+
+    def on_done() -> None:
+        rewrite_fn(work_dir, gh, _print_prompt=print_prompt)
+
+    kwargs: dict[str, Any] = {"_on_changes": on_changes, "_on_done": on_done}
+    if registry is not None and repo_cfg is not None:
+
+        def on_inprogress_affected() -> None:
+            log.info(
+                "reorder_tasks_background: in-progress task affected — aborting %s",
+                repo_cfg.name,
+            )
+            registry.abort_task(repo_cfg.name)
+
+        kwargs["_on_inprogress_affected"] = on_inprogress_affected
+    return kwargs
+
+
 def _reorder_tasks_background(
     work_dir: Path,
     commit_summary: str,
@@ -866,8 +903,16 @@ def _reorder_tasks_background(
     _gh=None,
     _print_prompt=None,
     _rewrite_fn=None,
+    _reorder_fn=None,
+    _coalesce_state: dict | None = None,
 ) -> None:
     """Run :func:`~kennel.tasks.reorder_tasks` in a daemon background thread.
+
+    Coalesces concurrent calls: if a reorder thread is already running for
+    *work_dir*, the new trigger is recorded as pending rather than spawning
+    another thread.  When the running thread finishes it checks for a pending
+    run and, if one exists, executes it before exiting — so at most one Opus
+    call is in-flight plus one queued per repo.
 
     Passes an ``_on_changes`` callback so that any thread tasks dropped or
     modified during rescoping trigger a notification reply to the original
@@ -882,34 +927,42 @@ def _reorder_tasks_background(
     successful reorder, so the human-facing summary stays in sync with the
     updated plan.
     """
-    from kennel.tasks import reorder_tasks
+    from kennel.tasks import reorder_tasks as _reorder_tasks
 
+    reorder = _reorder_fn if _reorder_fn is not None else _reorder_tasks
     gh = _gh if _gh is not None else get_github()
     rewrite_fn = _rewrite_fn if _rewrite_fn is not None else _rewrite_pr_description
+    state = _coalesce_state if _coalesce_state is not None else _reorder_coalesce
 
-    def on_changes(changes: list[dict[str, Any]]) -> None:
-        for change in changes:
-            _notify_thread_change(change, config, _gh=gh)
+    key = str(work_dir)
+    kwargs = _make_reorder_kwargs(
+        work_dir, config, repo_cfg, registry, gh, _print_prompt, rewrite_fn
+    )
 
-    def on_done() -> None:
-        rewrite_fn(work_dir, gh, _print_prompt=_print_prompt)
+    with _reorder_coalesce_lock:
+        entry = state.setdefault(key, {"running": False, "pending": None})
+        if entry["running"]:
+            # Coalesce: latest call wins; the running thread will do one more pass.
+            entry["pending"] = (commit_summary, kwargs)
+            return
+        entry["running"] = True
+        entry["pending"] = None
 
-    kwargs: dict[str, Any] = {"_on_changes": on_changes, "_on_done": on_done}
-    if registry is not None and repo_cfg is not None:
-
-        def on_inprogress_affected() -> None:
-            log.info(
-                "reorder_tasks_background: in-progress task affected — aborting %s",
-                repo_cfg.name,
-            )
-            registry.abort_task(repo_cfg.name)
-
-        kwargs["_on_inprogress_affected"] = on_inprogress_affected
+    def run_loop() -> None:
+        cs = commit_summary
+        kw = kwargs
+        while True:
+            reorder(work_dir, cs, **kw)
+            with _reorder_coalesce_lock:
+                pending = state[key].get("pending")
+                if pending is None:
+                    state[key]["running"] = False
+                    return
+                state[key]["pending"] = None
+                cs, kw = pending
 
     t = threading.Thread(
-        target=reorder_tasks,
-        args=(work_dir, commit_summary),
-        kwargs=kwargs,
+        target=run_loop,
         name=f"reorder-{work_dir.name}",
         daemon=True,
     )

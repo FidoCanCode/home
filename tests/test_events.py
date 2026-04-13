@@ -2006,13 +2006,29 @@ class TestReorderTasksBackground:
             sub_dir=tmp_path / "sub",
         )
 
+    def _run_thread(self, started: list) -> None:
+        """Run the captured thread's target synchronously."""
+        started[0]._target()
+
+    def _capture_reorder_calls(self) -> tuple[list, callable]:
+        """Return (calls_list, mock_reorder_fn) that records (work_dir, cs, kwargs)."""
+        calls: list = []
+
+        def mock_reorder(work_dir, commit_summary, **kwargs):
+            calls.append((work_dir, commit_summary, kwargs))
+
+        return calls, mock_reorder
+
     def test_starts_daemon_thread(self, tmp_path: Path) -> None:
         started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
         _reorder_tasks_background(
             tmp_path,
             "some commits",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
         assert len(started) == 1
         t = started[0]
@@ -2020,41 +2036,50 @@ class TestReorderTasksBackground:
 
     def test_thread_name_includes_dir_name(self, tmp_path: Path) -> None:
         started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
         _reorder_tasks_background(
-            tmp_path, "commits", self._cfg(tmp_path), _start=lambda t: started.append(t)
+            tmp_path,
+            "commits",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
         assert tmp_path.name in started[0].name
 
-    def test_thread_target_is_reorder_tasks(self, tmp_path: Path) -> None:
-        from kennel.tasks import reorder_tasks
-
+    def test_thread_calls_reorder_with_work_dir_and_commit_summary(
+        self, tmp_path: Path
+    ) -> None:
         started: list = []
-        _reorder_tasks_background(
-            tmp_path, "commits", self._cfg(tmp_path), _start=lambda t: started.append(t)
-        )
-        assert started[0]._target is reorder_tasks
-
-    def test_thread_args_are_work_dir_and_commit_summary(self, tmp_path: Path) -> None:
-        started: list = []
+        calls, mock_reorder = self._capture_reorder_calls()
         _reorder_tasks_background(
             tmp_path,
             "feat: add parser",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
-        assert started[0]._args == (tmp_path, "feat: add parser")
+        self._run_thread(started)
+        assert len(calls) == 1
+        assert calls[0][0] == tmp_path
+        assert calls[0][1] == "feat: add parser"
 
     def test_on_changes_callback_notifies_thread_changes(self, tmp_path: Path) -> None:
         started: list = []
         mock_gh = MagicMock()
+        calls, mock_reorder = self._capture_reorder_calls()
         _reorder_tasks_background(
             tmp_path,
             "commits",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
             _gh=mock_gh,
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
-        on_changes = started[0]._kwargs["_on_changes"]
+        self._run_thread(started)
+        on_changes = calls[0][2]["_on_changes"]
         change = {
             "task": {
                 "id": "t1",
@@ -2081,6 +2106,7 @@ class TestReorderTasksBackground:
         started: list = []
         registry = MagicMock()
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        calls, mock_reorder = self._capture_reorder_calls()
         _reorder_tasks_background(
             tmp_path,
             "commits",
@@ -2088,8 +2114,11 @@ class TestReorderTasksBackground:
             repo_cfg=repo_cfg,
             registry=registry,
             _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
-        on_inprogress_affected = started[0]._kwargs["_on_inprogress_affected"]
+        self._run_thread(started)
+        on_inprogress_affected = calls[0][2]["_on_inprogress_affected"]
         on_inprogress_affected()
         registry.abort_task.assert_called_once_with("owner/repo")
 
@@ -2097,17 +2126,22 @@ class TestReorderTasksBackground:
         self, tmp_path: Path
     ) -> None:
         started: list = []
+        calls, mock_reorder = self._capture_reorder_calls()
         _reorder_tasks_background(
             tmp_path,
             "commits",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
-        assert "_on_inprogress_affected" not in started[0]._kwargs
+        self._run_thread(started)
+        assert "_on_inprogress_affected" not in calls[0][2]
 
     def test_on_done_kwarg_calls_rewrite_fn(self, tmp_path: Path) -> None:
         started: list = []
         rewrite_calls: list = []
+        calls, mock_reorder = self._capture_reorder_calls()
 
         def mock_rewrite(*a, **kw):
             rewrite_calls.append((a, kw))
@@ -2118,8 +2152,11 @@ class TestReorderTasksBackground:
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
             _rewrite_fn=mock_rewrite,
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
-        on_done = started[0]._kwargs["_on_done"]
+        self._run_thread(started)
+        on_done = calls[0][2]["_on_done"]
         on_done()
         assert len(rewrite_calls) == 1
         args, kwargs = rewrite_calls[0]
@@ -2129,6 +2166,7 @@ class TestReorderTasksBackground:
         started: list = []
         rewrite_calls: list = []
         fake_pp = MagicMock()
+        calls, mock_reorder = self._capture_reorder_calls()
 
         def mock_rewrite(*a, **kw):
             rewrite_calls.append(kw)
@@ -2140,10 +2178,169 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _rewrite_fn=mock_rewrite,
             _print_prompt=fake_pp,
+            _reorder_fn=mock_reorder,
+            _coalesce_state={},
         )
-        on_done = started[0]._kwargs["_on_done"]
+        self._run_thread(started)
+        on_done = calls[0][2]["_on_done"]
         on_done()
         assert rewrite_calls[0].get("_print_prompt") is fake_pp
+
+    def test_coalesces_when_already_running(self, tmp_path: Path) -> None:
+        """Second call while first is running marks pending, does not spawn thread."""
+        state: dict = {}
+        started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+
+        # First call — marks running, spawns thread
+        _reorder_tasks_background(
+            tmp_path,
+            "cs1",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        assert len(started) == 1
+        assert state[str(tmp_path)]["running"] is True
+
+        # Second call while thread has not run yet — should coalesce, not spawn
+        _reorder_tasks_background(
+            tmp_path,
+            "cs2",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        assert len(started) == 1  # no second thread spawned
+        assert state[str(tmp_path)]["pending"] is not None
+        assert state[str(tmp_path)]["pending"][0] == "cs2"
+
+    def test_coalesced_call_reruns_after_first_completes(self, tmp_path: Path) -> None:
+        """Thread loops once for the pending coalesced call, then stops."""
+        state: dict = {}
+        started: list = []
+        calls, mock_reorder = self._capture_reorder_calls()
+
+        _reorder_tasks_background(
+            tmp_path,
+            "cs1",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        # Simulate a second trigger arriving before the thread runs
+        _reorder_tasks_background(
+            tmp_path,
+            "cs2",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        # Run the single thread — should execute reorder twice (cs1 then cs2)
+        self._run_thread(started)
+        assert len(calls) == 2
+        assert calls[0][1] == "cs1"
+        assert calls[1][1] == "cs2"
+        assert state[str(tmp_path)]["running"] is False
+        assert state[str(tmp_path)]["pending"] is None
+
+    def test_only_last_pending_call_is_preserved(self, tmp_path: Path) -> None:
+        """Multiple coalesced callers: only the last pending commit_summary is used."""
+        state: dict = {}
+        started: list = []
+        calls, mock_reorder = self._capture_reorder_calls()
+
+        for cs in ("cs1", "cs2", "cs3", "cs4"):
+            _reorder_tasks_background(
+                tmp_path,
+                cs,
+                self._cfg(tmp_path),
+                _start=lambda t: started.append(t),
+                _reorder_fn=mock_reorder,
+                _coalesce_state=state,
+            )
+        # Only one thread spawned; pending holds cs4 (the latest)
+        assert len(started) == 1
+        assert state[str(tmp_path)]["pending"][0] == "cs4"
+        self._run_thread(started)
+        # Ran cs1 (first call) then cs4 (latest pending); cs2 and cs3 dropped
+        assert len(calls) == 2
+        assert calls[0][1] == "cs1"
+        assert calls[1][1] == "cs4"
+
+    def test_running_flag_cleared_after_no_pending(self, tmp_path: Path) -> None:
+        """After a normal run with no pending call, running is set to False."""
+        state: dict = {}
+        started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+        _reorder_tasks_background(
+            tmp_path,
+            "cs",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        self._run_thread(started)
+        assert state[str(tmp_path)]["running"] is False
+
+    def test_second_call_after_first_completes_spawns_new_thread(
+        self, tmp_path: Path
+    ) -> None:
+        """Once the first thread finishes, a subsequent call spawns a fresh thread."""
+        state: dict = {}
+        started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+
+        _reorder_tasks_background(
+            tmp_path,
+            "cs1",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        self._run_thread(started)  # first thread completes
+
+        _reorder_tasks_background(
+            tmp_path,
+            "cs2",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        assert len(started) == 2  # new thread spawned
+
+    def test_different_work_dirs_do_not_interfere(self, tmp_path: Path) -> None:
+        """Coalescing is per work_dir; different dirs get independent threads."""
+        state: dict = {}
+        started: list = []
+        _, mock_reorder = self._capture_reorder_calls()
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+
+        _reorder_tasks_background(
+            dir_a,
+            "cs",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        _reorder_tasks_background(
+            dir_b,
+            "cs",
+            self._cfg(tmp_path),
+            _start=lambda t: started.append(t),
+            _reorder_fn=mock_reorder,
+            _coalesce_state=state,
+        )
+        assert len(started) == 2  # each dir gets its own thread
 
 
 class TestNotifyThreadChange:
