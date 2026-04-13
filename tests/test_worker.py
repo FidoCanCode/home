@@ -2166,6 +2166,52 @@ class TestGitClean:
         assert order == ["checkout", "clean"]
 
 
+class TestExtractBody:
+    """Tests for the module-level _extract_body helper."""
+
+    def test_extracts_between_tags(self) -> None:
+        from kennel.worker import _extract_body
+
+        assert _extract_body("<body>hello</body>") == "hello"
+
+    def test_strips_surrounding_whitespace(self) -> None:
+        from kennel.worker import _extract_body
+
+        assert _extract_body("<body>\n  hello  \n</body>") == "hello"
+
+    def test_returns_empty_when_no_tags(self) -> None:
+        from kennel.worker import _extract_body
+
+        assert _extract_body("no tags here") == ""
+
+    def test_returns_empty_for_none(self) -> None:
+        from kennel.worker import _extract_body
+
+        assert _extract_body(None) == ""
+
+    def test_returns_empty_for_empty_string(self) -> None:
+        from kennel.worker import _extract_body
+
+        assert _extract_body("") == ""
+
+    def test_handles_preamble_and_trailing_chatter(self) -> None:
+        from kennel.worker import _extract_body
+
+        raw = "Here's my take:\n<body>the real content</body>\nHope that helps!"
+        assert _extract_body(raw) == "the real content"
+
+    def test_handles_multiline_body(self) -> None:
+        from kennel.worker import _extract_body
+
+        raw = "<body>line 1\n\nline 2\n\nFixes #5.</body>"
+        assert _extract_body(raw) == "line 1\n\nline 2\n\nFixes #5."
+
+    def test_case_insensitive(self) -> None:
+        from kennel.worker import _extract_body
+
+        assert _extract_body("<BODY>upper</BODY>") == "upper"
+
+
 class TestWritePrDescription:
     """Tests for the module-level _write_pr_description function."""
 
@@ -2177,7 +2223,7 @@ class TestWritePrDescription:
         gh,
         task_list=None,
         existing_body="",
-        print_return="Desc.\n\nFixes #1.",
+        print_return="<body>Desc.\n\nFixes #1.</body>",
         issue=1,
         pr_number=42,
     ):
@@ -2290,7 +2336,10 @@ class TestWritePrDescription:
     def test_fixes_line_appended_when_missing(self) -> None:
         gh = MagicMock()
         self._call(
-            gh, print_return="Summary without fixes line.", issue=99, pr_number=5
+            gh,
+            print_return="<body>Summary without fixes line.</body>",
+            issue=99,
+            pr_number=5,
         )
         body = gh.edit_pr_body.call_args[0][2]
         assert "Fixes #99." in body
@@ -2299,11 +2348,39 @@ class TestWritePrDescription:
         gh = MagicMock()
         self._call(
             gh,
-            print_return="Summary.\n\nFixes #1.",
+            print_return="<body>Summary.\n\nFixes #1.</body>",
             issue=1,
         )
         body = gh.edit_pr_body.call_args[0][2]
         assert body.count("Fixes #1.") == 1
+
+    def test_strips_preamble_before_body_tag(self) -> None:
+        """Claude's chatty preamble before <body> must be stripped from the PR."""
+        gh = MagicMock()
+        chatty = (
+            "The current body is short. Here's the replacement:\n\n"
+            "<body>Clean description.\n\nFixes #1.</body>\n\n"
+            "Want me to update it directly?"
+        )
+        self._call(gh, print_return=chatty, issue=1)
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "Clean description." in body
+        assert "The current body is short" not in body
+        assert "Want me to update it directly" not in body
+
+    def test_falls_back_when_no_body_tags(self) -> None:
+        """No body tags = treat as garbage, use plain-text fallback."""
+        gh = MagicMock()
+        self._call(gh, print_return="Bare text with no body tags.", issue=42)
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "Working on #42." in body
+        assert "Bare text with no body tags" not in body
+
+    def test_body_tag_match_is_case_insensitive(self) -> None:
+        gh = MagicMock()
+        self._call(gh, print_return="<BODY>Upper case tag.</BODY>", issue=1)
+        body = gh.edit_pr_body.call_args[0][2]
+        assert "Upper case tag." in body
 
     def test_rewrite_preserves_rest_section(self) -> None:
         gh = MagicMock()
