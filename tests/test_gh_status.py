@@ -24,23 +24,12 @@ class TestGeneratePersonaStatus:
         )
         assert result == "sniffing out a bug *tail wag*"
 
-    def test_empty_response_falls_back_to_raw(self) -> None:
-        result = generate_persona_status(
-            "at the vet", "persona", _print_prompt=lambda **kw: ""
-        )
-        assert result == "at the vet"
-
-    def test_claude_error_falls_back_to_raw(self) -> None:
+    def test_claude_error_propagates(self) -> None:
         def failing(**kw):
             raise ClaudeError("fail")
 
-        result = generate_persona_status("at the vet", "persona", _print_prompt=failing)
-        assert result == "at the vet"
-
-    def test_long_message_truncated_on_fallback(self) -> None:
-        long_msg = "x" * 100
-        result = generate_persona_status(long_msg, "", _print_prompt=lambda **kw: "")
-        assert len(result) == 80
+        with pytest.raises(ClaudeError):
+            generate_persona_status("at the vet", "persona", _print_prompt=failing)
 
     def test_empty_persona(self) -> None:
         result = generate_persona_status("test", "", _print_prompt=lambda **kw: "woof")
@@ -56,18 +45,12 @@ class TestGeneratePersonaEmoji:
         )
         assert result == ":wrench:"
 
-    def test_empty_response_falls_back_to_dog(self) -> None:
-        result = generate_persona_emoji(
-            "test", "persona", _print_prompt_json=lambda **kw: ""
-        )
-        assert result == ":dog:"
-
-    def test_claude_error_falls_back_to_dog(self) -> None:
+    def test_claude_error_propagates(self) -> None:
         def failing(**kw):
             raise ClaudeError("fail")
 
-        result = generate_persona_emoji("test", "persona", _print_prompt_json=failing)
-        assert result == ":dog:"
+        with pytest.raises(ClaudeError):
+            generate_persona_emoji("test", "persona", _print_prompt_json=failing)
 
     def test_empty_persona(self) -> None:
         result = generate_persona_emoji(
@@ -92,6 +75,21 @@ class TestSetGhStatus:
         mock_gh.set_user_status.assert_called_once_with(
             "sniffing around", ":dog2:", busy=True
         )
+
+    def test_claude_error_skips_status_update(self, tmp_path) -> None:
+        mock_gh = MagicMock()
+
+        def failing(msg: str, persona: str) -> str:
+            raise ClaudeError("fail")
+
+        set_gh_status(
+            "diagnosing issue",
+            persona_path=tmp_path / "persona.md",
+            _generate_persona_status=failing,
+            _generate_persona_emoji=lambda txt, p: ":dog:",
+            _get_github=lambda: mock_gh,
+        )
+        mock_gh.set_user_status.assert_not_called()
 
     def test_missing_persona_file(self, tmp_path) -> None:
         mock_gh = MagicMock()
