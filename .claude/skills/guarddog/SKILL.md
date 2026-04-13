@@ -68,7 +68,7 @@ Do NOT clear the status when done. Kennel handles that on restart.
 
 ### Step 2: Stop kennel
 ```bash
-ps aux | grep -E "kennel|claude" | grep -v grep | grep -v "claude -c" | awk '{print $2}' | xargs kill 2>/dev/null
+MY_PID=$PPID; ps aux | grep -E "kennel|claude" | grep -v grep | grep -v "claude -c" | awk -v me="$MY_PID" '$2 != me {print $2}' | xargs kill 2>/dev/null
 ```
 
 ### Step 3: Diagnose
@@ -112,7 +112,7 @@ Update GitHub status: `uv run kennel gh-status set "fix implemented — running 
 - **Request review**: `gh pr edit <number> --repo FidoCanCode/home --add-reviewer rhencke`
 
 ### Step 8: Restore all workspaces before restarting
-For each managed repo (kennel, confusio, fidocancode.github.io):
+For each managed repo (kennel, confusio, home):
 - Check for open PRs — match workspace branch, state.json, and tasks.json to the PR
 - If no open PR: `git checkout main && git reset --hard origin/main && git clean -df`
 - If open PR exists: checkout the PR branch, reset hard to remote, clean, recreate tasks via CLI to match PR body
