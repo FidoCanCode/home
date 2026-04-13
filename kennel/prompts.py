@@ -315,7 +315,13 @@ def rewrite_description_prompt(
         "1. Keep it to 2-3 sentences.\n"
         "2. Preserve any 'Fixes #N.' lines exactly as they appear — do not add, remove, or modify them.\n"
         "3. Do not include work queue content, markdown headers, or HTML comments.\n"
-        "4. Output ONLY the replacement description text — no preamble, no explanation."
+        "4. Wrap your final output in <body>...</body> tags. Only text between the tags is used.\n"
+        "5. Do not add any text before the opening <body> tag or after the closing </body> tag.\n\n"
+        "Example output:\n"
+        "<body>\n"
+        "Fixes #123.\n\n"
+        "Refactors the foo module to use bar so we can add baz support later.\n"
+        "</body>"
     )
 
 

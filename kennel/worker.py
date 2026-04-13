@@ -319,6 +319,26 @@ def ci_ready_for_review(
     return all(states.get(name) == "SUCCESS" for name in required_checks)
 
 
+_BODY_TAG_RE = re.compile(r"<body>\s*(.*?)\s*</body>", re.DOTALL | re.IGNORECASE)
+
+
+def _extract_body(raw: str | None) -> str:
+    """Extract content between <body>...</body> tags from Opus output.
+
+    Returns the extracted content stripped of whitespace, or "" if no body
+    tags were found or the raw input was empty.  This enforces the output
+    contract in :func:`kennel.prompts.rewrite_description_prompt` — Opus is
+    told to wrap its output in body tags so we can strip any preamble or
+    trailing commentary.
+    """
+    if not raw:
+        return ""
+    m = _BODY_TAG_RE.search(raw)
+    if not m:
+        return ""
+    return m.group(1).strip()
+
+
 def _write_pr_description(
     gh: Any,
     repo: str,
@@ -372,10 +392,12 @@ def _write_pr_description(
         rest = f"## Work queue\n\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
 
     prompt = rewrite_description_prompt(existing_body, task_list)
-    new_desc = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
+    raw = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
+    new_desc = _extract_body(raw)
     if not new_desc:
         log.warning(
-            "_write_pr_description: Opus returned empty — using plain-text fallback"
+            "_write_pr_description: Opus returned no <body> content — using plain-text fallback (raw=%r)",
+            (raw or "")[:200],
         )
         new_desc = f"Working on #{issue}."
 

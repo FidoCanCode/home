@@ -793,10 +793,12 @@ class TestRewriteDescriptionPrompt:
         result = rewrite_description_prompt(self._body(), [])
         assert "work queue" in result.lower()
 
-    def test_output_only_constraint_stated(self) -> None:
+    def test_body_tag_contract_stated(self) -> None:
+        """Prompt must instruct Opus to wrap output in <body> tags so we can
+        reliably strip preamble and trailing chatter."""
         result = rewrite_description_prompt(self._body(), [])
-        assert "ONLY" in result or "only" in result
-        assert "preamble" in result or "no preamble" in result
+        assert "<body>" in result
+        assert "</body>" in result
 
     def test_extracts_description_at_divider(self) -> None:
         body = "My description.\n\nFixes #3.\n\n---\n\nStuff below divider."
