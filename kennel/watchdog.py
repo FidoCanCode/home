@@ -33,6 +33,9 @@ class Watchdog:
         """Run one watchdog iteration. Returns 0."""
         for repo_name, repo_cfg in self.repos.items():
             if not self.registry.is_alive(repo_name):
+                error = self.registry.get_thread_crash_error(repo_name)
+                if error is not None:
+                    self.registry.record_crash(repo_name, error)
                 log.info("thread for %s is not alive — restarting", repo_name)
                 self.registry.start(repo_cfg)
         return 0

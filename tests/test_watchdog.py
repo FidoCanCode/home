@@ -40,6 +40,7 @@ class TestWatchdogRun:
         repo_cfg = _repo()
         w, registry = _make({"owner/repo": repo_cfg})
         registry.is_alive.return_value = False
+        registry.get_thread_crash_error.return_value = None
         w.run()
         registry.start.assert_called_once_with(repo_cfg)
 
@@ -60,6 +61,7 @@ class TestWatchdogRun:
             return name == "org/alive"
 
         registry.is_alive.side_effect = is_alive
+        registry.get_thread_crash_error.return_value = None
         w.run()
         registry.start.assert_called_once_with(dead_cfg)
 
@@ -69,10 +71,42 @@ class TestWatchdogRun:
         repos = {"org/a": repo_a, "org/b": repo_b}
         w, registry = _make(repos)
         registry.is_alive.return_value = False
+        registry.get_thread_crash_error.return_value = None
         w.run()
         assert registry.start.call_count == 2
         registry.start.assert_any_call(repo_a)
         registry.start.assert_any_call(repo_b)
+
+    def test_records_crash_before_restart_when_crash_error_set(self) -> None:
+        repo_cfg = _repo()
+        w, registry = _make({"owner/repo": repo_cfg})
+        registry.is_alive.return_value = False
+        registry.get_thread_crash_error.return_value = "RuntimeError: boom"
+        w.run()
+        registry.record_crash.assert_called_once_with(
+            "owner/repo", "RuntimeError: boom"
+        )
+        registry.start.assert_called_once_with(repo_cfg)
+
+    def test_record_crash_called_before_start(self) -> None:
+        call_order: list[str] = []
+        repo_cfg = _repo()
+        w, registry = _make({"owner/repo": repo_cfg})
+        registry.is_alive.return_value = False
+        registry.get_thread_crash_error.return_value = "ValueError: oops"
+        registry.record_crash.side_effect = lambda *_: call_order.append("record_crash")
+        registry.start.side_effect = lambda *_: call_order.append("start")
+        w.run()
+        assert call_order == ["record_crash", "start"]
+
+    def test_does_not_record_crash_when_crash_error_is_none(self) -> None:
+        repo_cfg = _repo()
+        w, registry = _make({"owner/repo": repo_cfg})
+        registry.is_alive.return_value = False
+        registry.get_thread_crash_error.return_value = None
+        w.run()
+        registry.record_crash.assert_not_called()
+        registry.start.assert_called_once_with(repo_cfg)
 
     def test_no_repos_is_no_op(self) -> None:
         w, registry = _make({})

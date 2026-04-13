@@ -137,6 +137,26 @@ class TestWorkerRegistry:
         reg, _ = self._make_registry()
         assert reg.is_alive("unknown/repo") is False
 
+    def test_get_thread_crash_error_returns_none_for_unknown_repo(self) -> None:
+        reg, _ = self._make_registry()
+        assert reg.get_thread_crash_error("unknown/repo") is None
+
+    def test_get_thread_crash_error_returns_thread_crash_error(
+        self, tmp_path: Path
+    ) -> None:
+        reg, factory = self._make_registry()
+        factory.return_value.crash_error = "RuntimeError: boom"
+        reg.start(_repo("foo/bar", tmp_path))
+        assert reg.get_thread_crash_error("foo/bar") == "RuntimeError: boom"
+
+    def test_get_thread_crash_error_returns_none_when_thread_has_no_error(
+        self, tmp_path: Path
+    ) -> None:
+        reg, factory = self._make_registry()
+        factory.return_value.crash_error = None
+        reg.start(_repo("foo/bar", tmp_path))
+        assert reg.get_thread_crash_error("foo/bar") is None
+
     def test_report_activity_stores_entry(self) -> None:
         reg, _ = self._make_registry()
         reg.report_activity("foo/bar", "Working on: #1", busy=True)

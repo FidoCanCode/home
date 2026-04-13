@@ -1578,6 +1578,7 @@ class WorkerThread(threading.Thread):
         self._wake = threading.Event()
         self._abort_task = threading.Event()
         self._stop = False
+        self.crash_error: str | None = None
 
     def wake(self) -> None:
         """Signal the thread to wake up and check for work immediately."""
@@ -1596,23 +1597,28 @@ class WorkerThread(threading.Thread):
     def run(self) -> None:
         """Main loop — runs until :meth:`stop` is called."""
         _thread_repo.repo_name = self._repo_name.split("/")[-1]
-        while not self._stop:
-            result = Worker(
-                self.work_dir,
-                self._gh,
-                self._abort_task,
-                self._repo_name,
-                self._registry,
-                self._membership,
-            ).run()
+        try:
+            while not self._stop:
+                result = Worker(
+                    self.work_dir,
+                    self._gh,
+                    self._abort_task,
+                    self._repo_name,
+                    self._registry,
+                    self._membership,
+                ).run()
 
-            if result == 1:
-                # Did work — loop immediately without waiting.
-                continue
+                if result == 1:
+                    # Did work — loop immediately without waiting.
+                    continue
 
-            timeout = _RETRY_TIMEOUT if result == 2 else _IDLE_TIMEOUT
-            self._wake.wait(timeout=timeout)
-            self._wake.clear()
+                timeout = _RETRY_TIMEOUT if result == 2 else _IDLE_TIMEOUT
+                self._wake.wait(timeout=timeout)
+                self._wake.clear()
+        except Exception as exc:
+            self.crash_error = f"{type(exc).__name__}: {exc}"
+            log.exception("WorkerThread %s: unexpected error", self.name)
+            raise
 
 
 def run(work_dir: Path) -> int:

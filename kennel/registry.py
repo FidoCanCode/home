@@ -145,6 +145,11 @@ class WorkerRegistry:
         thread = self._threads.get(repo_name)
         return thread is not None and thread.is_alive()
 
+    def get_thread_crash_error(self, repo_name: str) -> str | None:
+        """Return the crash_error stored on the thread for *repo_name*, or None."""
+        thread = self._threads.get(repo_name)
+        return thread.crash_error if thread is not None else None
+
 
 def _make_thread(
     repo_cfg: RepoConfig,
