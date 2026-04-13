@@ -16,7 +16,6 @@ from kennel.prompts import (
     Prompts,
     issue_reply_instruction,
     reply_instruction,
-    rewrite_description_prompt,
     triage_prompt,
 )
 from kennel.registry import WorkerRegistry
@@ -805,19 +804,17 @@ def _rewrite_pr_description(
 ) -> None:
     """Rewrite the PR description summary after a successful rescope.
 
-    Fetches the current PR body, asks Opus to rewrite the description section
-    (everything before ``---``) to match the updated task list, and writes the
-    result back.  The work-queue section (``<!-- WORK_QUEUE_START/END -->``) is
-    preserved unchanged.
+    Delegates to :func:`kennel.worker._write_pr_description` so that initial
+    PR creation and post-rescope rewrites share one code path.
 
-    Silently skips when there is no active issue, no open PR, no ``---``
-    divider in the body, or when Opus returns an empty response.
+    Silently skips when there is no active issue or no open PR for it.
+    Skips (and logs) when the PR body fetch fails or when the shared writer
+    skips (no ``---`` divider, or Opus returned empty).
     """
     from kennel.state import State
     from kennel.tasks import Tasks
+    from kennel.worker import _write_pr_description
 
-    if _print_prompt is None:
-        _print_prompt = claude.print_prompt
     if _state is None:
         _state = State(work_dir / ".git" / "fido")
     if _tasks is None:
@@ -850,26 +847,10 @@ def _rewrite_pr_description(
         log.exception("_rewrite_pr_description: failed to get PR body")
         return
 
-    divider = "\n\n---\n\n"
-    if divider not in body:
-        log.info(
-            "_rewrite_pr_description: no --- divider in PR #%s body — skipping",
-            pr_number,
-        )
-        return
-
-    prompt = rewrite_description_prompt(body, task_list)
-    new_desc = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
-    if not new_desc:
-        log.warning("_rewrite_pr_description: Opus returned empty — skipping")
-        return
-
-    rest = body.split(divider, 1)[1]
-    new_body = f"{new_desc.strip()}{divider}{rest}"
-
     try:
-        gh.edit_pr_body(repo, pr_number, new_body)
-        log.info("_rewrite_pr_description: PR #%s description updated", pr_number)
+        _write_pr_description(
+            gh, repo, pr_number, issue, task_list, body, _print_prompt=_print_prompt
+        )
     except Exception:
         log.exception("_rewrite_pr_description: failed to update PR body")
 

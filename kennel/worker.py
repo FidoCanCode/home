@@ -16,7 +16,7 @@ from typing import IO, Any, Protocol
 from kennel import claude, hooks, tasks
 from kennel.config import RepoMembership
 from kennel.github import GitHub
-from kennel.prompts import Prompts
+from kennel.prompts import Prompts, rewrite_description_prompt
 from kennel.state import (
     State,
     _resolve_git_dir,
@@ -319,6 +319,75 @@ def ci_ready_for_review(
     return all(states.get(name) == "SUCCESS" for name in required_checks)
 
 
+def _write_pr_description(
+    gh: Any,
+    repo: str,
+    pr_number: int,
+    issue: int,
+    task_list: list[dict[str, Any]],
+    existing_body: str = "",
+    *,
+    _print_prompt=None,
+) -> bool:
+    """Write or rewrite the PR description.
+
+    Handles both initial PR creation (``existing_body=""``; builds work-queue
+    section from *task_list*) and post-rescope rewrites (``existing_body``
+    contains the current body; preserves the rest section after the ``---``
+    divider).
+
+    Generates the description via Opus and writes it back via
+    ``gh.edit_pr_body``.  Returns ``True`` if the body was written,
+    ``False`` when skipped (no divider in an existing body, or Opus returned
+    empty).
+    """
+    if _print_prompt is None:
+        _print_prompt = claude.print_prompt
+
+    divider = "\n\n---\n\n"
+
+    # For a rewrite, only proceed when the divider is present so we know
+    # where the description section ends.  For initial write (empty body)
+    # skip this guard and build the rest section fresh.
+    if existing_body and divider not in existing_body:
+        log.info(
+            "_write_pr_description: no --- divider in PR #%s body — skipping", pr_number
+        )
+        return False
+
+    # Preserve the existing rest section or build the work-queue from scratch.
+    if divider in existing_body:
+        rest = existing_body.split(divider, 1)[1]
+    else:
+        pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
+        next_task = _pick_next_task(task_list)
+        if pending:
+            lines = [
+                f"- [ ] {t['title']}{' **→ next**' if t is next_task else ''}"
+                for t in pending
+            ]
+            queue = "\n".join(lines)
+        else:
+            queue = "<!-- no tasks yet -->"
+        rest = f"## Work queue\n\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
+
+    prompt = rewrite_description_prompt(existing_body, task_list)
+    new_desc = _print_prompt(prompt, "claude-opus-4-6", timeout=30)
+    if not new_desc:
+        log.warning("_write_pr_description: Opus returned empty — skipping")
+        return False
+
+    # Ensure "Fixes #N" is always present (Opus preserves it for rewrites via
+    # prompt rules; for initial writes we append it here).
+    if f"Fixes #{issue}" not in new_desc:
+        new_desc = f"{new_desc.rstrip()}\n\nFixes #{issue}."
+
+    new_body = f"{new_desc.strip()}{divider}{rest}"
+    gh.edit_pr_body(repo, pr_number, new_body)
+    log.info("_write_pr_description: PR #%s description written", pr_number)
+    return True
+
+
 class Worker:
     """Fido worker for a single repository.
 
@@ -560,53 +629,6 @@ class Worker:
         else:
             log.info("git clean: nothing to remove")
 
-    def _build_pr_body(
-        self,
-        request: str,
-        issue: int,
-        *,
-        setup_session_id: str,
-    ) -> str:
-        """Build the draft PR body: generated description + work-queue section.
-
-        Continues *setup_session_id* (the planning session) so Opus writes the
-        description with full context from everything it just planned.  Falls
-        back to plain text if Claude returns nothing.  Appends the pending task
-        list inside the ``WORK_QUEUE_START/END`` markers.
-        """
-        assert setup_session_id, "setup_session_id must be non-empty"
-        plain = f"{request}\n\nFixes #{issue}."
-        task_list = self._tasks.list()
-        pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
-
-        continuation_prompt = (
-            "Based on the planning above, write a specific 2-3 sentence pull"
-            " request description for this PR. Reference the concrete tasks by"
-            " name. No markdown headers. Do not include a 'Fixes #N.' line."
-        )
-        desc = claude.resume_status(setup_session_id, continuation_prompt, timeout=60)
-
-        if desc:
-            desc = f"{desc.rstrip()}\n\nFixes #{issue}."
-        else:
-            log.warning("Opus returned no description — falling back to plain text")
-            desc = plain
-
-        next_task = _pick_next_task(task_list)
-        if pending:
-            lines = []
-            for t in pending:
-                marker = " **→ next**" if t is next_task else ""
-                lines.append(f"- [ ] {t['title']}{marker}")
-            queue = "\n".join(lines)
-        else:
-            queue = "<!-- no tasks yet -->"
-
-        return (
-            f"{desc}\n\n---\n\n## Work queue\n\n"
-            f"<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
-        )
-
     def find_or_create_pr(
         self,
         fido_dir: Path,
@@ -718,18 +740,19 @@ class Worker:
             log.warning("setup produced no tasks — skipping PR creation, will retry")
             return None
 
-        # Build PR body with tasks already populated by setup
-        pr_body = self._build_pr_body(request, issue, setup_session_id=session_id)
-
-        # Create draft PR
+        # Create draft PR, then write the description using the same function
+        # used for post-rescope rewrites so both paths share one code path.
         url = self.gh.create_pr(
             repo_ctx.repo,
             request,
-            pr_body,
+            f"Fixes #{issue}.",
             repo_ctx.default_branch,
             slug,
         )
         pr_number = int(url.rstrip("/").split("/")[-1])
+        _write_pr_description(
+            self.gh, repo_ctx.repo, pr_number, issue, self._tasks.list()
+        )
         task_count = len(
             [t for t in self._tasks.list() if t.get("status") == "pending"]
         )
