@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from http.server import HTTPServer
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1075,6 +1075,66 @@ class TestRun:
 
         mock_watchdog_cls.assert_called_once_with(mock_registry, fake_cfg.repos)
         mock_watchdog_cls.return_value.start_thread.assert_called_once()
+
+    def test_run_installs_excepthooks(self, tmp_path: Path) -> None:
+        """Uncaught exceptions (main thread and worker threads) should route
+        through the logger so tracebacks land in kennel.log, not just stderr."""
+        import sys as _sys
+        import threading as _threading
+
+        from kennel.server import run
+
+        fake_cfg = self._fake_cfg(tmp_path)
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+
+        saved_sys = _sys.excepthook
+        saved_thr = _threading.excepthook
+        try:
+            run(
+                _from_args=lambda: fake_cfg,
+                _HTTPServer=lambda *a, **kw: mock_server,
+                _make_registry=MagicMock(),
+                _path_home=lambda: tmp_path,
+                _basic_config=MagicMock(),
+                _populate_memberships=MagicMock(),
+                _startup_pull=MagicMock(),
+                _Watchdog=MagicMock(),
+            )
+            assert _sys.excepthook is not saved_sys
+            assert _threading.excepthook is not saved_thr
+
+            # Call the hooks to confirm they don't raise and they go through logging.
+            import kennel.server as srv_mod
+
+            with patch.object(srv_mod, "log") as mock_log:
+                try:
+                    raise ValueError("boom")
+                except ValueError:
+                    _sys.excepthook(*_sys.exc_info())
+                mock_log.critical.assert_called_once()
+
+            with patch.object(srv_mod, "log") as mock_log:
+                fake_args = MagicMock()
+                fake_args.thread = MagicMock(name="tname")
+                fake_args.exc_type = ValueError
+                fake_args.exc_value = ValueError("boom")
+                fake_args.exc_traceback = None
+                _threading.excepthook(fake_args)
+                mock_log.critical.assert_called_once()
+
+            # Also cover the branch where thread is None.
+            with patch.object(srv_mod, "log") as mock_log:
+                fake_args = MagicMock()
+                fake_args.thread = None
+                fake_args.exc_type = ValueError
+                fake_args.exc_value = ValueError("boom")
+                fake_args.exc_traceback = None
+                _threading.excepthook(fake_args)
+                mock_log.critical.assert_called_once()
+        finally:
+            _sys.excepthook = saved_sys
+            _threading.excepthook = saved_thr
 
 
 def _self_restart_cfg(tmp_path: Path) -> Config:

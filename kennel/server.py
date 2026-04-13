@@ -510,6 +510,23 @@ def run(
         handlers=handlers,
     )
 
+    # Route uncaught exceptions through the logger so tracebacks land in
+    # kennel.log, not just ~/log/kennel-crash.log (where start-kennel.sh
+    # redirects stderr).  Before this, RCA on crashes required reading two
+    # different log files.
+    def _log_uncaught(exc_type, exc_value, exc_tb):
+        log.critical("uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+
+    def _log_thread_exception(args):
+        log.critical(
+            "uncaught exception in thread %s",
+            args.thread.name if args.thread else "?",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    sys.excepthook = _log_uncaught
+    threading.excepthook = _log_thread_exception
+
     _startup_pull()
 
     _populate_memberships(config)

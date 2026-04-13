@@ -453,9 +453,18 @@ class GH:
     def pr_merge(
         self, repo: str, pr: int | str, squash: bool = True, auto: bool = False
     ) -> None:
-        """Merge a PR."""
+        """Merge a PR.
+
+        If the PR is already merged, logs and returns success rather than
+        raising.  This handles the race where kennel self-restarts after a
+        PR merge and the worker resumes with stale state thinking the PR
+        still needs merging.
+        """
+        pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
+        if pr_data.get("merged"):
+            log.info("PR %s/#%s already merged — skipping", repo, pr)
+            return
         if auto:
-            pr_data = self._get(f"/repos/{repo}/pulls/{pr}")
             node_id = pr_data["node_id"]
             merge_method = "SQUASH" if squash else "MERGE"
             query = (
@@ -467,10 +476,25 @@ class GH:
             self._graphql(query, prId=node_id, mergeMethod=merge_method)
         else:
             merge_method = "squash" if squash else "merge"
-            self._put(
-                f"/repos/{repo}/pulls/{pr}/merge",
-                merge_method=merge_method,
-            )
+            try:
+                self._put(
+                    f"/repos/{repo}/pulls/{pr}/merge",
+                    merge_method=merge_method,
+                )
+            except _requests.HTTPError as e:
+                # Re-check: if the PR was merged between our initial get_pr and
+                # the merge call (race with webhook-triggered self-restart on
+                # another process), treat 405 as success.
+                if e.response is not None and e.response.status_code == 405:
+                    recheck = self._get(f"/repos/{repo}/pulls/{pr}")
+                    if recheck.get("merged"):
+                        log.info(
+                            "PR %s/#%s merged concurrently — treating 405 as success",
+                            repo,
+                            pr,
+                        )
+                        return
+                raise
 
     def get_pr(self, repo: str, pr: int | str) -> dict[str, Any]:
         """Return PR data (reviews, isDraft, mergeStateStatus, body, commits)."""
