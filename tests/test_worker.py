@@ -1307,6 +1307,35 @@ def _issue(
     return node
 
 
+class TestNoCommitNudge:
+    def test_early_attempt_is_gentle(self) -> None:
+        from kennel.worker import _no_commit_nudge
+
+        msg = _no_commit_nudge(1, "Fix widget", 42)
+        assert "Fix widget" in msg
+        assert "commit" in msg.lower()
+        # Early nudges don't threaten or list numbered actions.
+        assert "attempt 1" not in msg.lower()
+        assert "blocked" not in msg.lower()
+
+    def test_late_attempt_offers_blocked_comment_with_pr(self) -> None:
+        from kennel.worker import _no_commit_nudge
+
+        msg = _no_commit_nudge(3, "Fix widget", 42)
+        assert "attempt 3" in msg.lower()
+        assert "blocked:" in msg.lower()
+        assert "gh pr comment 42" in msg
+        # Two of the three actions are commit / mark complete.
+        assert "git add" in msg.lower()
+        assert "kennel task complete" in msg.lower()
+
+    def test_late_attempt_without_pr_uses_placeholder(self) -> None:
+        from kennel.worker import _no_commit_nudge
+
+        msg = _no_commit_nudge(3, "Fix widget", None)
+        assert "gh pr comment <pr>" in msg
+
+
 class TestPickNextIssue:
     """Direct unit tests for _pick_next_issue / _walk_to_root / _descend_issue."""
 
@@ -5648,7 +5677,8 @@ class TestExecuteTask:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
-        # No session_id on first run, retry starts fresh, second run produces commits
+        # No session_id on first run, retry writes nudge to prompt_file (no
+        # build_prompt), second run produces commits
         shas = iter(["aaa", "aaa", "bbb"])
         git_mock = MagicMock(
             side_effect=lambda args, **kw: MagicMock(
@@ -5671,9 +5701,12 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        # build_prompt called twice: initial + fresh restart
-        assert mock_bp.call_count == 2
+        # build_prompt only called for initial setup now — retries nudge
+        # in place via prompt_file directly.
+        assert mock_bp.call_count == 1
         assert mock_run.call_count == 2
+        # prompt_file should contain the first nudge after the retry.
+        assert "commit" in (fido_dir / "prompt").read_text().lower()
 
     def test_keeps_retrying_across_multiple_resumes(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -5709,6 +5742,49 @@ class TestExecuteTask:
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert mock_run.call_count == 4
         mock_complete.assert_called_once()
+
+    def test_drops_stale_session_after_nudge_limit(self, tmp_path: Path) -> None:
+        """After _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION nudges, the next retry
+        drops the session id so claude starts from scratch.  We don't give
+        up on the task — just reset context."""
+        from kennel.worker import _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Stubborn task")
+
+        n = _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION
+        # head_before=aaa, then n+1 resumes return aaa (no commits), then
+        # the fresh session lands commits at bbb so loop exits.  Every
+        # iteration rev-parses HEAD once.
+        head_seq = ["aaa"] * (1 + (n + 1)) + ["bbb"]
+        head_iter = iter(head_seq)
+
+        def git_side(args, **kw):
+            if args == ["rev-parse", "HEAD"]:
+                return MagicMock(
+                    returncode=0, stdout=next(head_iter, "bbb"), stderr=""
+                )
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        # Initial + n nudged resumes on sess-1, then the fresh start returns sess-2.
+        runs = [("sess-1", "o")] * (n + 1) + [("sess-2", "fresh")]
+
+        with (
+            patch("kennel.worker.tasks.list_tasks", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", side_effect=runs) as mock_run,
+            patch.object(worker, "_git", side_effect=git_side),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.worker.tasks.complete_by_id"),
+            patch("kennel.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 42, "br")
+
+        # Call index (n+1) is the fresh start — session_id kwarg missing/empty.
+        fresh_call = mock_run.call_args_list[n + 1]
+        assert fresh_call.kwargs.get("session_id", "") == ""
 
     def test_breaks_retry_loop_when_task_externally_completed(
         self, tmp_path: Path

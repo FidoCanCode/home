@@ -458,6 +458,49 @@ def _has_pending_asks(task_list: list[dict[str, Any]]) -> bool:
 
 _DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED"}
 
+# Number of session-resume attempts with escalating nudges before we
+# abandon the stale session and start a fresh one.  Resuming the same
+# session forever can get stuck in a rut where claude keeps replying
+# with the same "nothing to do" no matter how hard we nudge; rebuilding
+# the context from scratch usually unsticks it.  See #452.
+_NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION: int = 5
+
+
+def _no_commit_nudge(attempt: int, task_title: str, pr_number: int | None) -> str:
+    """Build an escalating nudge prompt for the no-commit resume loop.
+
+    Each attempt demands a concrete action — commit, mark complete, or
+    post a blocked-status comment on the PR.  "Explain what's blocking
+    you" without posting it is intentionally not an option; an
+    explanation that never leaves claude's head isn't actionable.
+    """
+    pr_hint = (
+        f"`gh pr comment {pr_number} --body ...`"
+        if pr_number is not None
+        else "`gh pr comment <pr> --body ...`"
+    )
+    if attempt <= 2:
+        return (
+            f"You're working on: {task_title}\n\n"
+            "I don't see any commits yet.  Continue the task.  If you "
+            "already have changes, commit them now.  If the task is "
+            "already fully complete, mark it done."
+        )
+    return (
+        f"You're working on: {task_title}\n\n"
+        f"This is attempt {attempt} and there are still no commits on "
+        "the branch.  Take exactly one of these actions:\n"
+        "1. Commit the changes you have (`git add -A && git commit`)\n"
+        "2. Mark the task complete via `kennel task complete <id>` "
+        "if it was already done in a previous commit.\n"
+        "3. If something outside your control is blocking you, post a "
+        f"comment on the PR ({pr_hint}) that starts with `BLOCKED:` "
+        "and explains what's blocking you and why — so a human can "
+        "unblock you.  Do not just describe the situation internally; "
+        "post the comment.\n\n"
+        "Do not respond with a plan — just act."
+    )
+
 
 def latest_decisive_review(
     owner_reviews: list[dict[str, Any]],
@@ -1401,9 +1444,20 @@ class Worker:
                 )
                 break
             attempt += 1
+            # After _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION nudges fail, drop
+            # the stale session and start a fresh one.  Do not give up on
+            # the task — just reset context and keep going.
+            if session_id and attempt > _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION:
+                log.warning(
+                    "task produced no commits after %d nudges — starting fresh session",
+                    _NUDGE_ATTEMPTS_BEFORE_FRESH_SESSION,
+                )
+                session_id = ""
+            nudge = _no_commit_nudge(attempt, task_title, pr_number)
+            (fido_dir / "prompt").write_text(nudge)
             if session_id:
                 log.info(
-                    "task produced no commits — resuming session (attempt %d)",
+                    "task produced no commits — nudging session (attempt %d)",
                     attempt,
                 )
                 session_id, output = claude_run(
@@ -1411,10 +1465,9 @@ class Worker:
                 )
             else:
                 log.info(
-                    "task produced no commits — starting fresh session (attempt %d)",
+                    "task produced no commits — fresh session with nudge (attempt %d)",
                     attempt,
                 )
-                build_prompt(fido_dir, "task", context)
                 session_id, output = claude_run(fido_dir, cwd=self.work_dir)
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()
