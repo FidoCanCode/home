@@ -9,6 +9,7 @@ import select
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -703,20 +704,46 @@ class ClaudeSession:
         self._proc.stdin.write(msg + "\n")
         self._proc.stdin.flush()
 
+    def _send_control_interrupt(self) -> None:
+        """Write a stream-json ``control_request`` interrupt to subprocess stdin.
+
+        Tells the Claude subprocess to abort the current turn at the protocol
+        level.  The subprocess responds with a ``control_response`` on stdout
+        and then emits a ``type=result`` to close the turn.  Call this while
+        holding the session lock so it does not race with other stdin writes.
+        """
+        msg = json.dumps(
+            {
+                "type": "control_request",
+                "request_id": str(uuid.uuid4()),
+                "request": {"subtype": "interrupt"},
+            }
+        )
+        assert self._proc.stdin is not None
+        self._proc.stdin.write(msg + "\n")
+        self._proc.stdin.flush()
+
     def interrupt(self, content: str) -> None:
-        """Signal the in-flight turn to stop, then send *content* under the lock.
+        """Interrupt the in-flight turn at the protocol level, then send *content*.
 
-        Sets the cancel event so :meth:`iter_events` exits on its next poll
-        cycle.  The lock holder's ``with session:`` block then unwinds and
-        releases the lock.  This method acquires the lock (blocking until the
-        holder releases it), sends *content* as a normal user message, and
-        releases the lock.  No stdin write ever races with the holder's writes.
+        One owner-controlled sequence while holding the lock:
 
-        For preempt/interrupt use cases (rescope abort, CI-failure cancel)
-        where the in-flight turn must be cancelled and a follow-up sent.
+        1. Sets the cancel event so any concurrent :meth:`iter_events` caller
+           exits on its next poll cycle and releases the lock.
+        2. Acquires the lock (blocks until the holder exits).
+        3. Sends a stream-json ``control_request`` interrupt so the Claude
+           subprocess aborts the current turn (not just our local reading of it).
+        4. Drains events until the turn boundary (``type=result`` /
+           ``type=error`` / EOF) so the stream is clean for the next caller.
+        5. Sends *content* as the follow-up user message.
+
+        This guarantees no unread old-turn output is left on stdout for the
+        next :meth:`iter_events` caller to inherit.
         """
         self._cancel.set()
         with self._lock:
+            self._send_control_interrupt()
+            self.consume_until_result()
             self.send(content)
 
     def preempt(self, content: str) -> None:

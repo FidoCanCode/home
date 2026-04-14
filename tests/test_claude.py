@@ -1828,24 +1828,115 @@ class TestClaudeSessionLock:
         session.stop()
 
 
+class TestClaudeSessionSendControlInterrupt:
+    def test_writes_control_request_type(self, tmp_path: Path) -> None:
+        import json as _json
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._send_control_interrupt()
+        written = proc.stdin.write.call_args.args[0]
+        assert _json.loads(written.strip())["type"] == "control_request"
+        session.stop()
+
+    def test_writes_interrupt_subtype(self, tmp_path: Path) -> None:
+        import json as _json
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._send_control_interrupt()
+        obj = _json.loads(proc.stdin.write.call_args.args[0].strip())
+        assert obj["request"]["subtype"] == "interrupt"
+        session.stop()
+
+    def test_includes_request_id(self, tmp_path: Path) -> None:
+        import json as _json
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._send_control_interrupt()
+        obj = _json.loads(proc.stdin.write.call_args.args[0].strip())
+        assert isinstance(obj.get("request_id"), str) and obj["request_id"]
+        session.stop()
+
+
 class TestClaudeSessionInterrupt:
-    def test_interrupt_writes_json_to_stdin(self, tmp_path: Path) -> None:
+    def test_interrupt_sends_control_request_first(self, tmp_path: Path) -> None:
+        """interrupt() sends control_request as the first stdin write."""
         import json as _json
 
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
         session.interrupt("abort now")
-        written = proc.stdin.write.call_args.args[0]
-        obj = _json.loads(written.strip())
-        assert obj["type"] == "user"
-        assert obj["message"]["content"] == "abort now"
+        first_write = proc.stdin.write.call_args_list[0].args[0]
+        obj = _json.loads(first_write.strip())
+        assert obj["type"] == "control_request"
+        assert obj["request"]["subtype"] == "interrupt"
+        session.stop()
 
-    def test_interrupt_sets_cancel_event(self, tmp_path: Path) -> None:
+    def test_interrupt_sends_follow_up_as_user_message(self, tmp_path: Path) -> None:
+        """interrupt() sends follow-up content as the last stdin write."""
+        import json as _json
+
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        assert not session._cancel.is_set()
-        session.interrupt("stop")
-        assert session._cancel.is_set()
+        session.interrupt("abort now")
+        last_write = proc.stdin.write.call_args.args[0]
+        obj = _json.loads(last_write.strip())
+        assert obj["type"] == "user"
+        assert obj["message"]["content"] == "abort now"
+        session.stop()
+
+    def test_interrupt_drains_turn_before_follow_up(self, tmp_path: Path) -> None:
+        """interrupt() reads all old-turn events before sending the follow-up."""
+        import json as _json
+
+        result_line = _json.dumps({"type": "result", "result": "done"})
+        proc = _make_session_proc([result_line])
+        session = _make_session(tmp_path, proc)
+        session.interrupt("next")
+        # stdout was read (drain happened — readline called at least once)
+        assert proc.stdout.readline.call_count >= 1
+        # and follow-up was still sent
+        last_write = proc.stdin.write.call_args.args[0]
+        obj = _json.loads(last_write.strip())
+        assert obj["type"] == "user"
+        assert obj["message"]["content"] == "next"
+        session.stop()
+
+    def test_interrupt_sets_cancel_while_waiting_for_lock(self, tmp_path: Path) -> None:
+        """_cancel is set before interrupt() acquires the lock."""
+        import threading as _threading
+        import time as _time
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        lock_held = _threading.Event()
+        release = _threading.Event()
+        cancel_seen: list[bool] = []
+
+        def holder() -> None:
+            session._lock.acquire()
+            lock_held.set()
+            release.wait()
+            cancel_seen.append(session._cancel.is_set())
+            session._lock.release()
+
+        t_holder = _threading.Thread(target=holder)
+        t_holder.start()
+        lock_held.wait()
+
+        t_int = _threading.Thread(target=lambda: session.interrupt("follow"))
+        t_int.start()
+
+        # _cancel.set() is the very first thing interrupt() does — 50ms is
+        # far more than enough for the thread to reach it before we check.
+        _time.sleep(0.05)
+        release.set()
+        t_holder.join(timeout=2)
+        t_int.join(timeout=2)
+
+        assert cancel_seen == [True]
         session.stop()
 
     def test_interrupt_waits_for_lock_holder_then_sends(self, tmp_path: Path) -> None:
