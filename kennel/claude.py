@@ -208,6 +208,7 @@ def print_prompt(
         try:
             result = _claude(*args, timeout=timeout, runner=runner)
             if result.returncode != 0:
+                log.warning("print_prompt: claude exited %d", result.returncode)
                 return ""
             text = result.stdout.strip()
             if text:
@@ -221,7 +222,8 @@ def print_prompt(
                     attempt + 1,
                 )
                 _sleep(_EMPTY_RETRY_DELAY)
-        except subprocess.TimeoutExpired, FileNotFoundError:
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            log.warning("print_prompt: %s", exc)
             return ""
     log.warning("print_prompt: empty output after %d attempts", _EMPTY_RETRY_COUNT + 1)
     return ""
@@ -535,6 +537,9 @@ def generate_status_with_session(
                 runner=runner,
             )
             if result.returncode != 0:
+                log.warning(
+                    "generate_status_with_session: claude exited %d", result.returncode
+                )
                 return "", ""
             raw = result.stdout.strip()
             text = extract_result_text(raw)
@@ -552,7 +557,8 @@ def generate_status_with_session(
                     attempt + 1,
                 )
                 _sleep(_EMPTY_RETRY_DELAY)
-        except subprocess.TimeoutExpired, FileNotFoundError:
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            log.warning("generate_status_with_session: %s", exc)
             return "", ""
     log.warning(
         "generate_status_with_session: empty output after %d attempts",
