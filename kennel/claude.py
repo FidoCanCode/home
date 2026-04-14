@@ -638,12 +638,13 @@ class ClaudeSession:
         """
         log.warning("ClaudeSession: restarting after unexpected process death")
         _unregister_child(self._proc)
-        try:
-            self._proc.kill()
-            self._proc.wait(timeout=1.0)
-        except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
-            log.warning("ClaudeSession.restart: kill/wait failed: %s", exc)
-            raise
+        if self._proc.poll() is None:
+            try:
+                self._proc.kill()
+                self._proc.wait(timeout=1.0)
+            except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
+                log.warning("ClaudeSession.restart: kill/wait failed: %s", exc)
+                raise
         self._proc = self._spawn()
         _register_child(self._proc)
 

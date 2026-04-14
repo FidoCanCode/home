@@ -1611,6 +1611,21 @@ class TestClaudeSessionIsAliveAndRestart:
         assert any("restart" in r.message.lower() for r in caplog.records)
         session.stop()
 
+    def test_restart_skips_kill_when_process_already_dead(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        old_proc = _make_session_proc([], poll_returns=0)  # already dead
+        new_proc = _make_session_proc([])
+        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        fake_selector = MagicMock(return_value=([], [], []))
+        session = ClaudeSession(
+            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+        )
+        session.restart()
+        old_proc.kill.assert_not_called()
+        assert session._proc is new_proc
+        session.stop()
+
     def test_restart_raises_oserror_on_kill(self, tmp_path: Path, caplog) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
