@@ -522,8 +522,10 @@ class TestProcessAction:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
+        mock_gh = MagicMock()
         mock_ic = MagicMock(return_value=("ACT", ["do it"]))
         mock_task = MagicMock()
+        WebhookHandler._fn_get_github = MagicMock(return_value=mock_gh)
         WebhookHandler._fn_reply_to_issue_comment = mock_ic
         WebhookHandler._fn_create_task = mock_task
         WebhookHandler._fn_launch_worker = MagicMock()
@@ -535,6 +537,7 @@ class TestProcessAction:
             "do it",
             cfg,
             cfg.repos["owner/repo"],
+            mock_gh,
             thread={
                 "repo": "owner/repo",
                 "pr": 11,
@@ -696,12 +699,12 @@ class TestProcessAction:
             "action": "closed",
             "pull_request": {"number": 22, "merged": True},
         }
-        mock_gh_factory = MagicMock()
-        WebhookHandler._fn_get_github = mock_gh_factory
+        mock_gh = MagicMock()
+        WebhookHandler._fn_get_github = MagicMock(return_value=mock_gh)
         WebhookHandler._fn_launch_worker = MagicMock(side_effect=RuntimeError("boom"))
         _post_webhook(url, cfg, "pull_request", payload)
         time.sleep(0.2)
-        mock_gh_factory.assert_not_called()
+        mock_gh.add_reaction.assert_not_called()
 
     def test_process_action_error_no_reaction_when_comment_id_missing(
         self, server: tuple
@@ -719,13 +722,13 @@ class TestProcessAction:
             },
             "pull_request": {"number": 24},
         }
-        mock_gh_factory = MagicMock()
-        WebhookHandler._fn_get_github = mock_gh_factory
+        mock_gh = MagicMock()
+        WebhookHandler._fn_get_github = MagicMock(return_value=mock_gh)
         WebhookHandler._fn_reply_to_review = MagicMock(side_effect=RuntimeError("boom"))
         WebhookHandler._fn_launch_worker = MagicMock()
         _post_webhook(url, cfg, "pull_request_review", payload)
         time.sleep(0.2)
-        mock_gh_factory.assert_not_called()
+        mock_gh.add_reaction.assert_not_called()
 
     def test_process_action_error_reaction_failure_doesnt_crash(
         self, server: tuple

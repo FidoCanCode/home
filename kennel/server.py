@@ -398,6 +398,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.registry.report_activity(
                 repo_cfg.name, "handling webhook action", busy=True
             )
+            gh = type(self)._fn_get_github()
             handled = False
 
             if action.reply_to:
@@ -408,7 +409,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     category, titles = None, []
                 else:
                     category, titles = type(self)._fn_reply_to_comment(
-                        action, self.config, repo_cfg
+                        action, self.config, repo_cfg, gh
                     )
                     if cid:
                         _replied_comments.add(cid)
@@ -422,20 +423,21 @@ class WebhookHandler(BaseHTTPRequestHandler):
                             title,
                             self.config,
                             repo_cfg,
+                            gh,
                             thread=action.reply_to,
                             registry=self.registry,
                         )
 
             if action.review_comments:
                 type(self)._fn_reply_to_review(
-                    action, self.config, repo_cfg, already_replied=_replied_comments
+                    action, self.config, repo_cfg, gh, already_replied=_replied_comments
                 )
                 handled = True  # inline comments handled individually
 
             # Top-level PR comments (issue_comment) — no reply_to, but has comment_body
             if not handled and action.comment_body:
                 category, titles = type(self)._fn_reply_to_issue_comment(
-                    action, self.config, repo_cfg
+                    action, self.config, repo_cfg, gh
                 )
                 handled = True
                 # DEFER files a GitHub issue — no tasks.json entry.
@@ -445,6 +447,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                             title,
                             self.config,
                             repo_cfg,
+                            gh,
                             thread=action.thread,
                             registry=self.registry,
                         )
