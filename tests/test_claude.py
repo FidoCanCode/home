@@ -1796,13 +1796,23 @@ class TestClaudeSessionPreempt:
         t_preempt.start()
 
         # preempt is blocked on lock.acquire(); queue must still be empty
-        assert session._queued_content is None
+        assert len(session._queued_content) == 0
 
         release.set()
         t_holder.join(timeout=2)
         t_preempt.join(timeout=2)
 
-        assert session._queued_content == "queued"
+        assert list(session._queued_content) == ["queued"]
+        session.stop()
+
+    def test_preempt_twice_preserves_both_messages(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session.preempt("first")
+        session.preempt("second")
+        assert session.take_queued_content() == "first"
+        assert session.take_queued_content() == "second"
+        assert session.take_queued_content() is None
         session.stop()
 
     def test_take_queued_content_returns_none_when_empty(self, tmp_path: Path) -> None:

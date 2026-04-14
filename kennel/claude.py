@@ -9,6 +9,7 @@ import select
 import subprocess
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -565,7 +566,7 @@ class ClaudeSession:
         self._popen_fn = popen
         self._lock = threading.Lock()
         self._cancel = threading.Event()
-        self._queued_content: str | None = None
+        self._queued_content: deque[str] = deque()
         self._proc = self._spawn()
         _register_child(self._proc)
 
@@ -663,9 +664,12 @@ class ClaudeSession:
         Sets the cancel event so :meth:`iter_events` exits on its next poll
         cycle.  The lock holder's ``with session:`` block then unwinds and
         releases the lock.  This method acquires the lock (blocking until the
-        holder releases it), stores *content* as the queued follow-up turn,
-        and releases the lock.  The queued content is retrieved via
-        :meth:`take_queued_content` by the next caller that holds the lock.
+        holder releases it), appends *content* to the durable FIFO queue, and
+        releases the lock.  Multiple consecutive preempts accumulate — no
+        message is lost even if preempt is called again before the first
+        queued turn is consumed.  The queued content is retrieved one item at
+        a time via :meth:`take_queued_content` by the next caller that holds
+        the lock.
 
         Only for preempt paths (rescope abort, CI-failure cancel).  Normal
         turns must go through the context-manager lock.
@@ -673,21 +677,19 @@ class ClaudeSession:
         self._cancel.set()
         self._lock.acquire()
         try:
-            self._queued_content = content
+            self._queued_content.append(content)
         finally:
             self._lock.release()
 
     def take_queued_content(self) -> str | None:
-        """Return and clear any content queued by :meth:`preempt`.
+        """Pop and return the oldest queued preempt content, or ``None``.
 
-        Returns ``None`` if no preempt is pending.  Call this while holding
-        the session lock (via the context manager) so that reading and
-        clearing the queue is serialized with respect to a concurrent
-        :meth:`preempt` writing to it.
+        Returns ``None`` if the queue is empty.  Call this while holding the
+        session lock (via the context manager) so that reading and removing
+        from the queue is serialized with respect to a concurrent
+        :meth:`preempt` appending to it.
         """
-        content = self._queued_content
-        self._queued_content = None
-        return content
+        return self._queued_content.popleft() if self._queued_content else None
 
     def switch_model(self, model: str) -> None:
         """Switch the active model by sending a /model slash command.
