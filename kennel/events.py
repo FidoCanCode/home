@@ -206,21 +206,16 @@ def _load_persona(config: Config) -> str:
         return ""
 
 
-def _open_defer_issue(
-    gh: Any, repo: str, pr_url: str, title: str, comment: str
-) -> str | None:
+def _open_defer_issue(gh: Any, repo: str, pr_url: str, title: str, comment: str) -> str:
     """Create a tracking issue for a DEFER triage result.
 
-    Returns the new issue URL, or None if creation failed.
+    Returns the new issue URL.  Raises on any creation failure so the caller
+    fails closed rather than crafting a reply that references a missing issue.
     """
     issue_body = f"Deferred from {pr_url}\n\n> {comment}" if pr_url else comment
-    try:
-        url = gh.create_issue(repo, title, issue_body)
-        log.info("opened tracking issue for DEFER: %s", url)
-        return url
-    except Exception:
-        log.exception("failed to open tracking issue for DEFER")
-        return None
+    url = gh.create_issue(repo, title, issue_body)
+    log.info("opened tracking issue for DEFER: %s", url)
+    return url
 
 
 def _comment_lock(work_dir: Path, comment_id: int) -> Path:
@@ -336,7 +331,8 @@ def reply_to_comment(
     )
     log.info("triage: %s — %s", category, titles)
 
-    # Step 2: For DEFER, open a tracking issue before crafting the reply
+    # Step 2: For DEFER, open a tracking issue before crafting the reply.
+    # Raises on failure so we don't craft a reply referencing a missing issue.
     issue_url: str | None = None
     if category == "DEFER" and info.get("repo"):
         pr_url = f"https://github.com/{info['repo']}/pull/{info['pr']}"
@@ -604,7 +600,8 @@ def reply_to_issue_comment(
     )
     log.info("issue comment triage: %s — %s", category, titles)
 
-    # For DEFER, open a tracking issue before crafting the reply
+    # For DEFER, open a tracking issue before crafting the reply.
+    # Raises on failure so we don't craft a reply referencing a missing issue.
     issue_url: str | None = None
     if category == "DEFER":
         pr_url = f"https://github.com/{repo_full}/pull/{number}" if number else ""

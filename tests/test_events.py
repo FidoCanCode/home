@@ -837,8 +837,10 @@ class TestReplyToComment:
         assert posted
         assert cat == "DUMP"
 
-    def test_full_flow_defer_issue_creation_failure(self, tmp_path: Path) -> None:
-        """DEFER still posts a reply even when create_issue raises."""
+    def test_full_flow_defer_issue_creation_failure_propagates(
+        self, tmp_path: Path
+    ) -> None:
+        """DEFER issue creation failure propagates — no reply posted with missing issue."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -856,15 +858,15 @@ class TestReplyToComment:
 
         mock_gh = MagicMock()
         mock_gh.create_issue.side_effect = RuntimeError("network fail")
-        posted, cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            _print_prompt=fake_pp,
-            _gh=mock_gh,
-        )
-        assert posted
-        assert cat == "DEFER"
+        with pytest.raises(RuntimeError, match="network fail"):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=fake_pp,
+                _gh=mock_gh,
+            )
+        mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_empty_body_uses_fallback(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -1205,8 +1207,10 @@ class TestReplyToIssueComment:
             "Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
         )
 
-    def test_defer_reply_issue_creation_failure(self, tmp_path: Path) -> None:
-        """DEFER still posts a reply even when create_issue raises."""
+    def test_defer_reply_issue_creation_failure_propagates(
+        self, tmp_path: Path
+    ) -> None:
+        """DEFER issue creation failure propagates — no reply posted with missing issue."""
         cfg = self._cfg(tmp_path)
 
         def fake_pp(prompt, model, **kwargs):
@@ -1217,14 +1221,15 @@ class TestReplyToIssueComment:
         mock_gh = MagicMock()
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.create_issue.side_effect = RuntimeError("network fail")
-        cat, titles = reply_to_issue_comment(
-            self._action("big refactor"),
-            cfg,
-            self._repo_cfg(tmp_path),
-            _print_prompt=fake_pp,
-            _gh=mock_gh,
-        )
-        assert cat == "DEFER"
+        with pytest.raises(RuntimeError, match="network fail"):
+            reply_to_issue_comment(
+                self._action("big refactor"),
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=fake_pp,
+                _gh=mock_gh,
+            )
+        mock_gh.comment_issue.assert_not_called()
 
     def test_empty_body_fallback(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
