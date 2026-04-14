@@ -1982,13 +1982,31 @@ class TestGetCommitSummary:
             result = _get_commit_summary(tmp_path)
         assert result == ""
 
-    def test_returns_empty_stdout_when_git_fails(self, tmp_path: Path) -> None:
+    def test_returns_empty_on_nonzero_exit(self, tmp_path: Path) -> None:
         import subprocess as sp
 
         fake_result = sp.CompletedProcess(
             args=[], returncode=128, stdout="", stderr="not a git repo"
         )
         with patch("kennel.events.subprocess.run", return_value=fake_result):
+            result = _get_commit_summary(tmp_path)
+        assert result == ""
+
+    def test_nonzero_exit_ignored_even_with_stdout(self, tmp_path: Path) -> None:
+        import subprocess as sp
+
+        # Explicit guard: returncode wins over any stdout content.
+        fake_result = sp.CompletedProcess(
+            args=[], returncode=1, stdout="abc123 orphan output\n", stderr=""
+        )
+        with patch("kennel.events.subprocess.run", return_value=fake_result):
+            result = _get_commit_summary(tmp_path)
+        assert result == ""
+
+    def test_returns_empty_on_oserror(self, tmp_path: Path) -> None:
+        with patch(
+            "kennel.events.subprocess.run", side_effect=OSError("permission denied")
+        ):
             result = _get_commit_summary(tmp_path)
         assert result == ""
 

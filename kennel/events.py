@@ -695,9 +695,10 @@ def _maybe_abort_for_new_task(
 def _get_commit_summary(work_dir: Path) -> str:
     """Return a short ``git log --oneline`` summary of recent commits.
 
-    Used to give Opus context about what has already been implemented when
-    it reorders the pending task list.  Returns an empty string on any error
-    (e.g. not a git repository, git not found, timeout).
+    Best-effort enrichment: used to give Opus context about what has already
+    been implemented when it reorders the pending task list.  Returns an empty
+    string on nonzero exit, subprocess error, or missing git binary — callers
+    must not treat the result as authoritative.
     """
     try:
         result = subprocess.run(
@@ -707,8 +708,10 @@ def _get_commit_summary(work_dir: Path) -> str:
             text=True,
             timeout=10,
         )
+        if result.returncode != 0:
+            return ""
         return result.stdout.strip()
-    except Exception:
+    except subprocess.SubprocessError, OSError:
         return ""
 
 
