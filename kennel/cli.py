@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 class Cmd:
     """CLI command handler with injectable dependencies for testability."""
 
-    def __init__(self, *, github: GitHub | None = None) -> None:
+    def __init__(self, *, github: GitHub) -> None:
         self._github = github
 
     def _resolve_thread_if_ours(self, thread: dict) -> None:
@@ -28,7 +28,7 @@ class Cmd:
         if not (repo and pr and comment_id):
             return
 
-        github = self._github if self._github is not None else GitHub()
+        github = self._github
         try:
             us = github.get_user()
             comments = github.get_pull_comments(repo, pr)
@@ -131,10 +131,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None, *, _GitHub=GitHub) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    cmd = Cmd()
+    cmd = Cmd(github=_GitHub())
 
     match args.command:
         case "add":

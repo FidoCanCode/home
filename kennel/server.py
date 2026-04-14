@@ -179,17 +179,14 @@ def preflight_sub_dir(
     log.info("preflight: skill-files directory confirmed: %s", config.sub_dir)
 
 
-def preflight_gh_auth(
-    *,
-    _gh_factory: Callable[[], GitHub] = GitHub,
-) -> None:
+def preflight_gh_auth(gh: GitHub) -> None:
     """Verify gh auth works by fetching the authenticated bot user.
 
-    Raises :exc:`PreflightError` if the GitHub client cannot be constructed or
-    ``get_user()`` fails for any reason (bad token, network error, etc.).
+    Raises :exc:`PreflightError` if ``get_user()`` fails for any reason
+    (bad token, network error, etc.).
     """
     try:
-        bot_user = _gh_factory().get_user()
+        bot_user = gh.get_user()
     except Exception as e:
         raise PreflightError(f"preflight: gh auth check failed: {e}") from e
     log.info("preflight: gh auth confirmed — bot user is %r", bot_user)
@@ -289,9 +286,9 @@ def _pull_with_backoff(
 class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
     registry: WorkerRegistry
-    # Injectable callables — set as class attributes so HTTP-driven tests can
-    # replace them without patching module-level names.
-    _fn_get_github = GitHub
+    # Injectable collaborators — set as class attributes so HTTP-driven tests
+    # can replace them without patching module-level names.
+    gh: GitHub | None = None
     _fn_dispatch = dispatch
     _fn_reply_to_comment = reply_to_comment
     _fn_reply_to_review = reply_to_review
@@ -415,6 +412,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.registry.report_activity(
                 repo_cfg.name, "handling webhook action", busy=True
             )
+            gh = self.gh
             handled = False
 
             if action.reply_to:
@@ -425,7 +423,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     category, titles = None, []
                 else:
                     category, titles = type(self)._fn_reply_to_comment(
-                        action, self.config, repo_cfg
+                        action, self.config, repo_cfg, gh
                     )
                     if cid:
                         _replied_comments.add(cid)
@@ -439,20 +437,21 @@ class WebhookHandler(BaseHTTPRequestHandler):
                             title,
                             self.config,
                             repo_cfg,
+                            gh,
                             thread=action.reply_to,
                             registry=self.registry,
                         )
 
             if action.review_comments:
                 type(self)._fn_reply_to_review(
-                    action, self.config, repo_cfg, already_replied=_replied_comments
+                    action, self.config, repo_cfg, gh, already_replied=_replied_comments
                 )
                 handled = True  # inline comments handled individually
 
             # Top-level PR comments (issue_comment) — no reply_to, but has comment_body
             if not handled and action.comment_body:
                 category, titles = type(self)._fn_reply_to_issue_comment(
-                    action, self.config, repo_cfg
+                    action, self.config, repo_cfg, gh
                 )
                 handled = True
                 # DEFER files a GitHub issue — no tasks.json entry.
@@ -462,6 +461,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                             title,
                             self.config,
                             repo_cfg,
+                            gh,
                             thread=action.thread,
                             registry=self.registry,
                         )
@@ -487,8 +487,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         comment_id = thread.get("comment_id")
         comment_type = thread.get("comment_type", "issues")
         try:
-            gh = type(self)._fn_get_github()
-            gh.add_reaction(repo, comment_type, comment_id, "confused")
+            self.gh.add_reaction(repo, comment_type, comment_id, "confused")
         except Exception:
             log.exception("failed to post error reaction on comment %s", comment_id)
 
@@ -578,17 +577,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
         pass
 
 
-def populate_memberships(
-    config: Config, *, _gh_factory: Callable[[], GitHub] = GitHub
-) -> None:
+def populate_memberships(config: Config, gh: GitHub) -> None:
     """Fetch collaborators for each repo once at startup and store on RepoConfig.
 
     Mutates ``config.repos`` in place — each :class:`RepoConfig` is replaced
     with a new instance carrying a populated :class:`RepoMembership`.  Uses
-    one GitHub client instance for all repos.  Bot account (gh_user) is
-    excluded from every collaborator set.
+    the provided GitHub client instance for all repos.  Bot account (gh_user)
+    is excluded from every collaborator set.
     """
-    gh = _gh_factory()
     bot_user = gh.get_user()
     for name, repo_cfg in list(config.repos.items()):
         collabs = frozenset(c for c in gh.get_collaborators(name) if c != bot_user)
@@ -642,6 +638,7 @@ def run(
     _preflight_tools=preflight_tools,
     _preflight_sub_dir=preflight_sub_dir,
     _preflight_gh_auth=preflight_gh_auth,
+    _GitHub=GitHub,
 ) -> None:
     config = _from_args()
 
@@ -687,19 +684,21 @@ def run(
     sys.excepthook = _log_uncaught
     threading.excepthook = _log_thread_exception
 
+    gh = _GitHub()
     _startup_pull()
     try:
         _preflight_tools()
         _preflight_sub_dir(config)
-        _preflight_gh_auth()
+        _preflight_gh_auth(gh)
         _preflight_repo_identity(config.repos)
     except PreflightError as e:
         raise SystemExit(str(e)) from e
 
-    _populate_memberships(config)
+    _populate_memberships(config, gh)
 
     WebhookHandler.config = config
-    registry = _make_registry(config.repos)
+    WebhookHandler.gh = gh
+    registry = _make_registry(config.repos, gh)
     WebhookHandler.registry = registry
     _Watchdog(registry, config.repos).start_thread()
 

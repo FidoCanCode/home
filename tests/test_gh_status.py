@@ -72,7 +72,7 @@ class TestSetGhStatus:
             persona_path=persona_file,
             _generate_persona_status=lambda msg, p: "sniffing around",
             _generate_persona_emoji=lambda txt, p: ":dog2:",
-            _get_github=lambda: mock_gh,
+            _gh=mock_gh,
         )
         mock_gh.set_user_status.assert_called_once_with(
             "sniffing around", ":dog2:", busy=True
@@ -91,7 +91,7 @@ class TestSetGhStatus:
             persona_path=tmp_path / "nonexistent.md",
             _generate_persona_status=track_status,
             _generate_persona_emoji=lambda txt, p: ":dog:",
-            _get_github=lambda: mock_gh,
+            _gh=mock_gh,
         )
         assert calls == [""]
         mock_gh.set_user_status.assert_called_once()
@@ -109,7 +109,7 @@ class TestMain:
         orig = kennel.gh_status.set_gh_status
         kennel.gh_status.set_gh_status = fake_set
         try:
-            main(["set", "hello", "world"])
+            main(["set", "hello", "world"], _GitHub=MagicMock)
         finally:
             kennel.gh_status.set_gh_status = orig
         assert calls == ["hello world"]

@@ -1732,11 +1732,9 @@ class TestRun:
     def test_creates_worker_and_calls_run(self, tmp_path: Path) -> None:
         mock_worker = MagicMock()
         mock_worker.run.return_value = 0
-        with (
-            patch("kennel.worker.GitHub") as mock_gh_cls,
-            patch("kennel.worker.Worker", return_value=mock_worker) as mock_worker_cls,
-        ):
-            result = run(tmp_path)
+        mock_gh_cls = MagicMock()
+        with patch("kennel.worker.Worker", return_value=mock_worker) as mock_worker_cls:
+            result = run(tmp_path, _GitHub=mock_gh_cls)
         mock_worker_cls.assert_called_once_with(tmp_path, mock_gh_cls.return_value)
         mock_worker.run.assert_called_once()
         assert result == 0
@@ -1744,11 +1742,8 @@ class TestRun:
     def test_returns_worker_run_result(self, tmp_path: Path) -> None:
         mock_worker = MagicMock()
         mock_worker.run.return_value = 2
-        with (
-            patch("kennel.worker.GitHub"),
-            patch("kennel.worker.Worker", return_value=mock_worker),
-        ):
-            assert run(tmp_path) == 2
+        with patch("kennel.worker.Worker", return_value=mock_worker):
+            assert run(tmp_path, _GitHub=MagicMock()) == 2
 
 
 class TestCreateCompactScript:

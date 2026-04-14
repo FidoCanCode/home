@@ -556,8 +556,8 @@ class TestMaybeReact:
             "pulls",
             "owner/repo",
             cfg,
+            mock_gh,
             _print_prompt=MagicMock(return_value="heart"),
-            _gh=mock_gh,
         )
         mock_gh.add_reaction.assert_called_once_with("owner/repo", "pulls", 99, "heart")
 
@@ -570,8 +570,8 @@ class TestMaybeReact:
             "pulls",
             "owner/repo",
             cfg,
+            mock_gh,
             _print_prompt=MagicMock(return_value="NONE"),
-            _gh=mock_gh,
         )
         mock_gh.add_reaction.assert_not_called()
 
@@ -583,6 +583,7 @@ class TestMaybeReact:
             "pulls",
             "owner/repo",
             cfg,
+            MagicMock(),
             _print_prompt=MagicMock(return_value=""),
         )
 
@@ -594,6 +595,7 @@ class TestMaybeReact:
             "pulls",
             "owner/repo",
             cfg,
+            MagicMock(),
             _print_prompt=MagicMock(return_value=""),
         )
 
@@ -621,15 +623,15 @@ class TestMaybeReact:
             "pulls",
             "owner/repo",
             cfg,
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert "you are fido" in captured.get("prompt", "")
 
     def test_defaults_to_claude_print_prompt(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         with patch("kennel.claude.print_prompt", return_value="NONE") as mock_pp:
-            maybe_react("hi", 1, "pulls", "owner/repo", cfg)
+            maybe_react("hi", 1, "pulls", "owner/repo", cfg, MagicMock())
         mock_pp.assert_called_once()
 
 
@@ -650,7 +652,9 @@ class TestReplyToComment:
     def test_no_reply_to_returns_act(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(prompt="do stuff")
-        cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        cat, titles = reply_to_comment(
+            action, cfg, self._repo_cfg(tmp_path), MagicMock()
+        )
         assert cat == "ACT"
 
     def test_no_comment_body_returns_act(self, tmp_path: Path) -> None:
@@ -659,7 +663,9 @@ class TestReplyToComment:
             prompt="something",
             reply_to={"repo": "a/b", "pr": 1, "comment_id": 5},
         )
-        cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+        cat, titles = reply_to_comment(
+            action, cfg, self._repo_cfg(tmp_path), MagicMock()
+        )
         assert cat == "ACT"
 
     def test_full_flow_act(self, tmp_path: Path) -> None:
@@ -688,8 +694,8 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ACT"
         assert "logging" in titles[0].lower()
@@ -714,8 +720,8 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ASK"
 
@@ -739,8 +745,8 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ANSWER"
 
@@ -765,8 +771,8 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            mock_gh,
             _print_prompt=fake_pp,
-            _gh=mock_gh,
         )
         assert cat == "DO"
         assert titles == ["add result caching"]
@@ -794,8 +800,8 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            mock_gh,
             _print_prompt=fake_pp,
-            _gh=mock_gh,
         )
         assert cat == "DEFER"
         mock_gh.create_issue.assert_called_once_with(
@@ -824,8 +830,8 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "DUMP"
 
@@ -855,8 +861,8 @@ class TestReplyToComment:
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
+                mock_gh,
                 _print_prompt=fake_pp,
-                _gh=mock_gh,
             )
         mock_gh.reply_to_review_comment.assert_not_called()
 
@@ -880,8 +886,8 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ACT"  # still succeeds with fallback body
 
@@ -905,8 +911,8 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ACT"
 
@@ -927,7 +933,9 @@ class TestReplyToComment:
                 comment_body="competing update",
                 is_bot=False,
             )
-            cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
+            cat, titles = reply_to_comment(
+                action, cfg, self._repo_cfg(tmp_path), MagicMock()
+            )
             assert cat == "ACT"  # returns without posting
         finally:
             lock_fd.close()
@@ -953,8 +961,8 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ACT"
 
@@ -979,8 +987,8 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ACT"
         assert titles == ["add unit tests", "update documentation"]
@@ -1004,7 +1012,7 @@ class TestReplyToReview:
         cfg = self._cfg(tmp_path)
         action = Action(prompt="review", review_comments=None)
         # should return without error
-        reply_to_review(action, cfg, self._repo_cfg(tmp_path))
+        reply_to_review(action, cfg, self._repo_cfg(tmp_path), MagicMock())
 
     def test_fetches_and_replies(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -1023,7 +1031,7 @@ class TestReplyToReview:
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = [(100, "fix this"), (200, "nit")]
         reply_to_review(
-            action, cfg, self._repo_cfg(tmp_path), _print_prompt=fake_pp, _gh=mock_gh
+            action, cfg, self._repo_cfg(tmp_path), mock_gh, _print_prompt=fake_pp
         )
 
     def test_skips_already_replied(self, tmp_path: Path) -> None:
@@ -1045,9 +1053,9 @@ class TestReplyToReview:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            mock_gh,
             already_replied=already,
             _print_prompt=fake_pp,
-            _gh=mock_gh,
         )
         # no claude calls since all comments already replied
         assert not calls
@@ -1061,7 +1069,7 @@ class TestReplyToReview:
         mock_gh = MagicMock()
         mock_gh.get_review_comments.side_effect = Exception("network fail")
         reply_to_review(
-            action, cfg, self._repo_cfg(tmp_path), _gh=mock_gh
+            action, cfg, self._repo_cfg(tmp_path), mock_gh
         )  # should not raise
 
     def test_no_inline_comments(self, tmp_path: Path) -> None:
@@ -1073,7 +1081,7 @@ class TestReplyToReview:
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = []
         reply_to_review(
-            action, cfg, self._repo_cfg(tmp_path), _gh=mock_gh
+            action, cfg, self._repo_cfg(tmp_path), mock_gh
         )  # empty → no replies
 
 
@@ -1111,8 +1119,8 @@ class TestReplyToIssueComment:
             self._action(),
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ACT"
 
@@ -1128,8 +1136,8 @@ class TestReplyToIssueComment:
             self._action("unclear"),
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ASK"
 
@@ -1145,8 +1153,8 @@ class TestReplyToIssueComment:
             self._action("why?"),
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ANSWER"
 
@@ -1162,8 +1170,8 @@ class TestReplyToIssueComment:
             self._action("do it differently"),
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "DUMP"
 
@@ -1182,8 +1190,8 @@ class TestReplyToIssueComment:
             self._action("big refactor"),
             cfg,
             self._repo_cfg(tmp_path),
+            mock_gh,
             _print_prompt=fake_pp,
-            _gh=mock_gh,
         )
         assert cat == "DEFER"
         mock_gh.create_issue.assert_called_once_with(
@@ -1211,8 +1219,8 @@ class TestReplyToIssueComment:
                 self._action("big refactor"),
                 cfg,
                 self._repo_cfg(tmp_path),
+                mock_gh,
                 _print_prompt=fake_pp,
-                _gh=mock_gh,
             )
         mock_gh.comment_issue.assert_not_called()
 
@@ -1228,8 +1236,8 @@ class TestReplyToIssueComment:
             self._action(),
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ACT"
 
@@ -1245,8 +1253,8 @@ class TestReplyToIssueComment:
             self._action(),
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ACT"
 
@@ -1272,8 +1280,8 @@ class TestReplyToIssueComment:
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
+                mock_gh,
                 _print_prompt=fake_pp,
-                _gh=mock_gh,
             )
 
     def test_no_comment_id_skips_react(self, tmp_path: Path) -> None:
@@ -1294,8 +1302,8 @@ class TestReplyToIssueComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ACT"
 
@@ -1310,7 +1318,7 @@ class TestReplyToIssueComment:
 
         with patch("kennel.claude.print_prompt", side_effect=fake_pp) as mock_pp:
             cat, titles = reply_to_issue_comment(
-                action, cfg, self._repo_cfg(tmp_path), _gh=MagicMock()
+                action, cfg, self._repo_cfg(tmp_path), MagicMock()
             )
         assert mock_pp.called
         assert cat == "ACT"
@@ -1337,8 +1345,8 @@ class TestReplyToIssueComment:
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
+                mock_gh,
                 _print_prompt=fake_pp,
-                _gh=mock_gh,
             )
         assert cat == "ACT"
         mock_gh.get_issue_comments.assert_called_once_with("owner/repo", 7)
@@ -1363,8 +1371,8 @@ class TestReplyToIssueComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            mock_gh,
             _print_prompt=fake_pp,
-            _gh=mock_gh,
         )
         assert cat == "ACT"
 
@@ -1381,8 +1389,8 @@ class TestReplyToIssueComment:
             self._action("add tests and update docs"),
             cfg,
             self._repo_cfg(tmp_path),
+            MagicMock(),
             _print_prompt=fake_pp,
-            _gh=MagicMock(),
         )
         assert cat == "ACT"
         assert titles == ["add unit tests", "update documentation"]
@@ -1417,13 +1425,14 @@ class TestCreateTask:
     def test_calls_add_task_and_launch_sync(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        mock_gh = MagicMock()
         mock_tasks = self._mock_tasks()
         with patch("kennel.events.launch_sync") as mock_sync:
-            create_task("do something", cfg, repo_cfg, _tasks=mock_tasks)
+            create_task("do something", cfg, repo_cfg, mock_gh, _tasks=mock_tasks)
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=None
         )
-        mock_sync.assert_called_once_with(cfg, repo_cfg)
+        mock_sync.assert_called_once_with(cfg, repo_cfg, mock_gh)
 
     def test_passes_thread(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -1435,6 +1444,7 @@ class TestCreateTask:
                 "do something",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 thread=thread,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
@@ -1454,7 +1464,9 @@ class TestCreateTask:
         }
         mock_tasks = self._mock_tasks(fake_task)
         with patch("kennel.events.launch_sync"):
-            result = create_task("do something", cfg, repo_cfg, _tasks=mock_tasks)
+            result = create_task(
+                "do something", cfg, repo_cfg, MagicMock(), _tasks=mock_tasks
+            )
         assert result == fake_task
 
     def test_no_abort_without_registry(self, tmp_path: Path) -> None:
@@ -1491,6 +1503,7 @@ class TestCreateTask:
                 "Comment task",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 thread=thread,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
@@ -1529,6 +1542,7 @@ class TestCreateTask:
                 "Another plain task",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 registry=registry,
                 _tasks=mock_tasks,
             )  # no thread
@@ -1558,6 +1572,7 @@ class TestCreateTask:
                 "Comment task",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
@@ -1603,6 +1618,7 @@ class TestCreateTask:
                 "New thread task",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 thread=new_thread,
                 registry=registry,
                 _tasks=mock_tasks,
@@ -1629,6 +1645,7 @@ class TestCreateTask:
                 "Comment task",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
@@ -1659,6 +1676,7 @@ class TestCreateTask:
                 "Comment task",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
@@ -1689,6 +1707,7 @@ class TestCreateTask:
                 "Comment task",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
@@ -1743,6 +1762,7 @@ class TestCreateTask:
                 "Comment task",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
@@ -1773,6 +1793,7 @@ class TestCreateTask:
                 "Comment task",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
@@ -1802,6 +1823,7 @@ class TestCreateTask:
                 "Comment task",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
@@ -1818,7 +1840,14 @@ class TestCreateTask:
         fake_task = {"id": "t-ci", "title": "CI fix", "status": "pending", "type": "ci"}
         mock_tasks = self._mock_tasks(fake_task)
         with patch("kennel.events.launch_sync"):
-            create_task("CI fix", cfg, repo_cfg, registry=registry, _tasks=mock_tasks)
+            create_task(
+                "CI fix",
+                cfg,
+                repo_cfg,
+                MagicMock(),
+                registry=registry,
+                _tasks=mock_tasks,
+            )
         registry.abort_task.assert_called_once_with("owner/repo")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
@@ -1832,7 +1861,14 @@ class TestCreateTask:
         fake_task = {"id": "t-ci", "title": "CI fix", "status": "pending", "type": "ci"}
         mock_tasks = self._mock_tasks(fake_task)
         with patch("kennel.events.launch_sync"):
-            create_task("CI fix", cfg, repo_cfg, registry=registry, _tasks=mock_tasks)
+            create_task(
+                "CI fix",
+                cfg,
+                repo_cfg,
+                MagicMock(),
+                registry=registry,
+                _tasks=mock_tasks,
+            )
         registry.abort_task.assert_called_once_with("owner/repo")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
@@ -1851,7 +1887,12 @@ class TestCreateTask:
         mock_tasks = self._mock_tasks(fake_task)
         with patch("kennel.events.launch_sync"):
             create_task(
-                "New spec task", cfg, repo_cfg, registry=registry, _tasks=mock_tasks
+                "New spec task",
+                cfg,
+                repo_cfg,
+                MagicMock(),
+                registry=registry,
+                _tasks=mock_tasks,
             )
         registry.abort_task.assert_not_called()
 
@@ -1866,6 +1907,7 @@ class TestCreateTask:
             "type": "thread",
             "thread": thread,
         }
+        mock_gh = MagicMock()
         reorder_called: list[tuple] = []
         mock_tasks = self._mock_tasks(fake_task)
         with patch("kennel.events.launch_sync"):
@@ -1873,10 +1915,11 @@ class TestCreateTask:
                 "Comment task",
                 cfg,
                 repo_cfg,
+                mock_gh,
                 thread=thread,
                 _get_commit_summary_fn=lambda wd: "abc1234 add thing",
-                _reorder_background_fn=lambda wd, cs, cfg, rc, reg: (
-                    reorder_called.append((wd, cs, cfg, rc, reg))
+                _reorder_background_fn=lambda wd, cs, cfg, gh, rc, reg: (
+                    reorder_called.append((wd, cs, cfg, gh, rc, reg))
                 ),
                 _tasks=mock_tasks,
             )
@@ -1884,8 +1927,9 @@ class TestCreateTask:
         assert reorder_called[0][0] == tmp_path
         assert reorder_called[0][1] == "abc1234 add thing"
         assert reorder_called[0][2] is cfg
-        assert reorder_called[0][3] is repo_cfg
-        assert reorder_called[0][4] is None  # no registry passed
+        assert reorder_called[0][3] is mock_gh
+        assert reorder_called[0][4] is repo_cfg
+        assert reorder_called[0][5] is None  # no registry passed
 
     def test_spec_task_does_not_trigger_reorder(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -1903,6 +1947,7 @@ class TestCreateTask:
                 "Spec task",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 _reorder_background_fn=lambda *a: reorder_called.append(a),
                 _tasks=mock_tasks,
             )
@@ -1919,7 +1964,9 @@ class TestCreateTask:
             patch("kennel.events.launch_sync"),
             patch("kennel.events._rewrite_pr_description") as mock_rewrite,
         ):
-            create_task("Spec task", cfg, repo_cfg, _tasks=mock_tasks)  # thread=None
+            create_task(
+                "Spec task", cfg, repo_cfg, MagicMock(), _tasks=mock_tasks
+            )  # thread=None
         mock_rewrite.assert_not_called()
 
     def test_commit_summary_comes_from_get_commit_summary_fn(
@@ -1942,10 +1989,11 @@ class TestCreateTask:
                 "t",
                 cfg,
                 repo_cfg,
+                MagicMock(),
                 thread=thread,
                 _get_commit_summary_fn=lambda wd: "custom summary",
-                _reorder_background_fn=lambda wd, cs, cfg, rc, reg: summaries.append(
-                    cs
+                _reorder_background_fn=lambda wd, cs, cfg, gh, rc, reg: (
+                    summaries.append(cs)
                 ),
                 _tasks=mock_tasks,
             )
@@ -1956,7 +2004,7 @@ class TestCreateTask:
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         with patch("kennel.events.launch_sync"):
-            result = create_task("do a thing", cfg, repo_cfg)
+            result = create_task("do a thing", cfg, repo_cfg, MagicMock())
         assert result["title"] == "do a thing"
         from kennel.tasks import list_tasks
 
@@ -2058,8 +2106,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "some commits",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
         )
@@ -2074,8 +2122,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "commits",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
         )
@@ -2090,8 +2138,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "feat: add parser",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
         )
@@ -2108,8 +2156,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "commits",
             self._cfg(tmp_path),
+            mock_gh,
             _start=lambda t: started.append(t),
-            _gh=mock_gh,
             _reorder_fn=mock_reorder,
             _coalesce_state={},
         )
@@ -2133,7 +2181,7 @@ class TestReorderTasksBackground:
         }
         with patch("kennel.events._notify_thread_change") as mock_notify:
             on_changes([change])
-        mock_notify.assert_called_once_with(change, self._cfg(tmp_path), _gh=mock_gh)
+        mock_notify.assert_called_once_with(change, self._cfg(tmp_path), mock_gh)
 
     def test_on_inprogress_affected_aborts_worker_via_registry(
         self, tmp_path: Path
@@ -2146,10 +2194,10 @@ class TestReorderTasksBackground:
             tmp_path,
             "commits",
             self._cfg(tmp_path),
+            MagicMock(),
             repo_cfg=repo_cfg,
             registry=registry,
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
         )
@@ -2167,8 +2215,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "commits",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
         )
@@ -2187,8 +2235,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "commits",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _rewrite_fn=mock_rewrite,
             _reorder_fn=mock_reorder,
             _coalesce_state={},
@@ -2213,8 +2261,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "commits",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _rewrite_fn=mock_rewrite,
             _print_prompt=fake_pp,
             _reorder_fn=mock_reorder,
@@ -2236,8 +2284,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "cs1",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2249,8 +2297,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "cs2",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2268,8 +2316,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "cs1",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2278,8 +2326,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "cs2",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2302,8 +2350,8 @@ class TestReorderTasksBackground:
                 tmp_path,
                 cs,
                 self._cfg(tmp_path),
+                MagicMock(),
                 _start=lambda t: started.append(t),
-                _gh=MagicMock(),
                 _reorder_fn=mock_reorder,
                 _coalesce_state=state,
             )
@@ -2325,8 +2373,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "cs",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2345,8 +2393,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "cs1",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2356,8 +2404,8 @@ class TestReorderTasksBackground:
             tmp_path,
             "cs2",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2375,8 +2423,8 @@ class TestReorderTasksBackground:
             dir_a,
             "cs",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2384,8 +2432,8 @@ class TestReorderTasksBackground:
             dir_b,
             "cs",
             self._cfg(tmp_path),
+            MagicMock(),
             _start=lambda t: started.append(t),
-            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2426,7 +2474,7 @@ class TestNotifyThreadChange:
         mock_gh = MagicMock()
         change = {"task": self._task(), "kind": "completed"}
         _notify_thread_change(
-            change, cfg, _print_prompt=MagicMock(return_value="Noted!"), _gh=mock_gh
+            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="Noted!")
         )
         mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Noted!")
 
@@ -2440,7 +2488,7 @@ class TestNotifyThreadChange:
             "new_description": "",
         }
         _notify_thread_change(
-            change, cfg, _print_prompt=MagicMock(return_value="Updated!"), _gh=mock_gh
+            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="Updated!")
         )
         mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Updated!")
 
@@ -2450,7 +2498,7 @@ class TestNotifyThreadChange:
         task = self._task()
         task["thread"] = {}
         change = {"task": task, "kind": "completed"}
-        _notify_thread_change(change, cfg, _print_prompt=MagicMock(), _gh=mock_gh)
+        _notify_thread_change(change, cfg, mock_gh, _print_prompt=MagicMock())
         mock_gh.comment_issue.assert_not_called()
 
     def test_empty_opus_uses_fallback_for_completed(self, tmp_path: Path) -> None:
@@ -2458,7 +2506,7 @@ class TestNotifyThreadChange:
         mock_gh = MagicMock()
         change = {"task": self._task(), "kind": "completed"}
         _notify_thread_change(
-            change, cfg, _print_prompt=MagicMock(return_value=""), _gh=mock_gh
+            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="")
         )
         body = mock_gh.comment_issue.call_args[0][2]
         assert "Fix the thing" in body
@@ -2474,7 +2522,7 @@ class TestNotifyThreadChange:
             "new_description": "",
         }
         _notify_thread_change(
-            change, cfg, _print_prompt=MagicMock(return_value=""), _gh=mock_gh
+            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="")
         )
         body = mock_gh.comment_issue.call_args[0][2]
         assert "New title" in body
@@ -2489,8 +2537,8 @@ class TestNotifyThreadChange:
         _notify_thread_change(
             change,
             cfg,
+            mock_gh,
             _print_prompt=MagicMock(return_value="In-thread reply"),
-            _gh=mock_gh,
         )
         mock_gh.reply_to_review_comment.assert_called_once_with(
             "owner/repo", 42, "In-thread reply", 999
@@ -2506,7 +2554,7 @@ class TestNotifyThreadChange:
         change = {"task": task, "kind": "completed"}
         # Should not raise
         _notify_thread_change(
-            change, cfg, _print_prompt=MagicMock(return_value="ok"), _gh=mock_gh
+            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="ok")
         )
 
     def test_no_comment_type_defaults_to_issue_comment(self, tmp_path: Path) -> None:
@@ -2516,7 +2564,7 @@ class TestNotifyThreadChange:
         del task["thread"]["comment_type"]
         change = {"task": task, "kind": "completed"}
         _notify_thread_change(
-            change, cfg, _print_prompt=MagicMock(return_value="Fallback"), _gh=mock_gh
+            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="Fallback")
         )
         mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Fallback")
         mock_gh.reply_to_review_comment.assert_not_called()
@@ -2530,18 +2578,8 @@ class TestNotifyThreadChange:
             return "ok"
 
         change = {"task": self._task(), "kind": "completed"}
-        _notify_thread_change(change, cfg, _print_prompt=fake_pp, _gh=MagicMock())
+        _notify_thread_change(change, cfg, MagicMock(), _print_prompt=fake_pp)
         assert "alice" in captured_prompt[0]
-
-    def test_gh_none_uses_get_github(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        change = {"task": self._task(), "kind": "completed"}
-        with patch("kennel.events.get_github", return_value=mock_gh):
-            _notify_thread_change(
-                change, cfg, _print_prompt=MagicMock(return_value="ok")
-            )
-        mock_gh.comment_issue.assert_called_once()
 
     def test_comment_issue_exception_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -2550,7 +2588,7 @@ class TestNotifyThreadChange:
         change = {"task": self._task(), "kind": "completed"}
         # Should not raise
         _notify_thread_change(
-            change, cfg, _print_prompt=MagicMock(return_value="ok"), _gh=mock_gh
+            change, cfg, mock_gh, _print_prompt=MagicMock(return_value="ok")
         )
 
     def test_default_print_prompt_uses_claude(self, tmp_path: Path) -> None:
@@ -2558,7 +2596,7 @@ class TestNotifyThreadChange:
         mock_gh = MagicMock()
         change = {"task": self._task(), "kind": "completed"}
         with patch("kennel.events.claude.print_prompt", return_value="Auto reply"):
-            _notify_thread_change(change, cfg, _gh=mock_gh)
+            _notify_thread_change(change, cfg, mock_gh)
         mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Auto reply")
 
 
@@ -2580,15 +2618,13 @@ class TestLaunchSync:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         with patch("kennel.tasks.sync_tasks_background") as mock_sync:
-            launch_sync(cfg, self._repo_cfg(tmp_path), _gh=mock_gh)
+            launch_sync(cfg, self._repo_cfg(tmp_path), mock_gh)
         mock_sync.assert_called_once_with(tmp_path, mock_gh)
 
     def test_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         with patch("kennel.tasks.sync_tasks_background"):
-            launch_sync(
-                cfg, self._repo_cfg(tmp_path), _gh=MagicMock()
-            )  # should not raise
+            launch_sync(cfg, self._repo_cfg(tmp_path), MagicMock())  # should not raise
 
 
 class TestLaunchWorker:
@@ -2743,8 +2779,8 @@ class TestMaybeReactGhException:
             "pulls",
             "owner/repo",
             cfg,
+            mock_gh,
             _print_prompt=MagicMock(return_value="heart"),
-            _gh=mock_gh,
         )  # must not raise
 
 
@@ -2784,8 +2820,8 @@ class TestReplyToCommentElseBranch:
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
+                MagicMock(),
                 _print_prompt=MagicMock(return_value="I'll look into this."),
-                _gh=MagicMock(),
             )
         assert cat == "UNKNOWN_CAT"
 
@@ -2813,8 +2849,8 @@ class TestReplyToCommentElseBranch:
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
+                mock_gh,
                 _print_prompt=fake_pp,
-                _gh=mock_gh,
             )
 
 
@@ -2854,9 +2890,9 @@ class TestReplyToReviewAlreadyRepliedTracking:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            mock_gh,
             already_replied=already,
             _print_prompt=fake_pp,
-            _gh=mock_gh,
         )
         assert 500 in already
 
@@ -2892,9 +2928,9 @@ class TestReplyToReviewAlreadyRepliedTracking:
             action,
             cfg,
             self._repo_cfg(tmp_path),
+            mock_gh,
             already_replied=already,
             _print_prompt=fake_pp,
-            _gh=mock_gh,
         )
         assert 501 not in already  # post failed — should not be marked as replied
         assert 502 in already  # second comment still processed
@@ -2950,8 +2986,8 @@ class TestReplyToCommentTerseEnrichment:
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
+                mock_gh,
                 _print_prompt=MagicMock(return_value="On it!"),
-                _gh=mock_gh,
             )
 
         mock_gh.fetch_sibling_threads.assert_called_once_with("owner/repo", 5)
@@ -2979,8 +3015,8 @@ class TestReplyToCommentTerseEnrichment:
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
+                mock_gh,
                 _print_prompt=fake_pp,
-                _gh=mock_gh,
             )
 
         mock_gh.fetch_sibling_threads.assert_not_called()
@@ -3007,8 +3043,8 @@ class TestReplyToCommentTerseEnrichment:
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
+                mock_gh,
                 _print_prompt=fake_pp,
-                _gh=mock_gh,
             )
 
         assert cat == "ACT"
@@ -3041,8 +3077,8 @@ class TestReplyToCommentTerseEnrichment:
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
+                mock_gh,
                 _print_prompt=MagicMock(return_value="On it!"),
-                _gh=mock_gh,
             )
 
         assert "sibling_threads" not in captured_context

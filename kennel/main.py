@@ -5,14 +5,19 @@ from __future__ import annotations
 import sys
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(
+    argv: list[str] | None = None,
+    *,
+    _GitHub=None,
+) -> None:
     args = sys.argv[1:] if argv is None else argv
 
     # TODO: remove this compat shim once shell scripts are fully removed
     if args and args[0] == "task":
         from kennel.cli import main as task_main
+        from kennel.github import GitHub
 
-        task_main(args[1:])
+        task_main(args[1:], _GitHub=_GitHub or GitHub)
     elif args and args[0] == "status":
         from kennel.status import collect, format_status
 
@@ -32,7 +37,7 @@ def main(argv: list[str] | None = None) -> None:
         from kennel.tasks import sync_tasks
 
         work_dir = Path(args[1]) if len(args) > 1 else Path.cwd()
-        sync_tasks(work_dir, GitHub())
+        sync_tasks(work_dir, (_GitHub or GitHub)())
     else:
         from kennel.server import run as server_run
 

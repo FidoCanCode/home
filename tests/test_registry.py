@@ -430,17 +430,15 @@ class TestMakeThread:
     ) -> None:
         cfg = _repo("foo/bar", tmp_path)
         mock_registry = MagicMock()
-        mock_gh_cls = MagicMock()
+        mock_gh = MagicMock()
         mock_wt_cls = MagicMock()
-        result = _make_thread(
-            cfg, mock_registry, _GitHub=mock_gh_cls, _WorkerThread=mock_wt_cls
-        )
+        result = _make_thread(cfg, mock_registry, gh=mock_gh, _WorkerThread=mock_wt_cls)
         from kennel.config import RepoMembership
 
         mock_wt_cls.assert_called_once_with(
             tmp_path,
             "foo/bar",
-            mock_gh_cls.return_value,
+            mock_gh,
             mock_registry,
             RepoMembership(),
         )
@@ -451,7 +449,7 @@ class TestMakeThread:
         work_dir.mkdir()
         cfg = _repo("foo/bar", work_dir)
         mock_wt_cls = MagicMock()
-        _make_thread(cfg, MagicMock(), _GitHub=MagicMock(), _WorkerThread=mock_wt_cls)
+        _make_thread(cfg, MagicMock(), gh=MagicMock(), _WorkerThread=mock_wt_cls)
         assert mock_wt_cls.call_args[0][0] == work_dir
 
 
@@ -460,7 +458,9 @@ class TestMakeRegistry:
         cfg = _repo("foo/bar", tmp_path)
         mock_thread = MagicMock()
         result = make_registry(
-            {"foo/bar": cfg}, _thread_factory=MagicMock(return_value=mock_thread)
+            {"foo/bar": cfg},
+            MagicMock(),
+            _thread_factory=MagicMock(return_value=mock_thread),
         )
         assert isinstance(result, WorkerRegistry)
 
@@ -469,12 +469,16 @@ class TestMakeRegistry:
         cfg2 = _repo("foo/baz", tmp_path)
         mock_thread = MagicMock()
         mock_factory = MagicMock(return_value=mock_thread)
-        make_registry({"foo/bar": cfg1, "foo/baz": cfg2}, _thread_factory=mock_factory)
+        make_registry(
+            {"foo/bar": cfg1, "foo/baz": cfg2},
+            MagicMock(),
+            _thread_factory=mock_factory,
+        )
         assert mock_factory.call_count == 2
         assert mock_thread.start.call_count == 2
 
     def test_empty_repos_returns_empty_registry(self) -> None:
-        result = make_registry({})
+        result = make_registry({}, MagicMock())
         assert isinstance(result, WorkerRegistry)
         assert result.is_alive("anything") is False
 
@@ -483,7 +487,9 @@ class TestMakeRegistry:
         mock_thread = MagicMock()
         mock_thread.is_alive.return_value = True
         reg = make_registry(
-            {"foo/bar": cfg}, _thread_factory=MagicMock(return_value=mock_thread)
+            {"foo/bar": cfg},
+            MagicMock(),
+            _thread_factory=MagicMock(return_value=mock_thread),
         )
         assert reg.is_alive("foo/bar") is True
 

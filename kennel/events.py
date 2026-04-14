@@ -11,7 +11,7 @@ from typing import Any
 
 from kennel import claude
 from kennel.config import Config, RepoConfig
-from kennel.github import get_github
+from kennel.github import GitHub
 from kennel.prompts import (
     Prompts,
     issue_reply_instruction,
@@ -231,9 +231,9 @@ def maybe_react(
     comment_type: str,
     repo: str,
     config: Config,
+    gh: GitHub,
     *,
     _print_prompt=None,
-    _gh=None,
 ) -> None:
     """Let Fido decide whether to react to a comment with an emoji.
 
@@ -254,7 +254,6 @@ def maybe_react(
         log.debug("fido chose not to react (got: %s)", reaction)
         return
 
-    gh = _gh if _gh is not None else get_github()
     log.info("fido reacts with %s to comment %s", reaction, comment_id)
     try:
         gh.add_reaction(repo, comment_type, comment_id, reaction)
@@ -266,9 +265,9 @@ def reply_to_comment(
     action: Action,
     config: Config,
     repo_cfg: RepoConfig,
+    gh: GitHub,
     *,
     _print_prompt=None,
-    _gh=None,
 ) -> tuple[str, list[str]]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
 
@@ -298,7 +297,6 @@ def reply_to_comment(
     else:
         lock_fd = None
 
-    gh = _gh if _gh is not None else get_github()
     prompts = Prompts(_load_persona(config))
     comment = action.comment_body
 
@@ -374,8 +372,8 @@ def reply_to_comment(
         "pulls",
         info.get("repo", ""),
         config,
+        gh,
         _print_prompt=_print_prompt,
-        _gh=gh,
     )
 
     # For DUMP: also resolve the thread
@@ -399,10 +397,10 @@ def reply_to_review(
     action: Action,
     config: Config,
     repo_cfg: RepoConfig,
+    gh: GitHub,
     already_replied: set[int] | None = None,
     *,
     _print_prompt=None,
-    _gh=None,
 ) -> None:
     """Fetch inline comments from a review and reply to each."""
     if _print_prompt is None:
@@ -411,7 +409,6 @@ def reply_to_review(
     if not info:
         return
 
-    gh = _gh if _gh is not None else get_github()
     log.info(
         "fetching review comments for PR #%s review %s", info["pr"], info["review_id"]
     )
@@ -452,8 +449,8 @@ def reply_to_review(
                 ),
                 config,
                 repo_cfg,
+                gh,
                 _print_prompt=_print_prompt,
-                _gh=gh,
             )
         except Exception:
             log.exception("failed to reply to review comment %s — skipping", cid)
@@ -555,9 +552,9 @@ def reply_to_issue_comment(
     action: Action,
     config: Config,
     repo_cfg: RepoConfig,
+    gh: GitHub,
     *,
     _print_prompt=None,
-    _gh=None,
 ) -> tuple[str, list[str]]:
     """Triage and reply to a top-level PR comment (issue_comment event).
 
@@ -571,7 +568,6 @@ def reply_to_issue_comment(
     m = re.search(r"#(\d+)", action.prompt)
     number = m.group(1) if m else ""
 
-    gh = _gh if _gh is not None else get_github()
     repo_full = gh.get_repo_info(cwd=repo_cfg.work_dir)
 
     # Fetch full conversation history for context
@@ -636,8 +632,8 @@ def reply_to_issue_comment(
             "issues",
             repo_full,
             config,
+            gh,
             _print_prompt=_print_prompt,
-            _gh=gh,
         )
 
     return (category, titles)
@@ -718,9 +714,9 @@ def _get_commit_summary(work_dir: Path) -> str:
 def _notify_thread_change(
     change: dict[str, Any],
     config: Config,
+    gh: GitHub,
     *,
     _print_prompt=None,
-    _gh=None,
 ) -> None:
     """Post a brief comment notifying a commenter that their task was rescoped.
 
@@ -734,7 +730,6 @@ def _notify_thread_change(
     """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
-    gh = _gh if _gh is not None else get_github()
 
     task = change["task"]
     thread = task.get("thread") or {}
@@ -898,7 +893,7 @@ def _make_reorder_kwargs(
 
     def on_changes(changes: list[dict[str, Any]]) -> None:
         for change in changes:
-            _notify_thread_change(change, config, _gh=gh)
+            _notify_thread_change(change, config, gh)
 
     def on_done() -> None:
         rewrite_fn(work_dir, gh, _print_prompt=print_prompt)
@@ -921,11 +916,11 @@ def _reorder_tasks_background(
     work_dir: Path,
     commit_summary: str,
     config: Config,
+    gh: GitHub,
     repo_cfg: RepoConfig | None = None,
     registry: WorkerRegistry | None = None,
     *,
     _start=threading.Thread.start,
-    _gh=None,
     _print_prompt=None,
     _rewrite_fn=None,
     _reorder_fn=None,
@@ -955,7 +950,6 @@ def _reorder_tasks_background(
     from kennel.tasks import reorder_tasks as _reorder_tasks
 
     reorder = _reorder_fn if _reorder_fn is not None else _reorder_tasks
-    gh = _gh if _gh is not None else get_github()
     rewrite_fn = _rewrite_fn if _rewrite_fn is not None else _rewrite_pr_description
     state = _coalesce_state if _coalesce_state is not None else _reorder_coalesce
 
@@ -998,6 +992,7 @@ def create_task(
     prompt: str,
     config: Config,
     repo_cfg: RepoConfig,
+    gh: GitHub,
     thread: dict[str, Any] | None = None,
     registry: WorkerRegistry | None = None,
     *,
@@ -1027,22 +1022,21 @@ def create_task(
     task_type = TaskType.THREAD if thread else TaskType.SPEC
     log.info("creating task: %s", prompt[:100])
     new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)
-    launch_sync(config, repo_cfg)
+    launch_sync(config, repo_cfg, gh)
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)
         _reorder_background_fn(
-            repo_cfg.work_dir, commit_summary, config, repo_cfg, registry
+            repo_cfg.work_dir, commit_summary, config, gh, repo_cfg, registry
         )
     if registry is not None:
         _maybe_abort_for_new_task(repo_cfg, new_task, registry)
     return new_task
 
 
-def launch_sync(config: Config, repo_cfg: RepoConfig, *, _gh=None) -> None:
+def launch_sync(config: Config, repo_cfg: RepoConfig, gh: GitHub) -> None:
     """Sync tasks.json → PR body in a background thread."""
     from kennel.tasks import sync_tasks_background
 
-    gh = _gh if _gh is not None else get_github()
     sync_tasks_background(repo_cfg.work_dir, gh)
     log.info("sync-tasks launched")
 

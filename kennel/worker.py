@@ -1893,11 +1893,11 @@ class WorkerThread(threading.Thread):
             raise
 
 
-def run(work_dir: Path) -> int:
+def run(work_dir: Path, *, _GitHub: type[GitHub] = GitHub) -> int:
     """Run one iteration of the worker loop.
 
     Creates a :class:`Worker` with a live :class:`~kennel.github.GitHub` client
-    and delegates to :meth:`Worker.run`.  For testing, construct ``Worker``
-    directly with a mock ``gh`` instead of patching module-level names.
+    and delegates to :meth:`Worker.run`.  Pass ``_GitHub=MockClass`` in tests
+    instead of patching the module-level name.
     """
-    return Worker(work_dir, GitHub()).run()
+    return Worker(work_dir, _GitHub()).run()
