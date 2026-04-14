@@ -44,6 +44,14 @@ _PULL_BACKOFF_DELAYS: tuple[int, ...] = (10, 30, 60)
 _PULL_BUDGET_SECONDS: float = 600.0
 
 
+class PreflightError(RuntimeError):
+    """Raised by preflight checks when a startup precondition is not met.
+
+    Caught by :func:`run` and converted to :exc:`SystemExit` so individual
+    preflight functions remain testable without triggering process exit.
+    """
+
+
 def _runner_dir() -> Path:
     """Return the runner clone directory — where the running kennel code lives."""
     return Path(__file__).resolve().parents[1]
@@ -101,10 +109,8 @@ def preflight_repo_identity(
 ) -> None:
     """Verify each configured work_dir is a git repo whose origin matches its name.
 
-    Raises :exc:`SystemExit` if any repo's origin remote can't be read, can't
-    be parsed, or doesn't match the configured ``owner/repo`` name.  This runs
-    once at startup so misconfigured repo mappings fail immediately rather than
-    surfacing as silent divergence deep inside webhook or worker paths.
+    Raises :exc:`PreflightError` if any repo's origin remote can't be read,
+    can't be parsed, or doesn't match the configured ``owner/repo`` name.
     """
     for name, repo_cfg in repos.items():
         try:
@@ -116,19 +122,19 @@ def preflight_repo_identity(
                 check=True,
             )
         except subprocess.CalledProcessError as e:
-            raise SystemExit(
+            raise PreflightError(
                 f"preflight: {name}: git remote get-url failed: {e}"
             ) from e
         except FileNotFoundError as e:
-            raise SystemExit(f"preflight: {name}: git not found: {e}") from e
+            raise PreflightError(f"preflight: {name}: git not found: {e}") from e
         url = result.stdout.strip()
         actual = _parse_repo_from_url(url)
         if actual is None:
-            raise SystemExit(
+            raise PreflightError(
                 f"preflight: {name}: could not parse owner/repo from origin remote: {url!r}"
             )
         if actual != name:
-            raise SystemExit(
+            raise PreflightError(
                 f"preflight: {name}: origin remote is {actual!r} — expected {name!r}"
             )
         log.info("preflight: %s: work_dir identity confirmed", name)
@@ -143,13 +149,13 @@ def preflight_tools(
 ) -> None:
     """Verify that all required CLI tools are on PATH.
 
-    Raises :exc:`SystemExit` naming the first missing tool.  Runs once at
-    startup so a missing binary is caught immediately rather than discovered
-    inside a worker or webhook handler hours later.
+    Raises :exc:`PreflightError` naming the first missing tool.
     """
     for tool in _REQUIRED_TOOLS:
         if _which(tool) is None:
-            raise SystemExit(f"preflight: required tool not found on PATH: {tool!r}")
+            raise PreflightError(
+                f"preflight: required tool not found on PATH: {tool!r}"
+            )
     log.info("preflight: all required tools found: %s", ", ".join(_REQUIRED_TOOLS))
 
 
@@ -160,13 +166,13 @@ def preflight_sub_dir(
 ) -> None:
     """Verify that the skill-files directory exists.
 
-    Raises :exc:`SystemExit` if ``config.sub_dir`` is not an existing directory.
-    Workers read ``persona.md`` and sub-skill files from here on every task
-    run — a missing directory causes every worker invocation to fail with an
-    obscure I/O error rather than a clear startup message.
+    Raises :exc:`PreflightError` if ``config.sub_dir`` is not an existing
+    directory.  Workers read ``persona.md`` and sub-skill files from here on
+    every task run — a missing directory causes every worker invocation to fail
+    with an obscure I/O error rather than a clear startup message.
     """
     if not _is_dir(config.sub_dir):
-        raise SystemExit(
+        raise PreflightError(
             f"preflight: skill-files directory not found: {config.sub_dir}"
         )
     log.info("preflight: skill-files directory confirmed: %s", config.sub_dir)
@@ -178,15 +184,13 @@ def preflight_gh_auth(
 ) -> None:
     """Verify gh auth works by fetching the authenticated bot user.
 
-    Raises :exc:`SystemExit` if the GitHub client cannot be constructed or
+    Raises :exc:`PreflightError` if the GitHub client cannot be constructed or
     ``get_user()`` fails for any reason (bad token, network error, etc.).
-    Runs once at startup so auth failures surface immediately rather than
-    deep inside a webhook or worker path.
     """
     try:
         bot_user = _gh_factory().get_user()
     except Exception as e:
-        raise SystemExit(f"preflight: gh auth check failed: {e}") from e
+        raise PreflightError(f"preflight: gh auth check failed: {e}") from e
     log.info("preflight: gh auth confirmed — bot user is %r", bot_user)
 
 
@@ -651,10 +655,13 @@ def run(
     threading.excepthook = _log_thread_exception
 
     _startup_pull()
-    _preflight_tools()
-    _preflight_sub_dir(config)
-    _preflight_gh_auth()
-    _preflight_repo_identity(config.repos)
+    try:
+        _preflight_tools()
+        _preflight_sub_dir(config)
+        _preflight_gh_auth()
+        _preflight_repo_identity(config.repos)
+    except PreflightError as e:
+        raise SystemExit(str(e)) from e
 
     _populate_memberships(config)
 

@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kennel.config import Config, RepoConfig
-from kennel.server import WebhookHandler
+from kennel.server import PreflightError, WebhookHandler
 
 
 def _config(tmp_path: Path) -> Config:
@@ -1357,7 +1357,7 @@ class TestPreflightRepoIdentity:
         mock_run = MagicMock(
             return_value=MagicMock(stdout="git@github.com:other/thing.git\n")
         )
-        with pytest.raises(SystemExit, match="other/thing"):
+        with pytest.raises(PreflightError, match="other/thing"):
             preflight_repo_identity(repos, _run=mock_run)
 
     def test_raises_on_subprocess_error(self, tmp_path: Path) -> None:
@@ -1365,7 +1365,7 @@ class TestPreflightRepoIdentity:
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
         mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, []))
-        with pytest.raises(SystemExit):
+        with pytest.raises(PreflightError):
             preflight_repo_identity(repos, _run=mock_run)
 
     def test_raises_when_git_not_found(self, tmp_path: Path) -> None:
@@ -1373,7 +1373,7 @@ class TestPreflightRepoIdentity:
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
         mock_run = MagicMock(side_effect=FileNotFoundError())
-        with pytest.raises(SystemExit):
+        with pytest.raises(PreflightError):
             preflight_repo_identity(repos, _run=mock_run)
 
     def test_raises_on_unparseable_url(self, tmp_path: Path) -> None:
@@ -1381,7 +1381,7 @@ class TestPreflightRepoIdentity:
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
         mock_run = MagicMock(return_value=MagicMock(stdout="garbage\n"))
-        with pytest.raises(SystemExit):
+        with pytest.raises(PreflightError):
             preflight_repo_identity(repos, _run=mock_run)
 
     def test_checks_all_repos(self, tmp_path: Path) -> None:
@@ -1413,7 +1413,7 @@ class TestPreflightRepoIdentity:
                 MagicMock(stdout="git@github.com:other/thing.git\n"),
             ]
         )
-        with pytest.raises(SystemExit, match="other/thing"):
+        with pytest.raises(PreflightError, match="other/thing"):
             preflight_repo_identity(repos, _run=mock_run)
 
     def test_run_calls_preflight_repo_identity(self, tmp_path: Path) -> None:
@@ -1540,6 +1540,36 @@ class TestPreflightRepoIdentity:
 
         mock_preflight.assert_called_once_with(fake_cfg)
 
+    def test_run_converts_preflight_error_to_system_exit(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = Config(
+            port=0,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_server = MagicMock()
+
+        with pytest.raises(SystemExit, match="something went wrong"):
+            run(
+                _from_args=lambda: fake_cfg,
+                _HTTPServer=lambda *a, **kw: mock_server,
+                _make_registry=MagicMock(),
+                _path_home=lambda: tmp_path,
+                _basic_config=MagicMock(),
+                _populate_memberships=MagicMock(),
+                _startup_pull=MagicMock(),
+                _preflight_tools=MagicMock(
+                    side_effect=PreflightError("something went wrong")
+                ),
+                _preflight_sub_dir=MagicMock(),
+                _preflight_gh_auth=MagicMock(),
+                _preflight_repo_identity=MagicMock(),
+            )
+
 
 class TestPreflightTools:
     def test_succeeds_when_all_tools_found(self) -> None:
@@ -1551,21 +1581,21 @@ class TestPreflightTools:
         from kennel.server import preflight_tools
 
         missing = "git"
-        with pytest.raises(SystemExit, match=repr(missing)):
+        with pytest.raises(PreflightError, match=repr(missing)):
             preflight_tools(_which=lambda t: None if t == missing else f"/usr/bin/{t}")
 
     def test_raises_when_gh_missing(self) -> None:
         from kennel.server import preflight_tools
 
         missing = "gh"
-        with pytest.raises(SystemExit, match=repr(missing)):
+        with pytest.raises(PreflightError, match=repr(missing)):
             preflight_tools(_which=lambda t: None if t == missing else f"/usr/bin/{t}")
 
     def test_raises_when_claude_missing(self) -> None:
         from kennel.server import preflight_tools
 
         missing = "claude"
-        with pytest.raises(SystemExit, match=repr(missing)):
+        with pytest.raises(PreflightError, match=repr(missing)):
             preflight_tools(_which=lambda t: None if t == missing else f"/usr/bin/{t}")
 
     def test_required_tools_constant(self) -> None:
@@ -1599,7 +1629,7 @@ class TestPreflightSubDir:
             log_level="INFO",
             sub_dir=tmp_path / "sub",
         )
-        with pytest.raises(SystemExit, match="skill-files directory not found"):
+        with pytest.raises(PreflightError, match="skill-files directory not found"):
             preflight_sub_dir(cfg, _is_dir=lambda _: False)
 
     def test_error_message_includes_path(self, tmp_path: Path) -> None:
@@ -1614,7 +1644,7 @@ class TestPreflightSubDir:
             log_level="INFO",
             sub_dir=sub,
         )
-        with pytest.raises(SystemExit, match=str(sub)):
+        with pytest.raises(PreflightError, match=str(sub)):
             preflight_sub_dir(cfg, _is_dir=lambda _: False)
 
 
@@ -1631,14 +1661,14 @@ class TestPreflightGhAuth:
 
         mock_gh = MagicMock()
         mock_gh.return_value.get_user.side_effect = RuntimeError("not logged in")
-        with pytest.raises(SystemExit, match="not logged in"):
+        with pytest.raises(PreflightError, match="not logged in"):
             preflight_gh_auth(_gh_factory=mock_gh)
 
     def test_raises_when_gh_factory_raises(self) -> None:
         from kennel.server import preflight_gh_auth
 
         mock_gh = MagicMock(side_effect=RuntimeError("gh auth token failed"))
-        with pytest.raises(SystemExit, match="gh auth token failed"):
+        with pytest.raises(PreflightError, match="gh auth token failed"):
             preflight_gh_auth(_gh_factory=mock_gh)
 
     def test_raises_when_get_user_raises_any_exception(self) -> None:
@@ -1646,7 +1676,7 @@ class TestPreflightGhAuth:
 
         mock_gh = MagicMock()
         mock_gh.return_value.get_user.side_effect = Exception("network error")
-        with pytest.raises(SystemExit, match="network error"):
+        with pytest.raises(PreflightError, match="network error"):
             preflight_gh_auth(_gh_factory=mock_gh)
 
 
