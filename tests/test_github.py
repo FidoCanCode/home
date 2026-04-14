@@ -13,6 +13,7 @@ from kennel.github import (
     GraphQLError,
     _get_gh,
     _gh_token,
+    _TimeoutSession,  # noqa: PLC2701
     get_github,
 )
 
@@ -431,6 +432,30 @@ class TestGitHubClass:
         assert gh.get_run_log("o/r", 1) == "log\n"
 
 
+class TestTimeoutSession:
+    def test_injects_default_timeout(self) -> None:
+        from unittest.mock import patch
+
+        with patch("requests.Session.request") as mock_req:
+            mock_req.return_value = MagicMock()
+            s = _TimeoutSession()
+            s.request("GET", "https://example.com")
+        assert mock_req.call_args.kwargs.get("timeout") == _HTTP_TIMEOUT
+
+    def test_does_not_override_caller_timeout(self) -> None:
+        from unittest.mock import patch
+
+        with patch("requests.Session.request") as mock_req:
+            mock_req.return_value = MagicMock()
+            s = _TimeoutSession()
+            s.request("GET", "https://example.com", timeout=5)
+        assert mock_req.call_args.kwargs.get("timeout") == 5
+
+    def test_gh_uses_timeout_session_when_no_session_injected(self) -> None:
+        gh = GH("tok")
+        assert isinstance(gh._s, _TimeoutSession)
+
+
 class TestGHClass:
     def _gh(self) -> tuple[GH, MagicMock]:
         mock_s = MagicMock()
@@ -450,9 +475,7 @@ class TestGHClass:
         mock_resp.json.return_value = [{"id": 1}]
         mock_s.get.return_value = mock_resp
         result = gh._get("/repos/o/r/issues")
-        mock_s.get.assert_called_once_with(
-            "https://api.github.com/repos/o/r/issues", timeout=_HTTP_TIMEOUT
-        )
+        mock_s.get.assert_called_once_with("https://api.github.com/repos/o/r/issues")
         assert result == [{"id": 1}]
 
     def test_get_raises_on_error(self) -> None:
@@ -474,7 +497,6 @@ class TestGHClass:
         mock_s.post.assert_called_once_with(
             "https://api.github.com/repos/o/r/issues/1/comments",
             json={"body": "hi"},
-            timeout=_HTTP_TIMEOUT,
         )
 
     def test_post_raises_on_error(self) -> None:
@@ -508,7 +530,6 @@ class TestGHClass:
         mock_s.patch.assert_called_once_with(
             "https://api.github.com/repos/o/r/issues/1",
             json={"state": "closed"},
-            timeout=_HTTP_TIMEOUT,
         )
 
     def test_patch_raises_on_error(self) -> None:
@@ -531,7 +552,6 @@ class TestGHClass:
         mock_s.put.assert_called_once_with(
             "https://api.github.com/repos/o/r/pulls/1/merge",
             json={"merge_method": "squash"},
-            timeout=_HTTP_TIMEOUT,
         )
 
     def test_put_raises_on_error(self) -> None:
@@ -544,60 +564,6 @@ class TestGHClass:
             assert False, "should have raised"
         except Exception as e:
             assert "405" in str(e)
-
-    def test_get_passes_timeout(self) -> None:
-        gh, mock_s = self._gh()
-        mock_s.get.return_value = MagicMock()
-        gh._get("/anything")
-        assert mock_s.get.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
-
-    def test_post_passes_timeout(self) -> None:
-        gh, mock_s = self._gh()
-        mock_s.post.return_value = MagicMock()
-        gh._post("/anything")
-        assert mock_s.post.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
-
-    def test_patch_passes_timeout(self) -> None:
-        gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        mock_s.patch.return_value = mock_resp
-        gh._patch("/anything")
-        assert mock_s.patch.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
-
-    def test_put_passes_timeout(self) -> None:
-        gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        mock_s.put.return_value = mock_resp
-        gh._put("/anything")
-        assert mock_s.put.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
-
-    def test_graphql_passes_timeout(self) -> None:
-        gh, mock_s = self._gh()
-        mock_s.post.return_value = MagicMock()
-        mock_s.post.return_value.json.return_value = {"data": {}}
-        gh._graphql("query {}")
-        assert mock_s.post.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
-
-    def test_paginate_passes_timeout(self) -> None:
-        gh, mock_s = self._gh()
-        resp = MagicMock()
-        resp.json.return_value = []
-        resp.headers = {}
-        mock_s.get.return_value = resp
-        list(gh._paginate("https://api.github.com/repos/o/r/items"))
-        assert mock_s.get.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
-
-    def test_get_run_log_passes_timeout_for_log_download(self) -> None:
-        gh, mock_s = self._gh()
-        jobs_resp = MagicMock()
-        jobs_resp.json.return_value = {"jobs": [{"id": 9, "conclusion": "failure"}]}
-        log_resp = MagicMock()
-        log_resp.text = "err\n"
-        mock_s.get.side_effect = [jobs_resp, log_resp]
-        gh.get_run_log("o/r", 1)
-        assert mock_s.get.call_args.kwargs["timeout"] == _HTTP_TIMEOUT
 
     def test_graphql_posts_to_graphql_endpoint(self) -> None:
         gh, mock_s = self._gh()

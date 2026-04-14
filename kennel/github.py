@@ -18,6 +18,16 @@ log = logging.getLogger(__name__)
 _HTTP_TIMEOUT: int = 30  # seconds for all outbound GitHub HTTP requests
 
 
+class _TimeoutSession(_requests.Session):
+    """requests.Session that applies _HTTP_TIMEOUT to every request by default."""
+
+    def request(
+        self, method: str | bytes, url: str | bytes, **kwargs: Any
+    ) -> _requests.Response:  # type: ignore[override]
+        kwargs.setdefault("timeout", _HTTP_TIMEOUT)
+        return super().request(method, url, **kwargs)
+
+
 class GraphQLError(Exception):
     """Raised when a GitHub GraphQL response contains an errors field."""
 
@@ -61,7 +71,7 @@ class GH:
     BASE = "https://api.github.com"
 
     def __init__(self, token: str, session: _requests.Session | None = None) -> None:
-        self._s = session if session is not None else _requests.Session()
+        self._s = session if session is not None else _TimeoutSession()
         self._s.headers.update(
             {
                 "Authorization": f"Bearer {token}",
@@ -71,26 +81,26 @@ class GH:
         )
 
     def _get(self, path: str) -> Any:
-        resp = self._s.get(f"{self.BASE}{path}", timeout=_HTTP_TIMEOUT)
+        resp = self._s.get(f"{self.BASE}{path}")
         resp.raise_for_status()
         return resp.json()
 
     def _post(self, path: str, **payload: Any) -> None:
-        resp = self._s.post(f"{self.BASE}{path}", json=payload, timeout=_HTTP_TIMEOUT)
+        resp = self._s.post(f"{self.BASE}{path}", json=payload)
         resp.raise_for_status()
 
     def _post_json(self, path: str, **payload: Any) -> Any:
-        resp = self._s.post(f"{self.BASE}{path}", json=payload, timeout=_HTTP_TIMEOUT)
+        resp = self._s.post(f"{self.BASE}{path}", json=payload)
         resp.raise_for_status()
         return resp.json()
 
     def _patch(self, path: str, **payload: Any) -> Any:
-        resp = self._s.patch(f"{self.BASE}{path}", json=payload, timeout=_HTTP_TIMEOUT)
+        resp = self._s.patch(f"{self.BASE}{path}", json=payload)
         resp.raise_for_status()
         return resp.json()
 
     def _put(self, path: str, **payload: Any) -> Any:
-        resp = self._s.put(f"{self.BASE}{path}", json=payload, timeout=_HTTP_TIMEOUT)
+        resp = self._s.put(f"{self.BASE}{path}", json=payload)
         resp.raise_for_status()
         return resp.json()
 
@@ -99,7 +109,6 @@ class GH:
         resp = self._s.post(
             f"{self.BASE}/graphql",
             json={"query": query, "variables": variables},
-            timeout=_HTTP_TIMEOUT,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -200,7 +209,7 @@ class GH:
         """Yield each item from all pages of a paginated GitHub API endpoint."""
         current: str | None = url
         while current:
-            resp = self._s.get(current, timeout=_HTTP_TIMEOUT)
+            resp = self._s.get(current)
             resp.raise_for_status()
             yield from resp.json()
             link = resp.headers.get("Link", "")
@@ -625,8 +634,7 @@ class GH:
             if job.get("conclusion") not in ("failure", "timed_out"):
                 continue
             resp = self._s.get(
-                f"{self.BASE}/repos/{repo}/actions/jobs/{job['id']}/logs",
-                timeout=_HTTP_TIMEOUT,
+                f"{self.BASE}/repos/{repo}/actions/jobs/{job['id']}/logs"
             )
             resp.raise_for_status()
             parts.append(resp.text)
