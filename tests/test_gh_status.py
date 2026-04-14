@@ -109,7 +109,7 @@ class TestMain:
         orig = kennel.gh_status.set_gh_status
         kennel.gh_status.set_gh_status = fake_set
         try:
-            main(["set", "hello", "world"])
+            main(["set", "hello", "world"], _GitHub=MagicMock)
         finally:
             kennel.gh_status.set_gh_status = orig
         assert calls == ["hello world"]

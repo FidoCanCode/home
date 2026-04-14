@@ -179,17 +179,14 @@ def preflight_sub_dir(
     log.info("preflight: skill-files directory confirmed: %s", config.sub_dir)
 
 
-def preflight_gh_auth(
-    *,
-    _gh_factory: Callable[[], GitHub] = GitHub,
-) -> None:
+def preflight_gh_auth(gh: GitHub) -> None:
     """Verify gh auth works by fetching the authenticated bot user.
 
-    Raises :exc:`PreflightError` if the GitHub client cannot be constructed or
-    ``get_user()`` fails for any reason (bad token, network error, etc.).
+    Raises :exc:`PreflightError` if ``get_user()`` fails for any reason
+    (bad token, network error, etc.).
     """
     try:
-        bot_user = _gh_factory().get_user()
+        bot_user = gh.get_user()
     except Exception as e:
         raise PreflightError(f"preflight: gh auth check failed: {e}") from e
     log.info("preflight: gh auth confirmed — bot user is %r", bot_user)
@@ -580,17 +577,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
         pass
 
 
-def populate_memberships(
-    config: Config, *, _gh_factory: Callable[[], GitHub] = GitHub
-) -> None:
+def populate_memberships(config: Config, gh: GitHub) -> None:
     """Fetch collaborators for each repo once at startup and store on RepoConfig.
 
     Mutates ``config.repos`` in place — each :class:`RepoConfig` is replaced
     with a new instance carrying a populated :class:`RepoMembership`.  Uses
-    one GitHub client instance for all repos.  Bot account (gh_user) is
-    excluded from every collaborator set.
+    the provided GitHub client instance for all repos.  Bot account (gh_user)
+    is excluded from every collaborator set.
     """
-    gh = _gh_factory()
     bot_user = gh.get_user()
     for name, repo_cfg in list(config.repos.items()):
         collabs = frozenset(c for c in gh.get_collaborators(name) if c != bot_user)
@@ -644,6 +638,7 @@ def run(
     _preflight_tools=preflight_tools,
     _preflight_sub_dir=preflight_sub_dir,
     _preflight_gh_auth=preflight_gh_auth,
+    _GitHub=GitHub,
 ) -> None:
     config = _from_args()
 
@@ -689,20 +684,21 @@ def run(
     sys.excepthook = _log_uncaught
     threading.excepthook = _log_thread_exception
 
+    gh = _GitHub()
     _startup_pull()
     try:
         _preflight_tools()
         _preflight_sub_dir(config)
-        _preflight_gh_auth()
+        _preflight_gh_auth(gh)
         _preflight_repo_identity(config.repos)
     except PreflightError as e:
         raise SystemExit(str(e)) from e
 
-    _populate_memberships(config)
+    _populate_memberships(config, gh)
 
     WebhookHandler.config = config
-    WebhookHandler.gh = GitHub()
-    registry = _make_registry(config.repos, WebhookHandler.gh)
+    WebhookHandler.gh = gh
+    registry = _make_registry(config.repos, gh)
     WebhookHandler.registry = registry
     _Watchdog(registry, config.repos).start_thread()
 

@@ -74,8 +74,8 @@ def set_gh_status(
     _gh.set_user_status(text, emoji, busy=True)
 
 
-def main(argv: list[str]) -> None:
+def main(argv: list[str], *, _GitHub=GitHub) -> None:
     if len(argv) < 2 or argv[0] != "set":
         print("Usage: kennel gh-status set <message>", file=sys.stderr)
         raise SystemExit(1)
-    set_gh_status(" ".join(argv[1:]), _gh=GitHub())
+    set_gh_status(" ".join(argv[1:]), _gh=_GitHub())

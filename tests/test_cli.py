@@ -384,7 +384,7 @@ class TestCmdList:
 class TestMain:
     def test_add_via_main(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "spec", "task title"])
+        main([str(tmp_path), "add", "spec", "task title"], _GitHub=MagicMock)
         capsys.readouterr()
         from kennel.tasks import list_tasks
 
@@ -405,7 +405,8 @@ class TestMain:
                 "r/r",
                 "--pr",
                 "3",
-            ]
+            ],
+            _GitHub=MagicMock,
         )
         capsys.readouterr()
         from kennel.tasks import list_tasks
@@ -415,19 +416,19 @@ class TestMain:
 
     def test_complete_via_main(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "spec", "finish me"])
+        main([str(tmp_path), "add", "spec", "finish me"], _GitHub=MagicMock)
         out = capsys.readouterr().out
         task_id = json.loads(out)["id"]
-        main([str(tmp_path), "complete", task_id])
+        main([str(tmp_path), "complete", task_id], _GitHub=MagicMock)
         from kennel.tasks import list_tasks
 
         assert list_tasks(tmp_path)[0]["status"] == "completed"
 
     def test_list_via_main(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "spec", "one"])
+        main([str(tmp_path), "add", "spec", "one"], _GitHub=MagicMock)
         capsys.readouterr()
-        main([str(tmp_path), "list"])
+        main([str(tmp_path), "list"], _GitHub=MagicMock)
         out = capsys.readouterr().out
         data = json.loads(out)
         assert data[0]["title"] == "one"
@@ -449,4 +450,4 @@ class TestMain:
 
         monkeypatch.setattr(cli_mod, "build_parser", lambda: fake_parser)
         with pytest.raises(AssertionError, match="unreachable"):
-            main([])
+            main([], _GitHub=MagicMock)

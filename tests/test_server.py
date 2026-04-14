@@ -832,7 +832,7 @@ class TestPopulateMemberships:
         mock_gh = MagicMock()
         mock_gh.get_user.return_value = "fido-bot"
         mock_gh.get_collaborators.return_value = ["alice", "bob"]
-        populate_memberships(cfg, _gh_factory=lambda: mock_gh)
+        populate_memberships(cfg, mock_gh)
         assert cfg.repos["owner/repo"].membership == RepoMembership(
             collaborators=frozenset({"alice", "bob"})
         )
@@ -853,7 +853,7 @@ class TestPopulateMemberships:
         mock_gh = MagicMock()
         mock_gh.get_user.return_value = "fido-bot"
         mock_gh.get_collaborators.return_value = ["alice", "fido-bot", "bob"]
-        populate_memberships(cfg, _gh_factory=lambda: mock_gh)
+        populate_memberships(cfg, mock_gh)
         result = cfg.repos["owner/repo"].membership.collaborators
         assert result == frozenset({"alice", "bob"})
         assert "fido-bot" not in result
@@ -878,7 +878,7 @@ class TestPopulateMemberships:
             "o/r1": ["alice"],
             "o/r2": ["bob", "carol"],
         }[name]
-        populate_memberships(cfg, _gh_factory=lambda: mock_gh)
+        populate_memberships(cfg, mock_gh)
         assert cfg.repos["o/r1"].membership.collaborators == frozenset({"alice"})
         assert cfg.repos["o/r2"].membership.collaborators == frozenset({"bob", "carol"})
 
@@ -915,6 +915,7 @@ class TestRun:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -940,6 +941,7 @@ class TestRun:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
             _signal=MagicMock(),
             _kill_active_children=mock_kill,
         )
@@ -970,6 +972,7 @@ class TestRun:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
             _signal=fake_signal,
             _kill_active_children=MagicMock(),
         )
@@ -1000,6 +1003,7 @@ class TestRun:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
             _signal=fake_signal,
             _kill_active_children=mock_kill,
         )
@@ -1040,6 +1044,7 @@ class TestRun:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
         )
 
         assert len(captured_kwargs) == 1
@@ -1070,6 +1075,7 @@ class TestRun:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
         )
 
         assert len(captured_handlers) >= 1
@@ -1098,6 +1104,7 @@ class TestRun:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -1138,6 +1145,7 @@ class TestRun:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
         )
 
         # Two shared handlers (file + no tty stderr) + two per-repo handlers
@@ -1191,6 +1199,7 @@ class TestRun:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
         )
 
         repo_handler = next(
@@ -1225,6 +1234,7 @@ class TestRun:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
             _Watchdog=mock_watchdog_cls,
         )
 
@@ -1258,6 +1268,7 @@ class TestRun:
                 _preflight_tools=MagicMock(),
                 _preflight_sub_dir=MagicMock(),
                 _preflight_gh_auth=MagicMock(),
+                _GitHub=MagicMock,
                 _Watchdog=MagicMock(),
             )
             assert _sys.excepthook is not saved_sys
@@ -1452,6 +1463,7 @@ class TestPreflightRepoIdentity:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
         )
 
         mock_preflight.assert_called_once_with(fake_cfg.repos)
@@ -1483,6 +1495,7 @@ class TestPreflightRepoIdentity:
             _preflight_tools=mock_preflight,
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
         )
 
         mock_preflight.assert_called_once_with()
@@ -1514,9 +1527,10 @@ class TestPreflightRepoIdentity:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=mock_preflight,
+            _GitHub=MagicMock,
         )
 
-        mock_preflight.assert_called_once_with()
+        mock_preflight.assert_called_once()
 
     def test_run_calls_preflight_sub_dir(self, tmp_path: Path) -> None:
         from kennel.server import run
@@ -1545,6 +1559,7 @@ class TestPreflightRepoIdentity:
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=mock_preflight,
             _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
         )
 
         mock_preflight.assert_called_once_with(fake_cfg)
@@ -1576,6 +1591,7 @@ class TestPreflightRepoIdentity:
                 ),
                 _preflight_sub_dir=MagicMock(),
                 _preflight_gh_auth=MagicMock(),
+                _GitHub=MagicMock,
                 _preflight_repo_identity=MagicMock(),
             )
 
@@ -1662,31 +1678,24 @@ class TestPreflightGhAuth:
         from kennel.server import preflight_gh_auth
 
         mock_gh = MagicMock()
-        mock_gh.return_value.get_user.return_value = "fido-bot"
-        preflight_gh_auth(_gh_factory=mock_gh)  # no exception
+        mock_gh.get_user.return_value = "fido-bot"
+        preflight_gh_auth(mock_gh)  # no exception
 
     def test_raises_when_get_user_raises_runtime_error(self) -> None:
         from kennel.server import preflight_gh_auth
 
         mock_gh = MagicMock()
-        mock_gh.return_value.get_user.side_effect = RuntimeError("not logged in")
+        mock_gh.get_user.side_effect = RuntimeError("not logged in")
         with pytest.raises(PreflightError, match="not logged in"):
-            preflight_gh_auth(_gh_factory=mock_gh)
-
-    def test_raises_when_gh_factory_raises(self) -> None:
-        from kennel.server import preflight_gh_auth
-
-        mock_gh = MagicMock(side_effect=RuntimeError("gh auth token failed"))
-        with pytest.raises(PreflightError, match="gh auth token failed"):
-            preflight_gh_auth(_gh_factory=mock_gh)
+            preflight_gh_auth(mock_gh)
 
     def test_raises_when_get_user_raises_any_exception(self) -> None:
         from kennel.server import preflight_gh_auth
 
         mock_gh = MagicMock()
-        mock_gh.return_value.get_user.side_effect = Exception("network error")
+        mock_gh.get_user.side_effect = Exception("network error")
         with pytest.raises(PreflightError, match="network error"):
-            preflight_gh_auth(_gh_factory=mock_gh)
+            preflight_gh_auth(mock_gh)
 
 
 class TestGetSelfRepo:

@@ -131,10 +131,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None, *, _GitHub=GitHub) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    cmd = Cmd(github=GitHub())
+    cmd = Cmd(github=_GitHub())
 
     match args.command:
         case "add":
