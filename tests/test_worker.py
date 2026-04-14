@@ -2374,6 +2374,7 @@ class TestClaudeStart:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (fido_dir / "system").write_text("system prompt")
+        (fido_dir / "skill").write_text("sub-skill instructions")
         (fido_dir / "prompt").write_text("user prompt")
         return fido_dir
 
@@ -2484,7 +2485,7 @@ class TestClaudeStart:
 
     def test_session_path_sends_prompt_content(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        (fido_dir / "system").write_text("setup instructions")
+        (fido_dir / "skill").write_text("setup instructions")
         (fido_dir / "prompt").write_text("the task prompt")
         session = MagicMock()
         session.__enter__ = MagicMock(return_value=session)
@@ -2528,6 +2529,7 @@ class TestClaudeRun:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (fido_dir / "system").write_text("system")
+        (fido_dir / "skill").write_text("skill")
         (fido_dir / "prompt").write_text("prompt")
         return fido_dir
 
@@ -2616,7 +2618,7 @@ class TestClaudeRun:
 
     def test_session_path_sends_prompt_content(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
-        (fido_dir / "system").write_text("task instructions")
+        (fido_dir / "skill").write_text("task instructions")
         (fido_dir / "prompt").write_text("run this task")
         session = MagicMock()
         session.__enter__ = MagicMock(return_value=session)

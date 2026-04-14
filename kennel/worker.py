@@ -160,7 +160,14 @@ def build_prompt(fido_dir: Path, subskill: str, context: str) -> tuple[Path, Pat
     """Write system and prompt files for a sub-Claude session.
 
     The system file contains ``persona.md`` and ``<subskill>.md`` joined by a
-    blank line (matching bash ``printf '%s\\n\\n%s\\n' "$PERSONA" "$skill"``).
+    blank line (matching bash ``printf '%s\\n\\n%s\\n' "$PERSONA" "$skill"``) —
+    used by the one-shot ``print_prompt_from_file`` path.
+
+    The skill file contains only ``<subskill>.md`` — used by the persistent
+    :class:`~kennel.claude.ClaudeSession` path where the session already has
+    ``persona.md`` loaded as system prompt and each turn just needs the
+    sub-skill instructions as a user-message preamble.
+
     The prompt file contains the context string.
 
     Returns ``(system_file, prompt_file)`` where both live in *fido_dir*.
@@ -169,8 +176,10 @@ def build_prompt(fido_dir: Path, subskill: str, context: str) -> tuple[Path, Pat
     persona = (sub / "persona.md").read_text().rstrip()
     skill = (sub / f"{subskill}.md").read_text().rstrip()
     system_file = fido_dir / "system"
+    skill_file = fido_dir / "skill"
     prompt_file = fido_dir / "prompt"
     system_file.write_text(f"{persona}\n\n{skill}\n")
+    skill_file.write_text(f"{skill}\n")
     prompt_file.write_text(f"{context}\n")
     return system_file, prompt_file
 
@@ -229,16 +238,16 @@ def claude_start(
 def _session_turn_prompt(fido_dir: Path) -> str:
     """Build the user-message body for a persistent :class:`ClaudeSession` turn.
 
-    The persistent session is constructed with only ``sub/persona.md`` as
-    its system prompt.  Each turn (setup, task, ci, threads, resume,
-    comments) has its own sub-skill instructions in ``fido_dir/system``
-    which must be delivered as part of the user message — otherwise claude
-    sees only the bare context and doesn't know what to do, producing
-    empty output (observed as ``setup produced no tasks``).
+    The persistent session is constructed with ``sub/persona.md`` as its
+    system prompt, so we only need to deliver the sub-skill instructions
+    (``fido_dir/skill``) as a user-message preamble — not the full
+    ``fido_dir/system`` which would duplicate the persona.  Without this,
+    claude saw only the bare context and produced empty output (observed
+    as ``setup produced no tasks``).
     """
-    system = (fido_dir / "system").read_text()
+    skill = (fido_dir / "skill").read_text()
     prompt = (fido_dir / "prompt").read_text()
-    return f"{system}\n\n---\n\n{prompt}"
+    return f"{skill}\n\n---\n\n{prompt}"
 
 
 def claude_run(
