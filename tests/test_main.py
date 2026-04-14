@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from kennel.main import main
 
@@ -19,11 +19,8 @@ class TestMain:
             "type": "spec",
             "status": "pending",
         }
-        with (
-            patch("kennel.tasks.add_task", return_value=fake_task) as mock_add,
-            patch("kennel.github.GitHub"),
-        ):
-            main(["task", str(tmp_path), "add", "spec", "my task"])
+        with patch("kennel.tasks.add_task", return_value=fake_task) as mock_add:
+            main(["task", str(tmp_path), "add", "spec", "my task"], _GitHub=MagicMock())
 
         mock_add.assert_called_once()
 
@@ -59,27 +56,20 @@ class TestMain:
         with (
             patch("sys.argv", ["kennel", "task", str(tmp_path), "list"]),
             patch("kennel.tasks.list_tasks", return_value=[]),
-            patch("kennel.github.GitHub"),
         ):
-            main()  # should not raise
+            main(_GitHub=MagicMock())  # should not raise
 
     def test_sync_tasks_subcommand_dispatches(self, tmp_path) -> None:
         """'kennel sync-tasks <path>' should invoke sync_tasks."""
-        with (
-            patch("kennel.tasks.sync_tasks") as mock_sync,
-            patch("kennel.github.GitHub"),
-        ):
-            main(["sync-tasks", str(tmp_path)])
+        with patch("kennel.tasks.sync_tasks") as mock_sync:
+            main(["sync-tasks", str(tmp_path)], _GitHub=MagicMock())
         mock_sync.assert_called_once()
         assert mock_sync.call_args[0][0] == tmp_path
 
     def test_sync_tasks_subcommand_defaults_to_cwd(self) -> None:
         """'kennel sync-tasks' without path uses cwd."""
-        with (
-            patch("kennel.tasks.sync_tasks") as mock_sync,
-            patch("kennel.github.GitHub"),
-        ):
-            main(["sync-tasks"])
+        with patch("kennel.tasks.sync_tasks") as mock_sync:
+            main(["sync-tasks"], _GitHub=MagicMock())
         mock_sync.assert_called_once()
         from pathlib import Path
 
