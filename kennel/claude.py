@@ -679,12 +679,13 @@ class ClaudeSession:
     def __enter__(self) -> "ClaudeSession":
         """Acquire the session lock, serializing send/receive across threads.
 
-        Also clears the cancel event so a turn that follows a preempt or
-        interrupt starts with a clean slate.  Records the current thread name
-        in :attr:`owner` so status display can show who holds the session.
+        Records the current thread name in :attr:`owner` so status display can
+        show who holds the session.  Does *not* clear the cancel event — that
+        is deferred to :meth:`iter_events` so a signal that lands between one
+        holder's :meth:`__exit__` and the next holder's :meth:`iter_events` is
+        not silently dropped.
         """
         self._lock.acquire()
-        self._cancel.clear()
         self._owner = threading.current_thread().name
         return self
 
@@ -768,6 +769,12 @@ class ClaudeSession:
     def iter_events(self) -> Iterator[dict]:
         """Yield parsed stream-json events for the current turn.
 
+        Clears the cancel event at the start so any signal that arrived during
+        the lock-handoff window (between the previous holder's :meth:`__exit__`
+        and this call) is consumed here rather than immediately aborting the
+        new turn.  After that, checks the event on each poll cycle so a
+        concurrent :meth:`interrupt` or :meth:`preempt` can abort mid-turn.
+
         Reads lines from stdout, parsing each as JSON.  Stops (and returns)
         when a ``type=result`` or ``type=error`` event is yielded, when the
         process exits (EOF), or when no output arrives for *idle_timeout*
@@ -779,6 +786,7 @@ class ClaudeSession:
         should not be silently swallowed.
         """
         assert self._proc.stdout is not None
+        self._cancel.clear()
         last_activity = time.monotonic()
 
         while True:

@@ -1368,18 +1368,44 @@ class TestClaudeSessionIterEvents:
         # restart() must spawn a replacement process after killing
         assert fake_popen.call_count == 2
 
-    def test_stops_immediately_when_cancel_set(self, tmp_path: Path) -> None:
+    def test_cancel_cleared_at_iter_events_start(self, tmp_path: Path) -> None:
+        # A cancel set before iter_events() is called is cleared at the start of
+        # the method — it represents a stale signal from a previous turn, not a
+        # request to abort the new turn.
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._cancel.set()
+        assert session._cancel.is_set()
+        # Drain iter_events; proc has EOF so loop exits naturally
+        list(session.iter_events())
+        # cancel must have been cleared at start of iter_events
+        assert not session._cancel.is_set()
+        session.stop()
+
+    def test_stops_when_cancel_set_during_turn(self, tmp_path: Path) -> None:
+        # A cancel set AFTER iter_events() starts (i.e., during polling) must
+        # abort the loop on the next cycle.
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         proc = _make_session_proc([])
-        proc.poll = MagicMock(return_value=None)  # never exits
+        proc.poll = MagicMock(return_value=None)  # never exits on its own
         fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([], [], []))
-        session = ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
-        session._cancel.set()
+
+        session_ref: list[ClaudeSession] = []
+
+        def selector_that_cancels(
+            *_args: object, **_kwargs: object
+        ) -> tuple[list, list, list]:
+            # Set cancel on first poll — simulates an interrupt arriving mid-turn
+            session_ref[0]._cancel.set()
+            return ([], [], [])
+
+        session = ClaudeSession(
+            system_file, popen=fake_popen, selector=selector_that_cancels
+        )
+        session_ref.append(session)
         events = list(session.iter_events())
         assert events == []
-        fake_selector.assert_not_called()  # cancel check fires before select
         session.stop()
 
 
@@ -1684,12 +1710,53 @@ class TestClaudeSessionLock:
         session._lock.release()
         session.stop()
 
-    def test_enter_clears_cancel_event(self, tmp_path: Path) -> None:
+    def test_enter_preserves_cancel_event(self, tmp_path: Path) -> None:
+        # __enter__ must NOT clear _cancel — a signal that lands between one
+        # holder's __exit__ and the next holder's iter_events() must survive.
         session = _make_session(tmp_path, _make_session_proc([]))
         session._cancel.set()
         session.__enter__()
-        assert not session._cancel.is_set()
+        assert session._cancel.is_set()  # still set; iter_events() will clear it
         session._lock.release()
+        session.stop()
+
+    def test_cancel_survives_lock_handoff(self, tmp_path: Path) -> None:
+        import threading as _threading
+
+        # Simulate the lost-interrupt race: interrupt() is called after holder
+        # releases the lock but before the next holder calls iter_events().
+        # The signal must still be set when the new holder enters __enter__.
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+
+        cancel_set_after_exit = _threading.Event()
+        new_holder_entered = _threading.Event()
+        new_holder_cancel_was_set: list[bool] = []
+
+        def first_holder() -> None:
+            session._lock.acquire()
+            # Release without calling iter_events; then interrupt() sets cancel
+            session._lock.release()
+            # Simulate interrupt arriving right after release
+            session._cancel.set()
+            cancel_set_after_exit.set()
+
+        def second_holder() -> None:
+            cancel_set_after_exit.wait()
+            session.__enter__()
+            # Record whether cancel is still set before iter_events clears it
+            new_holder_cancel_was_set.append(session._cancel.is_set())
+            new_holder_entered.set()
+            session._lock.release()
+
+        t1 = _threading.Thread(target=first_holder)
+        t2 = _threading.Thread(target=second_holder)
+        t1.start()
+        t2.start()
+        t1.join(timeout=2)
+        t2.join(timeout=2)
+
+        assert new_holder_cancel_was_set == [True]
         session.stop()
 
     def test_exit_releases_lock(self, tmp_path: Path) -> None:
