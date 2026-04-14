@@ -330,13 +330,20 @@ class GH:
         cwd: Path | str | None = None,
         runner: Any = subprocess.run,
     ) -> str:
-        """Return 'owner/repo' for the repo at cwd, parsed from the git remote."""
+        """Return 'owner/repo' for the repo at cwd, parsed from the git remote.
+
+        Raises ``subprocess.CalledProcessError`` on nonzero exit (e.g. not a
+        git repo or no ``origin`` remote).  ``FileNotFoundError`` propagates
+        if git is not installed.  Raises ``ValueError`` if the remote URL is
+        not a recognised GitHub format.
+        """
         result = runner(
             ["git", "remote", "get-url", "origin"],
             capture_output=True,
             text=True,
             timeout=10,
             cwd=cwd,
+            check=True,
         )
         url = result.stdout.strip().removesuffix(".git")
         if url.startswith("https://github.com/"):

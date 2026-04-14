@@ -1180,6 +1180,18 @@ class TestGHClass:
         with pytest.raises(ValueError, match="Cannot parse"):
             gh.get_repo_info(runner=mock_run)
 
+    def test_get_repo_info_raises_on_git_failure(self) -> None:
+        gh = GH("test-token")
+        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, "git"))
+        with pytest.raises(subprocess.CalledProcessError):
+            gh.get_repo_info(runner=mock_run)
+
+    def test_get_repo_info_raises_on_file_not_found(self) -> None:
+        gh = GH("test-token")
+        mock_run = MagicMock(side_effect=FileNotFoundError("git not found"))
+        with pytest.raises(FileNotFoundError):
+            gh.get_repo_info(runner=mock_run)
+
     def test_get_default_branch(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
