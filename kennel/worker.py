@@ -1890,8 +1890,10 @@ class WorkerThread(threading.Thread):
     ``_session`` and ``_session_issue`` survive individual :class:`Worker`
     crashes: each new ``Worker`` receives the existing session via the
     constructor and hands it back after ``run()`` returns (even on exception).
-    The watchdog then restarts this thread, which will again inherit whatever
-    session remains.
+    When this thread itself crashes, :class:`~kennel.registry.WorkerRegistry`
+    rescues the live session from the dead thread and passes it to the
+    replacement thread via the *session* constructor parameter, so the session
+    persists across both Worker-level and WorkerThread-level crashes.
 
     Neither ``_session`` nor ``_session_issue`` survive a kennel/home restart
     — ``os.execvp`` replaces the process, so a new ``WorkerThread`` starts
@@ -1906,6 +1908,8 @@ class WorkerThread(threading.Thread):
         gh: GitHub,
         registry: ActivityReporter | None = None,
         membership: RepoMembership | None = None,
+        session: claude.ClaudeSession | None = None,
+        session_issue: int | None = None,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
         self.work_dir = work_dir
@@ -1917,8 +1921,8 @@ class WorkerThread(threading.Thread):
         self._abort_task = threading.Event()
         self._stop = False
         self.crash_error: str | None = None
-        self._session: claude.ClaudeSession | None = None
-        self._session_issue: int | None = None
+        self._session: claude.ClaudeSession | None = session
+        self._session_issue: int | None = session_issue
 
     @property
     def session_owner(self) -> str | None:
@@ -1980,7 +1984,9 @@ class WorkerThread(threading.Thread):
             log.exception("WorkerThread %s: unexpected error", self.name)
             raise
         finally:
-            if self._session is not None:
+            # Only stop the session on orderly shutdown — a crashed thread
+            # leaves it alive so the registry can hand it to the replacement.
+            if self._stop and self._session is not None:
                 self._session.stop()
                 self._session = None
 

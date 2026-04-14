@@ -8881,8 +8881,12 @@ class TestWorkerThread:
         assert wt._session is None
 
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
-    def test_session_stopped_when_worker_raises(self, tmp_path: Path) -> None:
-        """WorkerThread stops the session even when Worker.run() raises."""
+    def test_session_preserved_when_worker_raises(self, tmp_path: Path) -> None:
+        """WorkerThread leaves the session alive when Worker.run() raises.
+
+        The registry rescues the live session and passes it to the replacement
+        thread so the persistent ClaudeSession survives the crash.
+        """
         wt = self._make_thread(tmp_path)
         mock_session = MagicMock()
 
@@ -8895,8 +8899,17 @@ class TestWorkerThread:
             wt.join(timeout=5.0)
 
         assert not wt.is_alive()
-        mock_session.stop.assert_called_once()
-        assert wt._session is None
+        mock_session.stop.assert_not_called()  # session must NOT be stopped
+        assert wt._session is mock_session  # still reachable for registry to rescue
+
+    def test_session_accepted_via_constructor(self, tmp_path: Path) -> None:
+        """Session passed to WorkerThread constructor is used as the initial session."""
+        mock_session = MagicMock()
+        wt = WorkerThread(
+            tmp_path, "owner/repo", MagicMock(), session=mock_session, session_issue=7
+        )
+        assert wt._session is mock_session
+        assert wt._session_issue == 7
 
     def test_session_owner_returns_none_when_no_session(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
