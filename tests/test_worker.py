@@ -2364,6 +2364,51 @@ class TestClaudeStart:
             claude_start(fido_dir)
         mock_ext.assert_called_once_with(raw)
 
+    # ── Session path ──────────────────────────────────────────────────────
+
+    def test_session_path_returns_empty_string(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        result = claude_start(fido_dir, session=session)
+        assert result == ""
+
+    def test_session_path_sends_prompt_content(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        (fido_dir / "prompt").write_text("the task prompt")
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        claude_start(fido_dir, session=session)
+        session.send.assert_called_once_with("the task prompt")
+
+    def test_session_path_calls_consume_until_result(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        claude_start(fido_dir, session=session)
+        session.consume_until_result.assert_called_once()
+
+    def test_session_path_does_not_call_subprocess(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        with patch("kennel.worker.claude.print_prompt_from_file") as mock_ppf:
+            claude_start(fido_dir, session=session)
+        mock_ppf.assert_not_called()
+
+    def test_session_path_uses_context_manager(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        session = MagicMock()
+        session.__enter__ = MagicMock(return_value=session)
+        session.__exit__ = MagicMock(return_value=None)
+        claude_start(fido_dir, session=session)
+        session.__enter__.assert_called_once()
+        session.__exit__.assert_called_once()
+
 
 class TestClaudeRun:
     """Tests for claude_run."""
@@ -3021,7 +3066,7 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
-        mock_start.assert_called_once_with(fido_dir, cwd=tmp_path)
+        mock_start.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
 
     def test_open_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -3243,7 +3288,7 @@ class TestFindOrCreatePr:
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY)
-        mock_start.assert_called_once_with(fido_dir, cwd=tmp_path)
+        mock_start.assert_called_once_with(fido_dir, cwd=tmp_path, session=None)
 
     def test_no_pr_setup_context_includes_work_dir(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)

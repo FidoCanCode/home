@@ -197,14 +197,27 @@ def claude_start(
     model: str = "claude-opus-4-6",
     timeout: int = 300,
     cwd: Path | str | None = None,
+    session: claude.ClaudeSession | None = None,
 ) -> str:
     """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
 
-    Returns the session_id extracted from stream-json output, or an empty
-    string if the session_id is absent from the output.  Raises
-    ``ClaudeStreamError`` or ``FileNotFoundError`` on subprocess failure —
-    these propagate to the worker's crash handler.
+    When *session* is provided the setup prompt is sent through the
+    persistent session (via :meth:`~claude.ClaudeSession.send` +
+    :meth:`~claude.ClaudeSession.consume_until_result`) and an empty string
+    is returned — there is no subprocess session_id to track.
+
+    When *session* is ``None`` a fresh subprocess is spawned via
+    ``claude.print_prompt_from_file`` and the session_id extracted from its
+    stream-json output is returned.  Raises ``ClaudeStreamError`` or
+    ``FileNotFoundError`` on subprocess failure — these propagate to the
+    worker's crash handler.
     """
+    if session is not None:
+        prompt = (fido_dir / "prompt").read_text()
+        with session:
+            session.send(prompt)
+            session.consume_until_result()
+        return ""
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
     output = claude.print_prompt_from_file(
@@ -1009,7 +1022,9 @@ class Worker:
                     f"Work dir: {self.work_dir}"
                 )
                 build_prompt(fido_dir, "setup", context)
-                session_id = claude_start(fido_dir, cwd=self.work_dir)
+                session_id = claude_start(
+                    fido_dir, cwd=self.work_dir, session=self._session
+                )
                 log.info("setup session: %s", session_id)
                 with State(fido_dir).modify() as state:
                     state["setup_session_id"] = session_id
@@ -1054,7 +1069,7 @@ class Worker:
             f"Work dir: {self.work_dir}"
         )
         build_prompt(fido_dir, "setup", context)
-        session_id = claude_start(fido_dir, cwd=self.work_dir)
+        session_id = claude_start(fido_dir, cwd=self.work_dir, session=self._session)
         log.info("setup session: %s", session_id)
         with State(fido_dir).modify() as state:
             state["setup_session_id"] = session_id
