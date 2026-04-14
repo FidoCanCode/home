@@ -306,6 +306,20 @@ def _pull_with_backoff(
             _sleep(delay)
 
 
+def _spawn_bg(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
+    """Spawn *fn* in a background daemon thread."""
+    threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+def _noop_after_post() -> None:
+    """Default no-op hook called at the end of do_POST.
+
+    Tests override _fn_after_do_post to synchronise without sleeping — the
+    hook fires after _fn_spawn_bg so any captured background thread is in
+    the capture list before the test wakes up.
+    """
+
+
 class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
     registry: WorkerRegistry
@@ -318,6 +332,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
     _fn_reply_to_issue_comment = staticmethod(reply_to_issue_comment)
     _fn_create_task = staticmethod(create_task)
     _fn_launch_worker = staticmethod(launch_worker)
+    _fn_spawn_bg = staticmethod(_spawn_bg)
+    _fn_after_do_post = staticmethod(_noop_after_post)
     _fn_runner_dir = staticmethod(_runner_dir)
     _fn_get_self_repo = staticmethod(_get_self_repo)
     _fn_get_head = staticmethod(_get_head)
@@ -326,6 +342,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
     _fn_os_execvp = staticmethod(os.execvp)
 
     def do_POST(self) -> None:
+        try:
+            self._do_post_inner()
+        finally:
+            type(self)._fn_after_do_post()
+
+    def _do_post_inner(self) -> None:
         content_length = int(self.headers.get("Content-Length", 0))
         if content_length == 0:
             self._respond(400, "empty body")
@@ -408,11 +430,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         # Process in background thread so we don't block the server.
         if action:
-            threading.Thread(
-                target=self._process_action,
-                args=(action, repo_cfg),
-                daemon=True,
-            ).start()
+            type(self)._fn_spawn_bg(self._process_action, (action, repo_cfg))
 
     def _process_action(self, action: Action, repo_cfg: RepoConfig) -> None:
         description = self._describe_action(action)

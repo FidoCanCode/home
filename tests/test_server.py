@@ -5,17 +5,49 @@ import hmac
 import json
 import subprocess
 import threading
-import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from http.server import HTTPServer
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from kennel.config import Config, RepoConfig
 from kennel.server import PreflightError, WebhookHandler
+
+# Thread-capture and do_POST synchronisation helpers ---------------------------
+#
+# The wfile socket is unbuffered (wbufsize=0), so HTTP response bytes reach the
+# client the instant _respond() writes them — before do_POST() finishes.  Tests
+# that assert on work done after the ack (background threads, _self_restart)
+# therefore cannot rely on urlopen() returning to mean "server is done".
+#
+# Solution: _restore_handler_fns (autouse) overrides two injectables:
+#   _fn_after_do_post → signals _post_done so _post_webhook can wait
+#   _fn_spawn_bg      → captures the background thread so _post_webhook can join
+#
+# _post_webhook:  wait for _post_done → join any captured threads → return status
+#
+_bg_threads: list[threading.Thread] = []
+_bg_threads_lock: threading.Lock = threading.Lock()
+_post_done: threading.Event = threading.Event()
+
+
+def _capturing_spawn_bg(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
+    t = threading.Thread(target=fn, args=args, daemon=True)
+    t.start()
+    with _bg_threads_lock:
+        _bg_threads.append(t)
+
+
+def _signal_post_done() -> None:
+    _post_done.set()
+
+
+# ------------------------------------------------------------------------------
 
 
 def _config(tmp_path: Path) -> Config:
@@ -51,6 +83,8 @@ def _restore_handler_fns():
         "_fn_reply_to_issue_comment": WebhookHandler._fn_reply_to_issue_comment,
         "_fn_create_task": WebhookHandler._fn_create_task,
         "_fn_launch_worker": WebhookHandler._fn_launch_worker,
+        "_fn_spawn_bg": WebhookHandler._fn_spawn_bg,
+        "_fn_after_do_post": WebhookHandler._fn_after_do_post,
         "_fn_runner_dir": WebhookHandler._fn_runner_dir,
         "_fn_get_self_repo": WebhookHandler._fn_get_self_repo,
         "_fn_get_head": WebhookHandler._fn_get_head,
@@ -58,7 +92,15 @@ def _restore_handler_fns():
         "_fn_os_chdir": WebhookHandler._fn_os_chdir,
         "_fn_os_execvp": WebhookHandler._fn_os_execvp,
     }
+    # Override _fn_after_do_post for all tests so _post_webhook can wait for
+    # do_POST to complete without sleeping (see module-level comment above).
+    WebhookHandler._fn_after_do_post = staticmethod(  # type: ignore[assignment]
+        _signal_post_done
+    )
+    _post_done.clear()
     yield
+    with _bg_threads_lock:
+        _bg_threads.clear()
     for attr, val in saved.items():
         setattr(WebhookHandler, attr, val)
 
@@ -68,9 +110,12 @@ def server(tmp_path: Path):
     cfg = _config(tmp_path)
     WebhookHandler.config = cfg
     WebhookHandler.registry = MagicMock()
+    WebhookHandler._fn_spawn_bg = staticmethod(_capturing_spawn_bg)  # type: ignore[assignment]
     srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
     port = srv.server_address[1]
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t = threading.Thread(
+        target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     t.start()
     yield f"http://127.0.0.1:{port}", cfg
     srv.shutdown()
@@ -347,7 +392,18 @@ def _post_webhook(url: str, cfg: Config, event: str, payload: dict) -> int:
             "X-Hub-Signature-256": sig,
         },
     )
+    _post_done.clear()
     resp = urllib.request.urlopen(req)
+    # The wfile socket is unbuffered: _respond() sends bytes immediately, so
+    # urlopen() returns before do_POST() finishes.  Wait for _fn_after_do_post
+    # to fire (set by _restore_handler_fns autouse fixture) before asserting.
+    _post_done.wait(timeout=5.0)
+    # Join any background thread captured by _capturing_spawn_bg.
+    with _bg_threads_lock:
+        threads = list(_bg_threads)
+        _bg_threads.clear()
+    for t in threads:
+        t.join()
     return resp.status
 
 
@@ -374,7 +430,6 @@ class TestProcessAction:
         WebhookHandler._fn_create_task = MagicMock()
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
-        time.sleep(0.2)
         mock_worker.assert_called()
 
     def test_reply_to_comment_creates_task_for_act(self, server: tuple) -> None:
@@ -400,7 +455,6 @@ class TestProcessAction:
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
-        time.sleep(0.2)
         mock_reply.assert_called()
         mock_task.assert_called()
 
@@ -427,7 +481,6 @@ class TestProcessAction:
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
-        time.sleep(0.2)
         mock_reply.assert_called()
         mock_task.assert_not_called()
 
@@ -456,7 +509,6 @@ class TestProcessAction:
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
-        time.sleep(0.2)
         mock_task.assert_not_called()
 
     def test_reply_to_comment_failure_skips_task(self, server: tuple) -> None:
@@ -485,7 +537,6 @@ class TestProcessAction:
         WebhookHandler.gh = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
-        time.sleep(0.2)
         mock_task.assert_not_called()
 
     def test_reply_to_comment_do_creates_task(self, server: tuple) -> None:
@@ -517,7 +568,6 @@ class TestProcessAction:
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
-        time.sleep(0.2)
         assert task_titles == ["add result caching"]
 
     def test_already_replied_comment_skipped(self, server: tuple) -> None:
@@ -546,7 +596,6 @@ class TestProcessAction:
             WebhookHandler._fn_launch_worker = MagicMock()
             status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
             assert status == 200
-            time.sleep(0.2)
             mock_reply.assert_not_called()
         finally:
             ks._replied_comments.discard(203)
@@ -568,7 +617,6 @@ class TestProcessAction:
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review", payload)
         assert status == 200
-        time.sleep(0.2)
         mock_review.assert_called()
 
     def test_issue_comment_handled(self, server: tuple) -> None:
@@ -598,7 +646,6 @@ class TestProcessAction:
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
-        time.sleep(0.2)
         mock_ic.assert_called()
         mock_task.assert_called_once_with(
             "do it",
@@ -636,7 +683,6 @@ class TestProcessAction:
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
-        time.sleep(0.2)
         mock_ic.assert_called()
         mock_task.assert_not_called()
 
@@ -663,7 +709,6 @@ class TestProcessAction:
         WebhookHandler.gh = MagicMock()
         status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
-        time.sleep(0.2)
         mock_task.assert_not_called()
 
     def test_process_action_does_not_overwrite_worker_what(self, server: tuple) -> None:
@@ -681,7 +726,6 @@ class TestProcessAction:
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
-        time.sleep(0.2)
         for call in WebhookHandler.registry.report_activity.call_args_list:
             args = call.args
             assert "handling webhook action" not in args
@@ -748,7 +792,6 @@ class TestProcessAction:
         exits: list[int] = []
         monkeypatch.setattr(server_module.os, "_exit", exits.append)
         _post_webhook(url, cfg, "pull_request", payload)
-        time.sleep(0.2)
         assert exits == [3]
 
     def test_exception_in_process_action_does_not_crash(self, server: tuple) -> None:
@@ -762,7 +805,6 @@ class TestProcessAction:
         WebhookHandler._fn_launch_worker = MagicMock(side_effect=Exception("explode"))
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
-        time.sleep(0.2)
         # server still alive — no crash
 
     def test_process_action_error_reacts_on_reply_to(self, server: tuple) -> None:
@@ -789,7 +831,6 @@ class TestProcessAction:
         )
         WebhookHandler._fn_launch_worker = MagicMock()
         _post_webhook(url, cfg, "pull_request_review_comment", payload)
-        time.sleep(0.2)
         mock_gh.add_reaction.assert_called_once_with(
             "owner/repo", "pulls", 500, "confused"
         )
@@ -820,7 +861,6 @@ class TestProcessAction:
         )
         WebhookHandler._fn_launch_worker = MagicMock()
         _post_webhook(url, cfg, "issue_comment", payload)
-        time.sleep(0.2)
         mock_gh.add_reaction.assert_called_once_with(
             "owner/repo", "issues", 501, "confused"
         )
@@ -839,7 +879,6 @@ class TestProcessAction:
         WebhookHandler.gh = mock_gh
         WebhookHandler._fn_launch_worker = MagicMock(side_effect=RuntimeError("boom"))
         _post_webhook(url, cfg, "pull_request", payload)
-        time.sleep(0.2)
         mock_gh.add_reaction.assert_not_called()
 
     def test_process_action_error_no_reaction_when_comment_id_missing(
@@ -863,7 +902,6 @@ class TestProcessAction:
         WebhookHandler._fn_reply_to_review = MagicMock(side_effect=RuntimeError("boom"))
         WebhookHandler._fn_launch_worker = MagicMock()
         _post_webhook(url, cfg, "pull_request_review", payload)
-        time.sleep(0.2)
         mock_gh.add_reaction.assert_not_called()
 
     def test_process_action_error_no_reaction_when_thread_lacks_comment_id(
@@ -911,7 +949,6 @@ class TestProcessAction:
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
-        time.sleep(0.2)
         mock_gh.add_reaction.assert_called_once()
 
     def test_dispatch_error_returns_500(self, server: tuple) -> None:
@@ -1483,6 +1520,13 @@ _PUSH_PAYLOAD = {
     },
     "ref": "refs/heads/main",
 }
+
+
+class TestNoop:
+    def test_noop_after_post_is_callable_and_silent(self) -> None:
+        from kennel.server import _noop_after_post
+
+        _noop_after_post()  # default hook — must not raise
 
 
 class TestParseRepoFromUrl:
@@ -2115,7 +2159,9 @@ class TestSelfRestart:
         WebhookHandler.registry = mock_registry
         srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
         port = srv.server_address[1]
-        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t = threading.Thread(
+            target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
         t.start()
         return srv, f"http://127.0.0.1:{port}", cfg, mock_registry
 
@@ -2131,7 +2177,6 @@ class TestSelfRestart:
             WebhookHandler._fn_os_execvp = mock_exec
             status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             assert status == 200
-            time.sleep(0.2)
             mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
             mock_chdir.assert_called_once_with(tmp_path)
             mock_exec.assert_called_once()
@@ -2151,7 +2196,6 @@ class TestSelfRestart:
             WebhookHandler._fn_pull_with_backoff = mock_pull
             WebhookHandler._fn_os_execvp = mock_exec
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
-            time.sleep(0.2)
             mock_registry.stop_and_join.assert_not_called()
             mock_pull.assert_not_called()
             mock_exec.assert_not_called()
@@ -2166,7 +2210,6 @@ class TestSelfRestart:
             mock_exec = MagicMock()
             WebhookHandler._fn_os_execvp = mock_exec
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
-            time.sleep(0.2)
             mock_registry.stop_and_join.assert_not_called()
             mock_exec.assert_not_called()
         finally:
@@ -2188,7 +2231,6 @@ class TestSelfRestart:
             mock_exec = MagicMock()
             WebhookHandler._fn_os_execvp = mock_exec
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
-            time.sleep(0.2)
             mock_registry.stop_and_join.assert_not_called()
             mock_exec.assert_not_called()
         finally:
@@ -2214,7 +2256,6 @@ class TestSelfRestart:
             WebhookHandler._fn_os_chdir = MagicMock()
             WebhookHandler._fn_os_execvp = MagicMock()
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
-            time.sleep(0.2)
         finally:
             srv.shutdown()
         assert call_order == ["pull", "stop_and_join"]
@@ -2230,7 +2271,6 @@ class TestSelfRestart:
             WebhookHandler._fn_os_chdir = mock_chdir
             WebhookHandler._fn_os_execvp = mock_exec
             _post_webhook(url, cfg, "push", _PUSH_PAYLOAD)
-            time.sleep(0.2)
             mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
             mock_exec.assert_called_once()
         finally:
@@ -2246,7 +2286,6 @@ class TestSelfRestart:
             WebhookHandler._fn_os_execvp = mock_exec
             payload = {**_PUSH_PAYLOAD, "ref": "refs/heads/feature-branch"}
             _post_webhook(url, cfg, "push", payload)
-            time.sleep(0.2)
             mock_pull.assert_not_called()
             mock_exec.assert_not_called()
         finally:
@@ -2294,7 +2333,6 @@ class TestSelfRestart:
             WebhookHandler._fn_os_execvp = mock_exec
             status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             assert status == 200
-            time.sleep(0.2)
             mock_exec.assert_called_once()
         finally:
             srv.shutdown()
@@ -2314,7 +2352,6 @@ class TestSelfRestart:
             WebhookHandler._fn_os_execvp = mock_exec
             status = _post_webhook(url, cfg, "push", _PUSH_PAYLOAD)
             assert status == 200
-            time.sleep(0.2)
             mock_exec.assert_called_once()
         finally:
             srv.shutdown()
