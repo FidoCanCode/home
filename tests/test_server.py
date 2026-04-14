@@ -573,6 +573,22 @@ class TestProcessAction:
         time.sleep(0.2)
         mock_task.assert_not_called()
 
+    def test_process_action_emits_heartbeat(self, server: tuple) -> None:
+        """_process_action calls registry.report_activity at the start."""
+        url, cfg = server
+        payload = {
+            **self._payload(),
+            "action": "closed",
+            "pull_request": {"number": 14, "merged": True},
+        }
+        WebhookHandler._fn_launch_worker = MagicMock()
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        time.sleep(0.2)
+        WebhookHandler.registry.report_activity.assert_called_with(
+            "owner/repo", "handling webhook action", busy=True
+        )
+
     def test_exception_in_process_action_does_not_crash(self, server: tuple) -> None:
         url, cfg = server
         payload = {

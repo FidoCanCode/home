@@ -278,6 +278,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def _process_action(self, action, repo_cfg: RepoConfig) -> None:
         try:
+            self.registry.report_activity(
+                repo_cfg.name, "handling webhook action", busy=True
+            )
             handled = False
 
             if action.reply_to:
