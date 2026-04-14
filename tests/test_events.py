@@ -2812,7 +2812,7 @@ class TestReplyToReviewAlreadyRepliedTracking:
     def test_does_not_add_to_already_replied_on_post_failure(
         self, tmp_path: Path
     ) -> None:
-        """Dedup set is NOT updated when the GitHub post fails (exception propagates)."""
+        """Failed comment is not added to already_replied; loop continues for others."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="review",
@@ -2828,18 +2828,25 @@ class TestReplyToReviewAlreadyRepliedTracking:
             return "Will fix."
 
         mock_gh = MagicMock()
-        mock_gh.get_review_comments.return_value = [(501, "please fix")]
-        mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
-        with pytest.raises(RuntimeError, match="network down"):
-            reply_to_review(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                already_replied=already,
-                _print_prompt=fake_pp,
-                _gh=mock_gh,
-            )
+        mock_gh.get_review_comments.return_value = [
+            (501, "please fix"),
+            (502, "also fix this"),
+        ]
+        # First comment fails, second succeeds
+        mock_gh.reply_to_review_comment.side_effect = [
+            RuntimeError("network down"),
+            None,
+        ]
+        reply_to_review(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            already_replied=already,
+            _print_prompt=fake_pp,
+            _gh=mock_gh,
+        )
         assert 501 not in already  # post failed — should not be marked as replied
+        assert 502 in already  # second comment still processed
 
 
 class TestReplyToCommentTerseEnrichment:

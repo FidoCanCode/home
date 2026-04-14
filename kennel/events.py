@@ -439,21 +439,25 @@ def reply_to_review(
         return
     log.info("replying to %d review comments", len(todo))
     for cid, body in todo:
-        reply_to_comment(
-            Action(
-                prompt=action.prompt,
-                reply_to={
-                    "repo": info["repo"],
-                    "pr": info["pr"],
-                    "comment_id": cid,
-                },
-                comment_body=body,
-            ),
-            config,
-            repo_cfg,
-            _print_prompt=_print_prompt,
-            _gh=gh,
-        )
+        try:
+            reply_to_comment(
+                Action(
+                    prompt=action.prompt,
+                    reply_to={
+                        "repo": info["repo"],
+                        "pr": info["pr"],
+                        "comment_id": cid,
+                    },
+                    comment_body=body,
+                ),
+                config,
+                repo_cfg,
+                _print_prompt=_print_prompt,
+                _gh=gh,
+            )
+        except Exception:
+            log.exception("failed to reply to review comment %s — skipping", cid)
+            continue
         if already_replied is not None:
             already_replied.add(cid)
 
