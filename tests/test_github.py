@@ -41,6 +41,16 @@ class TestGhToken:
         mock_run = MagicMock(return_value=_completed("  tok  \n"))
         assert _gh_token(runner=mock_run, environ={}) == "tok"
 
+    def test_raises_on_nonzero_exit(self) -> None:
+        mock_run = MagicMock(return_value=_completed("", returncode=1))
+        with pytest.raises(RuntimeError, match="gh auth token failed"):
+            _gh_token(runner=mock_run, environ={})
+
+    def test_error_message_includes_exit_code(self) -> None:
+        mock_run = MagicMock(return_value=_completed("", returncode=4))
+        with pytest.raises(RuntimeError, match=r"exit 4"):
+            _gh_token(runner=mock_run, environ={})
+
 
 class TestGetGh:
     def test_creates_instance_lazily(self) -> None:
@@ -1168,6 +1178,18 @@ class TestGHClass:
         gh = GH("test-token")
         mock_run = MagicMock(return_value=_completed("https://example.com/repo.git"))
         with pytest.raises(ValueError, match="Cannot parse"):
+            gh.get_repo_info(runner=mock_run)
+
+    def test_get_repo_info_raises_on_git_failure(self) -> None:
+        gh = GH("test-token")
+        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, "git"))
+        with pytest.raises(subprocess.CalledProcessError):
+            gh.get_repo_info(runner=mock_run)
+
+    def test_get_repo_info_raises_on_file_not_found(self) -> None:
+        gh = GH("test-token")
+        mock_run = MagicMock(side_effect=FileNotFoundError("git not found"))
+        with pytest.raises(FileNotFoundError):
             gh.get_repo_info(runner=mock_run)
 
     def test_get_default_branch(self) -> None:

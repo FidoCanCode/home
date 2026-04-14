@@ -31,7 +31,12 @@ def _gh_token(
     runner: Any = subprocess.run,
     environ: Any = os.environ,
 ) -> str:
-    """Return a GitHub token from env or the gh CLI."""
+    """Return a GitHub token from env or the gh CLI.
+
+    Raises ``RuntimeError`` on nonzero exit (e.g. not logged in).
+    ``FileNotFoundError`` propagates if the gh CLI is not installed.
+    ``subprocess.TimeoutExpired`` propagates if the CLI hangs.
+    """
     token = environ.get("GITHUB_TOKEN", "")
     if not token:
         result = runner(
@@ -40,6 +45,10 @@ def _gh_token(
             text=True,
             timeout=10,
         )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"gh auth token failed (exit {result.returncode}) — run `gh auth login`"
+            )
         token = result.stdout.strip()
     return token
 
@@ -321,13 +330,20 @@ class GH:
         cwd: Path | str | None = None,
         runner: Any = subprocess.run,
     ) -> str:
-        """Return 'owner/repo' for the repo at cwd, parsed from the git remote."""
+        """Return 'owner/repo' for the repo at cwd, parsed from the git remote.
+
+        Raises ``subprocess.CalledProcessError`` on nonzero exit (e.g. not a
+        git repo or no ``origin`` remote).  ``FileNotFoundError`` propagates
+        if git is not installed.  Raises ``ValueError`` if the remote URL is
+        not a recognised GitHub format.
+        """
         result = runner(
             ["git", "remote", "get-url", "origin"],
             capture_output=True,
             text=True,
             timeout=10,
             cwd=cwd,
+            check=True,
         )
         url = result.stdout.strip().removesuffix(".git")
         if url.startswith("https://github.com/"):

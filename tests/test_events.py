@@ -1431,7 +1431,14 @@ class TestCreateTask:
         thread = {"repo": "a/b", "pr": 1, "comment_id": 5}
         mock_tasks = self._mock_tasks()
         with patch("kennel.events.launch_sync"):
-            create_task("do something", cfg, repo_cfg, thread=thread, _tasks=mock_tasks)
+            create_task(
+                "do something",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
+            )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
         )
@@ -1481,7 +1488,12 @@ class TestCreateTask:
         mock_tasks = self._mock_tasks(fake_task)
         with patch("kennel.events.launch_sync"):
             create_task(
-                "Comment task", cfg, repo_cfg, thread=thread, _tasks=mock_tasks
+                "Comment task",
+                cfg,
+                repo_cfg,
+                thread=thread,
+                _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
             )  # no registry
         registry.abort_task.assert_not_called()
 
@@ -1549,6 +1561,7 @@ class TestCreateTask:
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
             )
         registry.abort_task.assert_not_called()
 
@@ -1619,6 +1632,7 @@ class TestCreateTask:
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
             )
         registry.abort_task.assert_not_called()
 
@@ -1648,6 +1662,7 @@ class TestCreateTask:
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
             )
         registry.abort_task.assert_not_called()
 
@@ -1677,6 +1692,7 @@ class TestCreateTask:
                 thread=thread,
                 registry=registry,
                 _tasks=mock_tasks,
+                _reorder_background_fn=MagicMock(),
             )
         registry.abort_task.assert_not_called()
 
@@ -1982,13 +1998,31 @@ class TestGetCommitSummary:
             result = _get_commit_summary(tmp_path)
         assert result == ""
 
-    def test_returns_empty_stdout_when_git_fails(self, tmp_path: Path) -> None:
+    def test_returns_empty_on_nonzero_exit(self, tmp_path: Path) -> None:
         import subprocess as sp
 
         fake_result = sp.CompletedProcess(
             args=[], returncode=128, stdout="", stderr="not a git repo"
         )
         with patch("kennel.events.subprocess.run", return_value=fake_result):
+            result = _get_commit_summary(tmp_path)
+        assert result == ""
+
+    def test_nonzero_exit_ignored_even_with_stdout(self, tmp_path: Path) -> None:
+        import subprocess as sp
+
+        # Explicit guard: returncode wins over any stdout content.
+        fake_result = sp.CompletedProcess(
+            args=[], returncode=1, stdout="abc123 orphan output\n", stderr=""
+        )
+        with patch("kennel.events.subprocess.run", return_value=fake_result):
+            result = _get_commit_summary(tmp_path)
+        assert result == ""
+
+    def test_returns_empty_on_oserror(self, tmp_path: Path) -> None:
+        with patch(
+            "kennel.events.subprocess.run", side_effect=OSError("permission denied")
+        ):
             result = _get_commit_summary(tmp_path)
         assert result == ""
 
@@ -2025,6 +2059,7 @@ class TestReorderTasksBackground:
             "some commits",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
         )
@@ -2040,6 +2075,7 @@ class TestReorderTasksBackground:
             "commits",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
         )
@@ -2055,6 +2091,7 @@ class TestReorderTasksBackground:
             "feat: add parser",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
         )
@@ -2112,6 +2149,7 @@ class TestReorderTasksBackground:
             repo_cfg=repo_cfg,
             registry=registry,
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
         )
@@ -2130,6 +2168,7 @@ class TestReorderTasksBackground:
             "commits",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state={},
         )
@@ -2149,6 +2188,7 @@ class TestReorderTasksBackground:
             "commits",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _rewrite_fn=mock_rewrite,
             _reorder_fn=mock_reorder,
             _coalesce_state={},
@@ -2174,6 +2214,7 @@ class TestReorderTasksBackground:
             "commits",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _rewrite_fn=mock_rewrite,
             _print_prompt=fake_pp,
             _reorder_fn=mock_reorder,
@@ -2196,6 +2237,7 @@ class TestReorderTasksBackground:
             "cs1",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2208,6 +2250,7 @@ class TestReorderTasksBackground:
             "cs2",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2226,6 +2269,7 @@ class TestReorderTasksBackground:
             "cs1",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2235,6 +2279,7 @@ class TestReorderTasksBackground:
             "cs2",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2258,6 +2303,7 @@ class TestReorderTasksBackground:
                 cs,
                 self._cfg(tmp_path),
                 _start=lambda t: started.append(t),
+                _gh=MagicMock(),
                 _reorder_fn=mock_reorder,
                 _coalesce_state=state,
             )
@@ -2280,6 +2326,7 @@ class TestReorderTasksBackground:
             "cs",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2299,6 +2346,7 @@ class TestReorderTasksBackground:
             "cs1",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2309,6 +2357,7 @@ class TestReorderTasksBackground:
             "cs2",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2327,6 +2376,7 @@ class TestReorderTasksBackground:
             "cs",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
@@ -2335,6 +2385,7 @@ class TestReorderTasksBackground:
             "cs",
             self._cfg(tmp_path),
             _start=lambda t: started.append(t),
+            _gh=MagicMock(),
             _reorder_fn=mock_reorder,
             _coalesce_state=state,
         )
