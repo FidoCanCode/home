@@ -16,7 +16,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from kennel import claude
@@ -308,18 +308,18 @@ class WebhookHandler(BaseHTTPRequestHandler):
     # Injectable collaborators — set as class attributes so HTTP-driven tests
     # can replace them without patching module-level names.
     gh: GitHub | None = None
-    _fn_dispatch = dispatch
-    _fn_reply_to_comment = reply_to_comment
-    _fn_reply_to_review = reply_to_review
-    _fn_reply_to_issue_comment = reply_to_issue_comment
-    _fn_create_task = create_task
-    _fn_launch_worker = launch_worker
-    _fn_runner_dir = _runner_dir
-    _fn_get_self_repo = _get_self_repo
-    _fn_get_head = _get_head
-    _fn_pull_with_backoff = _pull_with_backoff
-    _fn_os_chdir = os.chdir
-    _fn_os_execvp = os.execvp
+    _fn_dispatch = staticmethod(dispatch)
+    _fn_reply_to_comment = staticmethod(reply_to_comment)
+    _fn_reply_to_review = staticmethod(reply_to_review)
+    _fn_reply_to_issue_comment = staticmethod(reply_to_issue_comment)
+    _fn_create_task = staticmethod(create_task)
+    _fn_launch_worker = staticmethod(launch_worker)
+    _fn_runner_dir = staticmethod(_runner_dir)
+    _fn_get_self_repo = staticmethod(_get_self_repo)
+    _fn_get_head = staticmethod(_get_head)
+    _fn_pull_with_backoff = staticmethod(_pull_with_backoff)
+    _fn_os_chdir = staticmethod(os.chdir)
+    _fn_os_execvp = staticmethod(os.execvp)
 
     def do_POST(self) -> None:
         content_length = int(self.headers.get("Content-Length", 0))
@@ -447,7 +447,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # Writing here would clobber the worker thread's own state, which is
         # what caused the old ``Doing: handling webhook action`` display bug.
         try:
-            gh = self.gh
+            gh = cast(GitHub, self.gh)  # always set by serve() before first request
             handled = False
 
             if action.reply_to:
@@ -526,7 +526,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         comment_id = thread.get("comment_id")
         comment_type = thread.get("comment_type", "issues")
         try:
-            self.gh.add_reaction(repo, comment_type, comment_id, "confused")
+            if self.gh is not None:
+                self.gh.add_reaction(repo, comment_type, comment_id, "confused")
         except Exception:
             log.exception("failed to post error reaction on comment %s", comment_id)
 

@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from kennel.claude import print_prompt as _claude_print_prompt
 from kennel.github import GitHub
@@ -31,7 +31,7 @@ def _locked(path: Path, write: bool = False):
 
     class Lock:
         def __init__(self):
-            self.fd = None
+            self.fd: IO[str] | None = None
 
         def __enter__(self):
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,9 +45,14 @@ def _locked(path: Path, write: bool = False):
                 fcntl.flock(self.fd, fcntl.LOCK_UN)
                 self.fd.close()
 
+        def _fd(self) -> IO[str]:
+            assert self.fd is not None, "Lock used outside context manager"
+            return self.fd
+
         def read(self) -> list[dict[str, Any]]:
-            self.fd.seek(0)
-            text = self.fd.read().strip()
+            fd = self._fd()
+            fd.seek(0)
+            text = fd.read().strip()
             if not text:
                 return []
             try:
@@ -62,10 +67,11 @@ def _locked(path: Path, write: bool = False):
             return result
 
         def write(self, tasks: list[dict[str, Any]]) -> None:
-            self.fd.seek(0)
-            self.fd.truncate()
-            json.dump(tasks, self.fd, indent=2)
-            self.fd.flush()
+            fd = self._fd()
+            fd.seek(0)
+            fd.truncate()
+            json.dump(tasks, fd, indent=2)
+            fd.flush()
 
     return Lock()
 

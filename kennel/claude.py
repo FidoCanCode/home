@@ -479,6 +479,7 @@ def _run_streaming(
         cwd=cwd,
     )
     _register_child(proc)
+    assert proc.stdout is not None  # guaranteed by stdout=PIPE
     repo_name = current_repo()
     thread_id = threading.get_ident()
     talker_registered = False

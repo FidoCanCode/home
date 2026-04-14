@@ -433,7 +433,7 @@ def collect() -> KennelStatus:
     uptime = _process_uptime_seconds(pid) if pid is not None else None
     repo_configs = _repos_from_pid(pid) if pid is not None else []
 
-    activities: dict[str, str] = {}
+    activities: dict[str, Any] = {}
     if pid is not None:
         port = _port_from_pid(pid)
         if port is not None:

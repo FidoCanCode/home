@@ -1272,7 +1272,7 @@ class Worker:
         self,
         nodes: list[dict[str, Any]],
         gh_user: str,
-        collaborators: tuple[str, ...],
+        collaborators: frozenset[str],
     ) -> list[dict[str, Any]]:
         """Return unresolved review threads for the comments sub-Claude.
 

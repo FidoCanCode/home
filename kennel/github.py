@@ -20,7 +20,7 @@ _HTTP_TIMEOUT: int = 30  # seconds for all outbound GitHub HTTP requests
 class _TimeoutSession(_requests.Session):
     """requests.Session that applies _HTTP_TIMEOUT to every request by default."""
 
-    def request(
+    def request(  # pyright: ignore[reportIncompatibleMethodOverride]
         self, method: str | bytes, url: str | bytes, **kwargs: Any
     ) -> _requests.Response:  # type: ignore[override]
         kwargs.setdefault("timeout", _HTTP_TIMEOUT)
