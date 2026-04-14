@@ -35,9 +35,10 @@ def generate_persona_status(
         prompt=f"Rewrite this status in Fido's voice: {message}",
         model="claude-opus-4-6",
         system_prompt=system,
-        timeout=15,
     )
-    return result if result else message[:80]
+    if not result:
+        raise ValueError("humanify_status: print_prompt returned empty")
+    return result
 
 
 def generate_persona_emoji(
@@ -52,9 +53,10 @@ def generate_persona_emoji(
         key="emoji",
         model="claude-opus-4-6",
         system_prompt=system,
-        timeout=15,
     )
-    return result if result else ":dog:"
+    if not result:
+        raise ValueError("generate_persona_emoji: print_prompt_json returned empty")
+    return result
 
 
 def set_gh_status(

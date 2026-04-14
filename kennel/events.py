@@ -351,14 +351,10 @@ def reply_to_comment(
         prompts.persona_wrap(instr),
         "claude-opus-4-6",
         system_prompt=prompts.reply_system_prompt(),
-        timeout=30,
     )
-
     if not body:
-        body = (
-            "Looking into this now."
-            if category in ("ACT", "DO")
-            else "Noted — checking on this."
+        raise ValueError(
+            f"review-comment reply: print_prompt returned empty for PR #{info['pr']}"
         )
 
     log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
@@ -504,9 +500,10 @@ def _summarize_as_action_item(comment_body: str, *, _print_prompt=None) -> str:
             f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
             f"Reply with ONLY the shortened title.\n\nTitle: {result}",
             "claude-opus-4-6",
-            timeout=15,
         ).strip()
-    return result[:_MAX_TITLE_LEN] if result else comment_body[:_MAX_TITLE_LEN]
+    if not result:
+        raise ValueError("_summarize_as_action_item: print_prompt returned empty")
+    return result[:_MAX_TITLE_LEN]
 
 
 def _triage(
@@ -614,10 +611,11 @@ def reply_to_issue_comment(
         prompts.persona_wrap(instr),
         "claude-opus-4-6",
         system_prompt=prompts.reply_system_prompt(),
-        timeout=30,
     )
     if not body:
-        body = "On it!" if category in ("ACT", "DO") else "Noted."
+        raise ValueError(
+            f"issue-comment reply: print_prompt returned empty for PR #{number}"
+        )
 
     log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
     gh.comment_issue(repo_full, number, body)
@@ -756,10 +754,6 @@ def _notify_thread_change(
             "Write a very brief reply notifying the commenter that their task has been "
             "marked done because it was covered by recent commits. Reference the comment URL."
         )
-        fallback = (
-            f"FYI — the task from your comment ('{original_title}') has been "
-            f"marked done: it was covered by recent commits."
-        )
     else:
         new_title = change.get("new_title", "")
         instruction = (
@@ -772,19 +766,16 @@ def _notify_thread_change(
             "Write a very brief reply notifying the commenter that their original task "
             "has been updated. Reference the comment URL."
         )
-        fallback = (
-            f"FYI — the task from your comment has been updated to: "
-            f"'{new_title}' based on new requirements."
-        )
 
     body = _print_prompt(
         prompts.persona_wrap(instruction),
         "claude-opus-4-6",
         system_prompt=prompts.reply_system_prompt(),
-        timeout=15,
     )
     if not body:
-        body = fallback
+        raise ValueError(
+            f"_notify_thread_change: print_prompt returned empty for comment {comment_id}"
+        )
 
     try:
         if comment_type == "pulls":
