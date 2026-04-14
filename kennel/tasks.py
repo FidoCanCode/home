@@ -264,12 +264,8 @@ def _auto_complete_ask_tasks(
     if not ask_tasks:
         return
 
-    try:
-        owner, repo_name = repo.split("/", 1)
-        nodes = gh.get_review_threads(owner, repo_name, pr_number)
-    except Exception:
-        log.exception("sync_tasks: failed to fetch review threads for ASK resolution")
-        return
+    owner, repo_name = repo.split("/", 1)
+    nodes = gh.get_review_threads(owner, repo_name, pr_number)
 
     resolved_ids: set[int] = set()
     for node in nodes:
@@ -325,12 +321,8 @@ def sync_tasks(
             log.info("sync_tasks: no current issue — nothing to sync")
             return
 
-        try:
-            repo = gh.get_repo_info(cwd=work_dir)
-            user = gh.get_user()
-        except Exception:
-            log.exception("sync_tasks: failed to get repo info or user")
-            return
+        repo = gh.get_repo_info(cwd=work_dir)
+        user = gh.get_user()
 
         pr_data = gh.find_pr(repo, issue, user)
         if pr_data is None or pr_data.get("state") != "OPEN":
@@ -348,11 +340,7 @@ def sync_tasks(
         queue = _format_work_queue(task_list)
         log.info("sync_tasks: syncing task list → PR #%s", pr_number)
 
-        try:
-            body = gh.get_pr_body(repo, pr_number)
-        except Exception:
-            log.exception("sync_tasks: failed to get PR body")
-            return
+        body = gh.get_pr_body(repo, pr_number)
 
         if "WORK_QUEUE_START" not in body:
             log.info(
@@ -362,11 +350,8 @@ def sync_tasks(
             return
 
         new_body = _apply_queue_to_body(body, queue)
-        try:
-            gh.edit_pr_body(repo, pr_number, new_body)
-            log.info("sync_tasks: PR #%s work queue synced", pr_number)
-        except Exception:
-            log.exception("sync_tasks: failed to update PR body")
+        gh.edit_pr_body(repo, pr_number, new_body)
+        log.info("sync_tasks: PR #%s work queue synced", pr_number)
     finally:
         sync_lock_fd.close()
 

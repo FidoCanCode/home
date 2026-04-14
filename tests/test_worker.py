@@ -7707,19 +7707,20 @@ class TestAutoCompleteAskTasks:
         )
         mock_complete.assert_not_called()
 
-    def test_get_review_threads_exception_logged(self, tmp_path: Path) -> None:
+    def test_get_review_threads_exception_propagates(self, tmp_path: Path) -> None:
         gh = MagicMock()
         task = self._ask_task(1)
         gh.get_review_threads.side_effect = RuntimeError("api fail")
         mock_complete = MagicMock()
-        _auto_complete_ask_tasks(
-            tmp_path,
-            gh,
-            "owner/repo",
-            1,
-            _list_tasks=MagicMock(return_value=[task]),
-            _complete_by_id=mock_complete,
-        )
+        with pytest.raises(RuntimeError, match="api fail"):
+            _auto_complete_ask_tasks(
+                tmp_path,
+                gh,
+                "owner/repo",
+                1,
+                _list_tasks=MagicMock(return_value=[task]),
+                _complete_by_id=mock_complete,
+            )
         mock_complete.assert_not_called()
 
     def test_non_ask_tasks_ignored(self, tmp_path: Path) -> None:
@@ -7905,15 +7906,16 @@ class TestSyncTasks:
         sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
         gh.edit_pr_body.assert_not_called()
 
-    def test_get_repo_info_exception_logged(self, tmp_path: Path) -> None:
+    def test_get_repo_info_exception_propagates(self, tmp_path: Path) -> None:
         gh = MagicMock()
         fido_dir = self._fido_dir(tmp_path)
         self._state_with_issue(fido_dir)
         gh.get_repo_info.side_effect = RuntimeError("no remote")
-        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
+        with pytest.raises(RuntimeError, match="no remote"):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.find_pr.assert_not_called()
 
-    def test_get_pr_body_exception_breaks_loop(self, tmp_path: Path) -> None:
+    def test_get_pr_body_exception_propagates(self, tmp_path: Path) -> None:
         gh = MagicMock()
         fido_dir = self._fido_dir(tmp_path)
         self._state_with_issue(fido_dir)
@@ -7922,10 +7924,11 @@ class TestSyncTasks:
         gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
         gh.get_pr_body.side_effect = RuntimeError("api down")
         task = {"title": "Do it", "status": "pending"}
-        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
+        with pytest.raises(RuntimeError, match="api down"):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
         gh.edit_pr_body.assert_not_called()
 
-    def test_edit_pr_body_exception_breaks_loop(self, tmp_path: Path) -> None:
+    def test_edit_pr_body_exception_propagates(self, tmp_path: Path) -> None:
         gh = MagicMock()
         fido_dir = self._fido_dir(tmp_path)
         self._state_with_issue(fido_dir)
@@ -7936,9 +7939,8 @@ class TestSyncTasks:
         gh.get_pr_body.return_value = body
         gh.edit_pr_body.side_effect = RuntimeError("api down")
         task = {"title": "Do it", "status": "pending"}
-        sync_tasks(
-            tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task])
-        )  # should not raise
+        with pytest.raises(RuntimeError, match="api down"):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir, task_list=[task]))
 
 
 class TestSyncTasksBackground:
