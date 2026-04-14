@@ -165,6 +165,10 @@ class GitHub:
             in_reply_to=int(in_reply_to),
         )
 
+    def edit_review_comment(self, repo: str, comment_id: int | str, body: str) -> None:
+        """Edit the body of an existing inline review comment."""
+        self._patch(f"/repos/{repo}/pulls/comments/{comment_id}", body=body)
+
     def get_pull_comments(self, repo: str, pr: int | str) -> list[dict[str, Any]]:
         """Return all inline review comments on a pull request."""
         return list(self._paginate(f"{self.BASE}/repos/{repo}/pulls/{pr}/comments"))
@@ -223,7 +227,11 @@ class GitHub:
         root_id = comment.get("in_reply_to_id") or comment_id
 
         return [
-            {"author": c.get("user", {}).get("login", ""), "body": c.get("body", "")}
+            {
+                "id": c["id"],
+                "author": c.get("user", {}).get("login", ""),
+                "body": c.get("body", ""),
+            }
             for c in raw
             if c["id"] == root_id or c.get("in_reply_to_id") == root_id
         ]

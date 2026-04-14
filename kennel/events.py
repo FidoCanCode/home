@@ -307,12 +307,22 @@ def reply_to_comment(
 
     context: dict[str, Any] = dict(action.context) if action.context else {}
 
-    # Always fetch the full thread for this comment
+    # Always fetch the full thread for this comment.
+    # Normalize to list so root_body extraction below is type-safe.
+    thread_comments: list[dict[str, Any]] = []
     if info.get("repo") and info.get("pr") and info.get("comment_id"):
-        thread = gh.fetch_comment_thread(info["repo"], info["pr"], info["comment_id"])
-        if thread:
-            context["comment_thread"] = thread
-            log.info("fetched %d comment(s) in thread for context", len(thread))
+        fetched = gh.fetch_comment_thread(info["repo"], info["pr"], info["comment_id"])
+        if fetched:
+            thread_comments = list(fetched)
+            context["comment_thread"] = thread_comments
+            log.info(
+                "fetched %d comment(s) in thread for context", len(thread_comments)
+            )
+
+    # Root comment body — used for task title generation.
+    # When the webhook fires on a reply (e.g. "Yes" or "Woof, you're right!"),
+    # the task title should describe the reviewer's original feedback, not the reply.
+    root_body = thread_comments[0].get("body", comment) if thread_comments else comment
 
     # Enrich context with sibling threads when the comment needs more context
     if (
@@ -328,11 +338,20 @@ def reply_to_comment(
                 len(siblings),
             )
 
-    # Step 1: Haiku triage
+    # Step 1: Haiku triage (on the triggering comment to determine category)
     category, titles = _triage(
         comment, action.is_bot, context, _print_prompt=_print_prompt
     )
     log.info("triage: %s — %s", category, titles)
+
+    # Step 1b: Always derive task titles from the root comment body for action
+    # categories.  The originating PR comment is the source of truth for what
+    # was requested; triage may have run on a short reply body ("Yes", "Done")
+    # that produces a poor title.  Using root_body here ensures the task always
+    # reflects what the reviewer originally asked.
+    if category in ("ACT", "DO"):
+        log.info("deriving task title from root comment")
+        titles = [_summarize_as_action_item(root_body, _print_prompt=_print_prompt)]
 
     # Step 2: For DEFER, open a tracking issue before crafting the reply.
     # Raises on failure so we don't craft a reply referencing a missing issue.
@@ -362,9 +381,25 @@ def reply_to_comment(
             f"review-comment reply: print_prompt returned empty for PR #{info['pr']}"
         )
 
-    log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
-    gh.reply_to_review_comment(info["repo"], info["pr"], body, info["comment_id"])
-    log.info("reply posted")
+    # Edit the last Fido reply in the thread instead of posting a new comment.
+    # This keeps the thread tidy — one acknowledgment per thread, updated in place.
+    _fido_logins = {"fidocancode", "fido-can-code"}
+    last_fido_id = next(
+        (
+            c["id"]
+            for c in reversed(thread_comments)
+            if c.get("author", "").lower() in _fido_logins
+        ),
+        None,
+    )
+    if last_fido_id:
+        log.info("editing last fido reply %s on PR #%s", last_fido_id, info["pr"])
+        gh.edit_review_comment(info["repo"], last_fido_id, body)
+        log.info("reply edited")
+    else:
+        log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
+        gh.reply_to_review_comment(info["repo"], info["pr"], body, info["comment_id"])
+        log.info("reply posted")
 
     # Maybe react
     maybe_react(

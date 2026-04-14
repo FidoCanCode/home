@@ -92,7 +92,11 @@ def reply_context_block(
     comment: str,
     title: str,
 ) -> str:
-    """Build the rich context block used inside a reply instruction."""
+    """Build the rich context block used inside a reply instruction.
+
+    Includes the full conversation thread so reply generation can consider
+    the entire discussion history, not just the triggering comment.
+    """
     ctx = context or {}
     parts: list[str] = []
     if ctx.get("pr_title"):
@@ -103,6 +107,13 @@ def reply_context_block(
             parts.append(f"Line: {ctx['line']}")
     if ctx.get("diff_hunk"):
         parts.append(f"Diff:\n```\n{ctx['diff_hunk']}\n```")
+    # Include comment thread so reply generation considers the full conversation
+    if ctx.get("comment_thread"):
+        thread_lines = [
+            f"  {c.get('author', '')}: {c.get('body', '')}"
+            for c in ctx["comment_thread"]
+        ]
+        parts.append("Comment thread:\n" + "\n".join(thread_lines))
     parts.append(f"Comment: {comment}")
     parts.append(f"Your plan: {title}")
     return "\n\n".join(parts)
