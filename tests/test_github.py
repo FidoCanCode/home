@@ -8,10 +8,8 @@ import pytest
 
 from kennel.github import (
     _HTTP_TIMEOUT,  # noqa: PLC2701
-    GH,
     GitHub,
     GraphQLError,
-    _get_gh,
     _gh_token,
     _TimeoutSession,  # noqa: PLC2701
     get_github,
@@ -26,8 +24,7 @@ def _completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedPro
 
 @pytest.fixture(autouse=True)
 def _reset_gh_cache() -> None:
-    """Reset caches before each test for isolation."""
-    _get_gh.cache_clear()
+    """Reset cache before each test for isolation."""
     get_github.cache_clear()
 
 
@@ -54,18 +51,6 @@ class TestGhToken:
             _gh_token(runner=mock_run, environ={})
 
 
-class TestGetGh:
-    def test_creates_instance_lazily(self) -> None:
-        result = _get_gh(token="tok")
-        assert isinstance(result, GH)
-        assert result._s.headers["Authorization"] == "Bearer tok"
-
-    def test_returns_cached_instance(self) -> None:
-        first = _get_gh(token="tok")
-        second = _get_gh(token="tok")
-        assert first is second
-
-
 class TestGetGithub:
     def test_creates_instance_lazily(self) -> None:
         result = get_github(token="tok")
@@ -75,361 +60,6 @@ class TestGetGithub:
         first = get_github(token="tok")
         second = get_github(token="tok")
         assert first is second
-
-
-class TestGitHubClass:
-    def _github(self) -> tuple[GitHub, MagicMock]:
-        mock_s = MagicMock()
-        return GitHub("test-token", session=mock_s), mock_s
-
-    def test_stores_gh_as_attribute(self) -> None:
-        gh = GitHub("test-token")
-        assert isinstance(gh._gh, GH)
-
-    def test_uses_provided_token(self) -> None:
-        gh = GitHub("my-token")
-        assert gh._gh._s.headers["Authorization"] == "Bearer my-token"
-
-    def test_get_repo_info_delegates(self) -> None:
-        gh, _ = self._github()
-        mock_run = MagicMock(return_value=_completed("https://github.com/o/r.git\n"))
-        assert gh.get_repo_info(runner=mock_run) == "o/r"
-
-    def test_get_user_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"login": "fido"}
-        mock_s.get.return_value = mock_resp
-        assert gh.get_user() == "fido"
-
-    def test_get_collaborators_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [
-            {"login": "alice", "role_name": "admin"},
-            {"login": "bob", "role_name": "write"},
-            {"login": "carol", "role_name": "read"},
-        ]
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
-        assert gh.get_collaborators("owner/repo") == ["alice", "bob"]
-
-    def test_get_default_branch_delegates(self) -> None:
-        gh, mock_s = self._github()
-        remote_resp = _completed("https://github.com/o/r.git\n")
-        repo_resp = MagicMock()
-        repo_resp.json.return_value = {"default_branch": "main"}
-        mock_run = MagicMock(return_value=remote_resp)
-        mock_s.get.return_value = repo_resp
-        assert gh.get_default_branch(runner=mock_run) == "main"
-
-    def test_get_default_branch_passes_cwd(self) -> None:
-        gh, mock_s = self._github()
-        remote_resp = _completed("https://github.com/o/r.git\n")
-        repo_resp = MagicMock()
-        repo_resp.json.return_value = {"default_branch": "main"}
-        mock_run = MagicMock(return_value=remote_resp)
-        mock_s.get.return_value = repo_resp
-        gh.get_default_branch(cwd=Path("/repo"), runner=mock_run)
-        assert mock_run.call_args.kwargs["cwd"] == Path("/repo")
-
-    def test_set_user_status_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        mock_s.post.return_value = mock_resp
-        gh.set_user_status("working", "🐕", busy=True)
-        body = mock_s.post.call_args.kwargs["json"]
-        assert body["variables"]["busy"] is True
-
-    def test_find_issues_delegates(self) -> None:
-        gh, mock_s = self._github()
-        nodes = [{"number": 1, "title": "t"}]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "data": {"repository": {"issues": {"nodes": nodes}}}
-        }
-        mock_s.post.return_value = mock_resp
-        assert gh.find_issues("o", "r", "fido") == nodes
-
-    def test_view_issue_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "state": "open",
-            "title": "T",
-            "body": "b",
-            "created_at": "2024-01-01T00:00:00Z",
-        }
-        mock_s.get.return_value = mock_resp
-        result = gh.view_issue("o/r", 1)
-        assert result["state"] == "OPEN"
-        assert result["created_at"] == "2024-01-01T00:00:00Z"
-
-    def test_comment_issue_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_s.post.return_value = mock_resp
-        gh.comment_issue("o/r", 7, "hi")
-        assert "repos/o/r/issues/7/comments" in mock_s.post.call_args.args[0]
-
-    def test_get_issue_comments_delegates(self) -> None:
-        gh, mock_s = self._github()
-        comments = [{"id": 1}]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = comments
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
-        assert gh.get_issue_comments("o/r", 9) == comments
-
-    def test_get_issue_events_delegates(self) -> None:
-        gh, mock_s = self._github()
-        events = [{"event": "reopened", "created_at": "2024-06-01T00:00:00Z"}]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = events
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
-        assert gh.get_issue_events("o/r", 3) == events
-
-    def test_create_issue_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"html_url": "https://github.com/o/r/issues/10"}
-        mock_s.post.return_value = mock_resp
-        url = gh.create_issue("o/r", "My suggestion", "some body")
-        assert url == "https://github.com/o/r/issues/10"
-        assert "repos/o/r/issues" in mock_s.post.call_args.args[0]
-
-    def test_get_pull_comments_delegates(self) -> None:
-        gh, mock_s = self._github()
-        comments = [{"id": 42}]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = comments
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
-        assert gh.get_pull_comments("o/r", 7) == comments
-
-    def test_fetch_sibling_threads_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = []
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
-        result = gh.fetch_sibling_threads("o/r", 7)
-        assert result == []
-
-    def test_fetch_comment_thread_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [
-            {
-                "id": 10,
-                "in_reply_to_id": None,
-                "user": {"login": "alice"},
-                "body": "root",
-            }
-        ]
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
-        result = gh.fetch_comment_thread("o/r", 7, 10)
-        assert result == [{"author": "alice", "body": "root"}]
-
-    def test_find_pr_delegates(self) -> None:
-        gh, mock_s = self._github()
-        pr = {
-            "__typename": "PullRequest",
-            "number": 1,
-            "headRefName": "feat",
-            "state": "OPEN",
-            "author": {"login": "fido"},
-            "body": "closes #5",
-        }
-        mock_s.post.return_value.json.return_value = {
-            "data": {
-                "repository": {
-                    "issue": {
-                        "timelineItems": {
-                            "pageInfo": {"hasNextPage": False, "endCursor": None},
-                            "nodes": [
-                                {"__typename": "CrossReferencedEvent", "source": pr}
-                            ],
-                        }
-                    }
-                }
-            }
-        }
-        result = gh.find_pr("o/r", 5, "fido")
-        assert result is not None
-        assert result["number"] == 1
-
-    def test_create_pr_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"html_url": "https://github.com/o/r/pull/1"}
-        mock_s.post.return_value = mock_resp
-        result = gh.create_pr("o/r", "t", "b", "main", "feat")
-        assert result == "https://github.com/o/r/pull/1"
-
-    def test_edit_pr_body_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        mock_s.patch.return_value = mock_resp
-        gh.edit_pr_body("o/r", 10, "new")
-        assert mock_s.patch.call_args.kwargs["json"]["body"] == "new"
-
-    def test_get_pr_body_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"body": "some body"}
-        mock_s.get.return_value = mock_resp
-        result = gh.get_pr_body("o/r", 10)
-        assert result == "some body"
-
-    def test_add_pr_reviewers_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_s.post.return_value = mock_resp
-        gh.add_pr_reviewers("o/r", 10, ["alice", "bob"])
-        assert mock_s.post.call_args.kwargs["json"]["reviewers"] == ["alice", "bob"]
-
-    def test_add_pr_reviewers_empty_is_noop(self) -> None:
-        gh, mock_s = self._github()
-        gh.add_pr_reviewers("o/r", 10, [])
-        mock_s.post.assert_not_called()
-
-    def test_pr_checks_delegates(self) -> None:
-        gh, mock_s = self._github()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"head": {"sha": "abc"}}
-        checks_resp = MagicMock()
-        checks_resp.json.return_value = {"check_runs": []}
-        mock_s.get.side_effect = [pr_resp, checks_resp]
-        assert gh.pr_checks("o/r", 10) == []
-
-    def test_get_required_checks_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "required_status_checks": {
-                "checks": [{"context": "ci / test", "app_id": 1}]
-            }
-        }
-        mock_s.get.return_value = mock_resp
-        result = gh.get_required_checks("o/r", "main")
-        assert result == ["ci / test"]
-
-    def test_pr_ready_delegates(self) -> None:
-        gh, mock_s = self._github()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"node_id": "PR_xyz"}
-        graphql_resp = MagicMock()
-        graphql_resp.json.return_value = {"data": {}}
-        mock_s.get.return_value = pr_resp
-        mock_s.post.return_value = graphql_resp
-        gh.pr_ready("o/r", 10)
-        body = mock_s.post.call_args.kwargs["json"]
-        assert "markPullRequestReadyForReview" in body["query"]
-        assert body["variables"]["prId"] == "PR_xyz"
-
-    def test_pr_merge_delegates(self) -> None:
-        gh, mock_s = self._github()
-        get_resp = MagicMock()
-        get_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
-        mock_s.get.return_value = get_resp
-        put_resp = MagicMock()
-        put_resp.json.return_value = {}
-        mock_s.put.return_value = put_resp
-        gh.pr_merge("o/r", 10)
-        assert mock_s.put.call_args.kwargs["json"]["merge_method"] == "squash"
-
-    def test_get_pr_delegates(self) -> None:
-        gh, mock_s = self._github()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {
-            "draft": False,
-            "mergeable_state": "clean",
-            "body": "b",
-        }
-        reviews_resp = MagicMock()
-        reviews_resp.json.return_value = []
-        reviews_resp.headers = {}
-        commits_resp = MagicMock()
-        commits_resp.json.return_value = []
-        commits_resp.headers = {}
-        mock_s.get.side_effect = [pr_resp, reviews_resp, commits_resp]
-        result = gh.get_pr("o/r", 10)
-        assert result["isDraft"] is False
-
-    def test_get_reviews_delegates(self) -> None:
-        gh, mock_s = self._github()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"draft": True}
-        reviews_resp = MagicMock()
-        reviews_resp.json.return_value = []
-        reviews_resp.headers = {}
-        commits_resp = MagicMock()
-        commits_resp.json.return_value = []
-        commits_resp.headers = {}
-        mock_s.get.side_effect = [pr_resp, reviews_resp, commits_resp]
-        result = gh.get_reviews("o/r", 10)
-        assert result["isDraft"] is True
-
-    def test_get_review_comments_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [
-            {"id": 1, "body": "fix this"},
-            {"id": 2, "body": "nit"},
-        ]
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
-        assert gh.get_review_comments("o/r", 10, 99) == [
-            (1, "fix this"),
-            (2, "nit"),
-        ]
-
-    def test_reply_to_review_comment_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_s.post.return_value = mock_resp
-        gh.reply_to_review_comment("o/r", 10, "lgtm", 55)
-        assert mock_s.post.call_args.kwargs["json"]["body"] == "lgtm"
-
-    def test_add_reaction_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_s.post.return_value = mock_resp
-        gh.add_reaction("o/r", "pulls", 42, "rocket")
-        assert mock_s.post.call_args.kwargs["json"]["content"] == "rocket"
-
-    def test_get_review_threads_delegates(self) -> None:
-        gh, mock_s = self._github()
-        nodes = [{"id": "T_1", "isResolved": False}]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-        mock_s.post.return_value = mock_resp
-        result = gh.get_review_threads("o", "r", 10)
-        assert result == nodes
-
-    def test_resolve_thread_delegates(self) -> None:
-        gh, mock_s = self._github()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"data": {}}
-        mock_s.post.return_value = mock_resp
-        gh.resolve_thread("T_abc")
-        assert "resolveReviewThread" in mock_s.post.call_args.kwargs["json"]["query"]
-
-    def test_get_run_log_delegates(self) -> None:
-        gh, mock_s = self._github()
-        jobs_resp = MagicMock()
-        jobs_resp.json.return_value = {"jobs": [{"id": 1, "conclusion": "failure"}]}
-        log_resp = MagicMock()
-        log_resp.text = "log\n"
-        mock_s.get.side_effect = [jobs_resp, log_resp]
-        assert gh.get_run_log("o/r", 1) == "log\n"
 
 
 class TestTimeoutSession:
@@ -451,22 +81,22 @@ class TestTimeoutSession:
             s.request("GET", "https://example.com", timeout=5)
         assert mock_req.call_args.kwargs.get("timeout") == 5
 
-    def test_gh_uses_timeout_session_when_no_session_injected(self) -> None:
-        gh = GH("tok")
+    def test_uses_timeout_session_when_no_session_injected(self) -> None:
+        gh = GitHub("tok")
         assert isinstance(gh._s, _TimeoutSession)
 
 
-class TestGHClass:
-    def _gh(self) -> tuple[GH, MagicMock]:
+class TestGitHubClass:
+    def _gh(self) -> tuple[GitHub, MagicMock]:
         mock_s = MagicMock()
-        return GH("test-token", session=mock_s), mock_s
+        return GitHub("test-token", session=mock_s), mock_s
 
     def test_sets_auth_header(self) -> None:
-        gh = GH("test-token")
+        gh = GitHub("test-token")
         assert gh._s.headers["Authorization"] == "Bearer test-token"
 
     def test_sets_accept_header(self) -> None:
-        gh = GH("test-token")
+        gh = GitHub("test-token")
         assert gh._s.headers["Accept"] == "application/vnd.github+json"
 
     def test_get_calls_session(self) -> None:
@@ -1183,50 +813,59 @@ class TestGHClass:
         assert gh.get_collaborators("o/r") == ["bob"]
 
     def test_get_repo_info_https(self) -> None:
-        gh = GH("test-token")
+        gh = GitHub("test-token")
         mock_run = MagicMock(
             return_value=_completed("https://github.com/owner/repo.git\n")
         )
         assert gh.get_repo_info(runner=mock_run) == "owner/repo"
 
     def test_get_repo_info_ssh(self) -> None:
-        gh = GH("test-token")
+        gh = GitHub("test-token")
         mock_run = MagicMock(return_value=_completed("git@github.com:owner/repo.git\n"))
         assert gh.get_repo_info(runner=mock_run) == "owner/repo"
 
     def test_get_repo_info_passes_cwd(self) -> None:
-        gh = GH("test-token")
+        gh = GitHub("test-token")
         mock_run = MagicMock(return_value=_completed("https://github.com/o/r.git"))
         gh.get_repo_info(cwd="/tmp/repo", runner=mock_run)
         assert mock_run.call_args.kwargs["cwd"] == "/tmp/repo"
 
     def test_get_repo_info_raises_unknown(self) -> None:
-        gh = GH("test-token")
+        gh = GitHub("test-token")
         mock_run = MagicMock(return_value=_completed("https://example.com/repo.git"))
         with pytest.raises(ValueError, match="Cannot parse"):
             gh.get_repo_info(runner=mock_run)
 
     def test_get_repo_info_raises_on_git_failure(self) -> None:
-        gh = GH("test-token")
+        gh = GitHub("test-token")
         mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, "git"))
         with pytest.raises(subprocess.CalledProcessError):
             gh.get_repo_info(runner=mock_run)
 
     def test_get_repo_info_raises_on_file_not_found(self) -> None:
-        gh = GH("test-token")
+        gh = GitHub("test-token")
         mock_run = MagicMock(side_effect=FileNotFoundError("git not found"))
         with pytest.raises(FileNotFoundError):
             gh.get_repo_info(runner=mock_run)
 
     def test_get_default_branch(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"default_branch": "main", "name": "repo"}
-        mock_s.get.return_value = mock_resp
-        result = gh.get_default_branch("o/r")
-        url = mock_s.get.call_args.args[0]
-        assert "repos/o/r" in url
-        assert result == "main"
+        remote_resp = _completed("https://github.com/o/r.git\n")
+        repo_resp = MagicMock()
+        repo_resp.json.return_value = {"default_branch": "main"}
+        mock_run = MagicMock(return_value=remote_resp)
+        mock_s.get.return_value = repo_resp
+        assert gh.get_default_branch(runner=mock_run) == "main"
+
+    def test_get_default_branch_passes_cwd(self) -> None:
+        gh, mock_s = self._gh()
+        remote_resp = _completed("https://github.com/o/r.git\n")
+        repo_resp = MagicMock()
+        repo_resp.json.return_value = {"default_branch": "main"}
+        mock_run = MagicMock(return_value=remote_resp)
+        mock_s.get.return_value = repo_resp
+        gh.get_default_branch(cwd=Path("/repo"), runner=mock_run)
+        assert mock_run.call_args.kwargs["cwd"] == Path("/repo")
 
     def test_set_user_status_graphql(self) -> None:
         gh, mock_s = self._gh()
@@ -1663,6 +1302,29 @@ class TestGHClass:
         result = gh.get_pr("o/r", 10)
         assert result["body"] == ""
         assert result["mergeStateStatus"] == ""
+
+    def test_get_review_threads(self) -> None:
+        gh, mock_s = self._gh()
+        nodes = [{"id": "T_1", "isResolved": False, "comments": {"nodes": []}}]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
+        }
+        mock_s.post.return_value = mock_resp
+        result = gh.get_review_threads("o", "r", 10)
+        assert result == nodes
+        body = mock_s.post.call_args.kwargs["json"]
+        assert body["variables"] == {"owner": "o", "repo": "r", "pr": 10}
+
+    def test_resolve_thread(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"data": {}}
+        mock_s.post.return_value = mock_resp
+        gh.resolve_thread("T_abc")
+        body = mock_s.post.call_args.kwargs["json"]
+        assert "resolveReviewThread" in body["query"]
+        assert body["variables"] == {"id": "T_abc"}
 
     def test_get_reviews_returns_dict(self) -> None:
         gh, mock_s = self._gh()
