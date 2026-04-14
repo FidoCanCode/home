@@ -562,6 +562,7 @@ class ClaudeSession:
         self._work_dir = work_dir
         self._popen_fn = popen
         self._lock = threading.Lock()
+        self._queued_content: str | None = None
         self._proc = self._spawn()
         _register_child(self._proc)
 
@@ -639,6 +640,36 @@ class ClaudeSession:
         manager instead.
         """
         self.send(content)
+
+    def preempt(self, content: str) -> None:
+        """Send a control_request interrupt and queue a follow-up user turn.
+
+        Bypasses the session lock so this can be called while another thread
+        holds the lock during the in-flight turn.  The running turn receives
+        a stream-json ``control_request`` interrupt signal and should
+        complete early; *content* is saved so the next holder of the lock
+        can retrieve and send it via :meth:`take_queued_content`.
+
+        Only for preempt paths (rescope abort, CI-failure cancel).  Normal
+        turns must go through the context-manager lock.
+        """
+        msg = json.dumps({"type": "control_request", "request": {"type": "interrupt"}})
+        assert self._proc.stdin is not None
+        self._proc.stdin.write(msg + "\n")
+        self._proc.stdin.flush()
+        self._queued_content = content
+
+    def take_queued_content(self) -> str | None:
+        """Return and clear any content queued by :meth:`preempt`.
+
+        Returns ``None`` if no preempt is pending.  Call this while holding
+        the session lock (via the context manager) so that reading and
+        clearing the queue is serialized with respect to a concurrent
+        :meth:`preempt` writing to it.
+        """
+        content = self._queued_content
+        self._queued_content = None
+        return content
 
     def switch_model(self, model: str) -> None:
         """Switch the active model by sending a /model slash command.

@@ -1673,3 +1673,45 @@ class TestClaudeSessionInterrupt:
         finally:
             session._lock.release()
         session.stop()
+
+
+class TestClaudeSessionPreempt:
+    def test_preempt_writes_control_request_to_stdin(self, tmp_path: Path) -> None:
+        import json as _json
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session.preempt("follow up")
+        written = proc.stdin.write.call_args.args[0]
+        obj = _json.loads(written.strip())
+        assert obj["type"] == "control_request"
+        assert obj["request"]["type"] == "interrupt"
+
+    def test_preempt_queues_content(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session.preempt("handle ci failure")
+        assert session.take_queued_content() == "handle ci failure"
+
+    def test_preempt_bypasses_held_lock(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._lock.acquire()
+        try:
+            session.preempt("urgent follow-up")  # must not block or raise
+        finally:
+            session._lock.release()
+        session.stop()
+
+    def test_take_queued_content_returns_none_when_empty(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path, _make_session_proc([]))
+        assert session.take_queued_content() is None
+        session.stop()
+
+    def test_take_queued_content_clears_after_return(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session.preempt("once")
+        session.take_queued_content()
+        assert session.take_queued_content() is None
+        session.stop()
