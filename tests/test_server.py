@@ -44,7 +44,7 @@ def _sign(body: bytes, secret: bytes) -> str:
 @pytest.fixture(autouse=True)
 def _restore_handler_fns():
     saved = {
-        "_fn_get_github": WebhookHandler._fn_get_github,
+        "gh": WebhookHandler.gh,
         "_fn_dispatch": WebhookHandler._fn_dispatch,
         "_fn_reply_to_comment": WebhookHandler._fn_reply_to_comment,
         "_fn_reply_to_review": WebhookHandler._fn_reply_to_review,
@@ -415,7 +415,7 @@ class TestProcessAction:
         )
         WebhookHandler._fn_create_task = mock_task
         WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler._fn_get_github = MagicMock(return_value=MagicMock())
+        WebhookHandler.gh = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
         time.sleep(0.2)
@@ -525,7 +525,7 @@ class TestProcessAction:
         mock_gh = MagicMock()
         mock_ic = MagicMock(return_value=("ACT", ["do it"]))
         mock_task = MagicMock()
-        WebhookHandler._fn_get_github = MagicMock(return_value=mock_gh)
+        WebhookHandler.gh = mock_gh
         WebhookHandler._fn_reply_to_issue_comment = mock_ic
         WebhookHandler._fn_create_task = mock_task
         WebhookHandler._fn_launch_worker = MagicMock()
@@ -593,7 +593,7 @@ class TestProcessAction:
         )
         WebhookHandler._fn_create_task = mock_task
         WebhookHandler._fn_launch_worker = MagicMock()
-        WebhookHandler._fn_get_github = MagicMock(return_value=MagicMock())
+        WebhookHandler.gh = MagicMock()
         status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
         time.sleep(0.2)
@@ -622,7 +622,7 @@ class TestProcessAction:
             "action": "closed",
             "pull_request": {"number": 13, "merged": True},
         }
-        WebhookHandler._fn_get_github = MagicMock()
+        WebhookHandler.gh = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock(side_effect=Exception("explode"))
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
@@ -647,7 +647,7 @@ class TestProcessAction:
             "pull_request": {"number": 20, "title": "T", "body": ""},
         }
         mock_gh = MagicMock()
-        WebhookHandler._fn_get_github = MagicMock(return_value=mock_gh)
+        WebhookHandler.gh = mock_gh
         WebhookHandler._fn_reply_to_comment = MagicMock(
             side_effect=RuntimeError("boom")
         )
@@ -678,7 +678,7 @@ class TestProcessAction:
             },
         }
         mock_gh = MagicMock()
-        WebhookHandler._fn_get_github = MagicMock(return_value=mock_gh)
+        WebhookHandler.gh = mock_gh
         WebhookHandler._fn_reply_to_issue_comment = MagicMock(
             side_effect=RuntimeError("boom")
         )
@@ -700,7 +700,7 @@ class TestProcessAction:
             "pull_request": {"number": 22, "merged": True},
         }
         mock_gh = MagicMock()
-        WebhookHandler._fn_get_github = MagicMock(return_value=mock_gh)
+        WebhookHandler.gh = mock_gh
         WebhookHandler._fn_launch_worker = MagicMock(side_effect=RuntimeError("boom"))
         _post_webhook(url, cfg, "pull_request", payload)
         time.sleep(0.2)
@@ -723,7 +723,7 @@ class TestProcessAction:
             "pull_request": {"number": 24},
         }
         mock_gh = MagicMock()
-        WebhookHandler._fn_get_github = MagicMock(return_value=mock_gh)
+        WebhookHandler.gh = mock_gh
         WebhookHandler._fn_reply_to_review = MagicMock(side_effect=RuntimeError("boom"))
         WebhookHandler._fn_launch_worker = MagicMock()
         _post_webhook(url, cfg, "pull_request_review", payload)
@@ -751,7 +751,7 @@ class TestProcessAction:
         }
         mock_gh = MagicMock()
         mock_gh.add_reaction.side_effect = RuntimeError("reaction failed")
-        WebhookHandler._fn_get_github = MagicMock(return_value=mock_gh)
+        WebhookHandler.gh = mock_gh
         WebhookHandler._fn_reply_to_comment = MagicMock(
             side_effect=RuntimeError("process boom")
         )

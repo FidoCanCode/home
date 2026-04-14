@@ -288,9 +288,9 @@ def _pull_with_backoff(
 class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
     registry: WorkerRegistry
-    # Injectable callables — set as class attributes so HTTP-driven tests can
-    # replace them without patching module-level names.
-    _fn_get_github = GitHub
+    # Injectable collaborators — set as class attributes so HTTP-driven tests
+    # can replace them without patching module-level names.
+    gh = GitHub()
     _fn_dispatch = dispatch
     _fn_reply_to_comment = reply_to_comment
     _fn_reply_to_review = reply_to_review
@@ -398,7 +398,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.registry.report_activity(
                 repo_cfg.name, "handling webhook action", busy=True
             )
-            gh = type(self)._fn_get_github()
+            gh = self.gh
             handled = False
 
             if action.reply_to:
@@ -473,8 +473,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         comment_id = thread.get("comment_id")
         comment_type = thread.get("comment_type", "issues")
         try:
-            gh = type(self)._fn_get_github()
-            gh.add_reaction(repo, comment_type, comment_id, "confused")
+            self.gh.add_reaction(repo, comment_type, comment_id, "confused")
         except Exception:
             log.exception("failed to post error reaction on comment %s", comment_id)
 
@@ -669,6 +668,7 @@ def run(
     _populate_memberships(config)
 
     WebhookHandler.config = config
+    WebhookHandler.gh = GitHub()
     registry = _make_registry(config.repos)
     WebhookHandler.registry = registry
     _Watchdog(registry, config.repos).start_thread()
