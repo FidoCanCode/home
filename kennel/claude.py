@@ -14,6 +14,14 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# How many seconds select.select waits for stdout before checking for
+# process exit or idle-timeout.  Short enough to react quickly, long enough
+# not to busy-loop.
+_SELECT_POLL_INTERVAL = 10.0
+
+# Maximum number of characters included when logging a raw line from the
+# claude subprocess, to keep log records readable.
+_LOG_LINE_TRUNCATE = 200
 
 # Tracked long-running claude subprocesses (the streaming ones), so kennel
 # can clean them up on shutdown.  Short-lived ``subprocess.run`` calls cap
@@ -172,8 +180,10 @@ def print_prompt(
             if text:
                 return text
             if result.stderr:
-                log.warning("print_prompt: stderr=%r", result.stderr[:200])
-            log.debug("print_prompt: stdout=%r", result.stdout[:200])
+                log.warning(
+                    "print_prompt: stderr=%r", result.stderr[:_LOG_LINE_TRUNCATE]
+                )
+            log.debug("print_prompt: stdout=%r", result.stdout[:_LOG_LINE_TRUNCATE])
             if attempt < _EMPTY_RETRY_COUNT:
                 log.warning(
                     "print_prompt: empty output on attempt %d — retrying",
@@ -256,7 +266,7 @@ def _run_streaming(
         last_activity = time.monotonic()
 
         while True:
-            ready, _, _ = selector([proc.stdout], [], [], 10.0)
+            ready, _, _ = selector([proc.stdout], [], [], _SELECT_POLL_INTERVAL)
             if ready:
                 line = proc.stdout.readline()
                 if not line:
@@ -501,9 +511,13 @@ def generate_status_with_session(
                 return text, sid
             if result.stderr:
                 log.warning(
-                    "generate_status_with_session: stderr=%r", result.stderr[:200]
+                    "generate_status_with_session: stderr=%r",
+                    result.stderr[:_LOG_LINE_TRUNCATE],
                 )
-            log.debug("generate_status_with_session: stdout=%r", result.stdout[:200])
+            log.debug(
+                "generate_status_with_session: stdout=%r",
+                result.stdout[:_LOG_LINE_TRUNCATE],
+            )
             if attempt < _EMPTY_RETRY_COUNT:
                 log.warning(
                     "generate_status_with_session: empty output on attempt %d — retrying",
@@ -628,7 +642,9 @@ class ClaudeSession:
         last_activity = time.monotonic()
 
         while True:
-            ready, _, _ = self._selector([self._proc.stdout], [], [], 10.0)
+            ready, _, _ = self._selector(
+                [self._proc.stdout], [], [], _SELECT_POLL_INTERVAL
+            )
             if ready:
                 line = self._proc.stdout.readline()
                 if not line:
@@ -640,10 +656,12 @@ class ClaudeSession:
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
-                    log.warning("ClaudeSession: unparseable line: %r", line[:200])
+                    log.warning(
+                        "ClaudeSession: unparseable line: %r", line[:_LOG_LINE_TRUNCATE]
+                    )
                     last_activity = time.monotonic()
                     continue
-                log.debug("ClaudeSession event: %s", line[:200])
+                log.debug("ClaudeSession event: %s", line[:_LOG_LINE_TRUNCATE])
                 last_activity = time.monotonic()
                 yield obj
                 if obj.get("type") in ("result", "error"):
