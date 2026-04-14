@@ -291,7 +291,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     registry: WorkerRegistry
     # Injectable collaborators — set as class attributes so HTTP-driven tests
     # can replace them without patching module-level names.
-    gh = GitHub()
+    gh: GitHub | None = None
     _fn_dispatch = dispatch
     _fn_reply_to_comment = reply_to_comment
     _fn_reply_to_review = reply_to_review
@@ -702,7 +702,7 @@ def run(
 
     WebhookHandler.config = config
     WebhookHandler.gh = GitHub()
-    registry = _make_registry(config.repos)
+    registry = _make_registry(config.repos, WebhookHandler.gh)
     WebhookHandler.registry = registry
     _Watchdog(registry, config.repos).start_thread()
 

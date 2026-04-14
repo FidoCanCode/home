@@ -90,7 +90,9 @@ class TestBuildParser:
 class TestCmdAdd:
     def test_adds_task(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        Cmd().add(tmp_path, TaskType.SPEC, "my task", "some description")
+        Cmd(github=MagicMock()).add(
+            tmp_path, TaskType.SPEC, "my task", "some description"
+        )
         capsys.readouterr()  # consume add output
         from kennel.tasks import list_tasks
 
@@ -102,7 +104,7 @@ class TestCmdAdd:
 
     def test_adds_task_no_description(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        Cmd().add(tmp_path, TaskType.CI, "bare task", "")
+        Cmd(github=MagicMock()).add(tmp_path, TaskType.CI, "bare task", "")
         capsys.readouterr()
         from kennel.tasks import list_tasks
 
@@ -114,7 +116,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys
     ) -> None:
         _task_file(tmp_path)
-        Cmd().add(
+        Cmd(github=MagicMock()).add(
             tmp_path, TaskType.THREAD, "threaded", "", comment_id=42, repo="a/b", pr=7
         )
         capsys.readouterr()
@@ -126,7 +128,9 @@ class TestCmdAdd:
     def test_adds_task_comment_id_only(self, tmp_path: Path, capsys) -> None:
         """comment_id without repo/pr still sets a thread for dedup purposes."""
         _task_file(tmp_path)
-        Cmd().add(tmp_path, TaskType.THREAD, "threaded", "", comment_id=99)
+        Cmd(github=MagicMock()).add(
+            tmp_path, TaskType.THREAD, "threaded", "", comment_id=99
+        )
         capsys.readouterr()
         from kennel.tasks import list_tasks
 
@@ -135,7 +139,7 @@ class TestCmdAdd:
 
     def test_add_deduplicates_by_comment_id(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        Cmd().add(
+        Cmd(github=MagicMock()).add(
             tmp_path,
             TaskType.THREAD,
             "first title",
@@ -145,7 +149,7 @@ class TestCmdAdd:
             pr=7,
         )
         capsys.readouterr()
-        Cmd().add(
+        Cmd(github=MagicMock()).add(
             tmp_path,
             TaskType.THREAD,
             "different title",
@@ -163,7 +167,7 @@ class TestCmdAdd:
 
     def test_add_prints_task_json(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        Cmd().add(tmp_path, TaskType.SPEC, "my task", "")
+        Cmd(github=MagicMock()).add(tmp_path, TaskType.SPEC, "my task", "")
         out = capsys.readouterr().out
         data = json.loads(out)
         assert data["title"] == "my task"
@@ -176,7 +180,7 @@ class TestCmdAdd:
 class TestCmdComplete:
     def test_completes_task_no_thread(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        cmd = Cmd()
+        cmd = Cmd(github=MagicMock())
         task = cmd.add(tmp_path, TaskType.SPEC, "task to finish", "")
         capsys.readouterr()
         cmd.complete(tmp_path, task["id"])
@@ -346,7 +350,7 @@ class TestCmdComplete:
     def test_complete_nonexistent_id_no_error(self, tmp_path: Path) -> None:
         """Completing a non-existent task ID should not raise."""
         _task_file(tmp_path)
-        Cmd().complete(tmp_path, "nonexistent-id")
+        Cmd(github=MagicMock()).complete(tmp_path, "nonexistent-id")
 
 
 # ── Cmd.list ──────────────────────────────────────────────────────────────────
@@ -355,7 +359,7 @@ class TestCmdComplete:
 class TestCmdList:
     def test_prints_json(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        cmd = Cmd()
+        cmd = Cmd(github=MagicMock())
         cmd.add(tmp_path, TaskType.SPEC, "alpha", "")
         capsys.readouterr()
         cmd.add(tmp_path, TaskType.SPEC, "beta", "desc")
@@ -369,7 +373,7 @@ class TestCmdList:
 
     def test_empty_list(self, tmp_path: Path, capsys) -> None:
         _task_file(tmp_path)
-        Cmd().list(tmp_path)
+        Cmd(github=MagicMock()).list(tmp_path)
         out = capsys.readouterr().out
         assert json.loads(out) == []
 

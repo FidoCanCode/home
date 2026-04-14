@@ -253,14 +253,14 @@ def _make_thread(
     repo_cfg: RepoConfig,
     registry: WorkerRegistry,
     *,
-    _GitHub=GitHub,
+    gh: GitHub,
     _WorkerThread=WorkerThread,
 ) -> WorkerThread:
-    """Default factory: create a WorkerThread with a live GitHub client."""
+    """Default factory: create a WorkerThread with the provided GitHub client."""
     return _WorkerThread(
         repo_cfg.work_dir,
         repo_cfg.name,
-        _GitHub(),
+        gh,
         registry,
         repo_cfg.membership,
     )
@@ -268,18 +268,19 @@ def _make_thread(
 
 def make_registry(
     repos: dict[str, RepoConfig],
+    gh: GitHub,
     *,
     _thread_factory=_make_thread,
 ) -> WorkerRegistry:
     """Create a :class:`WorkerRegistry` and start threads for all repos.
 
-    Uses :func:`_make_thread` as the factory so each thread gets its own
-    live :class:`~kennel.github.GitHub` client.  Pass a custom registry
-    directly (with a mock factory) in tests instead of calling this.
+    Uses :func:`_make_thread` as the factory; all threads share the provided
+    :class:`~kennel.github.GitHub` client.  Pass a custom registry directly
+    (with a mock factory) in tests instead of calling this.
     """
 
     def factory(cfg: RepoConfig) -> WorkerThread:
-        return _thread_factory(cfg, registry)
+        return _thread_factory(cfg, registry, gh=gh)
 
     registry = WorkerRegistry(factory)
     for repo_cfg in repos.values():

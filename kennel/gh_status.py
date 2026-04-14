@@ -63,7 +63,7 @@ def set_gh_status(
     persona_path: Path = _PERSONA_PATH,
     _generate_persona_status: Callable[..., str] = generate_persona_status,
     _generate_persona_emoji: Callable[..., str] = generate_persona_emoji,
-    _get_github: Callable[..., GitHub] = GitHub,
+    _gh: GitHub,
 ) -> None:
     try:
         persona = persona_path.read_text()
@@ -71,12 +71,11 @@ def set_gh_status(
         persona = ""
     text = _generate_persona_status(message, persona)
     emoji = _generate_persona_emoji(text, persona)
-    gh = _get_github()
-    gh.set_user_status(text, emoji, busy=True)
+    _gh.set_user_status(text, emoji, busy=True)
 
 
 def main(argv: list[str]) -> None:
     if len(argv) < 2 or argv[0] != "set":
         print("Usage: kennel gh-status set <message>", file=sys.stderr)
         raise SystemExit(1)
-    set_gh_status(" ".join(argv[1:]))
+    set_gh_status(" ".join(argv[1:]), _gh=GitHub())
