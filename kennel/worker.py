@@ -1884,6 +1884,19 @@ class WorkerThread(threading.Thread):
 
     Call :meth:`wake` to interrupt any wait early (e.g. when a webhook arrives).
     Call :meth:`stop` to request a clean shutdown.
+
+    **Session persistence**
+
+    ``_session`` and ``_session_issue`` survive individual :class:`Worker`
+    crashes: each new ``Worker`` receives the existing session via the
+    constructor and hands it back after ``run()`` returns (even on exception).
+    The watchdog then restarts this thread, which will again inherit whatever
+    session remains.
+
+    Neither ``_session`` nor ``_session_issue`` survive a kennel/home restart
+    — ``os.execvp`` replaces the process, so a new ``WorkerThread`` starts
+    with both fields set to ``None`` and creates a fresh session on its first
+    iteration.
     """
 
     def __init__(

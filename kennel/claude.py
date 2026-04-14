@@ -578,6 +578,21 @@ class ClaudeSession:
     JSON user message to stdin; :meth:`iter_events` reads structured events
     from stdout until the turn completes (``type=result`` or ``type=error``).
 
+    **Lifetime / persistence model**
+
+    The session outlives individual :class:`~kennel.worker.Worker` crashes:
+    :class:`~kennel.worker.WorkerThread` holds the session in
+    ``_session`` across iterations and passes it into each new ``Worker``
+    instance, so an unexpected exception in ``Worker.run()`` does not tear the
+    session down.  The watchdog restarts the thread and the next Worker
+    inherits the same session.
+
+    The session does *not* survive a kennel/home restart.  When kennel
+    replaces itself via ``os.execvp`` (e.g. after a self-update), all
+    in-memory state is lost, including the ``WorkerThread`` and its session.
+    The new process starts with ``_session = None`` and creates a fresh session
+    on the first iteration.
+
     Pass *popen* and *selector* to override subprocess creation and
     ``select.select`` in tests; these default to the real implementations.
     """
