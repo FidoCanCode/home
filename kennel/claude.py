@@ -9,9 +9,10 @@ import select
 import subprocess
 import threading
 import time
-from collections import deque
 from collections.abc import Callable, Iterator
 from pathlib import Path
+
+from kennel.state import PreemptQueue
 
 log = logging.getLogger(__name__)
 
@@ -557,6 +558,7 @@ class ClaudeSession:
         idle_timeout: float = 1800.0,
         popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
         selector: Callable[..., tuple[list, list, list]] = select.select,
+        preempt_queue: PreemptQueue | None = None,
     ) -> None:
         self._idle_timeout = idle_timeout
         self._selector = selector
@@ -566,7 +568,7 @@ class ClaudeSession:
         self._popen_fn = popen
         self._lock = threading.Lock()
         self._cancel = threading.Event()
-        self._queued_content: deque[str] = deque()
+        self._preempt_queue = preempt_queue
         self._proc = self._spawn()
         _register_child(self._proc)
 
@@ -677,7 +679,10 @@ class ClaudeSession:
         self._cancel.set()
         self._lock.acquire()
         try:
-            self._queued_content.append(content)
+            assert self._preempt_queue is not None, (
+                "preempt_queue required for preempt()"
+            )
+            self._preempt_queue.push(content)
         finally:
             self._lock.release()
 
@@ -689,7 +694,10 @@ class ClaudeSession:
         from the queue is serialized with respect to a concurrent
         :meth:`preempt` appending to it.
         """
-        return self._queued_content.popleft() if self._queued_content else None
+        assert self._preempt_queue is not None, (
+            "preempt_queue required for take_queued_content()"
+        )
+        return self._preempt_queue.pop()
 
     def switch_model(self, model: str) -> None:
         """Switch the active model by sending a /model slash command.

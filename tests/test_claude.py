@@ -29,6 +29,7 @@ from kennel.claude import (
     resume_status,
     triage_comment,
 )
+from kennel.state import PreemptQueue
 
 
 def _completed(
@@ -1159,6 +1160,7 @@ def _make_session(
         idle_timeout=idle_timeout,
         popen=fake_popen,
         selector=fake_selector,
+        preempt_queue=PreemptQueue(tmp_path / "preempt.json"),
     )
 
 
@@ -1796,13 +1798,14 @@ class TestClaudeSessionPreempt:
         t_preempt.start()
 
         # preempt is blocked on lock.acquire(); queue must still be empty
-        assert len(session._queued_content) == 0
+        assert session.take_queued_content() is None
 
         release.set()
         t_holder.join(timeout=2)
         t_preempt.join(timeout=2)
 
-        assert list(session._queued_content) == ["queued"]
+        assert session.take_queued_content() == "queued"
+        assert session.take_queued_content() is None
         session.stop()
 
     def test_preempt_twice_preserves_both_messages(self, tmp_path: Path) -> None:

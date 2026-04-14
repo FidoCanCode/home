@@ -20,6 +20,7 @@ from kennel.config import RepoMembership
 from kennel.github import GitHub
 from kennel.prompts import Prompts, rewrite_description_prompt
 from kennel.state import (
+    PreemptQueue,
     State,
     _resolve_git_dir,
 )
@@ -729,7 +730,7 @@ class Worker:
 
     def create_session(
         self,
-        fido_dir: Path,  # noqa: ARG002
+        fido_dir: Path,
         model: str = "claude-sonnet-4-6",
     ) -> None:
         """Start a persistent ClaudeSession for this work iteration.
@@ -738,12 +739,16 @@ class Worker:
         instructions are delivered via user messages in later phases.
         Stores the session on ``self._session`` so worker methods can access it.
 
-        *fido_dir* is accepted for future use (e.g. per-issue session files)
-        but is not used at this stage.
+        The session is given a :class:`~kennel.state.PreemptQueue` backed by
+        ``fido_dir/preempt.json`` so queued preempt content survives process
+        restarts.
         """
         persona_file = _sub_dir() / "persona.md"
         self._session = claude.ClaudeSession(
-            persona_file, work_dir=self.work_dir, model=model
+            persona_file,
+            work_dir=self.work_dir,
+            model=model,
+            preempt_queue=PreemptQueue(fido_dir / "preempt.json"),
         )
 
     def stop_session(self) -> None:
