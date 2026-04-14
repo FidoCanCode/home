@@ -344,13 +344,13 @@ def reply_to_comment(
     )
     log.info("triage: %s — %s", category, titles)
 
-    # Step 1b: Re-derive task titles from the root comment body when the
-    # triggering comment is a reply.  Triage ran on the reply body which may be
-    # a one-word acknowledgment; the root comment holds the actual requirement.
-    if category in ("ACT", "DO") and root_body != comment:
-        log.info(
-            "re-deriving task titles from root comment (triggering comment is a reply)"
-        )
+    # Step 1b: Always derive task titles from the root comment body for action
+    # categories.  The originating PR comment is the source of truth for what
+    # was requested; triage may have run on a short reply body ("Yes", "Done")
+    # that produces a poor title.  Using root_body here ensures the task always
+    # reflects what the reviewer originally asked.
+    if category in ("ACT", "DO"):
+        log.info("deriving task title from root comment")
         titles = [_summarize_as_action_item(root_body, _print_prompt=_print_prompt)]
 
     # Step 2: For DEFER, open a tracking issue before crafting the reply.
@@ -381,9 +381,25 @@ def reply_to_comment(
             f"review-comment reply: print_prompt returned empty for PR #{info['pr']}"
         )
 
-    log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
-    gh.reply_to_review_comment(info["repo"], info["pr"], body, info["comment_id"])
-    log.info("reply posted")
+    # Edit the last Fido reply in the thread instead of posting a new comment.
+    # This keeps the thread tidy — one acknowledgment per thread, updated in place.
+    _fido_logins = {"fidocancode", "fido-can-code"}
+    last_fido_id = next(
+        (
+            c["id"]
+            for c in reversed(thread_comments)
+            if c.get("author", "").lower() in _fido_logins
+        ),
+        None,
+    )
+    if last_fido_id:
+        log.info("editing last fido reply %s on PR #%s", last_fido_id, info["pr"])
+        gh.edit_review_comment(info["repo"], last_fido_id, body)
+        log.info("reply edited")
+    else:
+        log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
+        gh.reply_to_review_comment(info["repo"], info["pr"], body, info["comment_id"])
+        log.info("reply posted")
 
     # Maybe react
     maybe_react(

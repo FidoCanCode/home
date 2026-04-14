@@ -758,6 +758,8 @@ class TestReplyToComment:
                 return "NO"
             if "Triage" in prompt:
                 return "DO: add result caching"
+            if "Convert this PR review comment" in prompt:
+                return "Cache results for performance"
             return "On it!"
 
         mock_gh = MagicMock()
@@ -769,7 +771,7 @@ class TestReplyToComment:
             _print_prompt=fake_pp,
         )
         assert cat == "DO"
-        assert titles == ["add result caching"]
+        assert titles == ["Cache results for performance"]
         mock_gh.create_issue.assert_not_called()
 
     def test_full_flow_defer(self, tmp_path: Path) -> None:
@@ -874,6 +876,8 @@ class TestReplyToComment:
                 return "NO"
             if "Triage" in prompt:
                 return "ACT: do it"
+            if "Convert this PR review comment" in prompt:
+                return "Do something"
             return ""
 
         with pytest.raises(ValueError, match="review-comment reply"):
@@ -935,8 +939,8 @@ class TestReplyToComment:
         )
         assert cat == "ACT"
 
-    def test_multiple_tasks_from_one_comment(self, tmp_path: Path) -> None:
-        """A single comment may produce multiple ACT tasks."""
+    def test_act_title_from_summarize_not_triage(self, tmp_path: Path) -> None:
+        """ACT task title always comes from _summarize_as_action_item, not triage output."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -950,6 +954,8 @@ class TestReplyToComment:
                 return "NO"
             if "Triage" in prompt:
                 return "ACT: add unit tests\nACT: update documentation"
+            if "Convert this PR review comment" in prompt:
+                return "Add tests and update docs"
             return "On it!"
 
         cat, titles = reply_to_comment(
@@ -960,7 +966,8 @@ class TestReplyToComment:
             _print_prompt=fake_pp,
         )
         assert cat == "ACT"
-        assert titles == ["add unit tests", "update documentation"]
+        # Title comes from _summarize_as_action_item(root_body), not multi-item triage
+        assert titles == ["Add tests and update docs"]
 
     def test_act_title_uses_root_comment_when_reply(self, tmp_path: Path) -> None:
         """When the triggering comment is a reply, ACT title comes from the root."""
@@ -987,8 +994,12 @@ class TestReplyToComment:
         mock_gh = MagicMock()
         # Thread: root is reviewer feedback, second is fido's reply
         mock_gh.fetch_comment_thread.return_value = [
-            {"author": "reviewer", "body": "Please add null input validation"},
-            {"author": "fidocancode", "body": "Woof, you're right!"},
+            {
+                "id": 100,
+                "author": "reviewer",
+                "body": "Please add null input validation",
+            },
+            {"id": 101, "author": "fidocancode", "body": "Woof, you're right!"},
         ]
         cat, titles = reply_to_comment(
             action,
@@ -998,15 +1009,18 @@ class TestReplyToComment:
             _print_prompt=fake_pp,
         )
         assert cat == "ACT"
-        # Title re-derived from root comment, not the "Woof" reply
+        # Title derived from root comment, not the "Woof" reply
         assert titles == ["Add null input validation"]
         # _summarize_as_action_item was called with the root body
         summarize_calls = [p for p in calls if "Convert this PR review comment" in p]
         assert len(summarize_calls) == 1
         assert "Please add null input validation" in summarize_calls[0]
+        # Fido's previous reply is edited in-place rather than a new reply posted
+        mock_gh.edit_review_comment.assert_called_once_with("owner/repo", 101, "Done!")
+        mock_gh.reply_to_review_comment.assert_not_called()
 
-    def test_act_title_unchanged_when_triggering_is_root(self, tmp_path: Path) -> None:
-        """When the triggering comment IS the root, title comes from triage as usual."""
+    def test_act_title_always_from_root_comment(self, tmp_path: Path) -> None:
+        """ACT title is always derived from the root comment via _summarize_as_action_item."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -1020,12 +1034,18 @@ class TestReplyToComment:
                 return "NO"
             if "Triage" in prompt:
                 return "ACT: add error handling"
+            if "Convert this PR review comment" in prompt:
+                return "Add error handling for null inputs"
             return "Will do!"
 
         mock_gh = MagicMock()
         # Thread has only one comment — the triggering one IS the root
         mock_gh.fetch_comment_thread.return_value = [
-            {"author": "reviewer", "body": "Add error handling for null inputs"},
+            {
+                "id": 43,
+                "author": "reviewer",
+                "body": "Add error handling for null inputs",
+            },
         ]
         cat, titles = reply_to_comment(
             action,
@@ -1035,8 +1055,12 @@ class TestReplyToComment:
             _print_prompt=fake_pp,
         )
         assert cat == "ACT"
-        # root_body == comment → no re-derivation, title from triage
-        assert titles == ["add error handling"]
+        # Title always comes from _summarize_as_action_item(root_body), even when
+        # the triggering comment is the root itself
+        assert titles == ["Add error handling for null inputs"]
+        # No prior Fido reply in thread — a new reply is posted
+        mock_gh.reply_to_review_comment.assert_called_once()
+        mock_gh.edit_review_comment.assert_not_called()
 
     def test_ask_title_not_rederived_from_root(self, tmp_path: Path) -> None:
         """Non-task categories (ASK) are not affected by root body re-derivation."""
@@ -1062,8 +1086,8 @@ class TestReplyToComment:
 
         mock_gh = MagicMock()
         mock_gh.fetch_comment_thread.return_value = [
-            {"author": "reviewer", "body": "What do you think?"},
-            {"author": "fidocancode", "body": "Sure, sounds good"},
+            {"id": 200, "author": "reviewer", "body": "What do you think?"},
+            {"id": 201, "author": "fidocancode", "body": "Sure, sounds good"},
         ]
         cat, titles = reply_to_comment(
             action,
@@ -1075,6 +1099,11 @@ class TestReplyToComment:
         assert cat == "ASK"
         # _summarize_as_action_item must not be called for non-task categories
         assert not summarize_called
+        # Fido's prior reply is edited in-place
+        mock_gh.edit_review_comment.assert_called_once_with(
+            "owner/repo", 201, "Could you clarify?"
+        )
+        mock_gh.reply_to_review_comment.assert_not_called()
 
 
 class TestReplyToReview:

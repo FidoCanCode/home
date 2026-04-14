@@ -243,6 +243,16 @@ class TestGitHubClass:
         body = mock_s.post.call_args.kwargs["json"]
         assert body["in_reply_to"] == 99
 
+    def test_edit_review_comment(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_s.patch.return_value = mock_resp
+        gh.edit_review_comment("o/r", 77, "updated body")
+        url = mock_s.patch.call_args.args[0]
+        assert "repos/o/r/pulls/comments/77" in url
+        body = mock_s.patch.call_args.kwargs["json"]
+        assert body["body"] == "updated body"
+
     def test_get_pull_comments(self) -> None:
         gh, mock_s = self._gh()
         comments = [{"id": 42, "body": "looks good"}]
@@ -393,9 +403,9 @@ class TestGitHubClass:
         mock_s.get.return_value = mock_resp
         result = gh.fetch_comment_thread("o/r", 7, 10)
         assert result == [
-            {"author": "alice", "body": "root comment"},
-            {"author": "fido", "body": "reply one"},
-            {"author": "alice", "body": "reply two"},
+            {"id": 10, "author": "alice", "body": "root comment"},
+            {"id": 11, "author": "fido", "body": "reply one"},
+            {"id": 12, "author": "alice", "body": "reply two"},
         ]
 
     def test_fetch_comment_thread_finds_thread_by_reply_id(self) -> None:
@@ -421,8 +431,8 @@ class TestGitHubClass:
         mock_s.get.return_value = mock_resp
         result = gh.fetch_comment_thread("o/r", 7, 11)
         assert result == [
-            {"author": "alice", "body": "root"},
-            {"author": "fido", "body": "reply"},
+            {"id": 10, "author": "alice", "body": "root"},
+            {"id": 11, "author": "fido", "body": "reply"},
         ]
 
     def test_fetch_comment_thread_returns_empty_when_not_found(self) -> None:
