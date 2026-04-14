@@ -269,20 +269,20 @@ def reply_to_comment(
     *,
     _print_prompt=None,
     _gh=None,
-) -> tuple[bool, str, list[str]]:
+) -> tuple[str, list[str]]:
     """Triage a comment via Opus, generate a reply via Opus, post it.
 
-    Returns (posted, triage_category, task_titles).
-    posted is True only when the reply was successfully sent to GitHub.
+    Returns (triage_category, task_titles).
     task_titles is a list: one entry for non-task categories (used as reply
     context), or one or more entries for ACT/DO (each becomes a task).
     Uses a per-comment lockfile to prevent concurrent replies.
+    Raises on reply-post failure so callers fail closed.
     """
     if _print_prompt is None:
         _print_prompt = claude.print_prompt
     info = action.reply_to
     if not info or not action.comment_body:
-        return (False, "ACT", [action.comment_body or action.prompt])
+        return ("ACT", [action.comment_body or action.prompt])
 
     # Per-comment lock — prevents concurrent replies
     cid = info.get("comment_id")
@@ -294,7 +294,7 @@ def reply_to_comment(
         except OSError:
             log.info("comment %s locked by another process — skipping", cid)
             lock_fd.close()
-            return (False, "ACT", [action.comment_body[:80]])
+            return ("ACT", [action.comment_body[:80]])
     else:
         lock_fd = None
 
@@ -364,13 +364,8 @@ def reply_to_comment(
         )
 
     log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
-    posted = False
-    try:
-        gh.reply_to_review_comment(info["repo"], info["pr"], body, info["comment_id"])
-        posted = True
-        log.info("reply posted")
-    except Exception:
-        log.exception("failed to post reply")
+    gh.reply_to_review_comment(info["repo"], info["pr"], body, info["comment_id"])
+    log.info("reply posted")
 
     # Maybe react
     maybe_react(
@@ -391,7 +386,7 @@ def reply_to_comment(
     if lock_fd:
         lock_fd.close()
 
-    return (posted, category, titles)
+    return (category, titles)
 
 
 def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
@@ -444,7 +439,7 @@ def reply_to_review(
         return
     log.info("replying to %d review comments", len(todo))
     for cid, body in todo:
-        posted, *_ = reply_to_comment(
+        reply_to_comment(
             Action(
                 prompt=action.prompt,
                 reply_to={
@@ -459,7 +454,7 @@ def reply_to_review(
             _print_prompt=_print_prompt,
             _gh=gh,
         )
-        if posted and already_replied is not None:
+        if already_replied is not None:
             already_replied.add(cid)
 
 

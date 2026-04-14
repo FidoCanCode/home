@@ -650,8 +650,7 @@ class TestReplyToComment:
     def test_no_reply_to_returns_act(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(prompt="do stuff")
-        posted, cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
-        assert not posted
+        cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
     def test_no_comment_body_returns_act(self, tmp_path: Path) -> None:
@@ -660,8 +659,7 @@ class TestReplyToComment:
             prompt="something",
             reply_to={"repo": "a/b", "pr": 1, "comment_id": 5},
         )
-        posted, cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
-        assert not posted
+        cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
         assert cat == "ACT"
 
     def test_full_flow_act(self, tmp_path: Path) -> None:
@@ -686,14 +684,13 @@ class TestReplyToComment:
                 return "ACT: add logging"
             return "I will add logging."
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ACT"
         assert "logging" in titles[0].lower()
 
@@ -713,14 +710,13 @@ class TestReplyToComment:
                 return "ASK: need more info"
             return "What specifically?"
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ASK"
 
     def test_full_flow_answer(self, tmp_path: Path) -> None:
@@ -739,14 +735,13 @@ class TestReplyToComment:
                 return "ANSWER: explain choice"
             return "I did this because..."
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ANSWER"
 
     def test_full_flow_do(self, tmp_path: Path) -> None:
@@ -766,14 +761,13 @@ class TestReplyToComment:
             return "On it!"
 
         mock_gh = MagicMock()
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=mock_gh,
         )
-        assert posted
         assert cat == "DO"
         assert titles == ["add result caching"]
         mock_gh.create_issue.assert_not_called()
@@ -796,14 +790,13 @@ class TestReplyToComment:
 
         mock_gh = MagicMock()
         mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/99"
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=mock_gh,
         )
-        assert posted
         assert cat == "DEFER"
         mock_gh.create_issue.assert_called_once_with(
             "owner/repo",
@@ -827,14 +820,13 @@ class TestReplyToComment:
                 return "DUMP: not applicable"
             return "Not applicable here."
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "DUMP"
 
     def test_full_flow_defer_issue_creation_failure_propagates(
@@ -884,14 +876,13 @@ class TestReplyToComment:
                 return "ACT: do it"
             return ""  # empty reply triggers fallback
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ACT"  # still succeeds with fallback body
 
     def test_claude_timeout_uses_fallback(self, tmp_path: Path) -> None:
@@ -910,14 +901,13 @@ class TestReplyToComment:
                 return "ACT: do it"
             return ""  # simulates timeout — print_prompt returns "" on failure
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ACT"
 
     def test_lock_race_returns_act(self, tmp_path: Path) -> None:
@@ -937,10 +927,7 @@ class TestReplyToComment:
                 comment_body="competing update",
                 is_bot=False,
             )
-            posted, cat, titles = reply_to_comment(
-                action, cfg, self._repo_cfg(tmp_path)
-            )
-            assert not posted  # locked — no reply sent
+            cat, titles = reply_to_comment(action, cfg, self._repo_cfg(tmp_path))
             assert cat == "ACT"  # returns without posting
         finally:
             lock_fd.close()
@@ -962,14 +949,13 @@ class TestReplyToComment:
                 return "ACT: do it"
             return "ok"
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ACT"
 
     def test_multiple_tasks_from_one_comment(self, tmp_path: Path) -> None:
@@ -989,14 +975,13 @@ class TestReplyToComment:
                 return "ACT: add unit tests\nACT: update documentation"
             return "On it!"
 
-        posted, cat, titles = reply_to_comment(
+        cat, titles = reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             _print_prompt=fake_pp,
             _gh=MagicMock(),
         )
-        assert posted
         assert cat == "ACT"
         assert titles == ["add unit tests", "update documentation"]
 
@@ -2745,18 +2730,17 @@ class TestReplyToCommentElseBranch:
             patch("kennel.events._triage", return_value=("UNKNOWN_CAT", ["do it"])),
             patch("kennel.events.needs_more_context", return_value=False),
         ):
-            posted, cat, titles = reply_to_comment(
+            cat, titles = reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
                 _print_prompt=MagicMock(return_value="I'll look into this."),
                 _gh=MagicMock(),
             )
-        assert posted
         assert cat == "UNKNOWN_CAT"
 
-    def test_gh_post_exception_caught(self, tmp_path: Path) -> None:
-        """Exception in reply_to_review_comment is caught."""
+    def test_gh_post_exception_propagates(self, tmp_path: Path) -> None:
+        """Exception in reply_to_review_comment propagates so callers fail closed."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2774,15 +2758,14 @@ class TestReplyToCommentElseBranch:
 
         mock_gh = MagicMock()
         mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
-        posted, cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            _print_prompt=fake_pp,
-            _gh=mock_gh,
-        )  # must not raise
-        assert not posted  # post failed
-        assert cat == "ACT"
+        with pytest.raises(RuntimeError, match="network down"):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                _print_prompt=fake_pp,
+                _gh=mock_gh,
+            )
 
 
 class TestReplyToReviewAlreadyRepliedTracking:
@@ -2830,7 +2813,7 @@ class TestReplyToReviewAlreadyRepliedTracking:
     def test_does_not_add_to_already_replied_on_post_failure(
         self, tmp_path: Path
     ) -> None:
-        """Dedup set is NOT updated when the GitHub post fails."""
+        """Dedup set is NOT updated when the GitHub post fails (exception propagates)."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="review",
@@ -2848,14 +2831,15 @@ class TestReplyToReviewAlreadyRepliedTracking:
         mock_gh = MagicMock()
         mock_gh.get_review_comments.return_value = [(501, "please fix")]
         mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
-        reply_to_review(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            already_replied=already,
-            _print_prompt=fake_pp,
-            _gh=mock_gh,
-        )
+        with pytest.raises(RuntimeError, match="network down"):
+            reply_to_review(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                already_replied=already,
+                _print_prompt=fake_pp,
+                _gh=mock_gh,
+            )
         assert 501 not in already  # post failed — should not be marked as replied
 
 
@@ -2962,7 +2946,7 @@ class TestReplyToCommentTerseEnrichment:
             return "On it."
 
         with patch("kennel.events.needs_more_context", return_value=True):
-            posted, cat, titles = reply_to_comment(
+            cat, titles = reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
@@ -2970,7 +2954,6 @@ class TestReplyToCommentTerseEnrichment:
                 _gh=mock_gh,
             )
 
-        assert posted
         assert cat == "ACT"
 
     def test_terse_no_siblings_leaves_context_clean(self, tmp_path: Path) -> None:
