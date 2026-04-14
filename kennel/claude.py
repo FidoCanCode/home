@@ -561,6 +561,7 @@ class ClaudeSession:
         self._system_file = system_file
         self._work_dir = work_dir
         self._popen_fn = popen
+        self._lock = threading.Lock()
         self._proc = self._spawn()
         _register_child(self._proc)
 
@@ -607,6 +608,15 @@ class ClaudeSession:
             pass
         self._proc = self._spawn()
         _register_child(self._proc)
+
+    def __enter__(self) -> "ClaudeSession":
+        """Acquire the session lock, serializing send/receive across threads."""
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        """Release the session lock."""
+        self._lock.release()
 
     def send(self, content: str) -> None:
         """Write a user message to the session stdin, flushing immediately."""

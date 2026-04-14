@@ -1603,3 +1603,50 @@ class TestClaudeSessionIsAliveAndRestart:
         session.restart()
         session.stop()
         assert new_proc not in _active_children
+
+
+class TestClaudeSessionLock:
+    def test_enter_returns_self(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path, _make_session_proc([]))
+        assert session.__enter__() is session
+        session._lock.release()
+        session.stop()
+
+    def test_exit_releases_lock(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path, _make_session_proc([]))
+        session.__enter__()
+        session.__exit__(None, None, None)
+        assert session._lock.acquire(blocking=False)
+        session._lock.release()
+        session.stop()
+
+    def test_context_manager_blocks_second_thread(self, tmp_path: Path) -> None:
+        import threading as _threading
+
+        session = _make_session(tmp_path, _make_session_proc([]))
+        entered = _threading.Event()
+        done_checking = _threading.Event()
+        could_not_acquire = _threading.Event()
+
+        def first_thread() -> None:
+            with session:
+                entered.set()
+                done_checking.wait()  # hold the lock until t2 is done checking
+
+        def second_thread() -> None:
+            entered.wait()  # t1 holds the lock and is blocked on done_checking
+            acquired = session._lock.acquire(blocking=False)
+            if not acquired:
+                could_not_acquire.set()
+            else:
+                session._lock.release()
+            done_checking.set()  # let t1 exit the context manager
+
+        t1 = _threading.Thread(target=first_thread)
+        t2 = _threading.Thread(target=second_thread)
+        t1.start()
+        t2.start()
+        t1.join(timeout=2)
+        t2.join(timeout=2)
+        assert could_not_acquire.is_set()
+        session.stop()
