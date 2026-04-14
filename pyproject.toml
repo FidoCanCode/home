@@ -6,7 +6,7 @@ requires-python = ">=3.14"
 dependencies = ["requests"]
 
 [dependency-groups]
-dev = ["ruff", "pytest", "pytest-cov", "pytest-xdist"]
+dev = ["pyright", "ruff", "pytest", "pytest-cov", "pytest-xdist"]
 
 [build-system]
 requires = ["hatchling"]

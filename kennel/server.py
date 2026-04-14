@@ -16,13 +16,14 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from kennel import claude
 from kennel.claude import kill_active_children
 from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.events import (
+    Action,
     create_task,
     dispatch,
     launch_worker,
@@ -32,7 +33,10 @@ from kennel.events import (
 )
 from kennel.github import GitHub
 from kennel.registry import WorkerRegistry, make_registry
-from kennel.watchdog import _STALE_THRESHOLD, Watchdog  # noqa: PLC2701
+from kennel.watchdog import (  # noqa: PLC2701
+    _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
+    Watchdog,
+)
 from kennel.worker import RepoContextFilter, RepoNameFilter
 
 log = logging.getLogger(__name__)
@@ -308,18 +312,18 @@ class WebhookHandler(BaseHTTPRequestHandler):
     # Injectable collaborators — set as class attributes so HTTP-driven tests
     # can replace them without patching module-level names.
     gh: GitHub | None = None
-    _fn_dispatch = dispatch
-    _fn_reply_to_comment = reply_to_comment
-    _fn_reply_to_review = reply_to_review
-    _fn_reply_to_issue_comment = reply_to_issue_comment
-    _fn_create_task = create_task
-    _fn_launch_worker = launch_worker
-    _fn_runner_dir = _runner_dir
-    _fn_get_self_repo = _get_self_repo
-    _fn_get_head = _get_head
-    _fn_pull_with_backoff = _pull_with_backoff
-    _fn_os_chdir = os.chdir
-    _fn_os_execvp = os.execvp
+    _fn_dispatch = staticmethod(dispatch)
+    _fn_reply_to_comment = staticmethod(reply_to_comment)
+    _fn_reply_to_review = staticmethod(reply_to_review)
+    _fn_reply_to_issue_comment = staticmethod(reply_to_issue_comment)
+    _fn_create_task = staticmethod(create_task)
+    _fn_launch_worker = staticmethod(launch_worker)
+    _fn_runner_dir = staticmethod(_runner_dir)
+    _fn_get_self_repo = staticmethod(_get_self_repo)
+    _fn_get_head = staticmethod(_get_head)
+    _fn_pull_with_backoff = staticmethod(_pull_with_backoff)
+    _fn_os_chdir = staticmethod(os.chdir)
+    _fn_os_execvp = staticmethod(os.execvp)
 
     def do_POST(self) -> None:
         content_length = int(self.headers.get("Content-Length", 0))
@@ -410,7 +414,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 daemon=True,
             ).start()
 
-    def _process_action(self, action, repo_cfg: RepoConfig) -> None:
+    def _process_action(self, action: Action, repo_cfg: RepoConfig) -> None:
         description = self._describe_action(action)
         claude.set_thread_repo(repo_cfg.name)
         try:
@@ -428,7 +432,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         finally:
             claude.set_thread_repo(None)
 
-    def _describe_action(self, action) -> str:
+    def _describe_action(self, action: Action) -> str:
         """Short label for status display — what this webhook handler is doing."""
         if action.reply_to:
             cid = action.reply_to.get("comment_id")
@@ -439,7 +443,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return "triaging PR comment"
         return "handling webhook action"
 
-    def _process_action_inner(self, action, repo_cfg: RepoConfig) -> None:
+    def _process_action_inner(self, action: Action, repo_cfg: RepoConfig) -> None:
         # The worker thread's own ``worker_what`` is not touched here — this
         # handler runs on a separate webhook thread and its activity is
         # surfaced in the repo's :class:`~kennel.registry.WebhookActivity`
@@ -447,7 +451,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # Writing here would clobber the worker thread's own state, which is
         # what caused the old ``Doing: handling webhook action`` display bug.
         try:
-            gh = self.gh
+            gh = cast(GitHub, self.gh)  # always set by serve() before first request
             handled = False
 
             if action.reply_to:
@@ -511,7 +515,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             log.exception("error processing action")
             self._signal_action_error(action)
 
-    def _signal_action_error(self, action) -> None:
+    def _signal_action_error(self, action: Action) -> None:
         """Post a 'confused' reaction on the triggering comment, if any.
 
         Called when _process_action raises so the comment author sees something
@@ -525,8 +529,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
         repo = thread.get("repo")
         comment_id = thread.get("comment_id")
         comment_type = thread.get("comment_type", "issues")
+        if not repo or not comment_id:
+            return
         try:
-            self.gh.add_reaction(repo, comment_type, comment_id, "confused")
+            if self.gh is not None:
+                self.gh.add_reaction(repo, comment_type, comment_id, "confused")
         except Exception:
             log.exception("failed to post error reaction on comment %s", comment_id)
 
@@ -669,22 +676,22 @@ def _startup_pull(
 
 def run(
     *,
-    _from_args=Config.from_args,
-    _HTTPServer=HTTPServer,
-    _make_registry=make_registry,
-    _path_home=Path.home,
-    _basic_config=logging.basicConfig,
-    _stderr=sys.stderr,
-    _populate_memberships=populate_memberships,
-    _signal=signal.signal,
-    _kill_active_children=kill_active_children,
-    _startup_pull=_startup_pull,
-    _Watchdog=Watchdog,
-    _preflight_repo_identity=preflight_repo_identity,
-    _preflight_tools=preflight_tools,
-    _preflight_sub_dir=preflight_sub_dir,
-    _preflight_gh_auth=preflight_gh_auth,
-    _GitHub=GitHub,
+    _from_args: Callable[..., Config] = Config.from_args,
+    _HTTPServer: Callable[..., HTTPServer] = HTTPServer,
+    _make_registry: Callable[..., WorkerRegistry] = make_registry,
+    _path_home: Callable[[], Path] = Path.home,
+    _basic_config: Callable[..., None] = logging.basicConfig,
+    _stderr: Any = sys.stderr,
+    _populate_memberships: Callable[..., None] = populate_memberships,
+    _signal: Callable[..., Any] = signal.signal,
+    _kill_active_children: Callable[..., None] = kill_active_children,
+    _startup_pull: Callable[..., None] = _startup_pull,
+    _Watchdog: type[Watchdog] = Watchdog,
+    _preflight_repo_identity: Callable[..., None] = preflight_repo_identity,
+    _preflight_tools: Callable[..., None] = preflight_tools,
+    _preflight_sub_dir: Callable[..., None] = preflight_sub_dir,
+    _preflight_gh_auth: Callable[..., None] = preflight_gh_auth,
+    _GitHub: type[GitHub] = GitHub,
 ) -> None:
     config = _from_args()
 
@@ -717,14 +724,17 @@ def run(
     # kennel.log, not just ~/log/kennel-crash.log (where start-kennel.sh
     # redirects stderr).  Before this, RCA on crashes required reading two
     # different log files.
-    def _log_uncaught(exc_type, exc_value, exc_tb):
+    def _log_uncaught(
+        exc_type: type[BaseException], exc_value: BaseException, exc_tb: Any
+    ) -> None:
         log.critical("uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
 
-    def _log_thread_exception(args):
+    def _log_thread_exception(args: threading.ExceptHookArgs) -> None:
+        exc_info: Any = (args.exc_type, args.exc_value, args.exc_traceback)
         log.critical(
             "uncaught exception in thread %s",
             args.thread.name if args.thread else "?",
-            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            exc_info=exc_info,
         )
 
     sys.excepthook = _log_uncaught

@@ -10,13 +10,18 @@ import re
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from kennel.claude import print_prompt as _claude_print_prompt
 from kennel.github import GitHub
 from kennel.prompts import rescope_prompt as _rescope_prompt_default
-from kennel.state import JsonFileStore, _resolve_git_dir, load_state
+from kennel.state import (
+    JsonFileStore,
+    _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
+    load_state,
+)
 from kennel.types import TaskStatus, TaskType
 
 log = logging.getLogger(__name__)
@@ -31,7 +36,7 @@ def _locked(path: Path, write: bool = False):
 
     class Lock:
         def __init__(self):
-            self.fd = None
+            self.fd: IO[str] | None = None
 
         def __enter__(self):
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,9 +50,14 @@ def _locked(path: Path, write: bool = False):
                 fcntl.flock(self.fd, fcntl.LOCK_UN)
                 self.fd.close()
 
+        def _fd(self) -> IO[str]:
+            assert self.fd is not None, "Lock used outside context manager"
+            return self.fd
+
         def read(self) -> list[dict[str, Any]]:
-            self.fd.seek(0)
-            text = self.fd.read().strip()
+            fd = self._fd()
+            fd.seek(0)
+            text = fd.read().strip()
             if not text:
                 return []
             try:
@@ -62,10 +72,11 @@ def _locked(path: Path, write: bool = False):
             return result
 
         def write(self, tasks: list[dict[str, Any]]) -> None:
-            self.fd.seek(0)
-            self.fd.truncate()
-            json.dump(tasks, self.fd, indent=2)
-            self.fd.flush()
+            fd = self._fd()
+            fd.seek(0)
+            fd.truncate()
+            json.dump(tasks, fd, indent=2)
+            fd.flush()
 
     return Lock()
 
@@ -83,7 +94,7 @@ def add_task(
     task_type: mandatory — one of TaskType.CI, TaskType.THREAD, TaskType.SPEC.
     thread: optional {repo, pr, comment_id, review_id} for comment/review tasks.
     """
-    if not isinstance(task_type, TaskType):
+    if not isinstance(task_type, TaskType):  # pyright: ignore[reportUnnecessaryIsInstance]
         raise TypeError(f"task_type must be TaskType, got {type(task_type).__name__}")
     title = " ".join(title.split())
     task: dict[str, Any] = {
@@ -249,8 +260,8 @@ def _auto_complete_ask_tasks(
     repo: str,
     pr_number: int | str,
     *,
-    _list_tasks=list_tasks,
-    _complete_by_id=complete_by_id,
+    _list_tasks: Callable[[Path], list[dict[str, Any]]] = list_tasks,
+    _complete_by_id: Callable[[Path, str], dict[str, Any] | None] = complete_by_id,
 ) -> None:
     """Mark pending ASK tasks complete when their review thread is resolved."""
     task_list = _list_tasks(work_dir)
@@ -287,9 +298,9 @@ def sync_tasks(
     work_dir: Path,
     gh: GitHub,
     *,
-    _resolve_git_dir_fn=_resolve_git_dir,
-    _list_tasks=list_tasks,
-    _auto_complete_ask_tasks_fn=_auto_complete_ask_tasks,
+    _resolve_git_dir_fn: Callable[[Path], Path] = _resolve_git_dir,
+    _list_tasks: Callable[[Path], list[dict[str, Any]]] = list_tasks,
+    _auto_complete_ask_tasks_fn: Callable[..., None] = _auto_complete_ask_tasks,
 ) -> None:
     """Sync tasks.json → PR body work queue.
 
@@ -488,11 +499,11 @@ def reorder_tasks(
     work_dir: Path,
     commit_summary: str,
     *,
-    _print_prompt=_claude_print_prompt,
-    _rescope_prompt_fn=_rescope_prompt_default,
-    _on_changes=None,
-    _on_inprogress_affected=None,
-    _on_done=None,
+    _print_prompt: Callable[..., str] = _claude_print_prompt,
+    _rescope_prompt_fn: Callable[..., str] = _rescope_prompt_default,
+    _on_changes: Callable[[list[dict[str, Any]]], None] | None = None,
+    _on_inprogress_affected: Callable[[], None] | None = None,
+    _on_done: Callable[[], None] | None = None,
 ) -> None:
     """Reorder pending tasks by Opus dependency analysis.
 
@@ -587,7 +598,10 @@ def reorder_tasks(
 
 
 def sync_tasks_background(
-    work_dir: Path, gh: GitHub, *, _start=threading.Thread.start
+    work_dir: Path,
+    gh: GitHub,
+    *,
+    _start: Callable[[threading.Thread], None] = threading.Thread.start,
 ) -> None:
     """Launch :func:`sync_tasks` in a daemon background thread."""
     t = threading.Thread(
@@ -616,7 +630,7 @@ class Tasks(JsonFileStore):
     def _data_path(self) -> Path:
         return _task_file(self._work_dir)
 
-    def _default(self) -> list:
+    def _default(self) -> list[dict[str, Any]]:
         return []
 
     def list(self) -> list[dict[str, Any]]:
