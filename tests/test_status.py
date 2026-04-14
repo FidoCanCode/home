@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from kennel.color import _CODES
 from kennel.config import RepoConfig
 from kennel.status import (
     ClaudeTalkerInfo,
@@ -1437,3 +1438,178 @@ class TestFormatStatus:
         assert "crashes 1" in output
         assert "BUSY" in output
         assert "last crash: err" in output
+
+
+class TestFormatStatusColor:
+    """Color tests: verify ANSI codes appear under FORCE_COLOR=1."""
+
+    def _repo(self, **kwargs) -> RepoStatus:
+        defaults = dict(
+            name="owner/repo",
+            fido_running=False,
+            issue=None,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+        )
+        defaults.update(kwargs)
+        return RepoStatus(**defaults)
+
+    def _color_env(self) -> dict[str, str]:
+        return {"FORCE_COLOR": "1"}
+
+    def test_kennel_up_header_bold(self) -> None:
+        status = KennelStatus(kennel_pid=42, kennel_uptime=60, repos=[])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert output.startswith(_CODES["bold"])
+
+    def test_kennel_down_header_bold(self) -> None:
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert _CODES["bold"] in output
+
+    def test_repo_running_bold(self) -> None:
+        repo = self._repo(fido_running=True)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        header = [ln for ln in output.splitlines() if "owner/repo" in ln][0]
+        assert _CODES["bold"] in header
+
+    def test_repo_idle_dim(self) -> None:
+        repo = self._repo(fido_running=False)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        header = [ln for ln in output.splitlines() if "owner/repo" in ln][0]
+        assert _CODES["dim"] in header
+
+    def test_issue_number_cyan(self) -> None:
+        repo = self._repo(issue=42)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert f"{_CODES['cyan']}#42" in output
+
+    def test_pr_number_magenta(self) -> None:
+        repo = self._repo(issue=1, pr_number=99)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert f"{_CODES['magenta']}#99" in output
+
+    def test_elapsed_dim(self) -> None:
+        repo = self._repo(issue=1, issue_elapsed_seconds=120)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert f"{_CODES['dim']}(elapsed 2m)" in output
+
+    def test_busy_red(self) -> None:
+        repo = self._repo(worker_stuck=True)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert f"{_CODES['red']}BUSY" in output
+
+    def test_crash_red_bold(self) -> None:
+        repo = self._repo(crash_count=2, last_crash_error="RuntimeError: boom")
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert f"{_CODES['red_bold']}crashes 2" in output
+        assert f"{_CODES['red_bold']}last crash: RuntimeError: boom" in output
+
+    def test_task_counter_bold(self) -> None:
+        repo = self._repo(issue=1, current_task="Do thing", task_number=2, task_total=5)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert f"{_CODES['bold']}task 2/5" in output
+
+    def test_worker_label_green_when_talker(self) -> None:
+        repo = self._repo(
+            issue=1,
+            claude_pid=999,
+            session_alive=True,
+            claude_talker=ClaudeTalkerInfo(
+                thread_id=1, kind="worker", description="turn", claude_pid=999
+            ),
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
+        assert f"{_CODES['green']}Worker:" in worker_line
+
+    def test_worker_label_plain_when_not_talker(self) -> None:
+        repo = self._repo(issue=1)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        worker_line = [ln for ln in output.splitlines() if "Worker:" in ln][0]
+        assert _CODES["green"] not in worker_line
+
+    def test_webhook_label_yellow_when_talker(self) -> None:
+        repo = self._repo(
+            issue=1,
+            claude_pid=888,
+            session_alive=True,
+            webhook_activities=[
+                WebhookActivityInfo(
+                    description="triaging", elapsed_seconds=10, thread_id=5
+                ),
+            ],
+            claude_talker=ClaudeTalkerInfo(
+                thread_id=5, kind="webhook", description="one-shot", claude_pid=888
+            ),
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        wh_line = [ln for ln in output.splitlines() if "webhook:" in ln][0]
+        assert f"{_CODES['yellow']}webhook:" in wh_line
+
+    def test_webhook_label_plain_when_not_talker(self) -> None:
+        repo = self._repo(
+            issue=1,
+            webhook_activities=[
+                WebhookActivityInfo(
+                    description="triaging", elapsed_seconds=10, thread_id=5
+                ),
+            ],
+        )
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        wh_line = [ln for ln in output.splitlines() if "webhook:" in ln][0]
+        assert _CODES["yellow"] not in wh_line
+
+    def test_session_idle_dim(self) -> None:
+        repo = self._repo(issue=1, claude_pid=999, session_alive=True)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert f"{_CODES['dim']}session idle" in output
+
+    def test_claude_running_uptime_dim(self) -> None:
+        repo = self._repo(issue=1, claude_pid=999, claude_uptime=120)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert f"{_CODES['dim']}running 2m" in output
+
+    def test_no_color_env_suppresses_ansi(self) -> None:
+        repo = self._repo(fido_running=True, issue=42, worker_stuck=True)
+        status = KennelStatus(kennel_pid=1, kennel_uptime=60, repos=[repo])
+        with patch.dict("os.environ", {"NO_COLOR": ""}, clear=True):
+            output = format_status(status)
+        assert "\033[" not in output
