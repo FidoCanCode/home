@@ -635,42 +635,43 @@ class ClaudeSession:
         self._proc.stdin.flush()
 
     def interrupt(self, content: str) -> None:
-        """Signal the in-flight turn to stop, then send a follow-up message.
+        """Signal the in-flight turn to stop, then send *content* under the lock.
 
         Sets the cancel event so :meth:`iter_events` exits on its next poll
-        cycle, causing the lock holder to finish its ``with session:`` block
-        and release the lock.  Also writes *content* to stdin as a user
-        message (bypassing the lock) so it is queued as the next turn.
+        cycle.  The lock holder's ``with session:`` block then unwinds and
+        releases the lock.  This method acquires the lock (blocking until the
+        holder releases it), sends *content* as a normal user message, and
+        releases the lock.  No stdin write ever races with the holder's writes.
 
-        This is the explicit lock-break path for preempt and interrupt use
-        cases (e.g. rescope abort, CI-failure cancel) where the lock is
-        already held by the in-flight turn and waiting for it would defeat
-        the purpose of the interrupt.  Only call from threads that have a
-        legitimate need to preempt the current holder; all normal turns
-        should go through the :meth:`__enter__` / :meth:`__exit__` context
-        manager instead.
+        For preempt/interrupt use cases (rescope abort, CI-failure cancel)
+        where the in-flight turn must be cancelled and a follow-up sent.
         """
         self._cancel.set()
-        self.send(content)
+        self._lock.acquire()
+        try:
+            self.send(content)
+        finally:
+            self._lock.release()
 
     def preempt(self, content: str) -> None:
-        """Send a control_request interrupt and queue a follow-up user turn.
+        """Signal the in-flight turn to stop and queue a follow-up user turn.
 
-        Bypasses the session lock so this can be called while another thread
-        holds the lock during the in-flight turn.  The running turn receives
-        a stream-json ``control_request`` interrupt signal and should
-        complete early; *content* is saved so the next holder of the lock
-        can retrieve and send it via :meth:`take_queued_content`.
+        Sets the cancel event so :meth:`iter_events` exits on its next poll
+        cycle.  The lock holder's ``with session:`` block then unwinds and
+        releases the lock.  This method acquires the lock (blocking until the
+        holder releases it), stores *content* as the queued follow-up turn,
+        and releases the lock.  The queued content is retrieved via
+        :meth:`take_queued_content` by the next caller that holds the lock.
 
         Only for preempt paths (rescope abort, CI-failure cancel).  Normal
         turns must go through the context-manager lock.
         """
         self._cancel.set()
-        msg = json.dumps({"type": "control_request", "request": {"type": "interrupt"}})
-        assert self._proc.stdin is not None
-        self._proc.stdin.write(msg + "\n")
-        self._proc.stdin.flush()
-        self._queued_content = content
+        self._lock.acquire()
+        try:
+            self._queued_content = content
+        finally:
+            self._lock.release()
 
     def take_queued_content(self) -> str | None:
         """Return and clear any content queued by :meth:`preempt`.

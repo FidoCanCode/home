@@ -1686,16 +1686,6 @@ class TestClaudeSessionInterrupt:
         assert obj["type"] == "user"
         assert obj["message"]["content"] == "abort now"
 
-    def test_interrupt_bypasses_held_lock(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        session._lock.acquire()
-        try:
-            session.interrupt("urgent")  # must not block or raise
-        finally:
-            session._lock.release()
-        session.stop()
-
     def test_interrupt_sets_cancel_event(self, tmp_path: Path) -> None:
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
@@ -1704,33 +1694,89 @@ class TestClaudeSessionInterrupt:
         assert session._cancel.is_set()
         session.stop()
 
-
-class TestClaudeSessionPreempt:
-    def test_preempt_writes_control_request_to_stdin(self, tmp_path: Path) -> None:
-        import json as _json
+    def test_interrupt_waits_for_lock_holder_then_sends(self, tmp_path: Path) -> None:
+        import threading as _threading
 
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        session.preempt("follow up")
-        written = proc.stdin.write.call_args.args[0]
-        obj = _json.loads(written.strip())
-        assert obj["type"] == "control_request"
-        assert obj["request"]["type"] == "interrupt"
+        acquired = _threading.Event()
+        release = _threading.Event()
 
+        def holder() -> None:
+            session._lock.acquire()
+            acquired.set()
+            release.wait()
+            session._lock.release()
+
+        t_holder = _threading.Thread(target=holder)
+        t_holder.start()
+        acquired.wait()  # holder definitely has the lock
+
+        t_interrupt = _threading.Thread(target=lambda: session.interrupt("msg"))
+        t_interrupt.start()
+
+        # interrupt is blocked on lock.acquire(); stdin must not be written yet
+        assert proc.stdin.write.call_count == 0
+
+        release.set()
+        t_holder.join(timeout=2)
+        t_interrupt.join(timeout=2)
+
+        assert proc.stdin.write.call_count > 0
+        session.stop()
+
+
+class TestClaudeSessionPreempt:
     def test_preempt_queues_content(self, tmp_path: Path) -> None:
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
         session.preempt("handle ci failure")
         assert session.take_queued_content() == "handle ci failure"
 
-    def test_preempt_bypasses_held_lock(self, tmp_path: Path) -> None:
+    def test_preempt_does_not_write_to_stdin(self, tmp_path: Path) -> None:
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        session._lock.acquire()
-        try:
-            session.preempt("urgent follow-up")  # must not block or raise
-        finally:
+        session.preempt("follow up")
+        proc.stdin.write.assert_not_called()
+        session.stop()
+
+    def test_preempt_sets_cancel_event(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        assert not session._cancel.is_set()
+        session.preempt("follow up")
+        assert session._cancel.is_set()
+        session.stop()
+
+    def test_preempt_waits_for_lock_holder_then_queues(self, tmp_path: Path) -> None:
+        import threading as _threading
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        acquired = _threading.Event()
+        release = _threading.Event()
+
+        def holder() -> None:
+            session._lock.acquire()
+            acquired.set()
+            release.wait()
             session._lock.release()
+
+        t_holder = _threading.Thread(target=holder)
+        t_holder.start()
+        acquired.wait()  # holder definitely has the lock
+
+        t_preempt = _threading.Thread(target=lambda: session.preempt("queued"))
+        t_preempt.start()
+
+        # preempt is blocked on lock.acquire(); queue must still be empty
+        assert session._queued_content is None
+
+        release.set()
+        t_holder.join(timeout=2)
+        t_preempt.join(timeout=2)
+
+        assert session._queued_content == "queued"
         session.stop()
 
     def test_take_queued_content_returns_none_when_empty(self, tmp_path: Path) -> None:
@@ -1744,12 +1790,4 @@ class TestClaudeSessionPreempt:
         session.preempt("once")
         session.take_queued_content()
         assert session.take_queued_content() is None
-        session.stop()
-
-    def test_preempt_sets_cancel_event(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        assert not session._cancel.is_set()
-        session.preempt("follow up")
-        assert session._cancel.is_set()
         session.stop()
