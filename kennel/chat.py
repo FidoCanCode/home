@@ -39,16 +39,14 @@ def run(
     chdir(runner_clone)
     environ["CLAUDE_CODE_NO_FLICKER"] = "1"
 
-    execvp(
+    cmd = [
         "nice",
-        [
-            "nice",
-            "-n19",
-            "claude",
-            "--permission-mode=bypassPermissions",
-            "--continue",
-            "--append-system-prompt",
-            persona,
-            *args,
-        ],
-    )
+        "-n19",
+        "claude",
+        "--permission-mode=bypassPermissions",
+        "--continue",
+        "--append-system-prompt",
+        persona,
+        *args,
+    ]
+    execvp(cmd[0], cmd)
