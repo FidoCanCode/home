@@ -1610,7 +1610,7 @@ class TestClaudeSessionIsAliveAndRestart:
         assert any("restart" in r.message.lower() for r in caplog.records)
         session.stop()
 
-    def test_restart_swallows_oserror_on_kill(self, tmp_path: Path) -> None:
+    def test_restart_raises_oserror_on_kill(self, tmp_path: Path, caplog) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
@@ -1621,10 +1621,12 @@ class TestClaudeSessionIsAliveAndRestart:
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        session.restart()  # must not raise
-        session.stop()
+        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+            with pytest.raises(OSError):
+                session.restart()
+        assert any("kill/wait failed" in r.message for r in caplog.records)
 
-    def test_restart_swallows_timeout_on_wait(self, tmp_path: Path) -> None:
+    def test_restart_raises_timeout_on_wait(self, tmp_path: Path, caplog) -> None:
         import subprocess as _subprocess
 
         system_file = tmp_path / "system.md"
@@ -1637,8 +1639,10 @@ class TestClaudeSessionIsAliveAndRestart:
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        session.restart()  # must not raise
-        session.stop()
+        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+            with pytest.raises(_subprocess.TimeoutExpired):
+                session.restart()
+        assert any("kill/wait failed" in r.message for r in caplog.records)
 
     def test_stop_after_restart_cleans_up_new_proc(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"

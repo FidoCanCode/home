@@ -641,8 +641,9 @@ class ClaudeSession:
         try:
             self._proc.kill()
             self._proc.wait(timeout=1.0)
-        except OSError, ProcessLookupError, subprocess.TimeoutExpired:
-            pass
+        except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
+            log.warning("ClaudeSession.restart: kill/wait failed: %s", exc)
+            raise
         self._proc = self._spawn()
         _register_child(self._proc)
 
