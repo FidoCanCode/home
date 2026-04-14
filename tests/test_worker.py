@@ -2374,6 +2374,7 @@ class TestClaudeStart:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (fido_dir / "system").write_text("system prompt")
+        (fido_dir / "skill").write_text("sub-skill instructions")
         (fido_dir / "prompt").write_text("user prompt")
         return fido_dir
 
@@ -2484,12 +2485,15 @@ class TestClaudeStart:
 
     def test_session_path_sends_prompt_content(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
+        (fido_dir / "skill").write_text("setup instructions")
         (fido_dir / "prompt").write_text("the task prompt")
         session = MagicMock()
         session.__enter__ = MagicMock(return_value=session)
         session.__exit__ = MagicMock(return_value=None)
         claude_start(fido_dir, session=session)
-        session.send.assert_called_once_with("the task prompt")
+        session.send.assert_called_once_with(
+            "setup instructions\n\n---\n\nthe task prompt"
+        )
 
     def test_session_path_calls_consume_until_result(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
@@ -2525,6 +2529,7 @@ class TestClaudeRun:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (fido_dir / "system").write_text("system")
+        (fido_dir / "skill").write_text("skill")
         (fido_dir / "prompt").write_text("prompt")
         return fido_dir
 
@@ -2613,12 +2618,15 @@ class TestClaudeRun:
 
     def test_session_path_sends_prompt_content(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
+        (fido_dir / "skill").write_text("task instructions")
         (fido_dir / "prompt").write_text("run this task")
         session = MagicMock()
         session.__enter__ = MagicMock(return_value=session)
         session.__exit__ = MagicMock(return_value=None)
         claude_run(fido_dir, session=session)
-        session.send.assert_called_once_with("run this task")
+        session.send.assert_called_once_with(
+            "task instructions\n\n---\n\nrun this task"
+        )
 
     def test_session_path_calls_consume_until_result(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
