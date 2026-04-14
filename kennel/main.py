@@ -11,8 +11,9 @@ def main(argv: list[str] | None = None) -> None:
     # TODO: remove this compat shim once shell scripts are fully removed
     if args and args[0] == "task":
         from kennel.cli import main as task_main
+        from kennel.github import GitHub
 
-        task_main(args[1:])
+        task_main(args[1:], _GitHub=GitHub)
     elif args and args[0] == "status":
         from kennel.status import collect, format_status
 
