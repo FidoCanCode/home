@@ -6,7 +6,7 @@ import hmac
 import json
 import logging
 import os
-import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from urllib.parse import urlparse
 
 from kennel.claude import kill_active_children
 from kennel.config import Config, RepoConfig, RepoMembership
@@ -43,9 +44,33 @@ _PULL_BACKOFF_DELAYS: tuple[int, ...] = (10, 30, 60)
 _PULL_BUDGET_SECONDS: float = 600.0
 
 
+class PreflightError(RuntimeError):
+    """Raised by preflight checks when a startup precondition is not met.
+
+    Caught by :func:`run` and converted to :exc:`SystemExit` so individual
+    preflight functions remain testable without triggering process exit.
+    """
+
+
 def _runner_dir() -> Path:
     """Return the runner clone directory — where the running kennel code lives."""
     return Path(__file__).resolve().parents[1]
+
+
+def _parse_repo_from_url(url: str) -> str | None:
+    """Extract 'owner/repo' from an SSH or HTTPS git remote URL, or return None."""
+    parsed = urlparse(url)
+    if parsed.scheme:
+        # Standard URL (https, ssh, git, etc.): path is /owner/repo[.git]
+        path = parsed.path
+    elif ":" in url:
+        # SCP-style SSH: git@github.com:owner/repo[.git]
+        _, path = url.split(":", 1)
+    else:
+        return None
+    path = path.lstrip("/").removesuffix(".git")
+    parts = path.split("/")
+    return path if len(parts) == 2 and all(parts) else None
 
 
 def _get_self_repo(
@@ -70,11 +95,103 @@ def _get_self_repo(
         log.error("self-restart: failed to read origin remote: %s", e)
         return None
     url = result.stdout.strip()
-    m = re.search(r"[:/]([^:/]+/[^/]+?)(?:\.git)?$", url)
-    if not m:
+    parsed = _parse_repo_from_url(url)
+    if not parsed:
         log.error("self-restart: could not parse owner/repo from remote url: %r", url)
         return None
-    return m.group(1)
+    return parsed
+
+
+def preflight_repo_identity(
+    repos: dict[str, RepoConfig],
+    *,
+    _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Verify each configured work_dir is a git repo whose origin matches its name.
+
+    Raises :exc:`PreflightError` if any repo's origin remote can't be read,
+    can't be parsed, or doesn't match the configured ``owner/repo`` name.
+    """
+    for name, repo_cfg in repos.items():
+        try:
+            result = _run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=str(repo_cfg.work_dir),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            raise PreflightError(
+                f"preflight: {name}: git remote get-url failed: {e}"
+            ) from e
+        except FileNotFoundError as e:
+            raise PreflightError(f"preflight: {name}: git not found: {e}") from e
+        url = result.stdout.strip()
+        actual = _parse_repo_from_url(url)
+        if actual is None:
+            raise PreflightError(
+                f"preflight: {name}: could not parse owner/repo from origin remote: {url!r}"
+            )
+        if actual != name:
+            raise PreflightError(
+                f"preflight: {name}: origin remote is {actual!r} — expected {name!r}"
+            )
+        log.info("preflight: %s: work_dir identity confirmed", name)
+
+
+_REQUIRED_TOOLS = ("git", "gh", "claude")
+
+
+def preflight_tools(
+    *,
+    _which: Callable[[str], str | None] = shutil.which,
+) -> None:
+    """Verify that all required CLI tools are on PATH.
+
+    Raises :exc:`PreflightError` naming the first missing tool.
+    """
+    for tool in _REQUIRED_TOOLS:
+        if _which(tool) is None:
+            raise PreflightError(
+                f"preflight: required tool not found on PATH: {tool!r}"
+            )
+    log.info("preflight: all required tools found: %s", ", ".join(_REQUIRED_TOOLS))
+
+
+def preflight_sub_dir(
+    config: Config,
+    *,
+    _is_dir: Callable[[Path], bool] = Path.is_dir,
+) -> None:
+    """Verify that the skill-files directory exists.
+
+    Raises :exc:`PreflightError` if ``config.sub_dir`` is not an existing
+    directory.  Workers read ``persona.md`` and sub-skill files from here on
+    every task run — a missing directory causes every worker invocation to fail
+    with an obscure I/O error rather than a clear startup message.
+    """
+    if not _is_dir(config.sub_dir):
+        raise PreflightError(
+            f"preflight: skill-files directory not found: {config.sub_dir}"
+        )
+    log.info("preflight: skill-files directory confirmed: %s", config.sub_dir)
+
+
+def preflight_gh_auth(
+    *,
+    _gh_factory: Callable[[], GitHub] = GitHub,
+) -> None:
+    """Verify gh auth works by fetching the authenticated bot user.
+
+    Raises :exc:`PreflightError` if the GitHub client cannot be constructed or
+    ``get_user()`` fails for any reason (bad token, network error, etc.).
+    """
+    try:
+        bot_user = _gh_factory().get_user()
+    except Exception as e:
+        raise PreflightError(f"preflight: gh auth check failed: {e}") from e
+    log.info("preflight: gh auth confirmed — bot user is %r", bot_user)
 
 
 def _get_head(
@@ -488,6 +605,10 @@ def run(
     _kill_active_children=kill_active_children,
     _startup_pull=_startup_pull,
     _Watchdog=Watchdog,
+    _preflight_repo_identity=preflight_repo_identity,
+    _preflight_tools=preflight_tools,
+    _preflight_sub_dir=preflight_sub_dir,
+    _preflight_gh_auth=preflight_gh_auth,
 ) -> None:
     config = _from_args()
 
@@ -534,6 +655,13 @@ def run(
     threading.excepthook = _log_thread_exception
 
     _startup_pull()
+    try:
+        _preflight_tools()
+        _preflight_sub_dir(config)
+        _preflight_gh_auth()
+        _preflight_repo_identity(config.repos)
+    except PreflightError as e:
+        raise SystemExit(str(e)) from e
 
     _populate_memberships(config)
 

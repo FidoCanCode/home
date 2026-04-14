@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kennel.config import Config, RepoConfig
-from kennel.server import WebhookHandler
+from kennel.server import PreflightError, WebhookHandler
 
 
 def _config(tmp_path: Path) -> Config:
@@ -902,6 +902,10 @@ class TestRun:
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -923,6 +927,10 @@ class TestRun:
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
             _signal=MagicMock(),
             _kill_active_children=mock_kill,
         )
@@ -949,6 +957,10 @@ class TestRun:
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
             _signal=fake_signal,
             _kill_active_children=MagicMock(),
         )
@@ -975,6 +987,10 @@ class TestRun:
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
             _signal=fake_signal,
             _kill_active_children=mock_kill,
         )
@@ -1011,6 +1027,10 @@ class TestRun:
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
         )
 
         assert len(captured_kwargs) == 1
@@ -1037,6 +1057,10 @@ class TestRun:
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
         )
 
         assert len(captured_handlers) >= 1
@@ -1061,6 +1085,10 @@ class TestRun:
             _stderr=mock_stderr,
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -1097,6 +1125,10 @@ class TestRun:
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
         )
 
         # Two shared handlers (file + no tty stderr) + two per-repo handlers
@@ -1146,6 +1178,10 @@ class TestRun:
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
         )
 
         repo_handler = next(
@@ -1176,6 +1212,10 @@ class TestRun:
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
             _Watchdog=mock_watchdog_cls,
         )
 
@@ -1205,6 +1245,10 @@ class TestRun:
                 _basic_config=MagicMock(),
                 _populate_memberships=MagicMock(),
                 _startup_pull=MagicMock(),
+                _preflight_repo_identity=MagicMock(),
+                _preflight_tools=MagicMock(),
+                _preflight_sub_dir=MagicMock(),
+                _preflight_gh_auth=MagicMock(),
                 _Watchdog=MagicMock(),
             )
             assert _sys.excepthook is not saved_sys
@@ -1272,6 +1316,368 @@ _PUSH_PAYLOAD = {
     },
     "ref": "refs/heads/main",
 }
+
+
+class TestParseRepoFromUrl:
+    def test_parses_ssh_url(self) -> None:
+        from kennel.server import _parse_repo_from_url
+
+        assert _parse_repo_from_url("git@github.com:owner/repo.git") == "owner/repo"
+
+    def test_parses_https_url(self) -> None:
+        from kennel.server import _parse_repo_from_url
+
+        assert _parse_repo_from_url("https://github.com/owner/repo.git") == "owner/repo"
+
+    def test_parses_url_without_git_suffix(self) -> None:
+        from kennel.server import _parse_repo_from_url
+
+        assert _parse_repo_from_url("https://github.com/owner/repo") == "owner/repo"
+
+    def test_returns_none_for_garbage(self) -> None:
+        from kennel.server import _parse_repo_from_url
+
+        assert _parse_repo_from_url("garbage") is None
+
+
+class TestPreflightRepoIdentity:
+    def test_succeeds_when_remote_matches(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_repo_identity
+
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        mock_run = MagicMock(
+            return_value=MagicMock(stdout="git@github.com:owner/repo.git\n")
+        )
+        preflight_repo_identity(repos, _run=mock_run)  # no exception
+
+    def test_raises_on_remote_mismatch(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_repo_identity
+
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        mock_run = MagicMock(
+            return_value=MagicMock(stdout="git@github.com:other/thing.git\n")
+        )
+        with pytest.raises(PreflightError, match="other/thing"):
+            preflight_repo_identity(repos, _run=mock_run)
+
+    def test_raises_on_subprocess_error(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_repo_identity
+
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, []))
+        with pytest.raises(PreflightError):
+            preflight_repo_identity(repos, _run=mock_run)
+
+    def test_raises_when_git_not_found(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_repo_identity
+
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        mock_run = MagicMock(side_effect=FileNotFoundError())
+        with pytest.raises(PreflightError):
+            preflight_repo_identity(repos, _run=mock_run)
+
+    def test_raises_on_unparseable_url(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_repo_identity
+
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        mock_run = MagicMock(return_value=MagicMock(stdout="garbage\n"))
+        with pytest.raises(PreflightError):
+            preflight_repo_identity(repos, _run=mock_run)
+
+    def test_checks_all_repos(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_repo_identity
+
+        repos = {
+            "owner/repo1": RepoConfig(name="owner/repo1", work_dir=tmp_path),
+            "owner/repo2": RepoConfig(name="owner/repo2", work_dir=tmp_path),
+        }
+        mock_run = MagicMock(
+            side_effect=[
+                MagicMock(stdout="git@github.com:owner/repo1.git\n"),
+                MagicMock(stdout="git@github.com:owner/repo2.git\n"),
+            ]
+        )
+        preflight_repo_identity(repos, _run=mock_run)  # no exception
+        assert mock_run.call_count == 2
+
+    def test_raises_on_second_repo_mismatch(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_repo_identity
+
+        repos = {
+            "owner/repo1": RepoConfig(name="owner/repo1", work_dir=tmp_path),
+            "owner/repo2": RepoConfig(name="owner/repo2", work_dir=tmp_path),
+        }
+        mock_run = MagicMock(
+            side_effect=[
+                MagicMock(stdout="git@github.com:owner/repo1.git\n"),
+                MagicMock(stdout="git@github.com:other/thing.git\n"),
+            ]
+        )
+        with pytest.raises(PreflightError, match="other/thing"):
+            preflight_repo_identity(repos, _run=mock_run)
+
+    def test_run_calls_preflight_repo_identity(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = Config(
+            port=0,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_preflight = MagicMock()
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
+            _preflight_repo_identity=mock_preflight,
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
+        )
+
+        mock_preflight.assert_called_once_with(fake_cfg.repos)
+
+    def test_run_calls_preflight_tools(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = Config(
+            port=0,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_preflight = MagicMock()
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=mock_preflight,
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
+        )
+
+        mock_preflight.assert_called_once_with()
+
+    def test_run_calls_preflight_gh_auth(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = Config(
+            port=0,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_preflight = MagicMock()
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=mock_preflight,
+        )
+
+        mock_preflight.assert_called_once_with()
+
+    def test_run_calls_preflight_sub_dir(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = Config(
+            port=0,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_preflight = MagicMock()
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=mock_preflight,
+            _preflight_gh_auth=MagicMock(),
+        )
+
+        mock_preflight.assert_called_once_with(fake_cfg)
+
+    def test_run_converts_preflight_error_to_system_exit(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = Config(
+            port=0,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_server = MagicMock()
+
+        with pytest.raises(SystemExit, match="something went wrong"):
+            run(
+                _from_args=lambda: fake_cfg,
+                _HTTPServer=lambda *a, **kw: mock_server,
+                _make_registry=MagicMock(),
+                _path_home=lambda: tmp_path,
+                _basic_config=MagicMock(),
+                _populate_memberships=MagicMock(),
+                _startup_pull=MagicMock(),
+                _preflight_tools=MagicMock(
+                    side_effect=PreflightError("something went wrong")
+                ),
+                _preflight_sub_dir=MagicMock(),
+                _preflight_gh_auth=MagicMock(),
+                _preflight_repo_identity=MagicMock(),
+            )
+
+
+class TestPreflightTools:
+    def test_succeeds_when_all_tools_found(self) -> None:
+        from kennel.server import preflight_tools
+
+        preflight_tools(_which=lambda _: "/usr/bin/git")  # no exception
+
+    def test_raises_when_git_missing(self) -> None:
+        from kennel.server import preflight_tools
+
+        missing = "git"
+        with pytest.raises(PreflightError, match=repr(missing)):
+            preflight_tools(_which=lambda t: None if t == missing else f"/usr/bin/{t}")
+
+    def test_raises_when_gh_missing(self) -> None:
+        from kennel.server import preflight_tools
+
+        missing = "gh"
+        with pytest.raises(PreflightError, match=repr(missing)):
+            preflight_tools(_which=lambda t: None if t == missing else f"/usr/bin/{t}")
+
+    def test_raises_when_claude_missing(self) -> None:
+        from kennel.server import preflight_tools
+
+        missing = "claude"
+        with pytest.raises(PreflightError, match=repr(missing)):
+            preflight_tools(_which=lambda t: None if t == missing else f"/usr/bin/{t}")
+
+    def test_required_tools_constant(self) -> None:
+        from kennel.server import _REQUIRED_TOOLS
+
+        assert set(_REQUIRED_TOOLS) == {"git", "gh", "claude"}
+
+
+class TestPreflightSubDir:
+    def test_succeeds_when_sub_dir_exists(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_sub_dir
+
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="INFO",
+            sub_dir=tmp_path / "sub",
+        )
+        preflight_sub_dir(cfg, _is_dir=lambda _: True)  # no exception
+
+    def test_raises_when_sub_dir_missing(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_sub_dir
+
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="INFO",
+            sub_dir=tmp_path / "sub",
+        )
+        with pytest.raises(PreflightError, match="skill-files directory not found"):
+            preflight_sub_dir(cfg, _is_dir=lambda _: False)
+
+    def test_error_message_includes_path(self, tmp_path: Path) -> None:
+        from kennel.server import preflight_sub_dir
+
+        sub = tmp_path / "my-sub"
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="INFO",
+            sub_dir=sub,
+        )
+        with pytest.raises(PreflightError, match=str(sub)):
+            preflight_sub_dir(cfg, _is_dir=lambda _: False)
+
+
+class TestPreflightGhAuth:
+    def test_succeeds_when_get_user_works(self) -> None:
+        from kennel.server import preflight_gh_auth
+
+        mock_gh = MagicMock()
+        mock_gh.return_value.get_user.return_value = "fido-bot"
+        preflight_gh_auth(_gh_factory=mock_gh)  # no exception
+
+    def test_raises_when_get_user_raises_runtime_error(self) -> None:
+        from kennel.server import preflight_gh_auth
+
+        mock_gh = MagicMock()
+        mock_gh.return_value.get_user.side_effect = RuntimeError("not logged in")
+        with pytest.raises(PreflightError, match="not logged in"):
+            preflight_gh_auth(_gh_factory=mock_gh)
+
+    def test_raises_when_gh_factory_raises(self) -> None:
+        from kennel.server import preflight_gh_auth
+
+        mock_gh = MagicMock(side_effect=RuntimeError("gh auth token failed"))
+        with pytest.raises(PreflightError, match="gh auth token failed"):
+            preflight_gh_auth(_gh_factory=mock_gh)
+
+    def test_raises_when_get_user_raises_any_exception(self) -> None:
+        from kennel.server import preflight_gh_auth
+
+        mock_gh = MagicMock()
+        mock_gh.return_value.get_user.side_effect = Exception("network error")
+        with pytest.raises(PreflightError, match="network error"):
+            preflight_gh_auth(_gh_factory=mock_gh)
 
 
 class TestGetSelfRepo:
