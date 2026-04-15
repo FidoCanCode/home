@@ -224,6 +224,49 @@ has a hidden dependency that was never exposed through the constructor.  Use
 `MagicMock` (or a hand-rolled fake) and pass it in at construction time
 instead.
 
+### Fail-fast / fail-closed
+
+Core runtime paths — the webhook handler, worker loop, task engine, and
+self-restart — must fail loudly and early.  Silent recovery masks real bugs
+and turns transient errors into permanent state corruption.
+
+**No broad catch-log-continue in authoritative runner paths.**  A bare
+`except Exception: log(...)` that lets the loop continue is almost always
+wrong.  If an exception means the current task or request is unrecoverable,
+propagate it (or abort the task) rather than swallowing it.
+
+**No synthetic success from real failures.**  Do not convert a failure into an
+empty string, `None`, a default value, or a fake-success return so that the
+caller never finds out.  The caller needs to know.
+
+```python
+# wrong: failure becomes empty string
+def get_branch() -> str:
+    try:
+        return subprocess.check_output(["git", "branch"]).decode()
+    except Exception:
+        return ""  # caller thinks git worked
+
+# right: let it raise (or handle it explicitly at the call site)
+def get_branch() -> str:
+    return subprocess.check_output(["git", "branch"], check=True).decode()
+```
+
+**Subprocess failures must be explicit.**  Always pass `check=True` to
+`subprocess.run` / `check_output`, or check `returncode` explicitly and raise.
+Ignoring a non-zero exit is the subprocess equivalent of catch-log-continue.
+
+**No `.get()` defaults for required keys.**  If an external payload (GitHub
+webhook JSON, Claude response JSON, tasks.json) is required to contain a key,
+index it directly (`payload["action"]`) rather than using `.get("action", "")`
+or `.get("action", None)`.  A `KeyError` is much easier to debug than a
+downstream `NoneType` error or a silently skipped handler.
+
+**Fail closed on startup precondition failures.**  If kennel cannot verify a
+required precondition at startup (missing secret file, bad config, unreachable
+repo), it should exit rather than continue in a degraded state.  A kennel that
+starts without a valid HMAC secret will silently accept forged webhooks.
+
 ## Lessons learned
 
 - `set -euo pipefail` in bash catches errors but makes grep/jq failures fatal — use `|| true`
