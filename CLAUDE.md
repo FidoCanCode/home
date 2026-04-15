@@ -184,6 +184,46 @@ Static methods can't be patched via `self` and resist the DI pattern.  Move
 behavior-bearing static methods onto the injected object, or onto a new class
 that is itself injected.
 
+#### Migration smells
+
+These patterns signal incomplete migration to constructor-DI.  They are not
+errors by themselves, but each one is a debt marker — a sign that the
+surrounding code has not yet been fully refactored.  Do not introduce new
+instances.  When you touch code that contains them, treat them as invitations
+to finish the job.
+
+**Callable-slot DI** — attributes wired up as default-argument overrides
+rather than constructor parameters:
+
+```python
+# smell: callable slot assigned at construction time via default arg
+class Worker:
+    def __init__(self, ..., _run=subprocess.run):
+        self._run = _run  # not a real injected collaborator
+```
+
+Real constructor-DI accepts a typed collaborator object, not a bare callable
+default.  Callable slots exist only as temporary shims while callers are being
+migrated; they should disappear once the surrounding class accepts a proper
+injected object.  Examples in this codebase: `_run`, `_print_prompt`,
+`_start`, `_fn_*` parameters on `Worker`, `Events`, and `Tasks`.
+
+**Patch-heavy tests** — `@patch()` decorators or `patch.object()` calls that
+override module-level names from outside:
+
+```python
+# smell: patching module globals instead of injecting collaborators
+@patch("kennel.worker.subprocess.run")
+def test_something(self, mock_run):
+    ...
+```
+
+Tests should construct the object under test with injected mocks, exactly as
+production code does at the composition root.  `@patch` is a sign the class
+has a hidden dependency that was never exposed through the constructor.  Use
+`MagicMock` (or a hand-rolled fake) and pass it in at construction time
+instead.
+
 ## Lessons learned
 
 - `set -euo pipefail` in bash catches errors but makes grep/jq failures fatal — use `|| true`
