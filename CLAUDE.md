@@ -128,7 +128,8 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
   `--no-verify`).  That's more reliable than guessing at the build/test steps
   and avoids running the suite twice (once manually, once via the hook).
 - **One entry point** — `kennel` (heading toward all-threads architecture)
-- **No `@staticmethod`** — use module-level functions instead; static methods can't be patched via `self` and resist the dependency injection pattern
+- **No `@staticmethod` on behavior-bearing code** — static methods can't be patched via `self` and resist constructor-DI; see OO architecture rules below
+- **Prefer explicit object boundaries; keep module-level code thin and delegated** — new behavior lives on injected objects, not on free functions; see OO architecture rules below
 - **Thread safety (Python 3.14t, free-threaded, no GIL)** — kennel runs on
   the free-threaded build.  Do **not** rely on the GIL for atomicity.  Every
   shared mutable state (dicts, sets, lists, counters, attribute mutations
@@ -138,11 +139,31 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
   attribute reads, and integer increments are **not** safe across threads
   without a lock.  When in doubt, hold the lock.
 
-### Dependency injection pattern
+### OO + constructor-DI architecture
 
-Worker classes accept external collaborators (e.g. `GitHub`) via the
-constructor rather than instantiating them internally.  This keeps methods
-testable without patching module-level names.
+All behavior lives on classes with dependencies injected through the
+constructor.  Module-level code is restricted to:
+
+- **Constants** and pure data (no side effects, no I/O)
+- **Value-only helpers** — pure functions that transform data and take no
+  collaborators (e.g. `parse_event_type(header)`)
+- **Dataclasses, enums, exceptions, Protocols** — type definitions only
+- **Thin `run()` / `main()` composition roots** — these are the *only* places
+  that call constructors with real collaborators and then delegate
+
+A **composition root** is the one place where real objects are assembled.  In
+this repo every module's `run()` (or `main()`) function is a composition root:
+
+```python
+def run(work_dir: Path) -> int:
+    return Worker(work_dir, GitHub()).run()  # assembles, then delegates
+```
+
+Everything else — all logic, all I/O, all state — lives on injected objects.
+
+#### Constructor-DI pattern
+
+Collaborators are accepted via `__init__`, not instantiated internally:
 
 ```python
 class Worker:
@@ -154,15 +175,97 @@ class Worker:
         self.gh.do_thing(...)  # uses injected client
 ```
 
-The module-level `run()` entry point creates real collaborators and delegates:
-
-```python
-def run(work_dir: Path) -> int:
-    return Worker(work_dir, GitHub()).run()
-```
-
 Tests construct `Worker(tmp_path, mock_gh)` directly instead of patching
 `kennel.worker.GitHub`.
+
+#### No `@staticmethod` on behavior-bearing code
+
+Static methods can't be patched via `self` and resist the DI pattern.  Move
+behavior-bearing static methods onto the injected object, or onto a new class
+that is itself injected.
+
+#### Migration smells
+
+These patterns signal incomplete migration to constructor-DI.  They are not
+errors by themselves, but each one is a debt marker — a sign that the
+surrounding code has not yet been fully refactored.  Do not introduce new
+instances.  When you touch code that contains them, treat them as invitations
+to finish the job.
+
+**Callable-slot DI** — attributes wired up as default-argument overrides
+rather than constructor parameters:
+
+```python
+# smell: callable slot assigned at construction time via default arg
+class Worker:
+    def __init__(self, ..., _run=subprocess.run):
+        self._run = _run  # not a real injected collaborator
+```
+
+Real constructor-DI accepts a typed collaborator object, not a bare callable
+default.  Callable slots exist only as temporary shims while callers are being
+migrated; they should disappear once the surrounding class accepts a proper
+injected object.  Examples in this codebase: `_run`, `_print_prompt`,
+`_start`, `_fn_*` parameters on `Worker`, `Events`, and `Tasks`.
+
+**Patch-heavy tests** — `@patch()` decorators or `patch.object()` calls that
+override module-level names from outside:
+
+```python
+# smell: patching module globals instead of injecting collaborators
+@patch("kennel.worker.subprocess.run")
+def test_something(self, mock_run):
+    ...
+```
+
+Tests should construct the object under test with injected mocks, exactly as
+production code does at the composition root.  `@patch` is a sign the class
+has a hidden dependency that was never exposed through the constructor.  Use
+`MagicMock` (or a hand-rolled fake) and pass it in at construction time
+instead.
+
+### Fail-fast / fail-closed
+
+Core runtime paths — the webhook handler, worker loop, task engine, and
+self-restart — must fail loudly and early.  Silent recovery masks real bugs
+and turns transient errors into permanent state corruption.
+
+**No broad catch-log-continue in authoritative runner paths.**  A bare
+`except Exception: log(...)` that lets the loop continue is almost always
+wrong.  If an exception means the current task or request is unrecoverable,
+propagate it (or abort the task) rather than swallowing it.
+
+**No synthetic success from real failures.**  Do not convert a failure into an
+empty string, `None`, a default value, or a fake-success return so that the
+caller never finds out.  The caller needs to know.
+
+```python
+# wrong: failure becomes empty string
+def get_branch() -> str:
+    try:
+        return subprocess.check_output(["git", "branch"]).decode()
+    except Exception:
+        return ""  # caller thinks git worked
+
+# right: let it raise (or handle it explicitly at the call site)
+def get_branch() -> str:
+    return subprocess.check_output(["git", "branch"], check=True).decode()
+```
+
+**Subprocess failures must be explicit.**  Always pass `check=True` to
+`subprocess.run` / `check_output`, or check `returncode` explicitly and raise.
+Ignoring a non-zero exit is the subprocess equivalent of catch-log-continue.
+
+**No `.get()` defaults for required keys.**  If an external payload (GitHub
+webhook JSON, Claude response JSON, tasks.json) is required to contain a key,
+index it directly (`payload["action"]`) rather than using `.get("action", "")`
+or `.get("action", None)`.  A `KeyError` is much easier to debug than a
+downstream `NoneType` error or a silently skipped handler.
+
+**Fail closed on startup precondition failures.**  If kennel cannot verify a
+required precondition at startup (missing secret file, bad config, unreachable
+repo), it should exit rather than continue in a degraded state.  A kennel that
+starts without a valid HMAC secret will silently accept forged webhooks.
 
 ## Lessons learned
 
