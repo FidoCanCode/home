@@ -1111,8 +1111,11 @@ class ClaudeSession:
                 sid = obj.get("session_id")
                 if isinstance(sid, str) and sid:
                     self._session_id = sid
+                # Humanify drained events at INFO too so a cancelled turn's
+                # tail is visible in the log rather than silently discarded.
+                self._log_event(obj)
                 if obj.get("type") in ("result", "error"):
-                    log.debug(
+                    log.info(
                         "ClaudeSession: drained stale %s event",
                         obj.get("type"),
                     )
@@ -1267,6 +1270,51 @@ class ClaudeSession:
             _register_child(self._proc)
         log.info("switch_model: new pid %d ready (model=%s)", self._proc.pid, model)
 
+    def _log_event(self, obj: dict[str, Any]) -> None:
+        """Emit a human-readable INFO log line for a stream-json *obj*.
+
+        Makes stalls pinpointable to a specific tool call or turn rather
+        than leaving a silent gap in the kennel log between "preempt
+        requested" and "preempter acquired".  Closes #493.
+        """
+        t = obj.get("type")
+        if t == "assistant":
+            message = obj.get("message", {})
+            for c in message.get("content") or []:
+                if not isinstance(c, dict):
+                    continue
+                ct = c.get("type")
+                if ct == "text":
+                    text = str(c.get("text") or "").replace("\n", " ")[:200]
+                    log.info("claude> %s", text)
+                elif ct == "tool_use":
+                    name = c.get("name") or "?"
+                    args = c.get("input") or {}
+                    preview = (
+                        args.get("command")
+                        or args.get("file_path")
+                        or (args.get("pattern") or "")
+                    )
+                    if not preview and args:
+                        preview = str(next(iter(args.values())))
+                    log.info("claude tool: %s %s", name, str(preview)[:120])
+        elif t == "user":
+            message = obj.get("message", {})
+            content = message.get("content")
+            if isinstance(content, list):
+                for c in content:
+                    if isinstance(c, dict) and c.get("type") == "tool_result":
+                        tr = c.get("content", "")
+                        size = len(str(tr))
+                        log.info("claude tool result (%d chars)", size)
+        elif t == "system":
+            log.info("claude system: %s", obj.get("subtype") or "?")
+        elif t == "result":
+            result = str(obj.get("result") or "").replace("\n", " ")[:200]
+            log.info("claude result: %s", result)
+        elif t == "error":
+            log.warning("claude error: %s", obj.get("error") or obj)
+
     def iter_events(self) -> Iterator[dict[str, Any]]:
         """Yield parsed stream-json events for the current turn.
 
@@ -1312,7 +1360,7 @@ class ClaudeSession:
                     last_activity = time.monotonic()
                     continue
                 obj = json.loads(line)
-                log.debug("ClaudeSession event: %s", _Trunc(line))
+                self._log_event(obj)
                 last_activity = time.monotonic()
                 # Track the latest session_id so :meth:`switch_model` can
                 # restart with ``--resume <sid>`` and keep conversation

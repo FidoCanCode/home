@@ -1451,6 +1451,139 @@ class TestClaudeSessionDrainToBoundary:
         assert session._in_turn is False
 
 
+class TestClaudeSessionLogEvent:
+    def test_assistant_text(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "thinking hard"}]},
+                }
+            )
+        assert "claude>" in caplog.text and "thinking hard" in caplog.text
+
+    def test_tool_use_command(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Bash",
+                                "input": {"command": "ls -la"},
+                            }
+                        ]
+                    },
+                }
+            )
+        assert "claude tool: Bash" in caplog.text and "ls -la" in caplog.text
+
+    def test_tool_use_file_path(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Read",
+                                "input": {"file_path": "/tmp/foo.py"},
+                            }
+                        ]
+                    },
+                }
+            )
+        assert "claude tool: Read" in caplog.text and "/tmp/foo.py" in caplog.text
+
+    def test_tool_use_fallback_first_value(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Thing",
+                                "input": {"other": "value-xyz"},
+                            }
+                        ]
+                    },
+                }
+            )
+        assert "claude tool: Thing" in caplog.text and "value-xyz" in caplog.text
+
+    def test_content_non_dict_skipped(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        # Must not raise
+        session._log_event(
+            {"type": "assistant", "message": {"content": ["not a dict"]}}
+        )
+
+    def test_user_tool_result(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [{"type": "tool_result", "content": "abcdefghij"}]
+                    },
+                }
+            )
+        assert "claude tool result" in caplog.text
+
+    def test_system_event(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event({"type": "system", "subtype": "init"})
+        assert "claude system: init" in caplog.text
+
+    def test_result_event(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.INFO, logger="kennel"):
+            session._log_event({"type": "result", "result": "all done"})
+        assert "claude result: all done" in caplog.text
+
+    def test_error_event(self, tmp_path: Path, caplog) -> None:
+        import logging as _l
+
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with caplog.at_level(_l.WARNING, logger="kennel"):
+            session._log_event({"type": "error", "error": "kaboom"})
+        assert "claude error: kaboom" in caplog.text
+
+
 class TestClaudeSessionWaitForPendingPreempt:
     def test_returns_false_when_not_pending(self, tmp_path: Path) -> None:
         proc = _make_session_proc([])
