@@ -16,6 +16,7 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from kennel.config import Config, RepoConfig
+from kennel.events import Action
 from kennel.infra import Infra
 from kennel.server import PreflightError, WebhookHandler
 
@@ -404,6 +405,17 @@ def _post_webhook(url: str, cfg: Config, event: str, payload: dict) -> int:
     return resp.status
 
 
+class TestReplyPromiseKey:
+    def test_returns_none_without_replyable_thread(self) -> None:
+        handler = object.__new__(WebhookHandler)
+        assert handler._reply_promise(Action(prompt="x")) is None
+
+    def test_returns_none_for_invalid_thread_data(self) -> None:
+        handler = object.__new__(WebhookHandler)
+        action = Action(prompt="x", thread={"comment_type": "wat", "comment_id": "5"})
+        assert handler._reply_promise(action) is None
+
+
 class TestProcessAction:
     """Tests for _process_action — the background thread that dispatches actions."""
 
@@ -509,7 +521,7 @@ class TestProcessAction:
         mock_task.assert_not_called()
 
     def test_reply_to_comment_failure_skips_task(self, server: tuple) -> None:
-        """If reply posting raises, no task is created (fail closed)."""
+        """If reply posting raises, queue recovery and skip task creation."""
         url, cfg = server
         payload = {
             **self._payload(),
@@ -535,6 +547,13 @@ class TestProcessAction:
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
         mock_task.assert_not_called()
+        assert (
+            cfg.repos["owner/repo"].work_dir
+            / ".git"
+            / "fido"
+            / "reply-promises"
+            / "pulls-205"
+        ).exists()
 
     def test_reply_to_comment_do_creates_task(self, server: tuple) -> None:
         """DO adds to tasks.json."""
@@ -684,7 +703,7 @@ class TestProcessAction:
         mock_task.assert_not_called()
 
     def test_reply_to_issue_comment_failure_skips_task(self, server: tuple) -> None:
-        """If issue comment reply raises, no task is created (fail closed)."""
+        """If issue comment reply raises, queue recovery and skip task creation."""
         url, cfg = server
         payload = {
             **self._payload(),
@@ -707,6 +726,13 @@ class TestProcessAction:
         status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
         mock_task.assert_not_called()
+        assert (
+            cfg.repos["owner/repo"].work_dir
+            / ".git"
+            / "fido"
+            / "reply-promises"
+            / "issues-302"
+        ).exists()
 
     def test_process_action_does_not_overwrite_worker_what(self, server: tuple) -> None:
         """_process_action must not call report_activity — the webhook runs on

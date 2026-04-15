@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 
-from kennel import claude
+from kennel import claude, reply_promises
 from kennel.claude import kill_active_children
 from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.events import (
@@ -446,6 +446,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return "triaging PR comment"
         return "handling webhook action"
 
+    def _reply_promise(self, action: Action) -> tuple[str, int] | None:
+        """Return the durable reply-promise key for reply-capable webhook actions."""
+        thread = action.reply_to or action.thread
+        if not thread:
+            return None
+        comment_type = thread.get("comment_type")
+        comment_id = thread.get("comment_id")
+        if comment_type not in {"issues", "pulls"} or not isinstance(comment_id, int):
+            return None
+        return comment_type, comment_id
+
     def _process_action_inner(self, action: Action, repo_cfg: RepoConfig) -> None:
         # The worker thread's own ``worker_what`` is not touched here — this
         # handler runs on a separate webhook thread and its activity is
@@ -464,9 +475,19 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     handled = True
                     category, titles = None, []
                 else:
-                    category, titles = type(self)._fn_reply_to_comment(
-                        action, self.config, repo_cfg, gh
-                    )
+                    try:
+                        category, titles = type(self)._fn_reply_to_comment(
+                            action, self.config, repo_cfg, gh
+                        )
+                    except Exception:
+                        promise = self._reply_promise(action)
+                        if promise is not None:
+                            reply_promises.add_reply_promise(
+                                repo_cfg.work_dir / ".git" / "fido",
+                                promise[0],
+                                promise[1],
+                            )
+                        raise
                     if cid:
                         _replied_comments.add(cid)
                     handled = True
@@ -492,9 +513,19 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
             # Top-level PR comments (issue_comment) — no reply_to, but has comment_body
             if not handled and action.comment_body:
-                category, titles = type(self)._fn_reply_to_issue_comment(
-                    action, self.config, repo_cfg, gh
-                )
+                try:
+                    category, titles = type(self)._fn_reply_to_issue_comment(
+                        action, self.config, repo_cfg, gh
+                    )
+                except Exception:
+                    promise = self._reply_promise(action)
+                    if promise is not None:
+                        reply_promises.add_reply_promise(
+                            repo_cfg.work_dir / ".git" / "fido",
+                            promise[0],
+                            promise[1],
+                        )
+                    raise
                 handled = True
                 # DEFER files a GitHub issue — no tasks.json entry.
                 if category not in ("DUMP", "ANSWER", "ASK", "DEFER"):
