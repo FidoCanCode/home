@@ -224,6 +224,104 @@ has a hidden dependency that was never exposed through the constructor.  Use
 `MagicMock` (or a hand-rolled fake) and pass it in at construction time
 instead.
 
+### Coordination ethos
+
+The goal is **smaller coordination code with fewer timing branches** — not
+abstraction for its own sake.  Every coordination rule below exists because it
+eliminates a class of race, not because it looks tidy.
+
+#### Single-owner mutable state
+
+One object owns a mutable bucket.  Other objects send commands to it; they
+never reach in and mutate its internals directly.
+
+```python
+# wrong: two threads reach into the same dict
+class Server:
+    active_workers: dict[str, Worker] = {}  # shared mutable global
+
+# webhook thread
+Server.active_workers[repo] = new_worker   # reach-in from outside
+
+# right: one owner, others send commands
+class WorkerRegistry:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._workers: dict[str, Worker] = {}
+
+    def register(self, repo: str, worker: Worker) -> None:
+        with self._lock:
+            self._workers[repo] = worker
+```
+
+The owner serializes all mutations through its own lock.  Callers never
+acquire the owner's lock themselves — they call a method and trust the owner.
+
+**Reviewer signal:** if you see a lock acquired *outside* the class that owns
+the data it protects, that's a reach-through.  Push the lock inward.
+
+#### Command translation at entry boundaries
+
+Webhook events and CLI inputs are translated into typed commands or tasks at
+the boundary — the edge of the process where the outside world speaks.  After
+that point, internal objects coordinate through those commands, not through
+ambient state mutations scattered across the handler.
+
+```python
+# wrong: webhook handler mutates shared state directly
+def handle_webhook(payload: dict) -> None:
+    GLOBAL_STATE["pending_repos"].add(payload["repository"]["full_name"])
+    GLOBAL_STATE["last_event"] = payload["action"]
+
+# right: translate at the boundary, pass a command inward
+def handle_webhook(payload: dict) -> None:
+    event = parse_event(payload)          # typed value, no side effects
+    self.dispatcher.dispatch(event)       # owner decides what to mutate
+```
+
+The translation layer (`parse_event`) is pure: it reads the raw payload and
+returns a typed value.  No locks, no side effects.  The dispatcher is the
+single owner that decides what changes.
+
+**Reviewer signal:** if a webhook handler or CLI entry point mutates a dict,
+list, or counter that lives outside the handler's own scope, that's an ambient
+state mutation.  Translate first, dispatch second.
+
+#### Durable outbox / store before acting
+
+When an intent needs to survive a crash or a restart, write it to the durable
+store *before* acting on it.  `tasks.json` with `flock` is the canonical
+example: a task is appended to the file (under lock) before the worker starts
+executing it.  If kennel crashes mid-task, the task is still in the list on
+restart.
+
+```python
+# wrong: act first, persist later — crash loses the intent
+def start_task(task: Task) -> None:
+    self.worker.run(task)        # crash here → task silently lost
+    self.tasks.append(task)      # never reached
+
+# right: persist first, act second
+def start_task(task: Task) -> None:
+    self.tasks.append(task)      # durable; survives restart
+    self.worker.run(task)        # crash here → task replayed on restart
+```
+
+In-memory coordination (queues, events, locks) handles the *current run*.  The
+durable store handles *across runs*.  Do not conflate them.
+
+**Reviewer signal:** if an action is taken before the corresponding record is
+written to `tasks.json` (or another durable store), the order is wrong.
+
+#### Patterns to reject in review
+
+| Pattern | Why it's wrong |
+|---------|----------------|
+| Module-level mutable dict/set/list used as coordination state | Any thread can mutate it; ownership is unclear; lock discipline is impossible to enforce |
+| Long-lived callable-slot seams (`_fn_start`, `_run=subprocess.run`) used to inject cross-thread callbacks | Callable slots hide ownership; the real fix is a typed collaborator with a clear owner |
+| Cross-thread reach-through (thread A reads/writes thread B's `_private` attribute directly) | Bypasses the owner's lock; creates invisible coupling; makes reasoning about state impossible |
+| Ambient global set/cleared across requests (`request_context`, `current_repo`) | Thread-local globals are invisible dependencies; translate at the boundary instead |
+
 ### Fail-fast / fail-closed
 
 Core runtime paths — the webhook handler, worker loop, task engine, and
