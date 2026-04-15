@@ -1928,6 +1928,55 @@ class Worker:
         self.set_status("Napping — waiting for work", busy=False)
         return 0
 
+    def rescope_before_pick(self) -> None:
+        """Run a synchronous Opus rescope before picking the next task.
+
+        Called at the start of every worker iteration so the PR task list
+        stays fresh.  Skips when :attr:`_config` or :attr:`_repo_cfg` are not
+        injected (standalone :func:`run` invocation) or when fewer than two
+        tasks are pending (nothing to reorder).
+
+        Uses the same ``_on_changes`` and ``_on_done`` callbacks as the
+        background rescope triggered by ``create_task()``: thread-task authors
+        are notified of any changes and the PR description is rewritten after a
+        successful reorder.
+
+        Does **not** pass ``_on_inprogress_affected``: there is no running task
+        to abort at pick time, so the abort signal would be either a no-op or
+        harmful to the task that is about to be picked.
+        """
+        if self._config is None or self._repo_cfg is None:
+            log.debug("rescope_before_pick: no config/repo_cfg — skipping")
+            return
+
+        pending = [
+            t for t in self._tasks.list() if t.get("status") == TaskStatus.PENDING
+        ]
+        if len(pending) < 2:
+            log.debug("rescope_before_pick: fewer than 2 pending tasks — skipping")
+            return
+
+        from kennel.events import (
+            _get_commit_summary,  # pyright: ignore[reportPrivateUsage]
+            _make_reorder_kwargs,  # pyright: ignore[reportPrivateUsage]
+            _rewrite_pr_description,  # pyright: ignore[reportPrivateUsage]
+        )
+        from kennel.tasks import reorder_tasks
+
+        commit_summary = _get_commit_summary(self.work_dir)
+        kwargs = _make_reorder_kwargs(
+            self.work_dir,
+            self._config,
+            self._repo_cfg,
+            None,  # no _on_inprogress_affected: no running task to abort at pick time
+            self.gh,
+            self._claude_client,
+            self._get_prompts(),
+            _rewrite_pr_description,
+        )
+        log.info("rescope_before_pick: rescoping task list before next pick")
+        reorder_tasks(self.work_dir, commit_summary, **kwargs)
+
     def run(self) -> int:
         """Run one iteration of the worker loop.
 
@@ -2012,6 +2061,7 @@ class Worker:
                 if session_fresh and self._session is not None:
                     self._session.switch_model("claude-sonnet-4-6")
                 self._ensure_session_alive(ctx.fido_dir)
+                self.rescope_before_pick()
                 if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
                 if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
