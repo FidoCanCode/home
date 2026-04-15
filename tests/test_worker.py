@@ -299,6 +299,38 @@ class TestWorker:
         gh.get_pr.return_value = {"body": ""}
         return gh
 
+    # --- constructor / config injection ---
+
+    def test_config_stored_when_passed(self, tmp_path: Path) -> None:
+        from kennel.config import Config, RepoConfig
+
+        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        config = Config(
+            port=9000,
+            secret=b"s",
+            repos={"owner/repo": cfg},
+            allowed_bots=frozenset(),
+            log_level="DEBUG",
+            sub_dir=tmp_path,
+        )
+        worker = Worker(tmp_path, MagicMock(), config=config)
+        assert worker._config is config
+
+    def test_repo_cfg_stored_when_passed(self, tmp_path: Path) -> None:
+        from kennel.config import RepoConfig
+
+        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        worker = Worker(tmp_path, MagicMock(), repo_cfg=cfg)
+        assert worker._repo_cfg is cfg
+
+    def test_config_defaults_to_none(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        assert worker._config is None
+
+    def test_repo_cfg_defaults_to_none(self, tmp_path: Path) -> None:
+        worker = Worker(tmp_path, MagicMock())
+        assert worker._repo_cfg is None
+
     # --- discover_repo_context ---
 
     def test_discover_returns_repo_context(self, tmp_path: Path) -> None:
@@ -8801,6 +8833,8 @@ class TestWorkerThread:
             membership=None,
             session=None,
             session_issue=None,
+            config=None,
+            repo_cfg=None,
         ):
             captured.append(abort_task)
             self_w.work_dir = work_dir
@@ -8877,6 +8911,8 @@ class TestWorkerThread:
             membership=None,
             session=None,
             session_issue=None,
+            config=None,
+            repo_cfg=None,
         ) -> None:
             self_w.work_dir = work_dir
             self_w.gh = gh
@@ -8925,6 +8961,8 @@ class TestWorkerThread:
             membership=None,
             session=None,
             session_issue=None,
+            config=None,
+            repo_cfg=None,
         ) -> None:
             self_w.work_dir = work_dir
             self_w.gh = gh
@@ -9051,3 +9089,89 @@ class TestWorkerThread:
         wt._registry.report_activity.side_effect = claude.ClaudeLeakError("leak")
         wt.run()
         assert exits == [3]
+
+    # ── config / repo_cfg injection ───────────────────────────────────────
+
+    def test_config_stored_when_passed(self, tmp_path: Path) -> None:
+        from kennel.config import Config, RepoConfig
+
+        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        config = Config(
+            port=9000,
+            secret=b"s",
+            repos={"owner/repo": cfg},
+            allowed_bots=frozenset(),
+            log_level="DEBUG",
+            sub_dir=tmp_path,
+        )
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), config=config)
+        assert wt._config is config
+
+    def test_repo_cfg_stored_when_passed(self, tmp_path: Path) -> None:
+        from kennel.config import RepoConfig
+
+        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=cfg)
+        assert wt._repo_cfg is cfg
+
+    def test_config_defaults_to_none(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt._config is None
+
+    def test_repo_cfg_defaults_to_none(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt._repo_cfg is None
+
+    def test_config_and_repo_cfg_passed_to_worker(self, tmp_path: Path) -> None:
+        """WorkerThread.run() forwards config and repo_cfg to every Worker."""
+        from kennel.config import Config, RepoConfig
+
+        cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        config = Config(
+            port=9000,
+            secret=b"s",
+            repos={"owner/repo": cfg},
+            allowed_bots=frozenset(),
+            log_level="DEBUG",
+            sub_dir=tmp_path,
+        )
+        wt = WorkerThread(
+            tmp_path, "owner/repo", MagicMock(), config=config, repo_cfg=cfg
+        )
+        wt._wake = MagicMock()
+        received_config: list = []
+        received_repo_cfg: list = []
+
+        def fake_worker_init(
+            self_w,
+            work_dir,
+            gh,
+            abort_task=None,
+            repo_name="",
+            registry=None,
+            membership=None,
+            session=None,
+            session_issue=None,
+            config=None,
+            repo_cfg=None,
+        ) -> None:
+            self_w.work_dir = work_dir
+            self_w.gh = gh
+            self_w._abort_task = abort_task
+            self_w._session = session
+            self_w._session_issue = session_issue
+            received_config.append(config)
+            received_repo_cfg.append(repo_cfg)
+
+        def fake_worker_run(self_w) -> int:
+            wt._stop = True
+            return 0
+
+        with (
+            patch.object(Worker, "__init__", fake_worker_init),
+            patch.object(Worker, "run", fake_worker_run),
+        ):
+            wt.run()
+
+        assert received_config == [config]
+        assert received_repo_cfg == [cfg]

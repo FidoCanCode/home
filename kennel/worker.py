@@ -776,6 +776,8 @@ class Worker:
         _tasks: Tasks | None = None,
         claude_client: ClaudeClient | None = None,
         prompts: Prompts | None = None,
+        config: Config | None = None,
+        repo_cfg: RepoConfig | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
@@ -790,6 +792,8 @@ class Worker:
             claude_client if claude_client is not None else ClaudeClient()
         )
         self._prompts = prompts
+        self._config = config
+        self._repo_cfg = repo_cfg
 
     def _get_prompts(self, *, _sub_dir_fn: Callable[..., Path] = _sub_dir) -> Prompts:
         """Return the injected Prompts or build one from the persona file."""
@@ -2066,6 +2070,8 @@ class WorkerThread(threading.Thread):
         membership: RepoMembership | None = None,
         session: claude.ClaudeSession | None = None,
         session_issue: int | None = None,
+        config: Config | None = None,
+        repo_cfg: RepoConfig | None = None,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
         self.work_dir = work_dir
@@ -2079,6 +2085,8 @@ class WorkerThread(threading.Thread):
         self.crash_error: str | None = None
         self._session: claude.ClaudeSession | None = session
         self._session_issue: int | None = session_issue
+        self._config = config
+        self._repo_cfg = repo_cfg
 
     @property
     def session_owner(self) -> str | None:
@@ -2180,6 +2188,8 @@ class WorkerThread(threading.Thread):
                     self._membership,
                     session=self._session,
                     session_issue=self._session_issue,
+                    config=self._config,
+                    repo_cfg=self._repo_cfg,
                 )
                 try:
                     result = worker.run()
