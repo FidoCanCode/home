@@ -16,9 +16,6 @@ from kennel.config import RepoMembership
 from kennel.state import (
     State,
     _resolve_git_dir,
-    clear_state,
-    load_state,
-    save_state,
 )
 from kennel.tasks import (
     _apply_queue_to_body,
@@ -600,14 +597,14 @@ class TestWorker:
     def test_get_issue_returns_issue_number_when_open(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 7})
+        State(fido_dir).save({"issue": 7})
         gh = self._make_issue_gh(state="OPEN")
         assert Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo") == 7
 
     def test_get_issue_returns_int_type(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 7})
+        State(fido_dir).save({"issue": 7})
         gh = self._make_issue_gh(state="OPEN")
         result = Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
         assert isinstance(result, int)
@@ -615,17 +612,17 @@ class TestWorker:
     def test_get_issue_returns_none_when_closed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 4})
+        State(fido_dir).save({"issue": 4})
         gh = self._make_issue_gh(state="CLOSED")
         assert Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo") is None
 
     def test_get_issue_clears_state_when_closed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 4})
+        State(fido_dir).save({"issue": 4})
         gh = self._make_issue_gh(state="CLOSED")
         Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
-        assert load_state(fido_dir) == {}
+        assert State(fido_dir).load() == {}
 
     def test_get_issue_does_not_call_view_issue_when_no_state(
         self, tmp_path: Path
@@ -639,7 +636,7 @@ class TestWorker:
     def test_get_issue_calls_view_issue_with_correct_args(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 12})
+        State(fido_dir).save({"issue": 12})
         gh = self._make_issue_gh(state="OPEN")
         Worker(tmp_path, gh).get_current_issue(fido_dir, "alice/proj")
         gh.view_issue.assert_called_once_with("alice/proj", 12)
@@ -649,7 +646,7 @@ class TestWorker:
 
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 9})
+        State(fido_dir).save({"issue": 9})
         gh = self._make_issue_gh(state="CLOSED")
         with caplog.at_level(logging.INFO, logger="kennel"):
             Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
@@ -658,10 +655,10 @@ class TestWorker:
     def test_get_issue_state_preserved_when_open(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 5})
+        State(fido_dir).save({"issue": 5})
         gh = self._make_issue_gh(state="OPEN")
         Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
-        assert load_state(fido_dir) == {"issue": 5}
+        assert State(fido_dir).load() == {"issue": 5}
 
     # --- run ---
 
@@ -1360,7 +1357,7 @@ class TestWorkerFindNextIssue:
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
-        state = load_state(fido_dir)
+        state = State(fido_dir).load()
         assert state["issue"] == 7
         assert state["issue_title"] == "Fetch!"
         assert "issue_started_at" in state
@@ -1371,7 +1368,7 @@ class TestWorkerFindNextIssue:
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
-        assert load_state(fido_dir) == {}
+        assert State(fido_dir).load() == {}
 
     def test_calls_set_status_with_issue_info_when_found(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -2120,7 +2117,7 @@ class TestLoadState:
     def test_returns_empty_dict_when_absent(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        assert load_state(fido_dir) == {}
+        assert State(fido_dir).load() == {}
 
     def test_returns_state_when_present(self, tmp_path: Path) -> None:
         import json
@@ -2128,7 +2125,7 @@ class TestLoadState:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (fido_dir / "state.json").write_text(json.dumps({"issue": 42}))
-        assert load_state(fido_dir) == {"issue": 42}
+        assert State(fido_dir).load() == {"issue": 42}
 
     def test_returns_dict_with_arbitrary_keys(self, tmp_path: Path) -> None:
         import json
@@ -2136,7 +2133,7 @@ class TestLoadState:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         (fido_dir / "state.json").write_text(json.dumps({"issue": 7, "extra": "val"}))
-        result = load_state(fido_dir)
+        result = State(fido_dir).load()
         assert result["issue"] == 7
         assert result["extra"] == "val"
 
@@ -2145,43 +2142,43 @@ class TestSaveState:
     def test_creates_state_file(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 5})
+        State(fido_dir).save({"issue": 5})
         assert (fido_dir / "state.json").exists()
 
     def test_roundtrips_with_load_state(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 99})
-        assert load_state(fido_dir) == {"issue": 99}
+        State(fido_dir).save({"issue": 99})
+        assert State(fido_dir).load() == {"issue": 99}
 
     def test_overwrites_existing_state(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 1})
-        save_state(fido_dir, {"issue": 2})
-        assert load_state(fido_dir) == {"issue": 2}
+        State(fido_dir).save({"issue": 1})
+        State(fido_dir).save({"issue": 2})
+        assert State(fido_dir).load() == {"issue": 2}
 
 
 class TestClearState:
     def test_removes_state_file(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 3})
-        clear_state(fido_dir)
+        State(fido_dir).save({"issue": 3})
+        State(fido_dir).clear()
         assert not (fido_dir / "state.json").exists()
 
     def test_noop_when_absent(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         # Should not raise
-        clear_state(fido_dir)
+        State(fido_dir).clear()
 
     def test_load_returns_empty_after_clear(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 10})
-        clear_state(fido_dir)
-        assert load_state(fido_dir) == {}
+        State(fido_dir).save({"issue": 10})
+        State(fido_dir).clear()
+        assert State(fido_dir).load() == {}
 
 
 class TestState:
@@ -2201,12 +2198,12 @@ class TestState:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         State(fido_dir).save({"issue": 42})
-        assert load_state(fido_dir) == {"issue": 42}
+        assert State(fido_dir).load() == {"issue": 42}
 
     def test_clear_removes_state_file(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        save_state(fido_dir, {"issue": 1})
+        State(fido_dir).save({"issue": 1})
         State(fido_dir).clear()
         assert not (fido_dir / "state.json").exists()
 
@@ -3188,7 +3185,7 @@ class TestFindOrCreatePr:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
         fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 5})
+        State(fido_dir).save({"issue": 5})
         task = {"title": "t", "status": "pending"}
         call_count = 0
 
@@ -6050,12 +6047,12 @@ class TestExecuteTask:
     ) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1})
+        State(fido_dir).save({"issue": 1})
         task = {"id": "task-99", "title": "Do stuff", "status": "pending"}
         captured: dict = {}
 
         def capture(fd, *args, **kwargs):
-            captured.update(load_state(fd))
+            captured.update(State(fd).load())
             return ("sess", "")
 
         with (
@@ -6074,7 +6071,7 @@ class TestExecuteTask:
     def test_clears_current_task_id_after_completion(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1})
+        State(fido_dir).save({"issue": 1})
         task = {"id": "task-77", "title": "Complete me", "status": "pending"}
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[task]),
@@ -6087,19 +6084,19 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        assert "current_task_id" not in load_state(fido_dir)
+        assert "current_task_id" not in State(fido_dir).load()
 
     def test_preserves_other_state_keys_when_saving_current_task_id(
         self, tmp_path: Path
     ) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 5})
+        State(fido_dir).save({"issue": 5})
         task = {"id": "t-111", "title": "Preserve", "status": "pending"}
         captured: dict = {}
 
         def capture(fd, *args, **kwargs):
-            captured.update(load_state(fd))
+            captured.update(State(fd).load())
             return ("sess", "")
 
         with (
@@ -6119,7 +6116,7 @@ class TestExecuteTask:
     def test_current_task_id_not_cleared_when_push_fails(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1})
+        State(fido_dir).save({"issue": 1})
         task = {"id": "task-push-fail", "title": "Push me", "status": "pending"}
         with (
             patch("kennel.worker.tasks.list_tasks", return_value=[task]),
@@ -6132,7 +6129,7 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        assert load_state(fido_dir).get("current_task_id") == "task-push-fail"
+        assert State(fido_dir).load().get("current_task_id") == "task-push-fail"
 
     @staticmethod
     def _git_same_sha():
@@ -6154,7 +6151,7 @@ class TestExecuteTask:
     ) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1, "current_task_id": "t-abort"})
+        State(fido_dir).save({"issue": 1, "current_task_id": "t-abort"})
         task = {"id": "t-abort", "title": "Abort me", "status": "pending"}
         worker._abort_task.set()
         with (
@@ -6171,7 +6168,7 @@ class TestExecuteTask:
         assert result is True
         mock_clean.assert_called_once()
         mock_remove.assert_called_once_with(tmp_path, "t-abort")
-        assert "current_task_id" not in load_state(fido_dir)
+        assert "current_task_id" not in State(fido_dir).load()
         assert not worker._abort_task.is_set()
         mock_sync.assert_called()
 
@@ -6180,7 +6177,7 @@ class TestExecuteTask:
     ) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1})
+        State(fido_dir).save({"issue": 1})
         task = {"id": "t-resume-abort", "title": "Resume abort", "status": "pending"}
         call_count = 0
 
@@ -6205,14 +6202,14 @@ class TestExecuteTask:
         assert result is True
         mock_clean.assert_called_once()
         mock_remove.assert_called_once_with(tmp_path, "t-resume-abort")
-        assert "current_task_id" not in load_state(fido_dir)
+        assert "current_task_id" not in State(fido_dir).load()
         assert not worker._abort_task.is_set()
         mock_sync.assert_called()
 
     def test_abort_does_not_call_complete_by_id(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 1})
+        State(fido_dir).save({"issue": 1})
         task = {"id": "t-no-complete", "title": "No complete", "status": "pending"}
         worker._abort_task.set()
         with (
@@ -6665,7 +6662,7 @@ class TestHandlePromoteMerge:
     def test_approved_not_draft_no_pending_clears_state(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 5})
+        State(fido_dir).save({"issue": 5})
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
@@ -6674,7 +6671,7 @@ class TestHandlePromoteMerge:
             patch.object(worker, "set_status"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        assert load_state(fido_dir) == {}
+        assert State(fido_dir).load() == {}
 
     def test_approved_not_draft_no_pending_git_checkout_default(
         self, tmp_path: Path
@@ -6985,7 +6982,7 @@ class TestHandlePromoteMerge:
     def test_changes_req_then_approved_clears_state(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        save_state(fido_dir, {"issue": 5})
+        State(fido_dir).save({"issue": 5})
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
@@ -6994,7 +6991,7 @@ class TestHandlePromoteMerge:
             patch.object(worker, "set_status"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
-        assert load_state(fido_dir) == {}
+        assert State(fido_dir).load() == {}
 
     def test_changes_req_then_approved_git_checkout_default(
         self, tmp_path: Path

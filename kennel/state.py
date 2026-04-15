@@ -120,24 +120,6 @@ class State(JsonFileStore):
             self._data_path.unlink(missing_ok=True)
 
 
-# Compatibility shims — callers are migrated to State in subsequent commits.
-
-
-def load_state(fido_dir: Path) -> dict[str, Any]:
-    """Load state.json from fido_dir, returning an empty dict if absent."""
-    return State(fido_dir).load()
-
-
-def save_state(fido_dir: Path, state: dict[str, Any]) -> None:
-    """Write state to state.json in fido_dir."""
-    State(fido_dir).save(state)
-
-
-def clear_state(fido_dir: Path) -> None:
-    """Remove state.json from fido_dir (no-op if absent)."""
-    State(fido_dir).clear()
-
-
 def _resolve_git_dir(  # pyright: ignore[reportUnusedFunction]  # imported by tasks/worker
     work_dir: Path,
     *,

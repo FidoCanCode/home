@@ -19,8 +19,8 @@ from kennel.github import GitHub
 from kennel.prompts import rescope_prompt as _rescope_prompt_default
 from kennel.state import (
     JsonFileStore,
+    State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
-    load_state,
 )
 from kennel.types import TaskStatus, TaskType
 
@@ -326,7 +326,7 @@ def sync_tasks(
         return
 
     try:
-        state = load_state(fido_dir)
+        state = State(fido_dir).load()
         issue = state.get("issue")
         if issue is None:
             log.info("sync_tasks: no current issue — nothing to sync")
