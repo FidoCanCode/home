@@ -3268,7 +3268,7 @@ class TestRewritePrDescription:
                 _tasks=self._mock_tasks(),
             )
         mock_write.assert_called_once()
-        assert mock_write.call_args.kwargs.get("_print_prompt") is None
+        assert mock_write.call_args.kwargs.get("claude_client") is None
 
     def test_defaults_to_state(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()

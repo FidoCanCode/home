@@ -891,9 +891,7 @@ def _rewrite_pr_description(
             issue,
             task_list,
             body,
-            _print_prompt=claude_client.print_prompt
-            if claude_client is not None
-            else None,
+            claude_client=claude_client,
         )
 
         snapshot_after = _task_snapshot(_tasks.list())
