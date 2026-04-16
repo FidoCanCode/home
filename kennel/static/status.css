@@ -1,0 +1,342 @@
+/* kennel status — warm, functional, unmistakably fido */
+
+:root {
+  --cream: #faf6f0;
+  --warm-white: #ffffff;
+  --amber: #c87c0a;
+  --amber-light: #fdf0d5;
+  --gold: #d4880f;
+  --green: #1a7f37;
+  --green-light: #dafbe1;
+  --green-glow: #2da44e;
+  --red: #cf222e;
+  --red-light: #ffebe9;
+  --blue: #0969da;
+  --blue-light: #ddf4ff;
+  --text: #1f2328;
+  --text-secondary: #656d76;
+  --text-muted: #8b949e;
+  --border: #d8dee4;
+  --shadow: rgba(31, 35, 40, 0.06);
+  --shadow-lg: rgba(31, 35, 40, 0.12);
+  --radius: 10px;
+  --mono: "SF Mono", "Cascadia Code", "Fira Code", Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Noto Sans,
+    Helvetica, Arial, sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 15px;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--sans);
+  background: var(--cream);
+  color: var(--text);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+/* header */
+
+header {
+  padding: 1.5rem 1.5rem 0;
+  max-width: 52rem;
+  margin: 0 auto;
+}
+
+header h1 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.paw {
+  margin-right: 0.15em;
+}
+
+/* layout */
+
+main {
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 1rem 1.5rem 3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* empty state */
+
+.empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 4rem 1rem;
+  font-size: 1.1rem;
+}
+
+/* repo cards */
+
+.repo {
+  background: var(--warm-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  box-shadow: 0 1px 3px var(--shadow);
+  transition: border-color 0.2s ease;
+}
+
+.repo.stuck {
+  border-left: 3px solid var(--red);
+}
+
+.repo.crashed {
+  border-left: 3px solid var(--red);
+}
+
+.repo.busy {
+  border-left: 3px solid var(--green);
+}
+
+.repo.idle {
+  border-left: 3px solid var(--border);
+}
+
+/* repo header */
+
+.repo-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.repo-header h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+/* status dots */
+
+.dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-busy {
+  background: var(--green-glow);
+  box-shadow: 0 0 0 2px rgba(45, 164, 78, 0.2);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.dot-idle {
+  background: var(--text-muted);
+}
+
+.dot-stuck {
+  background: var(--red);
+  box-shadow: 0 0 0 2px rgba(207, 34, 46, 0.2);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.dot-crash {
+  background: var(--red);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* uptime badge in header */
+
+.uptime {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* activity line — what the worker is doing */
+
+.activity {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  padding: 0.15rem 0 0.5rem 1.15rem;
+}
+
+/* metadata badges */
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding-left: 1.15rem;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.15rem 0.55rem;
+  border-radius: 2rem;
+}
+
+.badge-crash {
+  background: var(--red-light);
+  color: var(--red);
+}
+
+.badge-rescope {
+  background: var(--blue-light);
+  color: var(--blue);
+}
+
+.badge-session {
+  background: var(--amber-light);
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+}
+
+/* claude talker */
+
+.talker {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  margin-left: 1.15rem;
+  background: var(--green-light);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.talker-label {
+  font-weight: 600;
+  color: var(--green);
+}
+
+.talker-kind {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--green);
+  background: rgba(26, 127, 55, 0.1);
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+}
+
+.talker-desc {
+  color: var(--text-secondary);
+}
+
+.talker-pid {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+}
+
+/* crash error details */
+
+.crash-error {
+  margin-top: 0.5rem;
+  margin-left: 1.15rem;
+}
+
+.crash-error summary {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--red);
+  cursor: pointer;
+}
+
+.crash-error pre {
+  margin: 0.35rem 0 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--red-light);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--red);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+/* webhook activities */
+
+.webhooks {
+  margin-top: 0.5rem;
+  padding-left: 1.15rem;
+}
+
+.webhooks-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.webhooks ul {
+  list-style: none;
+  margin: 0.2rem 0 0;
+  padding: 0;
+}
+
+.webhooks li {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  padding: 0.15rem 0;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--border);
+}
+
+.webhooks li::before {
+  content: none;
+}
+
+.elapsed {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  margin-left: 0.4rem;
+}
+
+/* responsive */
+
+@media (max-width: 600px) {
+  header {
+    padding: 1rem 1rem 0;
+  }
+
+  main {
+    padding: 0.75rem 1rem 2rem;
+  }
+
+  .repo {
+    padding: 0.85rem 1rem;
+  }
+}
