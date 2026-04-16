@@ -176,15 +176,13 @@ def _repos_from_pid(pid: int) -> list[RepoConfig]:
         if ":" not in spec:
             continue
         name_spec, path_str = spec.split(":", 1)
-        if "=" in name_spec:
-            name, provider_str = name_spec.rsplit("=", 1)
-            try:
-                provider = ProviderID(provider_str)
-            except ValueError:
-                continue
-        else:
-            name = name_spec
-            provider = ProviderID.CLAUDE_CODE
+        if "=" not in name_spec:
+            continue
+        name, provider_str = name_spec.rsplit("=", 1)
+        try:
+            provider = ProviderID(provider_str)
+        except ValueError:
+            continue
         if "/" not in name:
             continue
         repos.append(

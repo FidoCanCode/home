@@ -765,7 +765,9 @@ class TestWorker:
         claude.ClaudeSession.return_value = mock_session
         worker = Worker(tmp_path, MagicMock())
         worker.create_session()
-        mock_session.switch_model.assert_called_once_with("claude-opus-4-6")
+        _, kwargs = claude.ClaudeSession.call_args
+        assert kwargs.get("model") == "claude-opus-4-6"
+        mock_session.switch_model.assert_not_called()
 
     def test_create_session_stores_on_self(self, tmp_path: Path) -> None:
         from kennel import claude
@@ -1034,12 +1036,8 @@ class TestWorker:
             patch.object(worker, "handle_promote_merge", return_value=0),
         ):
             worker.run()
-        mock_session.reset.assert_called_once()
-        # opus first (boundary reset), then sonnet (session_fresh path)
-        assert mock_session.switch_model.call_args_list == [
-            call("claude-opus-4-6"),
-            call("claude-sonnet-4-6"),
-        ]
+        mock_session.reset.assert_called_once_with("claude-opus-4-6")
+        assert mock_session.switch_model.call_args_list == [call("claude-sonnet-4-6")]
 
     def test_run_sets_session_issue_after_picking_issue(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)

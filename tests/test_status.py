@@ -150,9 +150,7 @@ class TestProcessUptimeSeconds:
 
 class TestReposFromPid:
     def test_parses_single_repo(self) -> None:
-        cmdline = (
-            b"kennel\x00--port\x009000\x00rhencke/confusio:/workspace/confusio\x00"
-        )
+        cmdline = b"kennel\x00--port\x009000\x00rhencke/confusio=claude-code:/workspace/confusio\x00"
         with patch.object(Path, "read_bytes", return_value=cmdline):
             result = _repos_from_pid(123)
         assert len(result) == 1
@@ -160,7 +158,10 @@ class TestReposFromPid:
         assert result[0].work_dir == Path("/workspace/confusio")
 
     def test_parses_multiple_repos(self) -> None:
-        cmdline = b"kennel\x00rhencke/a:/path/a\x00rhencke/b:/path/b\x00"
+        cmdline = (
+            b"kennel\x00rhencke/a=claude-code:/path/a\x00"
+            b"rhencke/b=copilot-cli:/path/b\x00"
+        )
         with patch.object(Path, "read_bytes", return_value=cmdline):
             result = _repos_from_pid(123)
         assert len(result) == 2
@@ -179,7 +180,7 @@ class TestReposFromPid:
         assert result == []
 
     def test_skips_colon_args_without_slash_in_name(self) -> None:
-        cmdline = b"something:value\x00"
+        cmdline = b"something=claude-code:value\x00"
         with patch.object(Path, "read_bytes", return_value=cmdline):
             result = _repos_from_pid(123)
         assert result == []
@@ -196,7 +197,7 @@ class TestReposFromPid:
         assert paths_read == [Path("/proc/789/cmdline")]
 
     def test_expands_tilde_in_path(self) -> None:
-        cmdline = b"rhencke/repo:~/workspace/repo\x00"
+        cmdline = b"rhencke/repo=claude-code:~/workspace/repo\x00"
         with patch.object(Path, "read_bytes", return_value=cmdline):
             result = _repos_from_pid(1)
         assert result[0].work_dir == Path("~/workspace/repo").expanduser()
@@ -208,7 +209,7 @@ class TestReposFromPid:
         assert result == []
 
     def test_skips_non_utf8_args(self) -> None:
-        cmdline = b"\xff\xfe\x00rhencke/repo:/path\x00"
+        cmdline = b"\xff\xfe\x00rhencke/repo=claude-code:/path\x00"
         with patch.object(Path, "read_bytes", return_value=cmdline):
             result = _repos_from_pid(1)
         assert len(result) == 1

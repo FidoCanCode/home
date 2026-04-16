@@ -660,6 +660,7 @@ class CopilotCLISession:
         system_file: Path,
         *,
         work_dir: Path | str,
+        model: str,
         repo_name: str | None = None,
         runtime: CopilotACPRuntime | None = None,
         runtime_factory: Callable[..., CopilotACPRuntime] | None = None,
@@ -683,8 +684,8 @@ class CopilotCLISession:
         self._thread_state = threading.local()
         self._pending_content: str | None = None
         self._last_turn_cancelled = False
-        self._model: str | None = None
-        self._session_id: str | None = self._runtime.ensure_session(None, None)
+        self._model = model
+        self._session_id: str | None = self._runtime.ensure_session(None, model)
 
     @property
     def owner(self) -> str | None:
@@ -741,8 +742,11 @@ class CopilotCLISession:
     def recover(self) -> None:
         self._session_id = self._runtime.recover_session(self._session_id, self._model)
 
-    def reset(self) -> None:
-        self._session_id = self._runtime.reset_session(self._model)
+    def reset(self, model: str | None = None) -> None:
+        effective_model = self._model if model is None else model
+        self._session_id = self._runtime.reset_session(effective_model)
+        if model is not None:
+            self._model = model
         self._pending_content = None
         self._last_turn_cancelled = False
 
@@ -892,14 +896,15 @@ class CopilotCLIClient(ProviderAgent):
         session_id = getattr(session, "session_id")
         return session_id if isinstance(session_id, str) and session_id else None
 
-    def _spawn_owned_session(self) -> PromptSession:
-        if self._session_system_file is None or self._work_dir is None:
-            raise ValueError(
-                "CopilotCLIClient.ensure_session requires session_system_file and work_dir"
-            )
+    def _spawn_owned_session(self, model: str) -> PromptSession:
+        system_file = self._session_system_file
+        work_dir = self._work_dir
+        assert system_file is not None
+        assert work_dir is not None
         return self._session_factory(
-            self._session_system_file,
-            work_dir=self._work_dir,
+            system_file,
+            work_dir=work_dir,
+            model=model,
             repo_name=self._repo_name,
         )
 
@@ -907,8 +912,17 @@ class CopilotCLIClient(ProviderAgent):
         with self._session_lock:
             session = self._session
             if session is None:
-                session = self._spawn_owned_session()
+                if self._session_system_file is None or self._work_dir is None:
+                    raise ValueError(
+                        "CopilotCLIClient.ensure_session requires session_system_file and work_dir"
+                    )
+                if model is None:
+                    raise ValueError(
+                        "CopilotCLIClient.ensure_session requires model when creating a session"
+                    )
+                session = self._spawn_owned_session(model)
                 self._session = session
+                return
         if model is not None:
             session.switch_model(model)
 
@@ -924,19 +938,19 @@ class CopilotCLIClient(ProviderAgent):
             recover()
 
     def reset_session(self, model: str | None = None) -> None:
-        self.ensure_session()
+        if model is None:
+            raise ValueError("CopilotCLIClient.reset_session requires model")
         with self._session_lock:
             session = self._session
-        if session is None:
-            return
+            if session is None:
+                self._session = self._spawn_owned_session(model)
+                return
         reset = getattr(session, "reset", None)
         if not callable(reset):
             raise ValueError(
                 "CopilotCLIClient.reset_session requires CopilotCLISession"
             )
-        reset()
-        if model is not None:
-            session.switch_model(model)
+        reset(model)
 
     def stop_session(self) -> None:
         with self._session_lock:

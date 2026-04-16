@@ -10,7 +10,7 @@ from kennel.config import Config, RepoConfig
 from kennel.events import (
     Action,
     _comment_lock,
-    _default_agent,
+    _configured_agent,
     _get_commit_summary,
     _is_allowed,
     _notify_thread_change,
@@ -114,9 +114,7 @@ class TestNeedsMoreContext:
         MockCls.assert_called_once_with()
         assert result is False
 
-    def test_default_agent_uses_provider_factory_for_non_claude_repo(
-        self, tmp_path: Path
-    ) -> None:
+    def test_configured_agent_uses_provider_factory(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
         cfg.repos["owner/repo"] = RepoConfig(
             name="owner/repo",
@@ -126,7 +124,7 @@ class TestNeedsMoreContext:
         sentinel = MagicMock()
         with patch("kennel.events.DefaultProviderFactory") as factory_cls:
             factory_cls.return_value.create_agent.return_value = sentinel
-            assert _default_agent(cfg, repo_name="owner/repo") is sentinel
+            assert _configured_agent(cfg, cfg.repos["owner/repo"]) is sentinel
 
 
 class TestRecoverReplyPromises:
@@ -1057,11 +1055,14 @@ class TestTriage:
 
 
 class TestMaybeReact:
+    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        return RepoConfig(name="owner/repo", work_dir=tmp_path)
+
     def _cfg(self, tmp_path: Path) -> Config:
         return Config(
             port=9000,
             secret=b"test",
-            repos={},
+            repos={"owner/repo": self._repo_cfg(tmp_path)},
             allowed_bots=frozenset(),
             log_level="WARNING",
             sub_dir=tmp_path / "sub",
@@ -1148,12 +1149,28 @@ class TestMaybeReact:
         )
         assert "you are fido" in captured.get("prompt", "")
 
-    def test_defaults_to_claude_client(self, tmp_path: Path) -> None:
+    def test_defaults_to_repo_configured_agent(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with patch("kennel.events.ClaudeClient") as MockCls:
-            MockCls.return_value.print_prompt.return_value = "NONE"
+        with patch("kennel.events.DefaultProviderFactory") as factory_cls:
+            factory_cls.return_value.create_agent.return_value = _client("NONE")
             maybe_react("hi", 1, "pulls", "owner/repo", cfg, MagicMock())
-        MockCls.assert_called_once_with()
+        factory_cls.return_value.create_agent.assert_called_once_with(
+            cfg.repos["owner/repo"],
+            work_dir=tmp_path,
+            repo_name="owner/repo",
+        )
+
+    def test_missing_repo_config_raises(self, tmp_path: Path) -> None:
+        cfg = Config(
+            port=9000,
+            secret=b"test",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        with pytest.raises(KeyError, match="owner/repo"):
+            maybe_react("hi", 1, "pulls", "owner/repo", cfg, MagicMock())
 
 
 class TestReplyToComment:
@@ -1161,7 +1178,7 @@ class TestReplyToComment:
         return Config(
             port=9000,
             secret=b"test",
-            repos={},
+            repos={"owner/repo": self._repo_cfg(tmp_path)},
             allowed_bots=frozenset(),
             log_level="WARNING",
             sub_dir=tmp_path / "sub",
@@ -1721,7 +1738,7 @@ class TestReplyToIssueComment:
         return Config(
             port=9000,
             secret=b"test",
-            repos={},
+            repos={"owner/repo": self._repo_cfg(tmp_path)},
             allowed_bots=frozenset(),
             log_level="WARNING",
             sub_dir=tmp_path / "sub",
@@ -1921,7 +1938,7 @@ class TestReplyToIssueComment:
         )
         assert cat == "ACT"
 
-    def test_defaults_to_claude_client(self, tmp_path: Path) -> None:
+    def test_defaults_to_repo_configured_agent(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = self._action()
 
@@ -1930,12 +1947,18 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return "ok"
 
-        with patch("kennel.events.ClaudeClient") as MockCls:
-            MockCls.return_value.print_prompt.side_effect = fake_pp
+        with patch("kennel.events.DefaultProviderFactory") as factory_cls:
+            factory_cls.return_value.create_agent.return_value = _client(
+                side_effect=fake_pp
+            )
             cat, titles = reply_to_issue_comment(
                 action, cfg, self._repo_cfg(tmp_path), MagicMock()
             )
-        MockCls.assert_called_once_with()
+        factory_cls.return_value.create_agent.assert_called_once_with(
+            self._repo_cfg(tmp_path),
+            work_dir=tmp_path,
+            repo_name="owner/repo",
+        )
         assert cat == "ACT"
 
     def test_includes_conversation_context_in_triage(self, tmp_path: Path) -> None:
@@ -3288,7 +3311,7 @@ class TestNotifyThreadChange:
         return Config(
             port=9000,
             secret=b"test",
-            repos={},
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
             allowed_bots=frozenset(),
             log_level="WARNING",
             sub_dir=tmp_path / "sub",
@@ -3418,14 +3441,18 @@ class TestNotifyThreadChange:
         # Should not raise
         _notify_thread_change(change, cfg, mock_gh, claude_client=_client("ok"))
 
-    def test_default_claude_client_used(self, tmp_path: Path) -> None:
+    def test_default_repo_configured_agent_used(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         change = {"task": self._task(), "kind": "completed"}
-        with patch("kennel.events.ClaudeClient") as MockCls:
-            MockCls.return_value.print_prompt.return_value = "Auto reply"
+        with patch("kennel.events.DefaultProviderFactory") as factory_cls:
+            factory_cls.return_value.create_agent.return_value = _client("Auto reply")
             _notify_thread_change(change, cfg, mock_gh)
-        MockCls.assert_called_once_with()
+        factory_cls.return_value.create_agent.assert_called_once_with(
+            cfg.repos["owner/repo"],
+            work_dir=tmp_path,
+            repo_name="owner/repo",
+        )
         mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Auto reply")
 
 

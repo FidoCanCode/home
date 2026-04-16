@@ -1602,9 +1602,10 @@ class TestClaudeSessionIsAliveAndReset:
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        session.reset()
+        session.reset("claude-sonnet-4-6")
         assert session._proc is new_proc
         assert fake_popen.call_count == 2
+        assert fake_popen.call_args.args[0][8] == "claude-sonnet-4-6"
 
     def test_reset_registers_new_proc_in_active_children(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
@@ -2308,6 +2309,19 @@ class TestClaudeClientSessionAttachment:
         ):
             client.ensure_session()
 
+    def test_ensure_session_requires_model_when_creating_session(
+        self, tmp_path: Path
+    ) -> None:
+        client = ClaudeClient(
+            session_system_file=tmp_path / "persona.md",
+            work_dir=tmp_path,
+        )
+        with pytest.raises(
+            ValueError,
+            match="ClaudeClient.ensure_session requires model when creating a session",
+        ):
+            client.ensure_session()
+
     def test_recover_session_requires_recover_method(self) -> None:
         client = ClaudeClient(session=object())
         with pytest.raises(
@@ -2315,9 +2329,11 @@ class TestClaudeClientSessionAttachment:
         ):
             client.recover_session()
 
-    def test_reset_session_returns_when_session_stays_missing(self) -> None:
+    def test_reset_session_requires_model(self) -> None:
         client = ClaudeClient()
-        with patch.object(client, "ensure_session"):
+        with pytest.raises(
+            ValueError, match="ClaudeClient.reset_session requires model"
+        ):
             client.reset_session()
 
     def test_reset_session_requires_reset_method(self) -> None:
@@ -2325,7 +2341,23 @@ class TestClaudeClientSessionAttachment:
         with pytest.raises(
             ValueError, match="ClaudeClient.reset_session requires ClaudeSession"
         ):
-            client.reset_session()
+            client.reset_session("claude-opus-4-6")
+
+    def test_reset_session_spawns_when_session_missing(self, tmp_path: Path) -> None:
+        session = MagicMock()
+        session_factory = MagicMock(return_value=session)
+        client = ClaudeClient(
+            session_factory=session_factory,
+            session_system_file=tmp_path / "persona.md",
+            work_dir=tmp_path,
+        )
+        client.reset_session("claude-opus-4-6")
+        session_factory.assert_called_once_with(
+            tmp_path / "persona.md",
+            work_dir=tmp_path,
+            repo_name=None,
+            model="claude-opus-4-6",
+        )
 
     def test_run_turn_retries_after_preempt(self) -> None:
         session = MagicMock()

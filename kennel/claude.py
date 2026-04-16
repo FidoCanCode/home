@@ -826,8 +826,10 @@ class ClaudeSession:
         """Respawn the subprocess while preserving the durable conversation id."""
         self._respawn(clear_session_id=False, reason="recovering session")
 
-    def reset(self) -> None:
+    def reset(self, model: str | None = None) -> None:
         """Respawn the subprocess with a fresh conversation."""
+        if model is not None:
+            self._model = model
         self._respawn(clear_session_id=True, reason="resetting conversation")
 
     @property
@@ -1489,23 +1491,33 @@ class ClaudeClient(ProviderAgent):
         session_id = getattr(session, "session_id")
         return session_id if isinstance(session_id, str) and session_id else None
 
-    def _spawn_owned_session(self) -> PromptSession:
-        if self._session_system_file is None or self._work_dir is None:
-            raise ValueError(
-                "ClaudeClient.ensure_session requires session_system_file and work_dir"
-            )
+    def _spawn_owned_session(self, model: str) -> PromptSession:
+        system_file = self._session_system_file
+        work_dir = self._work_dir
+        assert system_file is not None
+        assert work_dir is not None
         return self._session_factory(
-            self._session_system_file,
-            work_dir=self._work_dir,
+            system_file,
+            work_dir=work_dir,
             repo_name=self._repo_name,
+            model=model,
         )
 
     def ensure_session(self, model: str | None = None) -> None:
         with self._session_lock:
             session = self._session
             if session is None:
-                session = self._spawn_owned_session()
+                if self._session_system_file is None or self._work_dir is None:
+                    raise ValueError(
+                        "ClaudeClient.ensure_session requires session_system_file and work_dir"
+                    )
+                if model is None:
+                    raise ValueError(
+                        "ClaudeClient.ensure_session requires model when creating a session"
+                    )
+                session = self._spawn_owned_session(model)
                 self._session = session
+                return
         if model is not None:
             session.switch_model(model)
 
@@ -1519,17 +1531,17 @@ class ClaudeClient(ProviderAgent):
             recover()
 
     def reset_session(self, model: str | None = None) -> None:
-        self.ensure_session()
+        if model is None:
+            raise ValueError("ClaudeClient.reset_session requires model")
         with self._session_lock:
             session = self._session
-        if session is None:
-            return
+            if session is None:
+                self._session = self._spawn_owned_session(model)
+                return
         reset = getattr(session, "reset", None)
         if not callable(reset):
             raise ValueError("ClaudeClient.reset_session requires ClaudeSession")
-        reset()
-        if model is not None:
-            session.switch_model(model)
+        reset(model)
 
     def stop_session(self) -> None:
         with self._session_lock:

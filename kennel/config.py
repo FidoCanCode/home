@@ -71,8 +71,8 @@ class Config:
         parser.add_argument(
             "repos",
             nargs="+",
-            metavar="owner/repo[=provider]:/path",
-            help="Repos to manage (name[=provider]:work_dir)",
+            metavar="owner/repo=provider:/path",
+            help="Repos to manage (name=provider:work_dir)",
         )
 
         args = parser.parse_args(argv)
@@ -86,20 +86,20 @@ class Config:
         for spec in args.repos:
             if ":" not in spec:
                 raise SystemExit(
-                    f"invalid repo spec (expected name[=provider]:path): {spec}"
+                    f"invalid repo spec (expected name=provider:path): {spec}"
                 )
             name_spec, path_str = spec.split(":", 1)
-            if "=" in name_spec:
-                name, provider_str = name_spec.rsplit("=", 1)
-                try:
-                    provider = ProviderID(provider_str)
-                except ValueError as exc:
-                    raise SystemExit(
-                        f"invalid provider {provider_str!r} for {name}"
-                    ) from exc
-            else:
-                name = name_spec
-                provider = ProviderID.CLAUDE_CODE
+            if "=" not in name_spec:
+                raise SystemExit(
+                    f"invalid repo spec (expected name=provider:path): {spec}"
+                )
+            name, provider_str = name_spec.rsplit("=", 1)
+            try:
+                provider = ProviderID(provider_str)
+            except ValueError as exc:
+                raise SystemExit(
+                    f"invalid provider {provider_str!r} for {name}"
+                ) from exc
             work_dir = Path(path_str).expanduser().resolve()
             if not work_dir.is_dir():
                 raise SystemExit(f"work_dir not found: {work_dir} (for {name})")

@@ -15,7 +15,7 @@ from kennel.claude import ClaudeClient, set_thread_repo
 from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
 from kennel.prompts import NO_TOOLS_CLAUSE, Prompts
-from kennel.provider import ProviderAgent, ProviderID
+from kennel.provider import ProviderAgent
 from kennel.provider_factory import DefaultProviderFactory
 from kennel.registry import WorkerRegistry
 from kennel.tasks import Tasks
@@ -29,21 +29,13 @@ _reorder_coalesce: dict[str, dict[str, Any]] = {}
 _reorder_coalesce_lock = threading.Lock()
 
 
-def _default_agent(
-    config: Config,
-    *,
-    repo_cfg: RepoConfig | None = None,
-    repo_name: str | None = None,
-) -> ProviderAgent:
-    target = repo_cfg if repo_cfg is not None else config.repos.get(repo_name or "")
-    if target is None or target.provider == ProviderID.CLAUDE_CODE:
-        return ClaudeClient()
+def _configured_agent(config: Config, repo_cfg: RepoConfig) -> ProviderAgent:
     return DefaultProviderFactory(
         session_system_file=config.sub_dir / "persona.md"
     ).create_agent(
-        target,
-        work_dir=target.work_dir,
-        repo_name=target.name,
+        repo_cfg,
+        work_dir=repo_cfg.work_dir,
+        repo_name=repo_cfg.name,
     )
 
 
@@ -507,7 +499,7 @@ def maybe_react(
     comment_type: 'pulls' for review comments, 'issues' for issue comments.
     """
     if claude_client is None:
-        claude_client = _default_agent(config, repo_name=repo)
+        claude_client = _configured_agent(config, config.repos[repo])
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     reaction = (
@@ -549,7 +541,7 @@ def reply_to_comment(
     Raises on reply-post failure so callers fail closed.
     """
     if claude_client is None:
-        claude_client = _default_agent(config, repo_cfg=repo_cfg)
+        claude_client = _configured_agent(config, repo_cfg)
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     info = action.reply_to
@@ -860,7 +852,7 @@ def reply_to_issue_comment(
     Raises on reply-post failure so callers fail closed.
     """
     if claude_client is None:
-        claude_client = _default_agent(config, repo_cfg=repo_cfg)
+        claude_client = _configured_agent(config, repo_cfg)
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     comment = action.comment_body or ""
@@ -1036,8 +1028,8 @@ def _notify_thread_change(
     the issue comments API.
     """
     if claude_client is None:
-        claude_client = _default_agent(
-            config, repo_name=change["task"]["thread"]["repo"]
+        claude_client = _configured_agent(
+            config, config.repos[change["task"]["thread"]["repo"]]
         )
     if prompts is None:
         prompts = Prompts(_load_persona(config))

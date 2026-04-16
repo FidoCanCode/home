@@ -573,7 +573,12 @@ class TestCopilotCLISession:
         system_file.write_text("persona")
         runtime = FakeRuntime()
         runtime.next_prompt = ("result", "cancelled", "sess-2")
-        session = CopilotCLISession(system_file, work_dir=tmp_path, runtime=runtime)
+        session = CopilotCLISession(
+            system_file,
+            work_dir=tmp_path,
+            model="claude-sonnet-4-6",
+            runtime=runtime,
+        )
 
         assert session.session_id == "sess-created"
         assert (
@@ -594,7 +599,7 @@ class TestCopilotCLISession:
         assert session.consume_until_result() == ""
         session.switch_model("claude-haiku-4-5")
         session.recover()
-        session.reset()
+        session.reset("claude-opus-4-6")
         assert session.session_id == "sess-reset"
         assert session.pid == 111
         assert session.is_alive() is True
@@ -605,7 +610,12 @@ class TestCopilotCLISession:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
         runtime = FakeRuntime()
-        session = CopilotCLISession(system_file, work_dir=tmp_path, runtime=runtime)
+        session = CopilotCLISession(
+            system_file,
+            work_dir=tmp_path,
+            model="claude-sonnet-4-6",
+            runtime=runtime,
+        )
         acquired = threading.Event()
         release = threading.Event()
 
@@ -638,6 +648,7 @@ class TestCopilotCLISession:
         session = CopilotCLISession(
             tmp_path / "missing.md",
             work_dir=tmp_path,
+            model="claude-sonnet-4-6",
             runtime_factory=lambda **kwargs: runtime,
         )
         assert session.owner is None
@@ -647,7 +658,10 @@ class TestCopilotCLISession:
         runtime = FakeRuntime()
         runtime.alive = False
         session = CopilotCLISession(
-            tmp_path / "missing.md", work_dir=tmp_path, runtime=runtime
+            tmp_path / "missing.md",
+            work_dir=tmp_path,
+            model="claude-sonnet-4-6",
+            runtime=runtime,
         )
         acquired = threading.Event()
 
@@ -721,6 +735,19 @@ class TestCopilotCLIClient:
         ):
             client.ensure_session()
 
+    def test_ensure_session_requires_model_when_creating_session(
+        self, tmp_path: Path
+    ) -> None:
+        client = CopilotCLIClient(
+            session_system_file=tmp_path / "persona.md",
+            work_dir=tmp_path,
+        )
+        with pytest.raises(
+            ValueError,
+            match="CopilotCLIClient.ensure_session requires model when creating a session",
+        ):
+            client.ensure_session()
+
     def test_recover_and_reset_require_session_methods(self) -> None:
         client = CopilotCLIClient(session=object())
         with pytest.raises(
@@ -730,14 +757,20 @@ class TestCopilotCLIClient:
             client.recover_session()
         with pytest.raises(
             ValueError,
-            match="CopilotCLIClient.reset_session requires CopilotCLISession",
+            match="CopilotCLIClient.reset_session requires model",
         ):
             client.reset_session()
+        with pytest.raises(
+            ValueError,
+            match="CopilotCLIClient.reset_session requires CopilotCLISession",
+        ):
+            client.reset_session("claude-opus-4-6")
 
     def test_ensure_reset_stop_and_recover_noop_branches(self, tmp_path: Path) -> None:
         session = MagicMock()
+        session_factory = MagicMock(return_value=session)
         client = CopilotCLIClient(
-            session_factory=MagicMock(return_value=session),
+            session_factory=session_factory,
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
@@ -745,17 +778,46 @@ class TestCopilotCLIClient:
         client.recover_session()
         client.reset_session("claude-sonnet-4-6")
         client.stop_session()
-        session.reset.assert_called_once_with()
-        assert session.switch_model.call_args_list[0].args == ("claude-opus-4-6",)
-        assert session.switch_model.call_args_list[1].args == ("claude-sonnet-4-6",)
+        session_factory.assert_called_once_with(
+            tmp_path / "persona.md",
+            work_dir=tmp_path,
+            model="claude-opus-4-6",
+            repo_name=None,
+        )
+        session.reset.assert_called_once_with("claude-sonnet-4-6")
+        session.switch_model.assert_not_called()
         session.stop.assert_called_once_with()
         CopilotCLIClient().recover_session()
 
-    def test_reset_session_returns_when_ensure_session_does_not_attach(self) -> None:
+    def test_ensure_session_switches_model_when_session_exists(self) -> None:
+        session = MagicMock()
+        client = CopilotCLIClient(session=session)
+        client.ensure_session("claude-opus-4-6")
+        session.switch_model.assert_called_once_with("claude-opus-4-6")
+
+    def test_reset_session_requires_model(self) -> None:
         client = CopilotCLIClient()
-        client.ensure_session = MagicMock()
-        client.reset_session()
-        client.ensure_session.assert_called_once_with()
+        with pytest.raises(
+            ValueError,
+            match="CopilotCLIClient.reset_session requires model",
+        ):
+            client.reset_session()
+
+    def test_reset_session_spawns_when_session_missing(self, tmp_path: Path) -> None:
+        session = MagicMock()
+        session_factory = MagicMock(return_value=session)
+        client = CopilotCLIClient(
+            session_factory=session_factory,
+            session_system_file=tmp_path / "persona.md",
+            work_dir=tmp_path,
+        )
+        client.reset_session("claude-opus-4-6")
+        session_factory.assert_called_once_with(
+            tmp_path / "persona.md",
+            work_dir=tmp_path,
+            model="claude-opus-4-6",
+            repo_name=None,
+        )
 
     def test_run_turn_retries_after_preempt(self) -> None:
         session = MagicMock()

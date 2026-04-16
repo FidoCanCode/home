@@ -37,3 +37,15 @@ class TestReposFromPid:
             lambda self: cmdline if self == Path(f"/proc/{pid}/cmdline") else b"",
         )
         assert _repos_from_pid(pid) == []
+
+    def test_skips_repo_without_provider_in_cmdline(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        pid = 1234
+        cmdline = f"uv\x00run\x00kennel\x00owner/repo:{tmp_path}\x00".encode()
+        monkeypatch.setattr(
+            Path,
+            "read_bytes",
+            lambda self: cmdline if self == Path(f"/proc/{pid}/cmdline") else b"",
+        )
+        assert _repos_from_pid(pid) == []
