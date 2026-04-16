@@ -11,13 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from kennel import reply_promises
-from kennel.claude import set_thread_repo
+from kennel.claude import ClaudeClient, set_thread_repo
 from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
 from kennel.prompts import NO_TOOLS_CLAUSE, Prompts
 from kennel.provider import ProviderAgent
 from kennel.provider_factory import DefaultProviderFactory
 from kennel.registry import WorkerRegistry
+from kennel.state import State
 from kennel.tasks import Tasks
 from kennel.types import TaskType
 
@@ -1117,16 +1118,18 @@ def _rewrite_pr_description(
     the state of the task list at the moment Opus returned.  The PR body is
     re-fetched on each retry so the work-queue section stays current.
     """
-    from kennel.state import State
-    from kennel.tasks import Tasks
     from kennel.worker import (
         _write_pr_description,  # pyright: ignore[reportPrivateUsage]
     )
 
-    if _state is None:
-        _state = State(work_dir / ".git" / "fido")
-    if _tasks is None:
-        _tasks = Tasks(work_dir)
+    if _state is None or _tasks is None:
+        from kennel.state import State as StateStore
+        from kennel.tasks import Tasks as TaskStore
+
+        if _state is None:
+            _state = StateStore(work_dir / ".git" / "fido")
+        if _tasks is None:
+            _tasks = TaskStore(work_dir)
 
     state = _state.load()
     issue = state.get("issue")
@@ -1183,18 +1186,24 @@ def _make_reorder_kwargs(
     repo_cfg: RepoConfig | None,
     registry: WorkerRegistry | None,
     gh: Any,
-    agent: ProviderAgent | None,
-    prompts: Prompts | None,
-    rewrite_fn: Any,
+    agent: ProviderAgent,
+    prompts: Prompts,
+    rewrite_fn: Callable[..., None],
 ) -> dict[str, Any]:
     """Build the kwargs dict for a :func:`~kennel.tasks.reorder_tasks` call."""
 
     def on_changes(changes: list[dict[str, Any]]) -> None:
         for change in changes:
-            _notify_thread_change(change, config, gh, agent=agent, prompts=prompts)
+            _notify_thread_change(change, config, gh, agent=None, prompts=None)
 
     def on_done() -> None:
-        rewrite_fn(work_dir, gh, agent=agent)
+        rewrite_fn(
+            work_dir,
+            gh,
+            agent=agent,
+            _state=State(work_dir / ".git" / "fido"),
+            _tasks=Tasks(work_dir),
+        )
 
     kwargs: dict[str, Any] = {
         "_on_changes": on_changes,
@@ -1256,6 +1265,14 @@ def _reorder_tasks_background(
     reorder = _reorder_fn if _reorder_fn is not None else _reorder_tasks
     rewrite_fn = _rewrite_fn if _rewrite_fn is not None else _rewrite_pr_description
     state = _coalesce_state if _coalesce_state is not None else _reorder_coalesce
+    if agent is None:
+        agent = (
+            _configured_agent(config, repo_cfg)
+            if repo_cfg is not None
+            else ClaudeClient()
+        )
+    if prompts is None:
+        prompts = Prompts(_load_persona(config))
 
     key = str(work_dir)
     kwargs = _make_reorder_kwargs(

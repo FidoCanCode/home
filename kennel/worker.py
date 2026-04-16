@@ -27,7 +27,7 @@ from kennel.provider import (
     ProviderAgent,
     ProviderModel,
 )
-from kennel.provider_factory import DefaultProviderFactory, extract_provider_session_id
+from kennel.provider_factory import DefaultProviderFactory
 from kennel.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
@@ -231,73 +231,45 @@ def _sanitize_slug(raw: str, fallback: str) -> str:
     return slug
 
 
-def claude_start(
+def provider_start(
     fido_dir: Path,
-    model: ProviderModel | None = None,
-    timeout: int = 300,
-    cwd: Path | str | None = None,
-    session: PromptSession | None = None,
+    *,
+    agent: ProviderAgent | None = None,
     claude_client: ProviderAgent | None = None,
+    model: ProviderModel,
+    session: str | None = None,
+    timeout: int = 300,
+    cwd: Path | str = ".",
     fresh_session: bool = False,
 ) -> str:
-    """Start a new sub-Claude session from fido_dir/system and fido_dir/prompt.
+    """Start a new provider session from fido_dir/system and fido_dir/prompt.
 
-    When *session* is provided the setup prompt is sent through the
-    persistent provider agent and an empty string
-    is returned — there is no subprocess session_id to track.
+    When the provider agent already has an attached persistent session, the
+    setup prompt is sent through :meth:`ProviderAgent.run_turn` and an empty
+    string is returned — there is no subprocess session id to track.
 
-    When *session* is ``None`` a fresh subprocess is spawned via
-    :meth:`~ClaudeClient.print_prompt_from_file` and the session_id extracted
-    from its stream-json output is returned.  Raises ``ClaudeStreamError`` or
-    ``FileNotFoundError`` on subprocess failure — these propagate to the
-    worker's crash handler.
+    When no persistent session is attached, a fresh one-shot subprocess is
+    spawned via :meth:`ProviderAgent.print_prompt_from_file` and the session id
+    is extracted from its raw output.
     """
-    if session is not None:
-        if claude_client is None:
-            _run_session_turn(session, _session_turn_prompt(fido_dir))
-            return ""
-        effective_model = claude_client.voice_model if model is None else model
-        claude_client.run_turn(
+    del session
+    provider_agent = claude_client if claude_client is not None else agent
+    if provider_agent is None:
+        raise ValueError("provider_start requires agent")
+    if provider_agent.session is not None:
+        provider_agent.run_turn(
             _session_turn_prompt(fido_dir),
-            model=effective_model,
+            model=model,
             retry_on_preempt=True,
             fresh_session=fresh_session,
         )
         return ""
-    if claude_client is None:
-        raise ValueError(
-            "claude_start requires claude_client when session is not supplied"
-        )
-    effective_model = claude_client.voice_model if model is None else model
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
-    output = claude_client.print_prompt_from_file(
-        system_file, prompt_file, effective_model, timeout, cwd=cwd
+    output = provider_agent.print_prompt_from_file(
+        system_file, prompt_file, model, timeout, cwd=cwd
     )
-    return extract_provider_session_id(claude_client, output)
-
-
-def _run_session_turn(session: PromptSession, content: str) -> str:
-    """Send *content* through *session* and return the result text.
-
-    Retries indefinitely when a webhook handler preempts the turn mid-flight
-    (detected via :attr:`~kennel.claude.ClaudeSession.last_turn_cancelled`).
-    No bound on the retry count — replying to a burst of PR review comments
-    is higher priority than worker development, so the worker yields as
-    many times as there are pending webhooks and picks up its turn once
-    the backlog has drained.  Each webhook is itself one-shot on the
-    webhook side; the loop is here, not on the webhook.
-    """
-    attempt = 0
-    while True:
-        with session:
-            session.send(content)
-            result = session.consume_until_result()
-            if session.last_turn_cancelled is not True:
-                return result
-        session.wait_for_pending_preempt()
-        attempt += 1
-        log.info("session turn preempted mid-flight — retry %d", attempt)
+    return provider_agent.extract_session_id(output)
 
 
 def _session_turn_prompt(fido_dir: Path) -> str:
@@ -315,51 +287,50 @@ def _session_turn_prompt(fido_dir: Path) -> str:
     return f"{skill}\n\n---\n\n{prompt}"
 
 
-def claude_run(
+def provider_run(
     fido_dir: Path,
-    model: ProviderModel | None = None,
-    timeout: int = 300,
-    cwd: Path | str | None = None,
-    session: PromptSession | None = None,
+    *,
+    agent: ProviderAgent | None = None,
     claude_client: ProviderAgent | None = None,
+    model: ProviderModel,
+    session: str | None = None,
+    timeout: int = 300,
+    cwd: Path | str = ".",
     fresh_session: bool = False,
 ) -> tuple[str, str]:
-    """Continue or start a sub-Claude session, streaming progress as JSON.
+    """Continue or start a provider session, streaming progress as raw text.
 
-    When *session* is provided the prompt is sent through the persistent
-    provider agent and ``("", "")``
-    is returned.
+    When the provider agent already has an attached persistent session, the
+    prompt is sent through :meth:`ProviderAgent.run_turn` and ``("", "")`` is
+    returned.
 
-    When *session* is ``None`` a new session is started from *fido_dir/system*
-    and *fido_dir/prompt*.  Returns ``(session_id, raw_output)`` where
-    *raw_output* is the full stream-json text.  Raises ``ClaudeStreamError``
-    or ``FileNotFoundError`` on subprocess failure — these propagate to the
-    worker's crash handler.
+    When no persistent session is attached, a new one-shot session is started
+    from *fido_dir/system* and *fido_dir/prompt*. Returns ``(session_id,
+    raw_output)`` where *raw_output* is the full provider output.
     """
-    if session is not None:
-        if claude_client is None:
-            _run_session_turn(session, _session_turn_prompt(fido_dir))
-            return "", ""
-        effective_model = claude_client.work_model if model is None else model
-        claude_client.run_turn(
+    del session
+    provider_agent = claude_client if claude_client is not None else agent
+    if provider_agent is None:
+        raise ValueError("provider_run requires agent")
+    if provider_agent.session is not None:
+        provider_agent.run_turn(
             _session_turn_prompt(fido_dir),
-            model=effective_model,
+            model=model,
             retry_on_preempt=True,
             fresh_session=fresh_session,
         )
         return "", ""
-    if claude_client is None:
-        raise ValueError(
-            "claude_run requires claude_client when session is not supplied"
-        )
-    effective_model = claude_client.work_model if model is None else model
     system_file = fido_dir / "system"
     prompt_file = fido_dir / "prompt"
-    output = claude_client.print_prompt_from_file(
-        system_file, prompt_file, effective_model, timeout, cwd=cwd
+    output = provider_agent.print_prompt_from_file(
+        system_file, prompt_file, model, timeout, cwd=cwd
     )
-    new_session_id = extract_provider_session_id(claude_client, output)
+    new_session_id = provider_agent.extract_session_id(output)
     return new_session_id, output
+
+
+claude_start = provider_start
+claude_run = provider_run
 
 
 @dataclass(frozen=True)
@@ -595,88 +566,35 @@ _DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED"}
 _FRESH_SESSION_NUDGE_ATTEMPT = 4
 
 
-def _no_commit_nudge(
+def _no_commit_nudge(  # pyright: ignore[reportUnusedFunction]
     attempt: int,
     task_title: str,
     task_id: str,
     work_dir: Path | str,
     pr_number: int | None,
 ) -> str:
-    r"""Build an escalating nudge prompt for the no-commit resume loop.
-
-    Each attempt demands a concrete action — commit, mark complete, or
-    post a blocked-status comment on the PR.  "Explain what's blocking
-    you" without posting it is intentionally not an option; an
-    explanation that never leaves claude's head isn't actionable.
-
-    The exact \`kennel task complete\` and \`gh pr comment\` invocations
-    are pre-baked with the actual task ID, work_dir, and PR number so
-    claude doesn't have to guess.
-    """
-    complete_cmd = f"kennel task complete {work_dir} {task_id}"
-    pr_comment_cmd = (
-        f"gh pr comment {pr_number} --body 'BLOCKED: ...'"
-        if pr_number is not None
-        else "gh pr comment <pr> --body 'BLOCKED: ...'"
-    )
-    if attempt <= 2:
-        return (
-            f"You're working on: {task_title}\n\n"
-            "I don't see any commits yet.  Continue the task.  If you "
-            "already have changes, commit them now.  If the task is "
-            f"already fully complete in a previous commit, run:\n"
-            f"  {complete_cmd}\n"
-        )
-    return (
-        f"You're working on: {task_title}\n\n"
-        f"This is attempt {attempt} and there are still no commits on "
-        "the branch.  Take exactly one of these actions:\n"
-        "1. Commit the changes you have (`git add -A && git commit`)\n"
-        f"2. Mark this task complete: `{complete_cmd}`\n"
-        f"3. If something outside your control is blocking you, run "
-        f"`{pr_comment_cmd}` with a real explanation of what's "
-        "blocking you and why — so a human can unblock you.  Do not "
-        "just describe the situation internally; post the comment.\n\n"
-        "Do not respond with a plan — just act."
+    return Prompts("").task_resume_nudge(
+        attempt=attempt,
+        task_title=task_title,
+        task_id=task_id,
+        work_dir=str(work_dir),
+        pr_number=pr_number,
     )
 
 
-def _fresh_session_nudge(
+def _fresh_session_nudge(  # pyright: ignore[reportUnusedFunction]
     task_title: str,
     task_id: str,
     work_dir: Path | str,
     pr_number: int | None,
     branch: str,
 ) -> str:
-    r"""Build the self-contained recovery prompt for a fresh-session retry.
-
-    This prompt is used only when repeated nudges failed and the persistent
-    conversation was intentionally reset.  It must therefore restate the work
-    clearly enough for a brand-new session to resume without prior context.
-    """
-    complete_cmd = f"kennel task complete {work_dir} {task_id}"
-    pr_comment_cmd = (
-        f"gh pr comment {pr_number} --body 'BLOCKED: ...'"
-        if pr_number is not None
-        else "gh pr comment <pr> --body 'BLOCKED: ...'"
-    )
-    return (
-        "Fresh-session recovery: the previous attempts failed repeatedly, so "
-        "the session context was intentionally wiped before this retry.\n\n"
-        f"Current work:\n"
-        f"- Branch: {branch}\n"
-        f"- Task title: {task_title}\n"
-        f"- Task id: {task_id}\n"
-        f"- PR: {pr_number if pr_number is not None else '<pr>'}\n\n"
-        "What to do now:\n"
-        "1. Re-establish context from the repo and current branch state.\n"
-        "2. Continue this task immediately.\n"
-        "3. Take exactly one concrete action before stopping:\n"
-        "   - commit the changes you made (`git add -A && git commit`)\n"
-        f"   - mark the task complete: `{complete_cmd}`\n"
-        f"   - if blocked by something outside your control, post a real "
-        f"blocking comment with `{pr_comment_cmd}`\n\n"
-        "Do not answer with a summary or plan. Act on the task."
+    return Prompts("").fresh_session_retry_prompt(
+        task_title=task_title,
+        task_id=task_id,
+        work_dir=str(work_dir),
+        pr_number=pr_number,
+        branch=branch,
     )
 
 
@@ -1072,6 +990,7 @@ class Worker:
             log.info("set_status: nudging session for status + emoji")
             raw = self._claude_client.run_turn(
                 prompts.status_prompt(activities),
+                model=self._claude_client.voice_model,
                 system_prompt=prompts.status_system_prompt(),
             )
             text, emoji = _parse_status_nudge(raw)
@@ -1229,10 +1148,10 @@ class Worker:
                 build_prompt(fido_dir, "setup", context)
                 claude_start(
                     fido_dir,
+                    claude_client=self._claude_client,
                     model=self._claude_client.voice_model,
                     cwd=self.work_dir,
-                    session=self._session,
-                    claude_client=self._claude_client,
+                    session=None,
                     fresh_session=self._consume_fresh_session(),
                 )
                 if not self._tasks.list():
@@ -1279,10 +1198,10 @@ class Worker:
         build_prompt(fido_dir, "setup", context)
         claude_start(
             fido_dir,
+            claude_client=self._claude_client,
             model=self._claude_client.voice_model,
             cwd=self.work_dir,
-            session=self._session,
-            claude_client=self._claude_client,
+            session=None,
             fresh_session=self._consume_fresh_session(),
         )
 
@@ -1358,10 +1277,10 @@ class Worker:
         build_prompt(fido_dir, "merge", context)
         session_id, _ = claude_run(
             fido_dir,
+            claude_client=self._claude_client,
             model=self._claude_client.work_model,
             cwd=self.work_dir,
-            session=self._session,
-            claude_client=self._claude_client,
+            session=None,
             fresh_session=self._consume_fresh_session(),
         )
         log.info("merge conflict resolution done (session=%s)", session_id)
@@ -1489,10 +1408,10 @@ class Worker:
         build_prompt(fido_dir, "ci", context)
         session_id, _ = claude_run(
             fido_dir,
+            claude_client=self._claude_client,
             model=self._claude_client.work_model,
             cwd=self.work_dir,
-            session=self._session,
-            claude_client=self._claude_client,
+            session=None,
             fresh_session=self._consume_fresh_session(),
         )
         log.info("CI fix done (session=%s)", session_id)
@@ -1620,10 +1539,10 @@ class Worker:
         build_prompt(fido_dir, "comments", context)
         session_id, _ = claude_run(
             fido_dir,
+            claude_client=self._claude_client,
             model=self._claude_client.work_model,
             cwd=self.work_dir,
-            session=self._session,
-            claude_client=self._claude_client,
+            session=None,
             fresh_session=self._consume_fresh_session(),
         )
         log.info("threads done (session=%s)", session_id)
@@ -1764,15 +1683,30 @@ class Worker:
                 context_parts.append(f"Thread URL: {thread['url']}")
         context = "\n".join(context_parts)
         build_prompt(fido_dir, "task", context)
+        prompts = self._get_prompts()
+        state_path = fido_dir / "state.json"
+        state_data = State(fido_dir).load() if state_path.exists() else {}
+        issue_number = state_data.get("issue")
+        issue_title = ""
+        issue_body = ""
+        if isinstance(issue_number, int):
+            issue_data = self.gh.view_issue(repo_ctx.repo, issue_number)
+            issue_title = issue_data.get("title", "")
+            issue_body = issue_data.get("body", "")
+        else:
+            issue_number = None
+        pr_data = self.gh.get_pr(repo_ctx.repo, pr_number)
+        pr_title = pr_data.get("title", "") or ""
+        pr_body = pr_data.get("body", "") or ""
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         with State(fido_dir).modify() as state:
             state["current_task_id"] = task["id"]
         session_id, _output = claude_run(
             fido_dir,
+            claude_client=self._claude_client,
             model=self._claude_client.work_model,
             cwd=self.work_dir,
-            session=self._session,
-            claude_client=self._claude_client,
+            session=None,
             fresh_session=self._consume_fresh_session(),
         )
         log.info("task done (session=%s)", session_id)
@@ -1803,16 +1737,25 @@ class Worker:
                 attempt >= _FRESH_SESSION_NUDGE_ATTEMPT and not fresh_session_retry_used
             )
             nudge = (
-                _fresh_session_nudge(
-                    task_title,
-                    task["id"],
-                    self.work_dir,
-                    pr_number,
-                    slug,
+                prompts.fresh_session_retry_prompt(
+                    task_title=task_title,
+                    task_id=task["id"],
+                    work_dir=str(self.work_dir),
+                    pr_number=pr_number,
+                    branch=slug,
+                    issue_number=issue_number,
+                    issue_title=issue_title,
+                    issue_body=issue_body,
+                    pr_title=pr_title,
+                    pr_body=pr_body,
                 )
                 if use_fresh_session
-                else _no_commit_nudge(
-                    attempt, task_title, task["id"], self.work_dir, pr_number
+                else prompts.task_resume_nudge(
+                    attempt=attempt,
+                    task_title=task_title,
+                    task_id=task["id"],
+                    work_dir=str(self.work_dir),
+                    pr_number=pr_number,
                 )
             )
             (fido_dir / "prompt").write_text(nudge)
@@ -1830,10 +1773,10 @@ class Worker:
             fresh_session = self._consume_fresh_session() or use_fresh_session
             session_id, _output = claude_run(
                 fido_dir,
+                claude_client=self._claude_client,
                 model=self._claude_client.work_model,
                 cwd=self.work_dir,
-                session=self._session,
-                claude_client=self._claude_client,
+                session=session_id or None,
                 fresh_session=fresh_session,
             )
             log.info("task resume done (session=%s)", session_id)

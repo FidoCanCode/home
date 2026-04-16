@@ -16,7 +16,7 @@ import kennel.worker as worker_module
 from kennel.claude import ClaudeClient
 from kennel.config import RepoConfig, RepoMembership
 from kennel.prompts import Prompts
-from kennel.provider import ProviderID
+from kennel.provider import ProviderID, ProviderModel
 from kennel.state import (
     State,
     _resolve_git_dir,
@@ -42,10 +42,10 @@ from kennel.worker import (
     acquire_lock,
     build_prompt,
     ci_ready_for_review,
-    claude_run,
-    claude_start,
     create_compact_script,
     latest_decisive_review,
+    provider_run,
+    provider_start,
     run,
     should_rerequest_review,
 )
@@ -133,6 +133,7 @@ def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
     client.session_alive = False
     client.session_pid = None
     client.session_id = None
+    client.extract_session_id.return_value = ""
     if side_effect is not None:
         client.run_turn.side_effect = side_effect
     else:
@@ -2520,19 +2521,23 @@ class TestClaudeStart:
         output = '{"type":"result","session_id":"sess-abc"}'
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = output
-        with patch(
-            "kennel.claude.extract_session_id",
-            return_value="sess-abc",
-        ):
-            result = claude_start(fido_dir, claude_client=mock_client)
+        mock_client.extract_session_id.return_value = "sess-abc"
+        result = provider_start(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.voice_model,
+        )
         assert result == "sess-abc"
 
     def test_returns_empty_when_extract_fails(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = ""
-        with patch("kennel.claude.extract_session_id", return_value=""):
-            result = claude_start(fido_dir, claude_client=mock_client)
+        result = provider_start(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.voice_model,
+        )
         assert result == ""
 
     def test_calls_print_prompt_from_file_with_correct_files(
@@ -2541,46 +2546,62 @@ class TestClaudeStart:
         fido_dir = self._setup_fido_dir(tmp_path)
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = ""
-        with patch("kennel.claude.extract_session_id", return_value=""):
-            claude_start(fido_dir, claude_client=mock_client)
+        provider_start(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.voice_model,
+        )
         mock_client.print_prompt_from_file.assert_called_once_with(
             fido_dir / "system",
             fido_dir / "prompt",
             "claude-opus-4-6",
             300,
-            cwd=None,
+            cwd=".",
         )
 
     def test_passes_custom_model(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = ""
-        with patch("kennel.claude.extract_session_id", return_value=""):
-            claude_start(fido_dir, model="claude-sonnet-4-6", claude_client=mock_client)
+        provider_start(
+            fido_dir,
+            agent=mock_client,
+            model="claude-sonnet-4-6",
+        )
         assert mock_client.print_prompt_from_file.call_args[0][2] == "claude-sonnet-4-6"
 
     def test_passes_custom_timeout(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = ""
-        with patch("kennel.claude.extract_session_id", return_value=""):
-            claude_start(fido_dir, timeout=600, claude_client=mock_client)
+        provider_start(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.voice_model,
+            timeout=600,
+        )
         assert mock_client.print_prompt_from_file.call_args[0][3] == 600
 
     def test_default_model_is_opus(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = ""
-        with patch("kennel.claude.extract_session_id", return_value=""):
-            claude_start(fido_dir, claude_client=mock_client)
+        provider_start(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.voice_model,
+        )
         assert mock_client.print_prompt_from_file.call_args[0][2] == "claude-opus-4-6"
 
     def test_default_timeout_is_300(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = ""
-        with patch("kennel.claude.extract_session_id", return_value=""):
-            claude_start(fido_dir, claude_client=mock_client)
+        provider_start(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.voice_model,
+        )
         assert mock_client.print_prompt_from_file.call_args[0][3] == 300
 
     def test_passes_output_to_extract_session_id(self, tmp_path: Path) -> None:
@@ -2588,38 +2609,37 @@ class TestClaudeStart:
         raw = '{"type":"result","session_id":"xyz"}'
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = raw
-        with patch("kennel.claude.extract_session_id", return_value="xyz") as mock_ext:
-            claude_start(fido_dir, claude_client=mock_client)
-        mock_ext.assert_called_once_with(raw)
+        mock_client.extract_session_id.return_value = "xyz"
+        provider_start(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.voice_model,
+        )
+        mock_client.extract_session_id.assert_called_once_with(raw)
+
+    def test_requires_agent(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with pytest.raises(ValueError, match="provider_start requires agent"):
+            provider_start(fido_dir, model=ProviderModel("claude-opus-4-6"))
 
     # ── Session path ──────────────────────────────────────────────────────
 
     def test_session_path_returns_empty_string(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
-        result = claude_start(fido_dir, session=session)
+        client = _client()
+        client.session = session
+        result = provider_start(fido_dir, agent=client, model=client.voice_model)
         assert result == ""
 
-    def test_session_path_retries_on_preempt(self, tmp_path: Path) -> None:
-        """_run_session_turn re-enters the session when last_turn_cancelled
-        is True, so a webhook steal → worker re-sends same content."""
+    def test_session_path_uses_agent_run_turn(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
-        # First turn: cancelled mid-flight (webhook stole).  Second turn:
-        # completes cleanly.
-        consume_calls = {"n": 0}
-
-        def consume_side_effect() -> str:
-            consume_calls["n"] += 1
-            if consume_calls["n"] == 1:
-                session.last_turn_cancelled = True
-            else:
-                session.last_turn_cancelled = False
-            return ""
-
-        session.consume_until_result.side_effect = consume_side_effect
-        claude_start(fido_dir, session=session)
-        assert session.send.call_count == 2
+        client = _client()
+        client.session = session
+        provider_start(fido_dir, agent=client, model=client.voice_model)
+        client.run_turn.assert_called_once()
+        assert client.run_turn.call_args.kwargs["retry_on_preempt"] is True
 
     def _mock_session(self) -> MagicMock:
         session = MagicMock()
@@ -2633,38 +2653,40 @@ class TestClaudeStart:
         (fido_dir / "skill").write_text("setup instructions")
         (fido_dir / "prompt").write_text("the task prompt")
         session = self._mock_session()
-        claude_start(fido_dir, session=session)
-        session.send.assert_called_once_with(
-            "setup instructions\n\n---\n\nthe task prompt"
+        client = _client()
+        client.session = session
+        provider_start(fido_dir, agent=client, model=client.voice_model)
+        client.run_turn.assert_called_once_with(
+            "setup instructions\n\n---\n\nthe task prompt",
+            model=client.voice_model,
+            retry_on_preempt=True,
+            fresh_session=False,
         )
 
-    def test_session_path_calls_consume_until_result(self, tmp_path: Path) -> None:
+    def test_session_path_calls_agent_once(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
-        claude_start(fido_dir, session=session)
-        session.consume_until_result.assert_called_once()
+        client = _client()
+        client.session = session
+        provider_start(fido_dir, agent=client, model=client.voice_model)
+        client.run_turn.assert_called_once()
 
     def test_session_path_does_not_call_subprocess(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
         mock_client = _client()
-        claude_start(fido_dir, session=session, claude_client=mock_client)
+        mock_client.session = session
+        provider_start(fido_dir, agent=mock_client, model=mock_client.voice_model)
         mock_client.print_prompt_from_file.assert_not_called()
 
     def test_session_path_uses_context_manager(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
-        claude_start(fido_dir, session=session)
-        session.__enter__.assert_called_once()
-        session.__exit__.assert_called_once()
-
-    def test_requires_client_when_no_session(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with pytest.raises(
-            ValueError,
-            match="claude_start requires claude_client when session is not supplied",
-        ):
-            claude_start(fido_dir)
+        client = _client()
+        client.session = session
+        provider_start(fido_dir, agent=client, model=client.voice_model)
+        session.__enter__.assert_not_called()
+        session.__exit__.assert_not_called()
 
 
 class TestClaudeRun:
@@ -2685,11 +2707,12 @@ class TestClaudeRun:
         raw = '{"type":"result","session_id":"new-sess"}'
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = raw
-        with patch(
-            "kennel.claude.extract_session_id",
-            return_value="new-sess",
-        ):
-            session_id, _ = claude_run(fido_dir, claude_client=mock_client)
+        mock_client.extract_session_id.return_value = "new-sess"
+        session_id, _ = provider_run(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.work_model,
+        )
         assert session_id == "new-sess"
 
     def test_start_returns_raw_output(self, tmp_path: Path) -> None:
@@ -2697,62 +2720,87 @@ class TestClaudeRun:
         raw = '{"type":"result","session_id":"s"}'
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = raw
-        with patch("kennel.claude.extract_session_id", return_value="s"):
-            _, output = claude_run(fido_dir, claude_client=mock_client)
+        _, output = provider_run(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.work_model,
+        )
         assert output == raw
 
     def test_start_calls_print_prompt_from_file(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = ""
-        with patch("kennel.claude.extract_session_id", return_value=""):
-            claude_run(fido_dir, claude_client=mock_client)
+        provider_run(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.work_model,
+        )
         mock_client.print_prompt_from_file.assert_called_once_with(
             fido_dir / "system",
             fido_dir / "prompt",
             "claude-sonnet-4-6",
             300,
-            cwd=None,
+            cwd=".",
         )
 
     def test_start_returns_empty_session_id_on_failure(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = ""
-        with patch("kennel.claude.extract_session_id", return_value=""):
-            session_id, _ = claude_run(fido_dir, claude_client=mock_client)
+        session_id, _ = provider_run(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.work_model,
+        )
         assert session_id == ""
 
     def test_passes_custom_model(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = ""
-        with patch("kennel.claude.extract_session_id", return_value=""):
-            claude_run(fido_dir, model="claude-opus-4-6", claude_client=mock_client)
+        provider_run(
+            fido_dir,
+            agent=mock_client,
+            model="claude-opus-4-6",
+        )
         assert mock_client.print_prompt_from_file.call_args[0][2] == "claude-opus-4-6"
 
     def test_default_model_is_sonnet(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = ""
-        with patch("kennel.claude.extract_session_id", return_value=""):
-            claude_run(fido_dir, claude_client=mock_client)
+        provider_run(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.work_model,
+        )
         assert mock_client.print_prompt_from_file.call_args[0][2] == "claude-sonnet-4-6"
 
     def test_default_timeout_is_300(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         mock_client = _client()
         mock_client.print_prompt_from_file.return_value = ""
-        with patch("kennel.claude.extract_session_id", return_value=""):
-            claude_run(fido_dir, claude_client=mock_client)
+        provider_run(
+            fido_dir,
+            agent=mock_client,
+            model=mock_client.work_model,
+        )
         assert mock_client.print_prompt_from_file.call_args[0][3] == 300
+
+    def test_requires_agent(self, tmp_path: Path) -> None:
+        fido_dir = self._setup_fido_dir(tmp_path)
+        with pytest.raises(ValueError, match="provider_run requires agent"):
+            provider_run(fido_dir, model=ProviderModel("claude-sonnet-4-6"))
 
     # ── Session path ──────────────────────────────────────────────────────
 
     def test_session_path_returns_empty_tuple(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
-        result = claude_run(fido_dir, session=session)
+        client = _client()
+        client.session = session
+        result = provider_run(fido_dir, agent=client, model=client.work_model)
         assert result == ("", "")
 
     def _mock_session(self) -> MagicMock:
@@ -2767,38 +2815,40 @@ class TestClaudeRun:
         (fido_dir / "skill").write_text("task instructions")
         (fido_dir / "prompt").write_text("run this task")
         session = self._mock_session()
-        claude_run(fido_dir, session=session)
-        session.send.assert_called_once_with(
-            "task instructions\n\n---\n\nrun this task"
+        client = _client()
+        client.session = session
+        provider_run(fido_dir, agent=client, model=client.work_model)
+        client.run_turn.assert_called_once_with(
+            "task instructions\n\n---\n\nrun this task",
+            model=client.work_model,
+            retry_on_preempt=True,
+            fresh_session=False,
         )
 
-    def test_session_path_calls_consume_until_result(self, tmp_path: Path) -> None:
+    def test_session_path_calls_agent_once(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
-        claude_run(fido_dir, session=session)
-        session.consume_until_result.assert_called_once()
+        client = _client()
+        client.session = session
+        provider_run(fido_dir, agent=client, model=client.work_model)
+        client.run_turn.assert_called_once()
 
     def test_session_path_does_not_call_subprocess(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
         mock_client = _client()
-        claude_run(fido_dir, session=session, claude_client=mock_client)
+        mock_client.session = session
+        provider_run(fido_dir, agent=mock_client, model=mock_client.work_model)
         mock_client.print_prompt_from_file.assert_not_called()
 
     def test_session_path_uses_context_manager(self, tmp_path: Path) -> None:
         fido_dir = self._setup_fido_dir(tmp_path)
         session = self._mock_session()
-        claude_run(fido_dir, session=session)
-        session.__enter__.assert_called_once()
-        session.__exit__.assert_called_once()
-
-    def test_requires_client_when_no_session(self, tmp_path: Path) -> None:
-        fido_dir = self._setup_fido_dir(tmp_path)
-        with pytest.raises(
-            ValueError,
-            match="claude_run requires claude_client when session is not supplied",
-        ):
-            claude_run(fido_dir)
+        client = _client()
+        client.session = session
+        provider_run(fido_dir, agent=client, model=client.work_model)
+        session.__enter__.assert_not_called()
+        session.__exit__.assert_not_called()
 
 
 class TestSanitizeSlug:

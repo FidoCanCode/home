@@ -175,10 +175,10 @@ def _repos_from_pid(pid: int) -> list[RepoConfig]:
             continue
         if ":" not in spec:
             continue
-        name_spec, path_str = spec.split(":", 1)
-        if "=" not in name_spec:
+        name, remainder = spec.split(":", 1)
+        if ":" not in remainder:
             continue
-        name, provider_str = name_spec.rsplit("=", 1)
+        path_str, provider_str = remainder.rsplit(":", 1)
         try:
             provider = ProviderID(provider_str)
         except ValueError:

@@ -754,7 +754,7 @@ class CopilotCLISession:
     def prompt(
         self,
         content: str,
-        model: ProviderModel | str | None = None,
+        model: ProviderModel | None = None,
         system_prompt: str | None = None,
     ) -> str:
         with self:
@@ -780,7 +780,7 @@ class CopilotCLISession:
     def recover(self) -> None:
         self._session_id = self._runtime.recover_session(self._session_id, self._model)
 
-    def reset(self, model: ProviderModel | str | None = None) -> None:
+    def reset(self, model: ProviderModel | None = None) -> None:
         effective_model = self._model if model is None else coerce_provider_model(model)
         self._session_id = self._runtime.reset_session(effective_model)
         if model is not None:
@@ -861,7 +861,7 @@ class CopilotCLIAPI(ProviderAPI):
 class CopilotCLIClient(ProviderAgent):
     """Injectable collaborator for Copilot CLI interactions."""
 
-    voice_model = ProviderModel("gpt-5.4", ("xhigh", "high"))
+    voice_model = ProviderModel("gpt-5.4", "high")
     work_model = ProviderModel("gpt-5.4", "medium")
     brief_model = ProviderModel("gpt-5.4", "low")
 
@@ -936,7 +936,7 @@ class CopilotCLIClient(ProviderAgent):
         session_id = getattr(session, "session_id")
         return session_id if isinstance(session_id, str) and session_id else None
 
-    def _spawn_owned_session(self, model: ProviderModel | str) -> PromptSession:
+    def _spawn_owned_session(self, model: ProviderModel) -> PromptSession:
         system_file = self._session_system_file
         work_dir = self._work_dir
         assert system_file is not None
@@ -944,11 +944,11 @@ class CopilotCLIClient(ProviderAgent):
         return self._session_factory(
             system_file,
             work_dir=work_dir,
-            model=coerce_provider_model(model),
+            model=model,
             repo_name=self._repo_name,
         )
 
-    def ensure_session(self, model: ProviderModel | str | None = None) -> None:
+    def ensure_session(self, model: ProviderModel | None = None) -> None:
         with self._session_lock:
             session = self._session
             if session is None:
@@ -979,7 +979,7 @@ class CopilotCLIClient(ProviderAgent):
     def _resolve_turn_session(
         self,
         *,
-        model: ProviderModel | str | None,
+        model: ProviderModel | None,
         fresh_session: bool,
     ) -> PromptSession:
         with self._session_lock:
@@ -994,19 +994,17 @@ class CopilotCLIClient(ProviderAgent):
                 return session
         if session is None:
             session = self._session_fn()
-        if not fresh_session:
-            return session
-        reset = getattr(session, "reset", None)
-        if not callable(reset):
-            raise ValueError(
-                "CopilotCLIClient.run_turn fresh_session requires resettable session"
-            )
-        reset(model)
+        if fresh_session:
+            reset = getattr(session, "reset", None)
+            if not callable(reset):
+                raise ValueError(
+                    "CopilotCLIClient.run_turn fresh_session requires resettable session"
+                )
+            reset(model)
         return session
 
     def _session_is_dead(self, session: PromptSession) -> bool:
-        is_alive = getattr(session, "is_alive", None)
-        return callable(is_alive) and is_alive() is False
+        return session.is_alive() is False
 
     def _recover_prompt_session(self, session: PromptSession) -> bool:
         recover = getattr(session, "recover", None)
@@ -1020,7 +1018,7 @@ class CopilotCLIClient(ProviderAgent):
         session: PromptSession,
         content: str,
         *,
-        model: ProviderModel | str | None,
+        model: ProviderModel | None,
         system_prompt: str | None,
     ) -> str:
         recovered = False
@@ -1065,7 +1063,7 @@ class CopilotCLIClient(ProviderAgent):
         self,
         content: str,
         *,
-        model: ProviderModel | str | None = None,
+        model: ProviderModel | None = None,
         system_prompt: str | None = None,
         retry_on_preempt: bool = False,
         fresh_session: bool = False,
@@ -1097,7 +1095,7 @@ class CopilotCLIClient(ProviderAgent):
         self,
         prompt: str,
         key: str,
-        model: ProviderModel | str,
+        model: ProviderModel,
         system_prompt: str | None = None,
     ) -> str:
         json_instruction = (
@@ -1126,7 +1124,7 @@ class CopilotCLIClient(ProviderAgent):
         self,
         prompt: str,
         system_prompt: str,
-        model: ProviderModel | str | None = None,
+        model: ProviderModel | None = None,
     ) -> str:
         return self.run_turn(
             prompt,
@@ -1138,7 +1136,7 @@ class CopilotCLIClient(ProviderAgent):
         self,
         prompt: str,
         system_prompt: str,
-        model: ProviderModel | str | None = None,
+        model: ProviderModel | None = None,
     ) -> str:
         return self._run_turn_json_value(
             prompt,
@@ -1151,10 +1149,10 @@ class CopilotCLIClient(ProviderAgent):
         self,
         system_file: Path,
         prompt_file: Path,
-        model: ProviderModel | str,
+        model: ProviderModel,
         timeout: int = 30,
         idle_timeout: float = 1800.0,
-        cwd: Path | str | None = None,
+        cwd: Path | str = ".",
     ) -> str:
         del idle_timeout
         prompt = _combine_prompt(
@@ -1167,10 +1165,10 @@ class CopilotCLIClient(ProviderAgent):
         self,
         session_id: str,
         prompt_file: Path,
-        model: ProviderModel | str,
+        model: ProviderModel,
         timeout: int = 300,
         idle_timeout: float = 1800.0,
-        cwd: Path | str | None = None,
+        cwd: Path | str = ".",
     ) -> str:
         del idle_timeout
         return self._run_cli_prompt(
@@ -1184,7 +1182,7 @@ class CopilotCLIClient(ProviderAgent):
     def generate_reply(
         self,
         prompt: str,
-        model: ProviderModel | str | None = None,
+        model: ProviderModel | None = None,
         timeout: int = 30,
     ) -> str:
         effective_model = self.voice_model if model is None else model
@@ -1199,7 +1197,7 @@ class CopilotCLIClient(ProviderAgent):
     def generate_branch_name(
         self,
         prompt: str,
-        model: ProviderModel | str | None = None,
+        model: ProviderModel | None = None,
         timeout: int = 15,
     ) -> str:
         effective_model = self.brief_model if model is None else model
@@ -1216,7 +1214,7 @@ class CopilotCLIClient(ProviderAgent):
         self,
         prompt: str,
         system_prompt: str,
-        model: ProviderModel | str | None = None,
+        model: ProviderModel | None = None,
         timeout: int = 15,
     ) -> tuple[str, str]:
         effective_model = self.voice_model if model is None else model
@@ -1234,7 +1232,7 @@ class CopilotCLIClient(ProviderAgent):
         self,
         session_id: str,
         prompt: str,
-        model: ProviderModel | str | None = None,
+        model: ProviderModel | None = None,
         timeout: int = 15,
     ) -> str:
         effective_model = self.voice_model if model is None else model
@@ -1248,6 +1246,9 @@ class CopilotCLIClient(ProviderAgent):
         except subprocess.TimeoutExpired, FileNotFoundError:
             return ""
         return extract_result_text(output).strip()
+
+    def extract_session_id(self, output: str) -> str:
+        return extract_session_id(output)
 
     def _run_cli_prompt(
         self,

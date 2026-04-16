@@ -12,7 +12,7 @@ class TestReposFromPid:
     ) -> None:
         pid = 1234
         cmdline = (
-            f"uv\x00run\x00kennel\x00owner/repo=copilot-cli:{tmp_path}\x00".encode()
+            f"uv\x00run\x00kennel\x00owner/repo:{tmp_path}:copilot-cli\x00".encode()
         )
         monkeypatch.setattr(
             Path,
@@ -29,7 +29,7 @@ class TestReposFromPid:
     ) -> None:
         pid = 1234
         cmdline = (
-            f"uv\x00run\x00kennel\x00owner/repo=bad-provider:{tmp_path}\x00".encode()
+            f"uv\x00run\x00kennel\x00owner/repo:{tmp_path}:bad-provider\x00".encode()
         )
         monkeypatch.setattr(
             Path,

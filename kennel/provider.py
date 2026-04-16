@@ -18,11 +18,11 @@ class ProviderID(StrEnum):
     GEMINI = "gemini"
 
 
-ReasoningEffort: TypeAlias = Literal["low", "medium", "high", "xhigh"]
+ReasoningEffort: TypeAlias = Literal["low", "medium", "high"]
 ReasoningEffortSpec: TypeAlias = ReasoningEffort | tuple[ReasoningEffort, ...] | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ProviderModel:
     """Explicit provider model selection, including reasoning effort when supported."""
 
@@ -37,6 +37,19 @@ class ProviderModel:
         if isinstance(self.effort, tuple):
             return self.effort
         return (self.effort,)
+
+    def __str__(self) -> str:
+        return self.model
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, ProviderModel):
+            return (self.model, self.effort) == (other.model, other.effort)
+        if isinstance(other, str):
+            return self.model == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash((self.model, self.effort))
 
 
 def coerce_provider_model(model: ProviderModel | str) -> ProviderModel:
@@ -98,10 +111,15 @@ class PromptSession(Protocol):
         """Return the subprocess PID backing the session, if any."""
         ...
 
+    @property
+    def session_id(self) -> str | None:
+        """Return the provider-native persistent session identifier, if any."""
+        ...
+
     def prompt(
         self,
         content: str,
-        model: ProviderModel | str | None = None,
+        model: ProviderModel | None = None,
         system_prompt: str | None = None,
     ) -> str:
         """Run a single prompt turn and return the final assistant text."""
@@ -124,7 +142,7 @@ class PromptSession(Protocol):
         """Wait for any queued preemption work to drain before retrying a turn."""
         ...
 
-    def switch_model(self, model: ProviderModel | str) -> None:
+    def switch_model(self, model: ProviderModel) -> None:
         """Switch the live session to *model* without resetting session state."""
         ...
 
@@ -132,7 +150,7 @@ class PromptSession(Protocol):
         """Reattach or revive the underlying session after an interruption."""
         ...
 
-    def reset(self, model: ProviderModel | str | None = None) -> None:
+    def reset(self, model: ProviderModel | None = None) -> None:
         """Reset the session, optionally selecting a fresh initial *model*."""
         ...
 
@@ -198,7 +216,7 @@ class ProviderAgent(Protocol):
         """Detach and return the current persistent session, if any."""
         ...
 
-    def ensure_session(self, model: ProviderModel | str | None = None) -> None:
+    def ensure_session(self, model: ProviderModel | None = None) -> None:
         """Ensure that a persistent session exists, optionally seeded with *model*."""
         ...
 
@@ -210,7 +228,7 @@ class ProviderAgent(Protocol):
         self,
         content: str,
         *,
-        model: ProviderModel | str | None = None,
+        model: ProviderModel | None = None,
         system_prompt: str | None = None,
         retry_on_preempt: bool = False,
         fresh_session: bool = False,
@@ -222,10 +240,10 @@ class ProviderAgent(Protocol):
         self,
         system_file: Path,
         prompt_file: Path,
-        model: ProviderModel | str,
+        model: ProviderModel,
         timeout: int = 30,
         idle_timeout: float = 1800.0,
-        cwd: Path | str | None = None,
+        cwd: Path | str = ".",
     ) -> str:
         """Run a one-shot prompt sourced from files and return raw provider output."""
         ...
@@ -234,10 +252,10 @@ class ProviderAgent(Protocol):
         self,
         session_id: str,
         prompt_file: Path,
-        model: ProviderModel | str,
+        model: ProviderModel,
         timeout: int = 300,
         idle_timeout: float = 1800.0,
-        cwd: Path | str | None = None,
+        cwd: Path | str = ".",
     ) -> str:
         """Resume a prior one-shot provider session and return raw output."""
         ...
@@ -245,7 +263,7 @@ class ProviderAgent(Protocol):
     def generate_reply(
         self,
         prompt: str,
-        model: ProviderModel | str,
+        model: ProviderModel | None = None,
         timeout: int = 30,
     ) -> str:
         """Generate a short natural-language reply for a GitHub comment flow."""
@@ -254,7 +272,7 @@ class ProviderAgent(Protocol):
     def generate_branch_name(
         self,
         prompt: str,
-        model: ProviderModel | str,
+        model: ProviderModel | None = None,
         timeout: int = 15,
     ) -> str:
         """Generate a git branch-name slug from *prompt*."""
@@ -264,7 +282,7 @@ class ProviderAgent(Protocol):
         self,
         prompt: str,
         system_prompt: str,
-        model: ProviderModel | str,
+        model: ProviderModel | None = None,
     ) -> str:
         """Generate a two-line GitHub status message."""
         ...
@@ -273,7 +291,7 @@ class ProviderAgent(Protocol):
         self,
         prompt: str,
         system_prompt: str,
-        model: ProviderModel | str,
+        model: ProviderModel | None = None,
     ) -> str:
         """Generate a single emoji suitable for a GitHub status."""
         ...
@@ -282,7 +300,7 @@ class ProviderAgent(Protocol):
         self,
         prompt: str,
         system_prompt: str,
-        model: ProviderModel | str,
+        model: ProviderModel | None = None,
         timeout: int = 15,
     ) -> tuple[str, str]:
         """Generate a status and return ``(status_text, resumable_session_id)``."""
@@ -292,10 +310,14 @@ class ProviderAgent(Protocol):
         self,
         session_id: str,
         prompt: str,
-        model: ProviderModel | str,
+        model: ProviderModel | None = None,
         timeout: int = 15,
     ) -> str:
         """Resume a prior status-generation session and return the refined text."""
+        ...
+
+    def extract_session_id(self, output: str) -> str:
+        """Extract a session id from provider-specific raw one-shot output."""
         ...
 
 

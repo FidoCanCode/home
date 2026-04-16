@@ -18,7 +18,7 @@ class TestFromArgs:
             [
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo=claude-code:{repo_dir}",
+                f"owner/repo:{repo_dir}:claude-code",
             ]
         )
         assert cfg.secret == b"my-secret"
@@ -35,7 +35,7 @@ class TestFromArgs:
             [
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo=claude-code:{repo_dir}",
+                f"owner/repo:{repo_dir}:claude-code",
             ]
         )
         assert cfg.port == 9000
@@ -53,7 +53,7 @@ class TestFromArgs:
                 "8080",
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo=claude-code:{repo_dir}",
+                f"owner/repo:{repo_dir}:claude-code",
             ]
         )
         assert cfg.port == 8080
@@ -69,7 +69,7 @@ class TestFromArgs:
                 "bot1[bot],bot2[bot]",
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo=claude-code:{repo_dir}",
+                f"owner/repo:{repo_dir}:claude-code",
             ]
         )
         assert cfg.allowed_bots == frozenset({"bot1[bot]", "bot2[bot]"})
@@ -82,7 +82,7 @@ class TestFromArgs:
                 [
                     "--secret-file",
                     str(tmp_path / "nonexistent"),
-                    f"owner/repo=claude-code:{repo_dir}",
+                    f"owner/repo:{repo_dir}:claude-code",
                 ]
             )
 
@@ -106,7 +106,7 @@ class TestFromArgs:
                 [
                     "--secret-file",
                     str(secret_file),
-                    f"owner/repo=claude-code:{tmp_path / 'nonexistent'}",
+                    f"owner/repo:{tmp_path / 'nonexistent'}:claude-code",
                 ]
             )
 
@@ -121,8 +121,8 @@ class TestFromArgs:
             [
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo1=claude-code:{dir1}",
-                f"owner/repo2=copilot-cli:{dir2}",
+                f"owner/repo1:{dir1}:claude-code",
+                f"owner/repo2:{dir2}:copilot-cli",
             ]
         )
         assert "owner/repo1" in cfg.repos
@@ -137,7 +137,7 @@ class TestFromArgs:
             [
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo=claude-code:{repo_dir}",
+                f"owner/repo:{repo_dir}:claude-code",
             ]
         )
         assert cfg.sub_dir.name == "sub"
@@ -151,7 +151,7 @@ class TestFromArgs:
             [
                 "--secret-file",
                 str(secret_file),
-                f"owner/repo=copilot-cli:{repo_dir}",
+                f"owner/repo:{repo_dir}:copilot-cli",
             ]
         )
         assert cfg.repos["owner/repo"].provider == ProviderID.COPILOT_CLI
@@ -166,7 +166,7 @@ class TestFromArgs:
                 [
                     "--secret-file",
                     str(secret_file),
-                    f"owner/repo=wat:{repo_dir}",
+                    f"owner/repo:{repo_dir}:wat",
                 ]
             )
 
@@ -175,7 +175,7 @@ class TestFromArgs:
         secret_file.write_text("s")
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
-        with pytest.raises(SystemExit, match="expected name=provider:path"):
+        with pytest.raises(SystemExit, match="expected name:path:provider"):
             Config.from_args(
                 [
                     "--secret-file",

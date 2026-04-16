@@ -1,4 +1,4 @@
-"""Provider construction and provider-specific helpers."""
+"""Provider construction."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from pathlib import Path
 from kennel.claude import ClaudeClient, ClaudeCode
 from kennel.config import RepoConfig
 from kennel.copilotcli import CopilotCLI, CopilotCLIClient
-from kennel.copilotcli import extract_session_id as extract_copilot_session_id
 from kennel.provider import PromptSession, Provider, ProviderAgent, ProviderID
 
 
@@ -31,7 +30,7 @@ class DefaultProviderFactory:
                     agent=ClaudeClient(
                         session_system_file=self._session_system_file,
                         work_dir=work_dir,
-                        repo_name=repo_name or None,
+                        repo_name=repo_name,
                         session=session,
                     )
                 )
@@ -40,7 +39,7 @@ class DefaultProviderFactory:
                     agent=CopilotCLIClient(
                         session_system_file=self._session_system_file,
                         work_dir=work_dir,
-                        repo_name=repo_name or None,
+                        repo_name=repo_name,
                         session=session,
                     )
                 )
@@ -60,14 +59,3 @@ class DefaultProviderFactory:
             repo_name=repo_name,
             session=None,
         ).agent
-
-
-def extract_provider_session_id(provider: ProviderAgent, output: str) -> str:
-    """Extract a session id from provider-specific raw one-shot output."""
-    if provider.provider_id == ProviderID.CLAUDE_CODE:
-        from kennel.claude import extract_session_id as extract_claude_session_id
-
-        return extract_claude_session_id(output)
-    if provider.provider_id == ProviderID.COPILOT_CLI:
-        return extract_copilot_session_id(output)
-    raise ValueError(f"unsupported provider: {provider.provider_id}")
