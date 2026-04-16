@@ -143,41 +143,41 @@ class TestSetGhStatus:
             set_gh_status("test", persona_path=persona_file, _gh=mock_gh)
             mock_cls.assert_called_once_with()
 
-    def test_tries_next_provider_when_first_fails(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_falls_back_to_nap_message_when_provider_fails(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("persona")
         mock_gh = MagicMock()
-        first = _client()
-        first.run_turn.side_effect = RuntimeError("nope")
-        second = _client()
-        second.run_turn.return_value = "back soon"
-        second.generate_status_emoji.return_value = ":dog:"
+        mock_client = _client()
+        mock_client.run_turn.side_effect = RuntimeError("boom")
 
         set_gh_status(
             "test",
             persona_path=persona_file,
+            provider=mock_client,
             _gh=mock_gh,
-            _provider_factories=(lambda: first, lambda: second),
-        )
-
-        mock_gh.set_user_status.assert_called_once_with("back soon", ":dog:", busy=True)
-
-    def test_falls_back_to_nap_message_when_all_providers_fail(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
-        persona_file = tmp_path / "persona.md"
-        persona_file.write_text("persona")
-        mock_gh = MagicMock()
-        first = _client()
-        first.run_turn.side_effect = RuntimeError("boom")
-        second = _client()
-        second.run_turn.side_effect = RuntimeError("still boom")
-
-        set_gh_status(
-            "test",
-            persona_path=persona_file,
-            _gh=mock_gh,
-            _provider_factories=(lambda: first, lambda: second),
             _choice=lambda options: options[7],
         )
+
+        mock_gh.set_user_status.assert_called_once_with(
+            "Sleeping off a big debugging session.",
+            ":sleeping:",
+            busy=True,
+        )
+
+    def test_falls_back_to_nap_message_when_default_client_fails(
+        self, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        persona_file = tmp_path / "persona.md"
+        persona_file.write_text("persona")
+        mock_gh = MagicMock()
+        with patch("kennel.gh_status.ClaudeClient", return_value=_client()) as mock_cls:
+            mock_cls.return_value.run_turn.side_effect = RuntimeError("boom")
+            set_gh_status(
+                "test",
+                persona_path=persona_file,
+                _gh=mock_gh,
+                _choice=lambda options: options[7],
+            )
 
         mock_gh.set_user_status.assert_called_once_with(
             "Sleeping off a big debugging session.",

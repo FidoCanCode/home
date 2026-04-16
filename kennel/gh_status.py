@@ -134,20 +134,6 @@ _NAP_MESSAGES = (
 )
 
 
-def _default_provider_factories() -> tuple[Callable[[], ProviderAgent], ...]:
-    """Return the currently available provider constructors for gh-status."""
-    return (ClaudeClient,)
-
-
-def _candidate_providers(
-    provider: ProviderAgent | None,
-    provider_factories: Sequence[Callable[[], ProviderAgent]],
-) -> tuple[ProviderAgent, ...]:
-    if provider is not None:
-        return (provider,)
-    return tuple(factory() for factory in provider_factories)
-
-
 def generate_persona_status(
     message: str,
     persona: str,
@@ -192,33 +178,25 @@ def set_gh_status(
     persona_path: Path = _PERSONA_PATH,
     provider: ProviderAgent | None = None,
     _gh: GitHub,
-    _provider_factories: Sequence[Callable[[], ProviderAgent]] | None = None,
     _choice: Callable[[Sequence[str]], str] = random.choice,
 ) -> None:
     try:
         persona = persona_path.read_text()
     except FileNotFoundError:
         persona = ""
-    providers = _candidate_providers(
-        provider,
-        _default_provider_factories()
-        if _provider_factories is None
-        else tuple(_provider_factories),
-    )
-    for current_provider in providers:
-        try:
-            text = generate_persona_status(message, persona, provider=current_provider)
-            emoji = generate_persona_emoji(text, persona, provider=current_provider)
-        except Exception as exc:
-            log.warning(
-                "set_gh_status: provider %s failed, trying next: %s",
-                getattr(current_provider, "provider_id", "unknown"),
-                exc,
-            )
-            continue
-        _gh.set_user_status(text, emoji, busy=True)
+    current_provider = ClaudeClient() if provider is None else provider
+    try:
+        text = generate_persona_status(message, persona, provider=current_provider)
+        emoji = generate_persona_emoji(text, persona, provider=current_provider)
+    except Exception as exc:
+        log.warning(
+            "set_gh_status: provider %s failed: %s",
+            getattr(current_provider, "provider_id", "unknown"),
+            exc,
+        )
+        _gh.set_user_status(_choice(_NAP_MESSAGES), ":sleeping:", busy=True)
         return
-    _gh.set_user_status(_choice(_NAP_MESSAGES), ":sleeping:", busy=True)
+    _gh.set_user_status(text, emoji, busy=True)
 
 
 def main(argv: list[str], *, _GitHub: type[GitHub] = GitHub) -> None:
