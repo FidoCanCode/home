@@ -62,7 +62,7 @@ class TestGeneratePersonaStatus:
 class TestGeneratePersonaEmoji:
     def test_happy_path(self) -> None:
         mock_client = _client()
-        mock_client.print_prompt_json.return_value = ":wrench:"
+        mock_client.generate_status_emoji.return_value = ":wrench:"
         result = generate_persona_emoji(
             "fixing bugs",
             "persona",
@@ -72,13 +72,13 @@ class TestGeneratePersonaEmoji:
 
     def test_empty_response_raises(self) -> None:
         mock_client = _client()
-        mock_client.print_prompt_json.return_value = ""
+        mock_client.generate_status_emoji.return_value = ""
         with pytest.raises(ValueError, match="generate_persona_emoji"):
             generate_persona_emoji("test", "persona", provider=mock_client)
 
     def test_empty_persona(self) -> None:
         mock_client = _client()
-        mock_client.print_prompt_json.return_value = ":rocket:"
+        mock_client.generate_status_emoji.return_value = ":rocket:"
         result = generate_persona_emoji("test", "", provider=mock_client)
         assert result == ":rocket:"
 
@@ -87,7 +87,7 @@ class TestGeneratePersonaEmoji:
             "kennel.gh_status.ClaudeClient",
             return_value=_client(),
         ) as mock_cls:
-            mock_cls.return_value.print_prompt_json.return_value = ":dog:"
+            mock_cls.return_value.generate_status_emoji.return_value = ":dog:"
             generate_persona_emoji("test", "persona")
             mock_cls.assert_called_once_with()
 
@@ -99,7 +99,7 @@ class TestSetGhStatus:
         mock_gh = MagicMock()
         mock_client = _client()
         mock_client.run_turn.return_value = "sniffing around"
-        mock_client.print_prompt_json.return_value = ":dog2:"
+        mock_client.generate_status_emoji.return_value = ":dog2:"
 
         set_gh_status(
             "diagnosing issue",
@@ -115,7 +115,7 @@ class TestSetGhStatus:
         mock_gh = MagicMock()
         mock_client = _client()
         mock_client.run_turn.return_value = "woof"
-        mock_client.print_prompt_json.return_value = ":dog:"
+        mock_client.generate_status_emoji.return_value = ":dog:"
 
         set_gh_status(
             "test",
@@ -139,7 +139,7 @@ class TestSetGhStatus:
             return_value=_client(),
         ) as mock_cls:
             mock_cls.return_value.run_turn.return_value = "woof"
-            mock_cls.return_value.print_prompt_json.return_value = ":dog:"
+            mock_cls.return_value.generate_status_emoji.return_value = ":dog:"
             set_gh_status("test", persona_path=persona_file, _gh=mock_gh)
             mock_cls.assert_called_once_with()
 
@@ -151,7 +151,7 @@ class TestSetGhStatus:
         first.run_turn.side_effect = RuntimeError("nope")
         second = _client()
         second.run_turn.return_value = "back soon"
-        second.print_prompt_json.return_value = ":dog:"
+        second.generate_status_emoji.return_value = ":dog:"
 
         set_gh_status(
             "test",

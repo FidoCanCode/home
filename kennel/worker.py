@@ -592,6 +592,7 @@ def _has_pending_asks(task_list: list[dict[str, Any]]) -> bool:
 
 
 _DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED"}
+_FRESH_SESSION_NUDGE_ATTEMPT = 4
 
 
 def _no_commit_nudge(
@@ -637,6 +638,45 @@ def _no_commit_nudge(
         "blocking you and why — so a human can unblock you.  Do not "
         "just describe the situation internally; post the comment.\n\n"
         "Do not respond with a plan — just act."
+    )
+
+
+def _fresh_session_nudge(
+    task_title: str,
+    task_id: str,
+    work_dir: Path | str,
+    pr_number: int | None,
+    branch: str,
+) -> str:
+    r"""Build the self-contained recovery prompt for a fresh-session retry.
+
+    This prompt is used only when repeated nudges failed and the persistent
+    conversation was intentionally reset.  It must therefore restate the work
+    clearly enough for a brand-new session to resume without prior context.
+    """
+    complete_cmd = f"kennel task complete {work_dir} {task_id}"
+    pr_comment_cmd = (
+        f"gh pr comment {pr_number} --body 'BLOCKED: ...'"
+        if pr_number is not None
+        else "gh pr comment <pr> --body 'BLOCKED: ...'"
+    )
+    return (
+        "Fresh-session recovery: the previous attempts failed repeatedly, so "
+        "the session context was intentionally wiped before this retry.\n\n"
+        f"Current work:\n"
+        f"- Branch: {branch}\n"
+        f"- Task title: {task_title}\n"
+        f"- Task id: {task_id}\n"
+        f"- PR: {pr_number if pr_number is not None else '<pr>'}\n\n"
+        "What to do now:\n"
+        "1. Re-establish context from the repo and current branch state.\n"
+        "2. Continue this task immediately.\n"
+        "3. Take exactly one concrete action before stopping:\n"
+        "   - commit the changes you made (`git add -A && git commit`)\n"
+        f"   - mark the task complete: `{complete_cmd}`\n"
+        f"   - if blocked by something outside your control, post a real "
+        f"blocking comment with `{pr_comment_cmd}`\n\n"
+        "Do not answer with a summary or plan. Act on the task."
     )
 
 
@@ -1744,6 +1784,7 @@ class Worker:
 
         # Resume loop: let Claude cook until commits appear
         attempt = 0
+        fresh_session_retry_used = False
         while head_before == head_after:
             # If the task was completed externally (e.g. via `kennel task
             # complete`) while we were waiting, stop retrying — the work is
@@ -1758,21 +1799,42 @@ class Worker:
                 )
                 break
             attempt += 1
-            nudge = _no_commit_nudge(
-                attempt, task_title, task["id"], self.work_dir, pr_number
+            use_fresh_session = (
+                attempt >= _FRESH_SESSION_NUDGE_ATTEMPT and not fresh_session_retry_used
+            )
+            nudge = (
+                _fresh_session_nudge(
+                    task_title,
+                    task["id"],
+                    self.work_dir,
+                    pr_number,
+                    slug,
+                )
+                if use_fresh_session
+                else _no_commit_nudge(
+                    attempt, task_title, task["id"], self.work_dir, pr_number
+                )
             )
             (fido_dir / "prompt").write_text(nudge)
-            log.info(
-                "task produced no commits — nudging session (attempt %d)",
-                attempt,
-            )
+            if use_fresh_session:
+                fresh_session_retry_used = True
+                log.info(
+                    "task produced no commits — retrying with fresh session (attempt %d)",
+                    attempt,
+                )
+            else:
+                log.info(
+                    "task produced no commits — nudging session (attempt %d)",
+                    attempt,
+                )
+            fresh_session = self._consume_fresh_session() or use_fresh_session
             session_id, _output = claude_run(
                 fido_dir,
                 model=self._claude_client.work_model,
                 cwd=self.work_dir,
                 session=self._session,
                 claude_client=self._claude_client,
-                fresh_session=self._consume_fresh_session(),
+                fresh_session=fresh_session,
             )
             log.info("task resume done (session=%s)", session_id)
             head_after = self._git(["rev-parse", "HEAD"]).stdout.strip()

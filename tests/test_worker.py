@@ -1824,6 +1824,20 @@ class TestNoCommitNudge:
         assert "gh pr comment <pr>" in msg
 
 
+class TestFreshSessionNudge:
+    def test_includes_context_reset_and_task_details(self) -> None:
+        from kennel.worker import _fresh_session_nudge
+
+        msg = _fresh_session_nudge("Fix widget", "task-7", "/repo/work", 42, "br-7")
+        assert "session context was intentionally wiped" in msg
+        assert "Task title: Fix widget" in msg
+        assert "Task id: task-7" in msg
+        assert "Branch: br-7" in msg
+        assert "PR: 42" in msg
+        assert "kennel task complete /repo/work task-7" in msg
+        assert "gh pr comment 42 --body 'BLOCKED:" in msg
+
+
 class TestPickNextIssue:
     """Direct unit tests for _pick_next_issue / _walk_to_root / _descend_issue."""
 
@@ -6834,6 +6848,49 @@ class TestExecuteTask:
         mock_run.assert_called_once()
         # complete_by_id still called (idempotent — task already completed externally)
         mock_complete.assert_called_once_with(task["id"])
+
+    def test_uses_fresh_session_once_after_repeated_no_commit_nudges(
+        self, tmp_path: Path
+    ) -> None:
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        (fido_dir / "prompt").write_text("initial prompt")
+        task = self._pending_task("Fix widget")
+        git_mock = MagicMock(
+            side_effect=lambda args, **kw: MagicMock(
+                returncode=0,
+                stdout="aaa" if args == ["rev-parse", "HEAD"] else "",
+                stderr="",
+            )
+        )
+        prompt_snapshots: list[str] = []
+        run_calls = 0
+
+        def fake_run(fd, *args, **kwargs):
+            nonlocal run_calls
+            run_calls += 1
+            prompt_snapshots.append((fd / "prompt").read_text())
+            if run_calls == 6:
+                worker._abort_task.set()
+            return ("sess", "")
+
+        with (
+            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.claude_run", side_effect=fake_run) as mock_run,
+            patch.object(worker, "_git", git_mock),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.tasks.Tasks.complete_by_id"),
+            patch("kennel.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 42, "br-42")
+
+        fresh_flags = [call.kwargs["fresh_session"] for call in mock_run.call_args_list]
+        assert fresh_flags == [False, False, False, False, True, False]
+        assert "session context was intentionally wiped" in prompt_snapshots[4]
+        assert "Task title: Fix widget" in prompt_snapshots[4]
+        assert "Branch: br-42" in prompt_snapshots[4]
 
     def test_saves_current_task_id_to_state_before_claude_run(
         self, tmp_path: Path

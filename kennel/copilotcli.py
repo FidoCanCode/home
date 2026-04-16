@@ -1093,7 +1093,7 @@ class CopilotCLIClient(ProviderAgent):
                 "CopilotCLIClient.run_turn: preempted mid-flight — retry %d", attempt
             )
 
-    def print_prompt_json(
+    def _run_turn_json_value(
         self,
         prompt: str,
         key: str,
@@ -1140,9 +1140,10 @@ class CopilotCLIClient(ProviderAgent):
         system_prompt: str,
         model: ProviderModel | str | None = None,
     ) -> str:
-        return self.run_turn(
+        return self._run_turn_json_value(
             prompt,
-            model=self.voice_model if model is None else model,
+            "emoji",
+            self.voice_model if model is None else model,
             system_prompt=system_prompt,
         )
 

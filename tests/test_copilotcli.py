@@ -945,7 +945,6 @@ class TestCopilotCLIClient:
             work_dir=tmp_path,
         )
 
-        assert client.print_prompt_json("q", "emoji", client.voice_model) == "rocket"
         assert client.print_prompt_from_file(
             system_file, prompt_file, client.work_model
         ) == _copilot_output("line1\nline2")
@@ -968,7 +967,7 @@ class TestCopilotCLIClient:
 
     def test_status_helpers_delegate_to_run_turn(self) -> None:
         session = MagicMock()
-        session.prompt.return_value = "ok"
+        session.prompt.side_effect = ["ok", '{"emoji": "ok"}']
         client = CopilotCLIClient(session=session)
         assert client.generate_status("status", "system", client.voice_model) == "ok"
         assert (
@@ -981,12 +980,14 @@ class TestCopilotCLIClient:
         )
         assert client.generate_reply("reply", client.voice_model) == ""
 
-    def test_empty_or_malformed_json_and_other_failures(self, tmp_path: Path) -> None:
+    def test_generate_status_emoji_handles_empty_or_malformed_json(
+        self, tmp_path: Path
+    ) -> None:
         session = MagicMock()
         session.prompt.side_effect = ["", "not json"]
         client = CopilotCLIClient(session=session)
-        assert client.print_prompt_json("q", "emoji", client.voice_model) == ""
-        assert client.print_prompt_json("q", "emoji", client.voice_model) == ""
+        assert client.generate_status_emoji("q", "sys", client.voice_model) == ""
+        assert client.generate_status_emoji("q", "sys", client.voice_model) == ""
 
         runner = MagicMock(side_effect=FileNotFoundError("missing"))
         client = CopilotCLIClient(runner=runner, work_dir=tmp_path)

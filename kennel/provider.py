@@ -218,16 +218,6 @@ class ProviderAgent(Protocol):
         """Run one interactive turn through the persistent session and return text."""
         ...
 
-    def print_prompt_json(
-        self,
-        prompt: str,
-        key: str,
-        model: ProviderModel | str,
-        system_prompt: str | None = None,
-    ) -> str:
-        """Run a one-shot prompt expected to return JSON and extract *key*."""
-        ...
-
     def print_prompt_from_file(
         self,
         system_file: Path,

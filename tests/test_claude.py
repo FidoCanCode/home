@@ -2681,45 +2681,45 @@ class TestClaudeCode:
         agent.attach_session.assert_called_once_with(session)
 
 
-class TestClaudeClientPrintPromptJson:
+class TestClaudeClientGenerateStatusEmoji:
     def test_extracts_json_value(self) -> None:
         session = MagicMock()
-        session.prompt.return_value = '{"answer": "42"}'
+        session.prompt.return_value = '{"emoji": "42"}'
         client = ClaudeClient(session_fn=lambda: session)
-        assert client.print_prompt_json("q", "answer", "claude-opus-4-6") == "42"
+        assert client.generate_status_emoji("q", "sys", "claude-opus-4-6") == "42"
 
     def test_returns_empty_on_empty_response(self) -> None:
         session = MagicMock()
         session.prompt.return_value = ""
         client = ClaudeClient(session_fn=lambda: session)
-        assert client.print_prompt_json("q", "answer", "claude-opus-4-6") == ""
+        assert client.generate_status_emoji("q", "sys", "claude-opus-4-6") == ""
 
     def test_returns_empty_on_malformed_json(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "not json"
         client = ClaudeClient(session_fn=lambda: session)
-        assert client.print_prompt_json("q", "answer", "claude-opus-4-6") == ""
+        assert client.generate_status_emoji("q", "sys", "claude-opus-4-6") == ""
 
     def test_scans_for_json_in_preamble(self) -> None:
         session = MagicMock()
-        session.prompt.return_value = 'Here is the answer: {"answer": "yes"}'
+        session.prompt.return_value = 'Here is the answer: {"emoji": "yes"}'
         client = ClaudeClient(session_fn=lambda: session)
-        assert client.print_prompt_json("q", "answer", "claude-opus-4-6") == "yes"
+        assert client.generate_status_emoji("q", "sys", "claude-opus-4-6") == "yes"
 
     def test_appends_json_instruction_to_system(self) -> None:
         session = MagicMock()
-        session.prompt.return_value = '{"k": "v"}'
+        session.prompt.return_value = '{"emoji": "v"}'
         client = ClaudeClient(session_fn=lambda: session)
-        client.print_prompt_json("q", "k", "claude-opus-4-6", system_prompt="sys")
+        client.generate_status_emoji("q", "sys", "claude-opus-4-6")
         sp = session.prompt.call_args.kwargs["system_prompt"]
         assert sp.startswith("sys\n\n")
-        assert '"k"' in sp
+        assert '"emoji"' in sp
 
     def test_json_instruction_only_when_no_system(self) -> None:
         session = MagicMock()
-        session.prompt.return_value = '{"k": "v"}'
+        session.prompt.return_value = '{"emoji": "v"}'
         client = ClaudeClient(session_fn=lambda: session)
-        client.print_prompt_json("q", "k", "claude-opus-4-6")
+        client.generate_status_emoji("q", "", "claude-opus-4-6")
         sp = session.prompt.call_args.kwargs["system_prompt"]
         assert "Respond with ONLY" in sp
 
@@ -2727,13 +2727,13 @@ class TestClaudeClientPrintPromptJson:
         session = MagicMock()
         session.prompt.return_value = '{"other": "val"}'
         client = ClaudeClient(session_fn=lambda: session)
-        assert client.print_prompt_json("q", "answer", "claude-opus-4-6") == ""
+        assert client.generate_status_emoji("q", "sys", "claude-opus-4-6") == ""
 
     def test_returns_empty_when_value_not_string(self) -> None:
         session = MagicMock()
-        session.prompt.return_value = '{"answer": 42}'
+        session.prompt.return_value = '{"emoji": 42}'
         client = ClaudeClient(session_fn=lambda: session)
-        assert client.print_prompt_json("q", "answer", "claude-opus-4-6") == ""
+        assert client.generate_status_emoji("q", "sys", "claude-opus-4-6") == ""
 
 
 class TestClaudeClientGenerateStatus:
@@ -2757,19 +2757,24 @@ class TestClaudeClientGenerateStatus:
         assert session.prompt.call_args.kwargs["model"] == "claude-sonnet-4-6"
 
 
-class TestClaudeClientGenerateStatusEmoji:
+class TestClaudeClientGenerateStatusEmojiDelegation:
     def test_delegates_to_run_turn(self) -> None:
         session = MagicMock()
-        session.prompt.return_value = "🐕"
+        session.prompt.return_value = '{"emoji": "🐕"}'
         client = ClaudeClient(session_fn=lambda: session)
         assert client.generate_status_emoji("pick emoji", "be fido") == "🐕"
         session.prompt.assert_called_once_with(
-            "pick emoji", model="claude-opus-4-6", system_prompt="be fido"
+            "pick emoji",
+            model="claude-opus-4-6",
+            system_prompt=(
+                "be fido\n\nRespond with ONLY a JSON object in the form "
+                '{"emoji": "your answer"}. No other text before or after the JSON.'
+            ),
         )
 
     def test_custom_model(self) -> None:
         session = MagicMock()
-        session.prompt.return_value = "🐕"
+        session.prompt.return_value = '{"emoji": "🐕"}'
         client = ClaudeClient(session_fn=lambda: session)
         client.generate_status_emoji("pick", "sys", model="claude-sonnet-4-6")
         assert session.prompt.call_args.kwargs["model"] == "claude-sonnet-4-6"

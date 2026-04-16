@@ -176,14 +176,13 @@ def generate_persona_emoji(
     if provider is None:
         provider = ClaudeClient()
     system = f"{persona}\n\n{_EMOJI_SYSTEM}" if persona else _EMOJI_SYSTEM
-    result = provider.print_prompt_json(
-        prompt=f"Pick an emoji for this status: {status_text}",
-        key="emoji",
+    result = provider.generate_status_emoji(
+        f"Pick an emoji for this status: {status_text}",
+        system,
         model=provider.voice_model,
-        system_prompt=system,
     )
     if not result:
-        raise ValueError("generate_persona_emoji: print_prompt_json returned empty")
+        raise ValueError("generate_persona_emoji: generate_status_emoji returned empty")
     return result
 
 

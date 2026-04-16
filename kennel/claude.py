@@ -1653,7 +1653,7 @@ class ClaudeClient(ProviderAgent):
             attempt += 1
             log.info("ClaudeClient.run_turn: preempted mid-flight — retry %d", attempt)
 
-    def print_prompt_json(
+    def _run_turn_json_value(
         self,
         prompt: str,
         key: str,
@@ -1705,9 +1705,10 @@ class ClaudeClient(ProviderAgent):
         model: ProviderModel | str | None = None,
     ) -> str:
         """Ask claude to choose a single emoji for a GitHub status."""
-        return self.run_turn(
+        return self._run_turn_json_value(
             prompt,
-            model=model_name(self.voice_model if model is None else model),
+            "emoji",
+            model_name(self.voice_model if model is None else model),
             system_prompt=system_prompt,
         )
 
