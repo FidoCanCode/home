@@ -10,7 +10,7 @@ from pathlib import Path
 
 from kennel.claude import ClaudeClient
 from kennel.github import GitHub
-from kennel.provider import Provider
+from kennel.provider import ProviderAgent
 
 log = logging.getLogger(__name__)
 
@@ -134,15 +134,15 @@ _NAP_MESSAGES = (
 )
 
 
-def _default_provider_factories() -> tuple[Callable[[], Provider], ...]:
+def _default_provider_factories() -> tuple[Callable[[], ProviderAgent], ...]:
     """Return the currently available provider constructors for gh-status."""
     return (ClaudeClient,)
 
 
 def _candidate_providers(
-    provider: Provider | None,
-    provider_factories: Sequence[Callable[[], Provider]],
-) -> tuple[Provider, ...]:
+    provider: ProviderAgent | None,
+    provider_factories: Sequence[Callable[[], ProviderAgent]],
+) -> tuple[ProviderAgent, ...]:
     if provider is not None:
         return (provider,)
     return tuple(factory() for factory in provider_factories)
@@ -152,7 +152,7 @@ def generate_persona_status(
     message: str,
     persona: str,
     *,
-    provider: Provider | None = None,
+    provider: ProviderAgent | None = None,
 ) -> str:
     if provider is None:
         provider = ClaudeClient()
@@ -171,7 +171,7 @@ def generate_persona_emoji(
     status_text: str,
     persona: str,
     *,
-    provider: Provider | None = None,
+    provider: ProviderAgent | None = None,
 ) -> str:
     if provider is None:
         provider = ClaudeClient()
@@ -191,9 +191,9 @@ def set_gh_status(
     message: str,
     *,
     persona_path: Path = _PERSONA_PATH,
-    provider: Provider | None = None,
+    provider: ProviderAgent | None = None,
     _gh: GitHub,
-    _provider_factories: Sequence[Callable[[], Provider]] | None = None,
+    _provider_factories: Sequence[Callable[[], ProviderAgent]] | None = None,
     _choice: Callable[[Sequence[str]], str] = random.choice,
 ) -> None:
     try:
