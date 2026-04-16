@@ -26,6 +26,7 @@ from kennel.provider import (
     Provider,
     ProviderAgent,
     ProviderModel,
+    ProviderPressureStatus,
 )
 from kennel.provider_factory import DefaultProviderFactory
 from kennel.state import (
@@ -216,6 +217,23 @@ def _parse_status_nudge(raw: str) -> tuple[str, str]:
         if isinstance(status, str) and isinstance(emoji, str):
             return status, emoji
     return "", ""
+
+
+def _format_provider_reset_time(resets_at: datetime | None) -> str:
+    if resets_at is None:
+        return "a little while"
+    return resets_at.astimezone(timezone.utc).strftime("%H:%M UTC")
+
+
+def _provider_pause_activity(status: ProviderPressureStatus) -> str:
+    until = _format_provider_reset_time(status.resets_at)
+    percent = f"{status.percent_used}%" if status.percent_used is not None else "limit"
+    return f"Paused for {status.provider} reset ({percent}, until {until})"
+
+
+def _provider_pause_status_text(status: ProviderPressureStatus) -> str:
+    until = _format_provider_reset_time(status.resets_at)
+    return f"Leaving the last 5% for the human until {until}."
 
 
 def _sanitize_slug(raw: str, fallback: str) -> str:
@@ -1009,6 +1027,29 @@ class Worker:
             self.gh.set_user_status(text, emoji, busy=busy)
             log.info("set_status: %s %s", emoji, text)
 
+    def _provider_pressure_status(self) -> ProviderPressureStatus:
+        """Return the normalized pressure summary for this worker's provider."""
+        return ProviderPressureStatus.from_snapshot(
+            self._ensure_provider().api.get_limit_snapshot()
+        )
+
+    def _set_provider_pause_status(self, status: ProviderPressureStatus) -> None:
+        """Publish a direct break status without consuming more provider budget."""
+        what = _provider_pause_activity(status)
+        ctx = (
+            self._registry.status_update()
+            if self._registry is not None
+            else nullcontext()
+        )
+        with ctx:
+            if self._registry is not None:
+                self._registry.report_activity(self._repo_name, what, False)
+            self.gh.set_user_status(
+                _provider_pause_status_text(status),
+                ":sleeping:",
+                busy=False,
+            )
+
     def find_next_issue(self, fido_dir: Path, repo_ctx: RepoContext) -> int | None:
         """Find the next eligible open issue assigned to gh_user.
 
@@ -1020,6 +1061,15 @@ class Worker:
         are needed during the walk.
         """
         log.info("finding next eligible issue")
+        provider_status = self._provider_pressure_status()
+        if provider_status.paused:
+            log.info(
+                "provider %s is paused at %s%% — leaving the last 5%% for the human",
+                provider_status.provider,
+                provider_status.percent_used,
+            )
+            self._set_provider_pause_status(provider_status)
+            return None
         all_issues = self.gh.find_all_open_issues(repo_ctx.owner, repo_ctx.repo_name)
         issue_index: dict[int, dict[str, Any]] = {i["number"]: i for i in all_issues}
         candidates = self.gh.find_issues(

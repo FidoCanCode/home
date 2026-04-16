@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, PropertyMock, patch
 
@@ -16,7 +17,12 @@ import kennel.worker as worker_module
 from kennel.claude import ClaudeClient
 from kennel.config import RepoConfig, RepoMembership
 from kennel.prompts import Prompts
-from kennel.provider import ProviderID, ProviderModel
+from kennel.provider import (
+    ProviderID,
+    ProviderLimitSnapshot,
+    ProviderLimitWindow,
+    ProviderModel,
+)
 from kennel.state import (
     State,
     _resolve_git_dir,
@@ -1512,7 +1518,11 @@ class TestWorkerFindNextIssue:
 
     def _make_worker(self, tmp_path: Path) -> tuple["Worker", MagicMock]:
         gh = MagicMock()
-        return Worker(tmp_path, gh), gh
+        provider = MagicMock()
+        provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE
+        )
+        return Worker(tmp_path, gh, provider=provider), gh
 
     def _make_repo_ctx(
         self,
@@ -1543,6 +1553,87 @@ class TestWorkerFindNextIssue:
         with patch.object(worker, "set_status"):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result is None
+
+    def test_pauses_before_querying_when_provider_is_over_ninety_five_percent(
+        self, tmp_path: Path
+    ) -> None:
+        gh = MagicMock()
+        provider = MagicMock()
+        provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE,
+            windows=(
+                ProviderLimitWindow(
+                    name="five_hour",
+                    used=96,
+                    limit=100,
+                ),
+            ),
+        )
+        worker = Worker(tmp_path, gh, provider=provider, repo_name="owner/repo")
+        fido_dir = self._fido_dir(tmp_path)
+
+        result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+
+        assert result is None
+        gh.find_all_open_issues.assert_not_called()
+        gh.find_issues.assert_not_called()
+        gh.set_user_status.assert_called_once_with(
+            "Leaving the last 5% for the human until a little while.",
+            ":sleeping:",
+            busy=False,
+        )
+
+    def test_pause_message_uses_reset_time_when_known(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        provider = MagicMock()
+        provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE,
+            windows=(
+                ProviderLimitWindow(
+                    name="five_hour",
+                    used=97,
+                    limit=100,
+                    resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=timezone.utc),
+                ),
+            ),
+        )
+        worker = Worker(tmp_path, gh, provider=provider, repo_name="owner/repo")
+        fido_dir = self._fido_dir(tmp_path)
+
+        worker.find_next_issue(fido_dir, self._make_repo_ctx())
+
+        gh.set_user_status.assert_called_once_with(
+            "Leaving the last 5% for the human until 07:00 UTC.",
+            ":sleeping:",
+            busy=False,
+        )
+
+    def test_pause_reports_activity_to_registry(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        provider = MagicMock()
+        provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE,
+            windows=(ProviderLimitWindow(name="five_hour", used=95, limit=100),),
+        )
+        registry = MagicMock()
+        registry.status_update.return_value.__enter__.return_value = None
+        registry.status_update.return_value.__exit__.return_value = None
+        worker = Worker(
+            tmp_path,
+            gh,
+            provider=provider,
+            repo_name="owner/repo",
+            registry=registry,
+        )
+        fido_dir = self._fido_dir(tmp_path)
+
+        worker.find_next_issue(fido_dir, self._make_repo_ctx())
+
+        registry.report_activity.assert_called_once_with(
+            "owner/repo",
+            "Paused for claude-code reset (95%, until a little while)",
+            False,
+        )
 
     def test_returns_issue_number_when_eligible_no_subissues(
         self, tmp_path: Path

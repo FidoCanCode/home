@@ -12,9 +12,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from kennel.color import BOLD, CYAN, DIM, GREEN, MAGENTA, RED, RED_BOLD, YELLOW, color
+from kennel.color import (
+    BOLD,
+    CYAN,
+    DARK_GRAY,
+    DIM,
+    GREEN,
+    MAGENTA,
+    RED,
+    RED_BOLD,
+    YELLOW,
+    color,
+)
 from kennel.config import RepoConfig
-from kennel.provider import ProviderID
+from kennel.provider import ProviderID, ProviderPressureStatus
+from kennel.provider_factory import DefaultProviderFactory
 from kennel.state import State
 from kennel.tasks import Tasks
 
@@ -57,6 +69,8 @@ class RepoStatus:
     crash_count: int  # number of unexpected worker deaths since kennel started
     last_crash_error: str | None  # error from the most recent crash, if any
     worker_stuck: bool  # True if the worker is alive but making no progress
+    provider: ProviderID = ProviderID.CLAUDE_CODE
+    provider_status: ProviderPressureStatus | None = None
     # Newer fields default so callers (tests) can omit them safely.
     issue_title: str | None = None
     issue_elapsed_seconds: int | None = None
@@ -77,6 +91,7 @@ class KennelStatus:
     kennel_pid: int | None
     kennel_uptime: int | None  # seconds
     repos: list[RepoStatus]
+    provider_statuses: list[ProviderPressureStatus] = field(default_factory=list)
 
 
 def _format_uptime(seconds: int) -> str:
@@ -211,6 +226,35 @@ def running_repo_configs(
     if pid is None:
         return []
     return _repos_from_pid_fn(pid)
+
+
+def _status_persona_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "sub" / "persona.md"
+
+
+def provider_statuses_for_repo_configs(
+    repo_configs: list[RepoConfig],
+    *,
+    _provider_factory: DefaultProviderFactory | None = None,
+) -> dict[ProviderID, ProviderPressureStatus]:
+    """Return one normalized provider-pressure summary per configured provider."""
+    provider_factory = _provider_factory or DefaultProviderFactory(
+        session_system_file=_status_persona_path()
+    )
+    statuses: dict[ProviderID, ProviderPressureStatus] = {}
+    for repo_cfg in repo_configs:
+        if repo_cfg.provider in statuses:
+            continue
+        provider = provider_factory.create_provider(
+            repo_cfg,
+            work_dir=repo_cfg.work_dir,
+            repo_name=repo_cfg.name,
+            session=None,
+        )
+        statuses[repo_cfg.provider] = ProviderPressureStatus.from_snapshot(
+            provider.api.get_limit_snapshot()
+        )
+    return statuses
 
 
 def _port_from_pid(pid: int) -> int | None:
@@ -367,6 +411,7 @@ def repo_status(
     session_pid: int | None = None,
     claude_talker: ClaudeTalkerInfo | None = None,
     rescoping: bool = False,
+    provider_status: ProviderPressureStatus | None = None,
 ) -> RepoStatus:
     """Collect status for a single repo."""
     webhook_activities = list(webhook_activities or [])
@@ -392,6 +437,8 @@ def repo_status(
             crash_count=crash_count,
             last_crash_error=last_crash_error,
             worker_stuck=worker_stuck,
+            provider=repo_config.provider,
+            provider_status=provider_status,
             webhook_activities=webhook_activities,
             session_owner=session_owner,
             session_alive=session_alive,
@@ -444,6 +491,8 @@ def repo_status(
         crash_count=crash_count,
         last_crash_error=last_crash_error,
         worker_stuck=worker_stuck,
+        provider=repo_config.provider,
+        provider_status=provider_status,
         webhook_activities=webhook_activities,
         session_owner=session_owner,
         session_alive=session_alive,
@@ -457,6 +506,7 @@ def collect() -> KennelStatus:
     pid = _kennel_pid()
     uptime = _process_uptime_seconds(pid) if pid is not None else None
     repo_configs = _repos_from_pid(pid) if pid is not None else []
+    provider_statuses = provider_statuses_for_repo_configs(repo_configs)
 
     activities: dict[str, Any] = {}
     if pid is not None:
@@ -506,9 +556,15 @@ def collect() -> KennelStatus:
                 session_pid=session_pid_val,
                 claude_talker=talker_info,
                 rescoping=bool(info.get("rescoping")) if info else False,
+                provider_status=provider_statuses.get(rc.provider),
             )
         )
-    return KennelStatus(kennel_pid=pid, kennel_uptime=uptime, repos=repos)
+    return KennelStatus(
+        kennel_pid=pid,
+        kennel_uptime=uptime,
+        repos=repos,
+        provider_statuses=list(provider_statuses.values()),
+    )
 
 
 _SILENT_DISPLAY_THRESHOLD: int = 300  # seconds of claude silence before we note it
@@ -543,6 +599,46 @@ def _claude_stats_suffix(repo: RepoStatus) -> str:
     return f" {arrow} {pid_str}"
 
 
+def _format_reset_at(resets_at: datetime) -> str:
+    """Format provider reset times in a compact UTC form."""
+    return resets_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _provider_status_style(status: ProviderPressureStatus) -> str:
+    if status.paused:
+        return DARK_GRAY
+    if status.warning or status.level == "unavailable":
+        return DIM
+    return ""
+
+
+def _provider_status_summary(status: ProviderPressureStatus) -> str:
+    provider = str(status.provider)
+    if status.unavailable_reason is not None:
+        return f"{provider} unavailable"
+    if status.percent_used is None:
+        return f"{provider} limits unknown"
+    details: list[str] = []
+    if status.window_name:
+        details.append(status.window_name.replace("_", " "))
+    if status.resets_at is not None:
+        details.append(f"resets {_format_reset_at(status.resets_at)}")
+    detail_text = f" ({', '.join(details)})" if details else ""
+    return f"{provider} {status.percent_used}%{detail_text}"
+
+
+def _styled_provider_status(status: ProviderPressureStatus) -> str:
+    return color(_provider_status_style(status), _provider_status_summary(status))
+
+
+def _format_provider_summary_line(statuses: list[ProviderPressureStatus]) -> str | None:
+    if not statuses:
+        return None
+    ordered = sorted(statuses, key=lambda status: status.provider.value)
+    rendered = " | ".join(_styled_provider_status(status) for status in ordered)
+    return f"{color(BOLD, 'limits:')} {rendered}"
+
+
 def _format_repo_header(repo: RepoStatus) -> str:
     """Top line per repo: ``<name>: fido <state> — <stats>[ → <claude>]``.
 
@@ -556,6 +652,10 @@ def _format_repo_header(repo: RepoStatus) -> str:
     state_word = "running" if repo.fido_running else "idle"
     state_style = GREEN if repo.fido_running else DIM
     stats: list[str] = []
+    if repo.provider_status is not None:
+        stats.append(_styled_provider_status(repo.provider_status))
+    else:
+        stats.append(str(repo.provider))
     if repo.crash_count > 0:
         stats.append(color(RED_BOLD, f"crashes {repo.crash_count}"))
     if repo.worker_uptime is not None:
@@ -637,6 +737,17 @@ def _worker_thread_state(repo: RepoStatus) -> str:
     and title) > PR-but-no-task > the live ``worker_what`` field > ``idle``.
     Never shows webhook-thread activity — that's surfaced separately.
     """
+    provider_status = repo.provider_status
+    if provider_status is not None and provider_status.paused:
+        until = (
+            f" until {_format_reset_at(provider_status.resets_at)}"
+            if provider_status.resets_at is not None
+            else ""
+        )
+        return color(
+            DARK_GRAY,
+            f"paused for {provider_status.provider} reset{until}",
+        )
     if repo.task_number is not None and repo.task_total is not None:
         uncertainty = "?" if repo.rescoping else ""
         suffix = f" — {repo.current_task}" if repo.current_task else ""
@@ -699,6 +810,10 @@ def format_status(status: KennelStatus) -> str:
         )
     else:
         lines.append(f"{color(BOLD, 'kennel:')} {color(RED_BOLD, 'DOWN')}")
+
+    provider_summary = _format_provider_summary_line(status.provider_statuses)
+    if provider_summary is not None:
+        lines.append(provider_summary)
 
     for repo in status.repos:
         lines.append(_format_repo_header(repo))

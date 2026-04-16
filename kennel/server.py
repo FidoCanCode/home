@@ -41,6 +41,7 @@ from kennel.infra import (
 )
 from kennel.registry import WorkerRegistry, make_registry
 from kennel.static_files import StaticFiles
+from kennel.status import provider_statuses_for_repo_configs
 from kennel.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
     Watchdog,
@@ -114,9 +115,12 @@ def _xml_text(value: object) -> str | None:
 def _repo_status(act: dict[str, Any]) -> str:
     """Derive a single status word from activity flags.
 
-    Priority: stuck > crashed > busy > idle.  Used as the ``dog:status``
+    Priority: paused > stuck > crashed > busy > idle.  Used as the ``dog:status``
     attribute on ``<repo>`` elements so XSLT and CSS can style by state.
     """
+    provider_status = act.get("provider_status")
+    if isinstance(provider_status, dict) and provider_status.get("paused"):
+        return "paused"
     if act.get("is_stuck"):
         return "stuck"
     if act.get("crash_count", 0) > 0:
@@ -155,6 +159,12 @@ def _activities_to_xml(activities: list[dict[str, Any]]) -> bytes:
                     for ck, cv in value.items():
                         el = SubElement(ct_el, f"{{{_NS_KENNEL}}}{ck}")
                         el.text = _xml_text(cv)
+            elif key == "provider_status":
+                ps_el = SubElement(repo, f"{{{_NS_KENNEL}}}provider_status")
+                if value is not None:
+                    for pk, pv in value.items():
+                        el = SubElement(ps_el, f"{{{_NS_KENNEL}}}{pk}")
+                        el.text = _xml_text(pv)
             else:
                 el = SubElement(repo, f"{{{_NS_KENNEL}}}{key}")
                 el.text = _xml_text(value)
@@ -179,6 +189,23 @@ def _parse_repo_from_url(url: str) -> str | None:
     path = path.lstrip("/").removesuffix(".git")
     parts = path.split("/")
     return path if len(parts) == 2 and all(parts) else None
+
+
+def _serialize_provider_status(status: Any) -> dict[str, Any] | None:
+    """Convert a ProviderPressureStatus to a JSON-friendly dict."""
+    if status is None:
+        return None
+    return {
+        "provider": status.provider,
+        "window_name": status.window_name,
+        "pressure": status.pressure,
+        "percent_used": status.percent_used,
+        "resets_at": status.resets_at.isoformat() if status.resets_at else None,
+        "unavailable_reason": status.unavailable_reason,
+        "level": status.level,
+        "warning": status.warning,
+        "paused": status.paused,
+    }
 
 
 def _get_self_repo(runner_dir: Path, proc: ProcessRunner) -> str | None:
@@ -720,9 +747,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
         """Build the activity snapshot for all registered repos."""
         now = datetime.now(tz=timezone.utc)
         activities: list[dict[str, Any]] = []
+        provider_statuses = provider_statuses_for_repo_configs(
+            list(self.config.repos.values())
+        )
         for a in self.registry.get_all_activities():
             crash = self.registry.get_crash_info(a.repo_name)
             started_at = self.registry.thread_started_at(a.repo_name)
+            repo_cfg = self.config.repos.get(a.repo_name)
             worker_uptime = (
                 (now - started_at).total_seconds() if started_at is not None else None
             )
@@ -744,6 +775,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     "is_stuck": self.registry.is_stale(a.repo_name, _STALE_THRESHOLD),
                     "worker_uptime_seconds": worker_uptime,
                     "webhook_activities": webhooks,
+                    "provider": repo_cfg.provider if repo_cfg is not None else None,
+                    "provider_status": _serialize_provider_status(
+                        provider_statuses.get(repo_cfg.provider)
+                        if repo_cfg is not None
+                        else None
+                    ),
                     "session_owner": self.registry.get_session_owner(a.repo_name),
                     "session_alive": self.registry.get_session_alive(a.repo_name),
                     "session_pid": self.registry.get_session_pid(a.repo_name),

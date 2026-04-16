@@ -112,6 +112,12 @@ def _restore_handler_fns():
         setattr(WebhookHandler, attr, val)
 
 
+@pytest.fixture(autouse=True)
+def _stub_provider_statuses():
+    with patch("kennel.server.provider_statuses_for_repo_configs", return_value={}):
+        yield
+
+
 @pytest.fixture()
 def server(tmp_path: Path):
     cfg = _config(tmp_path)
@@ -376,6 +382,50 @@ class TestGetEndpoint:
         data = json.loads(resp.read())
         assert data[0]["rescoping"] is True
 
+    def test_status_endpoint_includes_provider_status(self, server: tuple) -> None:
+        from datetime import UTC, datetime
+
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Working on: #1",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+        with patch(
+            "kennel.server.provider_statuses_for_repo_configs",
+            return_value={
+                ProviderID.CLAUDE_CODE: MagicMock(
+                    provider=ProviderID.CLAUDE_CODE,
+                    window_name="five_hour",
+                    pressure=0.96,
+                    percent_used=96,
+                    resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=UTC),
+                    unavailable_reason=None,
+                    level="paused",
+                    warning=False,
+                    paused=True,
+                )
+            },
+        ):
+            resp = urllib.request.urlopen(f"{url}/status.json")
+        data = json.loads(resp.read())
+        assert data[0]["provider"] == ProviderID.CLAUDE_CODE
+        assert data[0]["provider_status"]["level"] == "paused"
+        assert data[0]["provider_status"]["percent_used"] == 96
+
     def test_status_endpoint_rescoping_false_by_default(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
@@ -407,12 +457,21 @@ class TestRepoStatus:
     @pytest.mark.parametrize(
         ("act", "expected"),
         [
+            (
+                {
+                    "provider_status": {"paused": True},
+                    "is_stuck": False,
+                    "crash_count": 0,
+                    "busy": True,
+                },
+                "paused",
+            ),
             ({"is_stuck": True, "crash_count": 2, "busy": True}, "stuck"),
             ({"is_stuck": False, "crash_count": 3, "busy": True}, "crashed"),
             ({"is_stuck": False, "crash_count": 0, "busy": True}, "busy"),
             ({"is_stuck": False, "crash_count": 0, "busy": False}, "idle"),
         ],
-        ids=["stuck", "crashed", "busy", "idle"],
+        ids=["paused", "stuck", "crashed", "busy", "idle"],
     )
     def test_repo_status_priority(self, act: dict, expected: str) -> None:
         assert _repo_status(act) == expected
@@ -504,6 +563,50 @@ class TestStatusXml:
         body = resp.read().decode()
         assert "<kind>worker</kind>" in body
         assert "<claude_pid>9999</claude_pid>" in body
+
+    def test_status_xml_includes_provider_status(self, server: tuple) -> None:
+        from datetime import UTC, datetime
+
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="working",
+                busy=False,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+        with patch(
+            "kennel.server.provider_statuses_for_repo_configs",
+            return_value={
+                ProviderID.CLAUDE_CODE: MagicMock(
+                    provider=ProviderID.CLAUDE_CODE,
+                    window_name="five_hour",
+                    pressure=0.96,
+                    percent_used=96,
+                    resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=UTC),
+                    unavailable_reason=None,
+                    level="paused",
+                    warning=False,
+                    paused=True,
+                )
+            },
+        ):
+            resp = urllib.request.urlopen(f"{url}/status")
+        body = resp.read().decode()
+        assert "<provider>claude-code</provider>" in body
+        assert "<provider_status>" in body
+        assert "<percent_used>96</percent_used>" in body
 
     def test_status_xml_includes_webhooks(self, server: tuple) -> None:
         from datetime import datetime, timezone
