@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from kennel.claude import ClaudeClient
+from kennel.config import RepoConfig
 from kennel.gh_status import (
+    _PERSONA_PATH,
+    _default_provider_factories,
     generate_persona_emoji,
     generate_persona_status,
     main,
     set_gh_status,
 )
+from kennel.provider import ProviderID
 
 
 def _client(**overrides: object) -> MagicMock:
@@ -134,56 +139,129 @@ class TestSetGhStatus:
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("persona")
         mock_gh = MagicMock()
+        mock_client = _client()
+        mock_client.run_turn.return_value = "woof"
+        mock_client.generate_status_emoji.return_value = ":dog:"
         with patch(
-            "kennel.gh_status.ClaudeClient",
-            return_value=_client(),
-        ) as mock_cls:
-            mock_cls.return_value.run_turn.return_value = "woof"
-            mock_cls.return_value.generate_status_emoji.return_value = ":dog:"
+            "kennel.gh_status._default_provider_factories",
+            return_value=(lambda: mock_client,),
+        ):
             set_gh_status("test", persona_path=persona_file, _gh=mock_gh)
-            mock_cls.assert_called_once_with()
+        mock_gh.set_user_status.assert_called_once_with("woof", ":dog:", busy=True)
 
-    def test_falls_back_to_nap_message_when_provider_fails(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_tries_next_provider_when_first_fails(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("persona")
         mock_gh = MagicMock()
-        mock_client = _client()
-        mock_client.run_turn.side_effect = RuntimeError("boom")
+        first = _client()
+        first.run_turn.side_effect = RuntimeError("nope")
+        second = _client()
+        second.run_turn.return_value = "back soon"
+        second.generate_status_emoji.return_value = ":dog:"
 
         set_gh_status(
             "test",
             persona_path=persona_file,
-            provider=mock_client,
             _gh=mock_gh,
-            _choice=lambda options: options[7],
+            _provider_factories=(lambda: first, lambda: second),
         )
 
-        mock_gh.set_user_status.assert_called_once_with(
-            "Sleeping off a big debugging session.",
-            ":sleeping:",
-            busy=True,
-        )
+        mock_gh.set_user_status.assert_called_once_with("back soon", ":dog:", busy=True)
 
-    def test_falls_back_to_nap_message_when_default_client_fails(
+    def test_falls_back_to_generic_message_when_all_providers_fail(
         self, tmp_path
     ) -> None:  # type: ignore[no-untyped-def]
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("persona")
         mock_gh = MagicMock()
-        with patch("kennel.gh_status.ClaudeClient", return_value=_client()) as mock_cls:
-            mock_cls.return_value.run_turn.side_effect = RuntimeError("boom")
-            set_gh_status(
-                "test",
-                persona_path=persona_file,
-                _gh=mock_gh,
-                _choice=lambda options: options[7],
-            )
+        first = _client()
+        first.run_turn.side_effect = RuntimeError("boom")
+        second = _client()
+        second.run_turn.side_effect = RuntimeError("still boom")
+        set_gh_status(
+            "test",
+            persona_path=persona_file,
+            _gh=mock_gh,
+            _provider_factories=(lambda: first, lambda: second),
+            _choice=lambda options: options[7],
+        )
 
         mock_gh.set_user_status.assert_called_once_with(
-            "Sleeping off a big debugging session.",
+            "A little scrambled right now. I will be back soon.",
             ":sleeping:",
             busy=True,
         )
+
+
+class TestDefaultProviderFactories:
+    def test_falls_back_to_owned_claude_when_no_live_kennel(self) -> None:
+        sentinel = _client()
+        with (
+            patch("kennel.gh_status.Path.cwd", return_value=Path("/tmp/here")),
+            patch("kennel.gh_status.ClaudeClient", return_value=sentinel) as mock_cls,
+        ):
+            factories = _default_provider_factories(_running_repo_configs_fn=lambda: [])
+            assert [factory() for factory in factories] == [sentinel]
+        mock_cls.assert_called_once_with(
+            session_system_file=_PERSONA_PATH,
+            work_dir=Path("/tmp/here"),
+        )
+
+    def test_falls_back_to_owned_claude_when_running_kennel_has_no_repo_specs(
+        self,
+    ) -> None:
+        sentinel = _client()
+        with (
+            patch("kennel.gh_status.Path.cwd", return_value=Path("/tmp/here")),
+            patch("kennel.gh_status.ClaudeClient", return_value=sentinel),
+        ):
+            factories = _default_provider_factories(_running_repo_configs_fn=lambda: [])
+            assert [factory() for factory in factories] == [sentinel]
+
+    def test_uses_each_configured_provider_once(self, tmp_path: Path) -> None:
+        claude_cfg = RepoConfig(
+            name="owner/repo-a",
+            work_dir=tmp_path / "a",
+            provider=ProviderID.CLAUDE_CODE,
+        )
+        copilot_cfg = RepoConfig(
+            name="owner/repo-b",
+            work_dir=tmp_path / "b",
+            provider=ProviderID.COPILOT_CLI,
+        )
+        duplicate_claude_cfg = RepoConfig(
+            name="owner/repo-c",
+            work_dir=tmp_path / "c",
+            provider=ProviderID.CLAUDE_CODE,
+        )
+        for cfg in (claude_cfg, copilot_cfg, duplicate_claude_cfg):
+            cfg.work_dir.mkdir()
+        factory = MagicMock()
+        first = _client()
+        second = _client()
+        factory.create_agent.side_effect = [first, second]
+        with (
+            patch("kennel.gh_status.DefaultProviderFactory", return_value=factory),
+        ):
+            factories = _default_provider_factories(
+                _running_repo_configs_fn=lambda: [
+                    claude_cfg,
+                    copilot_cfg,
+                    duplicate_claude_cfg,
+                ],
+            )
+            assert [build() for build in factories] == [first, second]
+        factory.create_agent.assert_any_call(
+            claude_cfg,
+            work_dir=claude_cfg.work_dir,
+            repo_name=claude_cfg.name,
+        )
+        factory.create_agent.assert_any_call(
+            copilot_cfg,
+            work_dir=copilot_cfg.work_dir,
+            repo_name=copilot_cfg.name,
+        )
+        assert factory.create_agent.call_count == 2
 
 
 class TestMain:
