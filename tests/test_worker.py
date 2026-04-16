@@ -3102,7 +3102,7 @@ class TestWritePrDescription:
                 issue,
                 task_list or [],
                 existing_body,
-                claude_client=mock_cc,
+                agent=mock_cc,
             ),
             mock_cc,
         )
@@ -3259,11 +3259,9 @@ class TestWritePrDescription:
             self._call(gh, existing_body="no divider here")
         gh.edit_pr_body.assert_not_called()
 
-    def test_requires_claude_client(self) -> None:
+    def test_requires_agent(self) -> None:
         gh = MagicMock()
-        with pytest.raises(
-            ValueError, match="_write_pr_description requires claude_client"
-        ):
+        with pytest.raises(ValueError, match="_write_pr_description requires agent"):
             _write_pr_description(gh, "owner/repo", 99, 42, [])
 
 

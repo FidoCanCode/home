@@ -755,7 +755,7 @@ def _write_pr_description(
     task_list: list[dict[str, Any]],
     existing_body: str = "",
     *,
-    claude_client: ProviderAgent | None = None,
+    agent: ProviderAgent | None = None,
 ) -> None:
     """Write or rewrite the PR description.
 
@@ -769,8 +769,8 @@ def _write_pr_description(
     ``---`` divider (rewrite precondition) or when Opus returns no
     ``<body>``-tagged content.
     """
-    if claude_client is None:
-        raise ValueError("_write_pr_description requires claude_client")
+    if agent is None:
+        raise ValueError("_write_pr_description requires agent")
 
     divider = "\n\n---\n\n"
 
@@ -799,7 +799,7 @@ def _write_pr_description(
         rest = f"## Work queue\n\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
 
     prompt = Prompts("").rewrite_description_prompt(existing_body, task_list)
-    raw = claude_client.run_turn(prompt, model=claude_client.voice_model)
+    raw = agent.run_turn(prompt, model=agent.voice_model)
     new_desc = _extract_body(raw)
     if not new_desc:
         raise ValueError(
@@ -1308,7 +1308,7 @@ class Worker:
             pr_number,
             issue,
             self._tasks.list(),
-            claude_client=self._claude_client,
+            agent=self._claude_client,
         )
         task_count = len(
             [t for t in self._tasks.list() if t.get("status") == "pending"]
@@ -2243,7 +2243,7 @@ class Worker:
                     recovery_repo_cfg,
                     self.gh,
                     pr_number,
-                    claude_client=self._claude_client,
+                    agent=self._claude_client,
                     prompts=self._get_prompts(),
                 )
                 self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
