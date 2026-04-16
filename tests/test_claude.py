@@ -25,6 +25,7 @@ from kennel.claude import (
     kill_active_children,
     raise_for_provider_error_output,
 )
+from kennel.provider import ProviderID, ProviderLimitSnapshot
 
 
 def _completed(
@@ -2272,9 +2273,12 @@ class TestClaudeClientSessionAttachment:
         client = ClaudeClient()
         assert str(client.provider_id) == "claude-code"
 
-    def test_limit_snapshot_defaults_to_none(self) -> None:
+    def test_limit_snapshot_marks_limit_data_unavailable(self) -> None:
         client = ClaudeClient()
-        assert client.get_limit_snapshot() is None
+        assert client.get_limit_snapshot() == ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE,
+            unavailable_reason="Claude Code does not expose limit data yet.",
+        )
 
 
 class TestClaudeClientPrintPromptJson:

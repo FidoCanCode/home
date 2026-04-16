@@ -1341,7 +1341,10 @@ class ClaudeClient(Provider):
         return session.pid if session is not None else None
 
     def get_limit_snapshot(self) -> ProviderLimitSnapshot | None:
-        return None
+        return ProviderLimitSnapshot(
+            provider=self.provider_id,
+            unavailable_reason="Claude Code does not expose limit data yet.",
+        )
 
     def _current_session(self) -> PromptSession:
         with self._session_lock:
