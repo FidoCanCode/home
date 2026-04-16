@@ -53,7 +53,7 @@ def _default_provider_factories(
 
     repo_cfgs = _running_repo_configs_fn()
     if not repo_cfgs:
-        return ()
+        raise RuntimeError("No running kennel repo configs found")
 
     provider_factory = DefaultProviderFactory(session_system_file=_PERSONA_PATH)
     factories: list[Callable[[], ProviderAgent]] = []
@@ -132,12 +132,15 @@ def set_gh_status(
         persona = persona_path.read_text()
     except FileNotFoundError:
         persona = ""
-    providers = _candidate_providers(
-        provider,
-        _default_provider_factories()
-        if _provider_factories is None
-        else tuple(_provider_factories),
-    )
+    if provider is not None:
+        providers = (provider,)
+    else:
+        provider_factories = (
+            _default_provider_factories()
+            if _provider_factories is None
+            else tuple(_provider_factories)
+        )
+        providers = _candidate_providers(None, provider_factories)
     for current_provider in providers:
         try:
             text = generate_persona_status(message, persona, provider=current_provider)

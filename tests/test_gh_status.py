@@ -10,6 +10,7 @@ import pytest
 from kennel.claude import ClaudeClient
 from kennel.config import RepoConfig
 from kennel.gh_status import (
+    _candidate_providers,
     _default_provider_factories,
     generate_persona_emoji,
     generate_persona_status,
@@ -192,28 +193,39 @@ class TestSetGhStatus:
         )
 
 
-class TestDefaultProviderFactories:
-    def test_returns_no_factories_when_no_live_kennel(self) -> None:
-        assert _default_provider_factories(_running_repo_configs_fn=lambda: []) == ()
+class TestCandidateProviders:
+    def test_returns_explicit_provider_without_building_factories(self) -> None:
+        provider = _client()
+        factory = MagicMock()
 
-    def test_uses_generic_fallback_when_no_live_kennel(self, tmp_path: Path) -> None:
+        assert _candidate_providers(provider, (factory,)) == (provider,)
+        factory.assert_not_called()
+
+
+class TestDefaultProviderFactories:
+    def test_raises_when_no_live_kennel(self) -> None:
+        with pytest.raises(RuntimeError, match="No running kennel repo configs found"):
+            _default_provider_factories(_running_repo_configs_fn=lambda: [])
+
+    def test_set_gh_status_propagates_when_no_live_kennel(self, tmp_path: Path) -> None:
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("persona")
         mock_gh = MagicMock()
 
-        set_gh_status(
-            "test",
-            persona_path=persona_file,
-            _gh=mock_gh,
-            _provider_factories=(),
-            _choice=lambda options: options[0],
-        )
+        with (
+            patch(
+                "kennel.gh_status._default_provider_factories",
+                side_effect=RuntimeError("No running kennel repo configs found"),
+            ),
+            pytest.raises(RuntimeError, match="No running kennel repo configs found"),
+        ):
+            set_gh_status(
+                "test",
+                persona_path=persona_file,
+                _gh=mock_gh,
+            )
 
-        mock_gh.set_user_status.assert_called_once_with(
-            "Having a quiet think. Back soon.",
-            ":sleeping:",
-            busy=True,
-        )
+        mock_gh.set_user_status.assert_not_called()
 
     def test_uses_each_configured_provider_once(self, tmp_path: Path) -> None:
         claude_cfg = RepoConfig(
