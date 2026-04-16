@@ -259,7 +259,7 @@ def claude_start(
     return claude.extract_session_id(output)
 
 
-def _run_session_turn(session: claude.ClaudeSession, content: str) -> str:
+def _run_session_turn(session: PromptSession, content: str) -> str:
     """Send *content* through *session* and return the result text.
 
     Retries indefinitely when a webhook handler preempts the turn mid-flight
@@ -694,7 +694,7 @@ def _write_pr_description(
     task_list: list[dict[str, Any]],
     existing_body: str = "",
     *,
-    claude_client: ClaudeClient | None = None,
+    claude_client: Provider | None = None,
 ) -> None:
     """Write or rewrite the PR description.
 
@@ -2212,12 +2212,13 @@ class WorkerThread(threading.Thread):
         self._stop = False
         self.crash_error: str | None = None
         self._provider_lock = threading.Lock()
+        self._provider: Provider | None
         if provider is not None:
             self._provider = provider
             if session is not None:
                 self._provider.attach_session(session)
         else:
-            self._provider: Provider = ClaudeClient(session=session)
+            self._provider = ClaudeClient(session=session)
         self._session_issue: int | None = session_issue
         self._config = config
         self._repo_cfg = repo_cfg

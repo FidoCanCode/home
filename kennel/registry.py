@@ -9,10 +9,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from kennel.claude import ClaudeSession
 from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
-from kennel.provider import Provider
+from kennel.provider import PromptSession, Provider
 from kennel.worker import WorkerThread
 
 log = logging.getLogger(__name__)
@@ -324,8 +323,8 @@ class WorkerRegistry:
         with self._rescoping_lock:
             return self._rescoping.get(repo_name, False)
 
-    def get_session(self, repo_name: str) -> ClaudeSession | None:
-        """Return the live :class:`~kennel.claude.ClaudeSession` for *repo_name*.
+    def get_session(self, repo_name: str) -> PromptSession | None:
+        """Return the live persistent session for *repo_name*.
 
         Used by :func:`kennel.claude.set_session_resolver` so webhook-handler
         prompt calls can route through the per-repo persistent session

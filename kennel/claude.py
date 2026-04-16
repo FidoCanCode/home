@@ -181,7 +181,7 @@ def _talker_now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
-_session_resolver: Callable[[str], "ClaudeSession | None"] | None = None
+_session_resolver: Callable[[str], PromptSession | None] | None = None
 """Callback the event/webhook layer uses to find its repo's persistent
 :class:`ClaudeSession` — installed once by :mod:`kennel.server` at startup.
 
@@ -192,14 +192,14 @@ resolver install, not a real production path."""
 
 
 def set_session_resolver(
-    resolver: Callable[[str], "ClaudeSession | None"] | None,
+    resolver: Callable[[str], PromptSession | None] | None,
 ) -> None:
     """Install (or clear) the session resolver callback."""
     global _session_resolver
     _session_resolver = resolver
 
 
-def _session_for_current_repo() -> "ClaudeSession":
+def _session_for_current_repo() -> PromptSession:
     """Return the live :class:`ClaudeSession` driving the current thread's repo.
 
     Production always has both a thread-local ``repo_name`` (set by
@@ -1291,7 +1291,7 @@ class ClaudeClient(Provider):
     def __init__(
         self,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-        session_fn: Callable[[], "ClaudeSession"] = _session_for_current_repo,
+        session_fn: Callable[[], PromptSession] = _session_for_current_repo,
         streaming_runner: Callable[..., Iterator[str]] = _run_streaming,
         sleep_fn: Callable[[float], None] = time.sleep,
         session: PromptSession | None = None,
