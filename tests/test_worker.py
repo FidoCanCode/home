@@ -1418,6 +1418,80 @@ class TestWorker:
         mock_ci.assert_called_once()
         mock_threads.assert_called_once()
 
+    def test_run_no_issue_never_reaches_checks(self, tmp_path: Path) -> None:
+        """CI/thread/rescope checks are unreachable when no issue is selected."""
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        worker = Worker(tmp_path, gh)
+        mock_rescope = MagicMock()
+        mock_ci = MagicMock(return_value=False)
+        mock_threads = MagicMock(return_value=False)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
+            patch.object(worker, "rescope_before_pick", mock_rescope),
+            patch.object(worker, "handle_ci", mock_ci),
+            patch.object(worker, "handle_threads", mock_threads),
+        ):
+            result = worker.run()
+        assert result == 0
+        mock_rescope.assert_not_called()
+        mock_ci.assert_not_called()
+        mock_threads.assert_not_called()
+
+    def test_run_second_iteration_runs_checks_after_fresh_pr(
+        self, tmp_path: Path
+    ) -> None:
+        """After a fresh PR is created, the next iteration must run checks."""
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        iteration = 0
+
+        def focp_side_effect(*_a: object, **_kw: object) -> tuple[int, str, bool]:
+            nonlocal iteration
+            iteration += 1
+            # First call: fresh PR; second call: existing PR
+            return (42, "fix-bug", iteration == 1)
+
+        ci_calls: list[int] = []
+
+        def ci_side_effect(*_a: object, **_kw: object) -> bool:
+            ci_calls.append(iteration)
+            return False
+
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(worker, "find_or_create_pr", side_effect=focp_side_effect),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "_ensure_session_alive"),
+            patch.object(worker, "rescope_before_pick"),
+            patch.object(worker, "handle_ci", side_effect=ci_side_effect),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()  # iteration 1: fresh PR — checks skipped
+            worker.run()  # iteration 2: existing PR — checks run
+        # handle_ci was only called on iteration 2
+        assert ci_calls == [2]
+
 
 class TestWorkerFindNextIssue:
     """Tests for Worker.find_next_issue."""
