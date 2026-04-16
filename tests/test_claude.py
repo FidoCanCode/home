@@ -931,6 +931,32 @@ class TestClaudeSessionDrainToBoundary:
         mock_restart.assert_called_once()
         assert session._in_turn is False
 
+    def test_select_includes_wakeup_pipe(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [_json.dumps({"type": "result", "result": "done"}) + "\n"]
+        proc = _make_session_proc(lines)
+        select_inputs: list[list[object]] = []
+
+        def tracking_selector(
+            rlist: list[object],
+            wlist: list[object],
+            xlist: list[object],
+            timeout: float,
+        ) -> tuple[list[object], list[object], list[object]]:
+            select_inputs.append(list(rlist))
+            return ([proc.stdout], [], [])
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        session = ClaudeSession(
+            system_file, popen=MagicMock(return_value=proc), selector=tracking_selector
+        )
+        session._in_turn = True
+        session._drain_to_boundary()
+        assert all(session._wakeup_r in inputs for inputs in select_inputs)
+        session.stop()
+
 
 class TestClaudeSessionLogEvent:
     def test_assistant_text(self, tmp_path: Path, caplog) -> None:
@@ -1239,6 +1265,68 @@ class TestClaudeSessionIterEvents:
         session_ref.append(session)
         events = list(session.iter_events())
         assert events == []
+        session.stop()
+
+    def test_select_includes_wakeup_pipe(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [_json.dumps({"type": "result", "result": "ok"}) + "\n"]
+        proc = _make_session_proc(lines)
+        select_inputs: list[list[object]] = []
+
+        def tracking_selector(
+            rlist: list[object],
+            wlist: list[object],
+            xlist: list[object],
+            timeout: float,
+        ) -> tuple[list[object], list[object], list[object]]:
+            select_inputs.append(list(rlist))
+            return ([proc.stdout], [], [])
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        session = ClaudeSession(
+            system_file, popen=MagicMock(return_value=proc), selector=tracking_selector
+        )
+        list(session.iter_events())
+        # Every select call must include the wakeup fd alongside stdout
+        assert all(session._wakeup_r in inputs for inputs in select_inputs)
+        session.stop()
+
+    def test_wakeup_only_ready_continues_to_cancel_check(self, tmp_path: Path) -> None:
+        """When only the wakeup pipe fires, iter_events loops back and checks cancel."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        proc.poll = MagicMock(return_value=None)  # never exits
+        fake_popen = MagicMock(return_value=proc)
+
+        session_ref: list[ClaudeSession] = []
+        call_count = [0]
+
+        def staged_selector(
+            rlist: list[object],
+            wlist: list[object],
+            xlist: list[object],
+            timeout: float,
+        ) -> tuple[list[object], list[object], list[object]]:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: only wakeup pipe ready, then set cancel so next
+                # iteration exits cleanly
+                wakeup_r = next(x for x in rlist if x != proc.stdout)
+                session_ref[0]._cancel.set()
+                return ([wakeup_r], [], [])
+            return ([], [], [])  # should not reach here
+
+        session = ClaudeSession(system_file, popen=fake_popen, selector=staged_selector)
+        session_ref.append(session)
+        os.write(session._wakeup_w, b"\x00")
+        events = list(session.iter_events())
+        assert events == []
+        assert session._last_turn_cancelled is True
+        # readline was never called because stdout was not in the ready list
+        assert proc.stdout.readline.call_count == 0
         session.stop()
 
 

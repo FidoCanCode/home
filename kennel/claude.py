@@ -924,9 +924,10 @@ class ClaudeSession:
         end_time = time.monotonic() + deadline
         while time.monotonic() < end_time:
             ready, _, _ = self._selector(
-                [self._proc.stdout], [], [], _SELECT_POLL_INTERVAL
+                [self._proc.stdout, self._wakeup_r], [], [], _SELECT_POLL_INTERVAL
             )
-            if ready:
+            self._drain_wakeup()
+            if self._proc.stdout in ready:
                 line = self._proc.stdout.readline()
                 if not line:
                     break  # EOF
@@ -1179,9 +1180,10 @@ class ClaudeSession:
                 # we're abandoning here.
                 break
             ready, _, _ = self._selector(
-                [self._proc.stdout], [], [], _SELECT_POLL_INTERVAL
+                [self._proc.stdout, self._wakeup_r], [], [], _SELECT_POLL_INTERVAL
             )
-            if ready:
+            self._drain_wakeup()
+            if self._proc.stdout in ready:
                 line = self._proc.stdout.readline()
                 if not line:
                     self._in_turn = False
