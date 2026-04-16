@@ -535,10 +535,10 @@ class TestRunStreamingTracksChildren:
         # the generator runs); after exhaustion it should be unregistered.
         assert proc not in _active_children
 
-    def test_session_for_current_repo_returns_live_session(self) -> None:
+    def test_current_repo_session_returns_live_session(self) -> None:
         from kennel import claude as claude_module
         from kennel.claude import (
-            _session_for_current_repo,
+            current_repo_session,
             set_session_resolver,
             set_thread_repo,
         )
@@ -548,47 +548,47 @@ class TestRunStreamingTracksChildren:
         set_session_resolver(lambda repo: live if repo == "owner/repo" else None)
         set_thread_repo("owner/repo")
         try:
-            assert _session_for_current_repo() is live
+            assert current_repo_session() is live
         finally:
             set_thread_repo(None)
             claude_module.set_session_resolver(None)
 
-    def test_session_for_current_repo_raises_without_repo(self) -> None:
+    def test_current_repo_session_raises_without_repo(self) -> None:
         from kennel import claude as claude_module
-        from kennel.claude import _session_for_current_repo
+        from kennel.claude import current_repo_session
 
         claude_module.set_thread_repo(None)
         with pytest.raises(RuntimeError, match="thread-local repo_name"):
-            _session_for_current_repo()
+            current_repo_session()
 
-    def test_session_for_current_repo_raises_without_resolver(self) -> None:
+    def test_current_repo_session_raises_without_resolver(self) -> None:
         from kennel import claude as claude_module
-        from kennel.claude import _session_for_current_repo
+        from kennel.claude import current_repo_session
 
         claude_module.set_session_resolver(None)
         claude_module.set_thread_repo("owner/repo")
         try:
             with pytest.raises(RuntimeError, match="set_session_resolver"):
-                _session_for_current_repo()
+                current_repo_session()
         finally:
             claude_module.set_thread_repo(None)
 
-    def test_session_for_current_repo_raises_when_no_session(self) -> None:
+    def test_current_repo_session_raises_when_no_session(self) -> None:
         from kennel import claude as claude_module
-        from kennel.claude import _session_for_current_repo
+        from kennel.claude import current_repo_session
 
         claude_module.set_session_resolver(lambda repo: None)
         claude_module.set_thread_repo("owner/repo")
         try:
             with pytest.raises(RuntimeError, match="no ClaudeSession registered"):
-                _session_for_current_repo()
+                current_repo_session()
         finally:
             claude_module.set_thread_repo(None)
             claude_module.set_session_resolver(None)
 
-    def test_session_for_current_repo_raises_when_not_alive(self) -> None:
+    def test_current_repo_session_raises_when_not_alive(self) -> None:
         from kennel import claude as claude_module
-        from kennel.claude import _session_for_current_repo
+        from kennel.claude import current_repo_session
 
         dead = MagicMock()
         dead.is_alive.return_value = False
@@ -596,7 +596,7 @@ class TestRunStreamingTracksChildren:
         claude_module.set_thread_repo("owner/repo")
         try:
             with pytest.raises(RuntimeError, match="not alive"):
-                _session_for_current_repo()
+                current_repo_session()
         finally:
             claude_module.set_thread_repo(None)
             claude_module.set_session_resolver(None)

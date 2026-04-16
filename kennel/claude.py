@@ -213,7 +213,7 @@ def set_session_resolver(
     _session_resolver = resolver
 
 
-def _session_for_current_repo() -> PromptSession:
+def current_repo_session() -> PromptSession:
     """Return the live :class:`ClaudeSession` driving the current thread's repo.
 
     Production always has both a thread-local ``repo_name`` (set by
@@ -248,11 +248,6 @@ def _session_for_current_repo() -> PromptSession:
             "have restarted the worker thread"
         )
     return session
-
-
-def current_repo_session() -> PromptSession:
-    """Return the current thread's resolved persistent prompt session."""
-    return _session_for_current_repo()
 
 
 def _thread_name_for_id(thread_id: int) -> str | None:
@@ -1426,7 +1421,7 @@ class ClaudeClient(ProviderAgent):
     def __init__(
         self,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-        session_fn: Callable[[], PromptSession] = _session_for_current_repo,
+        session_fn: Callable[[], PromptSession] = current_repo_session,
         streaming_runner: Callable[..., Iterator[str]] = _run_streaming,
         sleep_fn: Callable[[float], None] = time.sleep,
         session_factory: Callable[..., PromptSession] | None = None,
