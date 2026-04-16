@@ -2360,7 +2360,7 @@ class WorkerThread(threading.Thread):
                     repo_cfg=self._repo_cfg,
                 )
                 worker._provider = provider  # pyright: ignore[reportPrivateUsage]
-                worker._claude_client = provider  # pyright: ignore[reportPrivateUsage]
+                worker._claude_client = provider.agent  # pyright: ignore[reportPrivateUsage]
                 try:
                     result = worker.run()
                 finally:
