@@ -1971,6 +1971,95 @@ class TestClaudeSessionLock:
         session.stop()
 
 
+class TestClaudeSessionPreemptLatency:
+    """Validate that webhook preemption completes well within the 30s latency target.
+
+    The worker holds the session lock and blocks in iter_events (real select on
+    a pipe). A preempter sets cancel and writes to the wakeup pipe. The worker's
+    select must wake instantly, detect cancel, and release the lock — all well
+    under the 30s budget from #559.
+    """
+
+    def test_preempt_handoff_under_worker_contention(self, tmp_path: Path) -> None:
+        """Worker releases lock within 2s of a cancel+wake signal (target: <30s)."""
+        import select as _select
+        import threading
+        import time
+
+        stdout_r, stdout_w = os.pipe()
+        os.set_blocking(stdout_r, False)
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 99999
+        proc.stdin = MagicMock()
+        proc.stdin.closed = False
+        proc.stdout = os.fdopen(stdout_r, "r")
+        proc.stderr = MagicMock()
+        proc.poll = MagicMock(return_value=None)  # never exits
+        proc.wait = MagicMock(return_value=0)
+        proc.returncode = 0
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=MagicMock(return_value=proc),
+            selector=_select.select,  # real select — wakeup pipe must work
+            repo_name="test/latency",
+            idle_timeout=30.0,
+        )
+
+        worker_in_select = threading.Event()
+        worker_exited_lock = threading.Event()
+
+        # Wrap selector so we know when the worker is blocking in select
+        real_selector = session._selector
+
+        def instrumented_selector(
+            rlist: list[object],
+            wlist: list[object],
+            xlist: list[object],
+            timeout: float,
+        ) -> tuple[list[object], list[object], list[object]]:
+            worker_in_select.set()
+            return real_selector(rlist, wlist, xlist, timeout)
+
+        session._selector = instrumented_selector
+
+        def worker() -> None:
+            with session:
+                for _ in session.iter_events():
+                    pass  # no events expected — just blocking on select
+            worker_exited_lock.set()
+
+        t = threading.Thread(target=worker)
+        t.start()
+
+        # Wait for worker to actually be blocking in select
+        assert worker_in_select.wait(timeout=2.0), "worker never entered select"
+
+        # Now preempt — this is the critical path we're measuring
+        start = time.monotonic()
+        session._cancel.set()
+        session._wake()
+
+        assert worker_exited_lock.wait(timeout=5.0), "worker did not release lock"
+        elapsed = time.monotonic() - start
+
+        # The 30s budget from #559 includes the actual Claude response; the
+        # lock-handoff portion must be negligible.  Assert < 2s — generous
+        # safety margin while still catching the old 10s+ poll-interval bug.
+        assert elapsed < 2.0, (
+            f"preempt handoff took {elapsed:.2f}s — must be well under 30s target"
+        )
+
+        t.join(timeout=2.0)
+        os.close(stdout_w)
+        session.stop()
+
+
 class TestClaudeSessionSendControlInterrupt:
     def test_writes_control_request_type(self, tmp_path: Path) -> None:
         import json as _json
