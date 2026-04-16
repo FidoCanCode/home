@@ -39,6 +39,7 @@ from kennel.infra import (
     real_infra,
 )
 from kennel.registry import WorkerRegistry, make_registry
+from kennel.static_files import StaticFiles
 from kennel.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
     Watchdog,
@@ -316,6 +317,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     gh: GitHub | None = None
     # Infrastructure ports — set by server.run() composition root.
     infra: Infra = real_infra()
+    static_files: StaticFiles | None = None
     _fn_dispatch = staticmethod(dispatch)
     _fn_reply_to_comment = staticmethod(reply_to_comment)
     _fn_reply_to_review = staticmethod(reply_to_review)
@@ -672,8 +674,29 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/static/"):
+            self._serve_static()
         else:
             self._respond(200, "kennel is running")
+
+    def _serve_static(self) -> None:
+        if self.static_files is None:
+            self._respond(404, "not found")
+            return
+        response = self.static_files.serve(
+            self.path,
+            self.headers.get("If-None-Match"),
+            self.headers.get("If-Modified-Since"),
+        )
+        if response is None:
+            self._respond(404, "not found")
+            return
+        self.send_response(response.status)
+        for name, value in response.headers:
+            self.send_header(name, value)
+        self.end_headers()
+        if response.body:
+            self.wfile.write(response.body)
 
     def _verify_signature(self, body: bytes) -> bool:
         header = self.headers.get("X-Hub-Signature-256", "")
@@ -815,6 +838,9 @@ def run(
 
     WebhookHandler.config = config
     WebhookHandler.gh = gh
+    WebhookHandler.static_files = StaticFiles(
+        Path(__file__).resolve().parent / "static"
+    )
     registry = _make_registry(config.repos, gh, config)
     WebhookHandler.registry = registry
     # Route webhook-handler prompt calls through the per-repo persistent

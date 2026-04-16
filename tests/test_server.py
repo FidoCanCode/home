@@ -89,6 +89,7 @@ def _restore_handler_fns():
         "_fn_after_do_post": WebhookHandler._fn_after_do_post,
         "_fn_runner_dir": WebhookHandler._fn_runner_dir,
         "infra": WebhookHandler.infra,
+        "static_files": WebhookHandler.static_files,
     }
     # Override _fn_after_do_post for all tests so _post_webhook can wait for
     # do_POST to complete without sleeping (see module-level comment above).
@@ -392,6 +393,78 @@ class TestGetEndpoint:
         resp = urllib.request.urlopen(f"{url}/status")
         data = json.loads(resp.read())
         assert data[0]["rescoping"] is False
+
+
+class TestStaticFileServing:
+    def test_serves_static_css(self, server: tuple, tmp_path: Path) -> None:
+        url, _ = server
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        (static_dir / "style.css").write_text("body { color: red; }")
+
+        from kennel.static_files import StaticFiles
+
+        WebhookHandler.static_files = StaticFiles(static_dir)
+        resp = urllib.request.urlopen(f"{url}/static/style.css")
+        assert resp.status == 200
+        assert resp.read() == b"body { color: red; }"
+        assert resp.headers["Content-Type"] == "text/css; charset=utf-8"
+
+    def test_static_includes_caching_headers(
+        self, server: tuple, tmp_path: Path
+    ) -> None:
+        url, _ = server
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        (static_dir / "style.css").write_text("x")
+
+        from kennel.static_files import StaticFiles
+
+        WebhookHandler.static_files = StaticFiles(static_dir)
+        resp = urllib.request.urlopen(f"{url}/static/style.css")
+        assert resp.headers["ETag"] is not None
+        assert resp.headers["Last-Modified"] is not None
+        assert resp.headers["Cache-Control"] == "public, max-age=3600"
+
+    def test_static_304_on_etag_match(self, server: tuple, tmp_path: Path) -> None:
+        url, _ = server
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        content = b"body { color: blue; }"
+        (static_dir / "style.css").write_bytes(content)
+
+        import hashlib
+
+        from kennel.static_files import StaticFiles
+
+        WebhookHandler.static_files = StaticFiles(static_dir)
+        etag = '"' + hashlib.sha256(content).hexdigest()[:16] + '"'
+        req = urllib.request.Request(
+            f"{url}/static/style.css",
+            headers={"If-None-Match": etag},
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req)
+        assert exc_info.value.code == 304
+
+    def test_static_404_when_no_static_files(self, server: tuple) -> None:
+        url, _ = server
+        WebhookHandler.static_files = None
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(f"{url}/static/style.css")
+        assert exc_info.value.code == 404
+
+    def test_static_404_for_missing_file(self, server: tuple, tmp_path: Path) -> None:
+        url, _ = server
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+
+        from kennel.static_files import StaticFiles
+
+        WebhookHandler.static_files = StaticFiles(static_dir)
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(f"{url}/static/nope.css")
+        assert exc_info.value.code == 404
 
 
 class TestEmptyBody:
