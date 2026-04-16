@@ -1,201 +1,158 @@
-/* kennel status — warm, functional, unmistakably fido */
+/*
+ * Rube Goldberg layer 3: CSS styles display-oriented XML.
+ *
+ * Pipeline: server emits structural XML → XSLT transforms to display XML →
+ *           this CSS styles the display XML via @namespace selectors.
+ *
+ * Display namespace: https://fidocancode.dog/display
+ * Attribute namespace: https://fidocancode.dog/woof (dog:status, dog:kind)
+ */
 
-:root {
-  --cream: #faf6f0;
-  --warm-white: #ffffff;
-  --amber: #c87c0a;
-  --amber-light: #fdf0d5;
-  --gold: #d4880f;
-  --green: #1a7f37;
-  --green-light: #dafbe1;
-  --green-glow: #2da44e;
-  --red: #cf222e;
-  --red-light: #ffebe9;
-  --blue: #0969da;
-  --blue-light: #ddf4ff;
-  --text: #1f2328;
-  --text-secondary: #656d76;
-  --text-muted: #8b949e;
-  --border: #d8dee4;
-  --shadow: rgba(31, 35, 40, 0.06);
-  --shadow-lg: rgba(31, 35, 40, 0.12);
-  --radius: 10px;
-  --mono: "SF Mono", "Cascadia Code", "Fira Code", Menlo, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Noto Sans,
+@namespace url(https://fidocancode.dog/display);
+@namespace dog url(https://fidocancode.dog/woof);
+
+/* === base === */
+
+dashboard {
+  display: block;
+  margin: 0;
+  padding: 1rem 0 3rem;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Noto Sans,
     Helvetica, Arial, sans-serif;
-}
-
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
-
-html {
+  background: #faf6f0;
+  color: #1f2328;
+  line-height: 1.5;
+  min-height: 100vh;
   font-size: 15px;
 }
 
-body {
-  margin: 0;
-  padding: 0;
-  font-family: var(--sans);
-  background: var(--cream);
-  color: var(--text);
-  line-height: 1.5;
-  min-height: 100vh;
-}
+/* === title === */
 
-/* header */
-
-header {
-  padding: 1.5rem 1.5rem 0;
-  max-width: 52rem;
-  margin: 0 auto;
-}
-
-header h1 {
+title {
+  display: block;
   font-size: 1.25rem;
   font-weight: 600;
-  color: var(--text-secondary);
-  margin: 0;
+  color: #656d76;
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 0.5rem 1.5rem;
   letter-spacing: -0.01em;
 }
 
-.paw {
-  margin-right: 0.15em;
-}
+/* === empty state === */
 
-/* layout */
-
-main {
-  max-width: 52rem;
-  margin: 0 auto;
-  padding: 1rem 1.5rem 3rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-
-/* empty state */
-
-.empty {
+empty {
+  display: block;
   text-align: center;
-  color: var(--text-muted);
+  color: #8b949e;
   padding: 4rem 1rem;
   font-size: 1.1rem;
 }
 
-/* repo cards */
+/* === repo cards === */
 
-.repo {
-  background: var(--warm-white);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+card {
+  display: block;
+  background: #ffffff;
+  border: 1px solid #d8dee4;
+  border-radius: 10px;
   padding: 1rem 1.25rem;
-  box-shadow: 0 1px 3px var(--shadow);
+  max-width: 52rem;
+  margin: 0.75rem auto;
+  box-shadow: 0 1px 3px rgba(31, 35, 40, 0.06);
   transition: border-color 0.2s ease;
 }
 
-.repo.stuck {
-  border-left: 3px solid var(--red);
+card[dog|status="stuck"],
+card[dog|status="crashed"] {
+  border-left: 3px solid #cf222e;
 }
 
-.repo.crashed {
-  border-left: 3px solid var(--red);
+card[dog|status="busy"] {
+  border-left: 3px solid #1a7f37;
 }
 
-.repo.busy {
-  border-left: 3px solid var(--green);
+card[dog|status="idle"] {
+  border-left: 3px solid #d8dee4;
 }
 
-.repo.idle {
-  border-left: 3px solid var(--border);
-}
+/* === status dot via name::before === */
 
-/* repo header */
-
-.repo-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
+name {
+  display: block;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   margin-bottom: 0.25rem;
 }
 
-.repo-header h2 {
-  font-size: 1rem;
-  font-weight: 600;
-  margin: 0;
-  letter-spacing: -0.01em;
-}
-
-/* status dots */
-
-.dot {
+name::before {
+  content: "";
   display: inline-block;
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  flex-shrink: 0;
+  margin-right: 0.5rem;
+  vertical-align: middle;
+  background: #8b949e;
 }
 
-.dot-busy {
-  background: var(--green-glow);
+card[dog|status="busy"] > name::before {
+  background: #2da44e;
   box-shadow: 0 0 0 2px rgba(45, 164, 78, 0.2);
   animation: pulse 2s ease-in-out infinite;
 }
 
-.dot-idle {
-  background: var(--text-muted);
-}
-
-.dot-stuck {
-  background: var(--red);
+card[dog|status="stuck"] > name::before {
+  background: #cf222e;
   box-shadow: 0 0 0 2px rgba(207, 34, 46, 0.2);
   animation: pulse 1s ease-in-out infinite;
 }
 
-.dot-crash {
-  background: var(--red);
+card[dog|status="crashed"] > name::before {
+  background: #cf222e;
 }
 
 @keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
-/* uptime badge in header */
+/* === uptime === */
 
-.uptime {
-  margin-left: auto;
+uptime {
+  display: block;
+  float: right;
   font-size: 0.8rem;
-  color: var(--text-muted);
-  font-family: var(--mono);
+  color: #8b949e;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Menlo, monospace;
   font-variant-numeric: tabular-nums;
 }
 
-/* activity line — what the worker is doing */
+/* === activity === */
 
-.activity {
-  color: var(--text-secondary);
+activity {
+  display: block;
+  color: #656d76;
   font-size: 0.9rem;
   padding: 0.15rem 0 0.5rem 1.15rem;
+  clear: both;
 }
 
-/* metadata badges */
+/* === badges === */
 
-.meta {
+badges {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
   padding-left: 1.15rem;
 }
 
-.badge {
+badges:empty {
+  display: none;
+}
+
+badge {
   display: inline-flex;
   align-items: center;
   font-size: 0.75rem;
@@ -204,139 +161,136 @@ main {
   border-radius: 2rem;
 }
 
-.badge-crash {
-  background: var(--red-light);
-  color: var(--red);
+badge[dog|kind="crash"] {
+  background: #ffebe9;
+  color: #cf222e;
 }
 
-.badge-rescope {
-  background: var(--blue-light);
-  color: var(--blue);
+badge[dog|kind="rescope"] {
+  background: #ddf4ff;
+  color: #0969da;
 }
 
-.badge-session {
-  background: var(--amber-light);
-  color: var(--amber);
-  font-family: var(--mono);
+badge[dog|kind="session"] {
+  background: #fdf0d5;
+  color: #c87c0a;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Menlo, monospace;
   font-size: 0.7rem;
 }
 
-/* claude talker */
+/* === claude talker === */
 
-.talker {
-  margin-top: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  margin-left: 1.15rem;
-  background: var(--green-light);
-  border-radius: 6px;
-  font-size: 0.8rem;
+talker {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0.4rem;
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  margin-left: 1.15rem;
+  background: #dafbe1;
+  border-radius: 6px;
+  font-size: 0.8rem;
 }
 
-.talker-label {
+talker > label {
+  display: inline;
   font-weight: 600;
-  color: var(--green);
+  color: #1a7f37;
 }
 
-.talker-kind {
-  font-family: var(--mono);
+talker > kind {
+  display: inline;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Menlo, monospace;
   font-size: 0.75rem;
-  color: var(--green);
+  color: #1a7f37;
   background: rgba(26, 127, 55, 0.1);
   padding: 0.05rem 0.4rem;
   border-radius: 3px;
 }
 
-.talker-desc {
-  color: var(--text-secondary);
+talker > desc {
+  display: inline;
+  color: #656d76;
 }
 
-.talker-pid {
-  color: var(--text-muted);
-  font-family: var(--mono);
+talker > pid {
+  display: inline;
+  color: #8b949e;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Menlo, monospace;
   font-size: 0.7rem;
 }
 
-/* crash error details */
+/* === crash error === */
 
-.crash-error {
-  margin-top: 0.5rem;
-  margin-left: 1.15rem;
-}
-
-.crash-error summary {
-  font-size: 0.8rem;
-  font-weight: 500;
-  color: var(--red);
-  cursor: pointer;
-}
-
-.crash-error pre {
-  margin: 0.35rem 0 0;
+crash-detail {
+  display: block;
+  margin: 0.5rem 0 0 1.15rem;
   padding: 0.6rem 0.75rem;
-  background: var(--red-light);
+  background: #ffebe9;
   border-radius: 6px;
-  font-family: var(--mono);
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Menlo, monospace;
   font-size: 0.75rem;
-  color: var(--red);
+  color: #cf222e;
   white-space: pre-wrap;
   word-break: break-word;
-  overflow-x: auto;
 }
 
-/* webhook activities */
+crash-detail::before {
+  content: "last crash";
+  display: block;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Noto Sans,
+    Helvetica, Arial, sans-serif;
+  font-size: 0.8rem;
+  font-weight: 500;
+  margin-bottom: 0.35rem;
+}
 
-.webhooks {
+/* === webhook activities === */
+
+hooks {
+  display: block;
   margin-top: 0.5rem;
   padding-left: 1.15rem;
 }
 
-.webhooks-label {
+hooks-label {
+  display: block;
   font-size: 0.8rem;
   font-weight: 600;
-  color: var(--text-secondary);
+  color: #656d76;
+  margin-bottom: 0.2rem;
 }
 
-.webhooks ul {
-  list-style: none;
-  margin: 0.2rem 0 0;
-  padding: 0;
-}
-
-.webhooks li {
+hook {
+  display: block;
   font-size: 0.8rem;
-  color: var(--text-secondary);
-  padding: 0.15rem 0;
-  padding-left: 0.75rem;
-  border-left: 2px solid var(--border);
+  color: #656d76;
+  padding: 0.15rem 0 0.15rem 0.75rem;
+  border-left: 2px solid #d8dee4;
 }
 
-.webhooks li::before {
-  content: none;
+hook-desc {
+  display: inline;
 }
 
-.elapsed {
-  color: var(--text-muted);
-  font-family: var(--mono);
+elapsed {
+  display: inline;
+  color: #8b949e;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Menlo, monospace;
   font-size: 0.7rem;
   margin-left: 0.4rem;
 }
 
-/* responsive */
+/* === responsive === */
 
 @media (max-width: 600px) {
-  header {
-    padding: 1rem 1rem 0;
+  title {
+    padding: 0.5rem 1rem;
   }
 
-  main {
-    padding: 0.75rem 1rem 2rem;
-  }
-
-  .repo {
+  card {
+    margin: 0.5rem 1rem;
     padding: 0.85rem 1rem;
   }
 }

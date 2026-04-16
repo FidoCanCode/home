@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
-from xml.etree.ElementTree import Element, SubElement, tostring
+from xml.etree.ElementTree import Element, SubElement, register_namespace, tostring
 
 from kennel import claude, reply_promises
 from kennel.claude import kill_active_children
@@ -57,6 +57,15 @@ _replied_comments: set[int] = set()
 # exceeds _PULL_BUDGET_SECONDS, even if a retry window remains.
 _PULL_BACKOFF_DELAYS: tuple[int, ...] = (10, 30, 60)
 _PULL_BUDGET_SECONDS: float = 600.0
+
+# XML namespace URIs for the /status endpoint structural XML.
+_NS_KENNEL = "https://fidocancode.dog/kennel"
+_NS_DOG = "https://fidocancode.dog/woof"
+
+# Register namespace prefixes for clean XML serialization.  Idempotent —
+# safe to call at module scope before any threads start.
+register_namespace("", _NS_KENNEL)
+register_namespace("dog", _NS_DOG)
 
 
 class PreflightError(RuntimeError):
@@ -102,31 +111,52 @@ def _xml_text(value: object) -> str | None:
     return str(value)
 
 
-def _activities_to_xml(activities: list[dict[str, Any]]) -> bytes:
-    """Serialize activity dicts to XML with an XSLT processing instruction.
+def _repo_status(act: dict[str, Any]) -> str:
+    """Derive a single status word from activity flags.
 
-    Pure function — transforms data, no I/O.  The resulting XML matches
-    the structure expected by ``status.xsl``.
+    Priority: stuck > crashed > busy > idle.  Used as the ``dog:status``
+    attribute on ``<repo>`` elements so XSLT and CSS can style by state.
     """
-    root = Element("kennel")
+    if act.get("is_stuck"):
+        return "stuck"
+    if act.get("crash_count", 0) > 0:
+        return "crashed"
+    if act.get("busy"):
+        return "busy"
+    return "idle"
+
+
+def _activities_to_xml(activities: list[dict[str, Any]]) -> bytes:
+    """Serialize activity dicts to namespaced structural XML with an XSLT PI.
+
+    Pure function — transforms data, no I/O.  The server emits this structural
+    XML in the ``https://fidocancode.dog/kennel`` namespace.  The browser
+    fetches ``status.xsl`` (via the XSLT processing instruction), which
+    transforms it into display-oriented XML in a separate namespace, which
+    is then styled by ``status.css`` via a CSS processing instruction.
+
+    Three-layer pipeline: structural XML → XSLT → display XML → CSS.
+    """
+    root = Element(f"{{{_NS_KENNEL}}}kennel")
     for act in activities:
-        repo = SubElement(root, "repo")
+        repo = SubElement(root, f"{{{_NS_KENNEL}}}repo")
+        repo.set(f"{{{_NS_DOG}}}status", _repo_status(act))
         for key, value in act.items():
             if key == "webhook_activities":
-                wa_el = SubElement(repo, "webhook_activities")
+                wa_el = SubElement(repo, f"{{{_NS_KENNEL}}}webhook_activities")
                 for wh in value:
-                    webhook_el = SubElement(wa_el, "webhook")
+                    webhook_el = SubElement(wa_el, f"{{{_NS_KENNEL}}}webhook")
                     for wk, wv in wh.items():
-                        el = SubElement(webhook_el, wk)
+                        el = SubElement(webhook_el, f"{{{_NS_KENNEL}}}{wk}")
                         el.text = _xml_text(wv)
             elif key == "claude_talker":
-                ct_el = SubElement(repo, "claude_talker")
+                ct_el = SubElement(repo, f"{{{_NS_KENNEL}}}claude_talker")
                 if value is not None:
                     for ck, cv in value.items():
-                        el = SubElement(ct_el, ck)
+                        el = SubElement(ct_el, f"{{{_NS_KENNEL}}}{ck}")
                         el.text = _xml_text(cv)
             else:
-                el = SubElement(repo, key)
+                el = SubElement(repo, f"{{{_NS_KENNEL}}}{key}")
                 el.text = _xml_text(value)
     xml_body = tostring(root, encoding="unicode")
     return (

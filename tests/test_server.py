@@ -18,7 +18,7 @@ import pytest
 from kennel.config import Config, RepoConfig
 from kennel.events import Action, recover_reply_promises
 from kennel.infra import Infra
-from kennel.server import PreflightError, WebhookHandler
+from kennel.server import PreflightError, WebhookHandler, _repo_status
 
 # Thread-capture and do_POST synchronisation helpers ---------------------------
 #
@@ -395,8 +395,23 @@ class TestGetEndpoint:
         assert data[0]["rescoping"] is False
 
 
+class TestRepoStatus:
+    @pytest.mark.parametrize(
+        ("act", "expected"),
+        [
+            ({"is_stuck": True, "crash_count": 2, "busy": True}, "stuck"),
+            ({"is_stuck": False, "crash_count": 3, "busy": True}, "crashed"),
+            ({"is_stuck": False, "crash_count": 0, "busy": True}, "busy"),
+            ({"is_stuck": False, "crash_count": 0, "busy": False}, "idle"),
+        ],
+        ids=["stuck", "crashed", "busy", "idle"],
+    )
+    def test_repo_status_priority(self, act: dict, expected: str) -> None:
+        assert _repo_status(act) == expected
+
+
 class TestStatusXml:
-    def test_status_returns_xml_with_xslt_pi(self, server: tuple) -> None:
+    def test_status_returns_namespaced_xml_with_xslt_pi(self, server: tuple) -> None:
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = []
         resp = urllib.request.urlopen(f"{url}/status")
@@ -405,8 +420,9 @@ class TestStatusXml:
         assert '<?xml version="1.0" encoding="UTF-8"?>' in body
         assert '<?xml-stylesheet type="text/xsl" href="/static/status.xsl"?>' in body
         assert "<kennel" in body
+        assert 'xmlns="https://fidocancode.dog/kennel"' in body
 
-    def test_status_xml_contains_repo_data(self, server: tuple) -> None:
+    def test_status_xml_contains_repo_data_with_namespaces(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
         from kennel.registry import WorkerActivity
@@ -433,13 +449,16 @@ class TestStatusXml:
         assert "<repo_name>owner/repo</repo_name>" in body
         assert "<what>Working on: #1</what>" in body
         assert "<busy>true</busy>" in body
+        assert 'dog:status="busy"' in body
 
     def test_status_xml_empty_kennel(self, server: tuple) -> None:
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = []
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
-        assert "<kennel />" in body or "<kennel/>" in body
+        assert 'xmlns="https://fidocancode.dog/kennel"' in body
+        # Empty kennel — self-closing root element (with namespace attrs)
+        assert "/>" in body
 
     def test_status_xml_includes_claude_talker(self, server: tuple) -> None:
         from datetime import datetime, timezone
