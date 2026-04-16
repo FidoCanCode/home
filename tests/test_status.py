@@ -5,12 +5,19 @@ from __future__ import annotations
 import fcntl
 import json
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from kennel.color import _CODES
 from kennel.config import RepoConfig as _RepoConfig
-from kennel.provider import ProviderID
+from kennel.provider import (
+    ProviderID,
+    ProviderLimitSnapshot,
+    ProviderPressureStatus,
+)
 from kennel.status import (
     ClaudeTalkerInfo,
     KennelStatus,
@@ -30,6 +37,7 @@ from kennel.status import (
     _repos_from_pid,
     collect,
     format_status,
+    provider_statuses_for_repo_configs,
     repo_status,
     running_repo_configs,
 )
@@ -138,6 +146,46 @@ class TestRunningRepoConfigs:
             _kennel_pid_fn=lambda: 123,
             _repos_from_pid_fn=lambda pid: [repo_cfg],
         ) == [repo_cfg]
+
+
+class TestProviderStatusesForRepoConfigs:
+    def test_dedupes_by_provider(self, tmp_path: Path) -> None:
+        claude_a = RepoConfig(name="owner/a", work_dir=tmp_path / "a")
+        claude_b = RepoConfig(name="owner/b", work_dir=tmp_path / "b")
+        copilot = RepoConfig(
+            name="owner/c",
+            work_dir=tmp_path / "c",
+            provider=ProviderID.COPILOT_CLI,
+        )
+        factory = MagicMock()
+        first = MagicMock()
+        second = MagicMock()
+        first.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE
+        )
+        second.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+            provider=ProviderID.COPILOT_CLI
+        )
+        factory.create_provider.side_effect = [first, second]
+
+        statuses = provider_statuses_for_repo_configs(
+            [claude_a, claude_b, copilot],
+            _provider_factory=factory,
+        )
+
+        assert list(statuses) == [ProviderID.CLAUDE_CODE, ProviderID.COPILOT_CLI]
+        factory.create_provider.assert_any_call(
+            claude_a,
+            work_dir=claude_a.work_dir,
+            repo_name=claude_a.name,
+            session=None,
+        )
+        factory.create_provider.assert_any_call(
+            copilot,
+            work_dir=copilot.work_dir,
+            repo_name=copilot.name,
+            session=None,
+        )
 
 
 class TestProcessUptimeSeconds:
@@ -825,8 +873,21 @@ class TestRepoStatus:
             result = repo_status(cfg, worker_stuck=True)
         assert result.worker_stuck is True
 
+    def test_provider_status_passed_through(self, tmp_path: Path) -> None:
+        cfg = self._make_config(tmp_path)
+        status = ProviderPressureStatus(provider=ProviderID.CLAUDE_CODE, pressure=0.95)
+        with patch("kennel.status._git_dir", return_value=None):
+            result = repo_status(cfg, provider_status=status)
+        assert result.provider is ProviderID.CLAUDE_CODE
+        assert result.provider_status == status
+
 
 class TestCollect:
+    @pytest.fixture(autouse=True)
+    def _stub_provider_statuses(self):
+        with patch("kennel.status.provider_statuses_for_repo_configs", return_value={}):
+            yield
+
     def _fake_repo_status(self, name: str = "owner/repo") -> RepoStatus:
         return RepoStatus(
             name=name,
@@ -857,6 +918,7 @@ class TestCollect:
         assert result.kennel_pid == 42
         assert result.kennel_uptime == 600
         assert len(result.repos) == 1
+        assert result.provider_statuses == []
 
     def test_kennel_down(self) -> None:
         with (
@@ -874,6 +936,30 @@ class TestCollect:
         mock_port.assert_not_called()
         assert result.kennel_pid is None
         assert result.kennel_uptime is None
+
+    def test_passes_provider_status_to_repo_status(self, tmp_path: Path) -> None:
+        rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.91,
+        )
+        with (
+            patch("kennel.status._kennel_pid", return_value=42),
+            patch("kennel.status._repos_from_pid", return_value=[rc]),
+            patch("kennel.status._process_uptime_seconds", return_value=600),
+            patch("kennel.status._port_from_pid", return_value=None),
+            patch(
+                "kennel.status.provider_statuses_for_repo_configs",
+                return_value={ProviderID.CLAUDE_CODE: provider_status},
+            ),
+            patch(
+                "kennel.status.repo_status", return_value=self._fake_repo_status()
+            ) as mock_repo,
+        ):
+            result = collect()
+
+        assert result.provider_statuses == [provider_status]
+        assert mock_repo.call_args.kwargs["provider_status"] == provider_status
 
     def _activity_info(
         self,
@@ -950,6 +1036,7 @@ class TestCollect:
             worker_stuck=False,
             worker_uptime=None,
             webhook_activities=[],
+            provider_status=None,
             session_owner=None,
             session_alive=False,
             session_pid=None,
@@ -985,6 +1072,7 @@ class TestCollect:
             worker_stuck=False,
             worker_uptime=None,
             webhook_activities=[],
+            provider_status=None,
             session_owner=None,
             session_alive=False,
             session_pid=None,
@@ -1013,6 +1101,7 @@ class TestCollect:
             worker_stuck=False,
             worker_uptime=None,
             webhook_activities=[],
+            provider_status=None,
             session_owner=None,
             session_alive=False,
             session_pid=None,
@@ -1089,6 +1178,7 @@ class TestCollect:
             worker_stuck=True,
             worker_uptime=None,
             webhook_activities=[],
+            provider_status=None,
             session_owner=None,
             session_alive=False,
             session_pid=None,
@@ -1157,6 +1247,67 @@ class TestFormatStatus:
         output = format_status(status)
         assert output == "kennel: UP (pid 12345, uptime 2h13m)"
 
+    def test_includes_provider_limits_summary_and_repo_pressure(self) -> None:
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.91,
+            window_name="five_hour",
+        )
+        status = KennelStatus(
+            kennel_pid=12345,
+            kennel_uptime=None,
+            repos=[self._repo(provider_status=provider_status)],
+            provider_statuses=[provider_status],
+        )
+        output = format_status(status)
+        assert "limits: claude-code 91% (five hour)" in output
+        assert "owner/repo: fido idle — claude-code 91% (five hour)" in output
+
+    def test_includes_provider_reset_time_in_summary(self) -> None:
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.96,
+            window_name="five_hour",
+            resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=UTC),
+        )
+        status = KennelStatus(
+            kennel_pid=None,
+            kennel_uptime=None,
+            repos=[self._repo(provider_status=provider_status)],
+            provider_statuses=[provider_status],
+        )
+        output = format_status(status)
+        assert "resets 2026-04-16 07:00 UTC" in output
+
+    def test_includes_provider_unavailable_summary(self) -> None:
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.COPILOT_CLI,
+            unavailable_reason="limits unavailable",
+        )
+        status = KennelStatus(
+            kennel_pid=None,
+            kennel_uptime=None,
+            repos=[
+                self._repo(
+                    provider=ProviderID.COPILOT_CLI, provider_status=provider_status
+                )
+            ],
+            provider_statuses=[provider_status],
+        )
+        output = format_status(status)
+        assert "copilot-cli unavailable" in output
+
+    def test_includes_provider_unknown_summary(self) -> None:
+        provider_status = ProviderPressureStatus(provider=ProviderID.CLAUDE_CODE)
+        status = KennelStatus(
+            kennel_pid=None,
+            kennel_uptime=None,
+            repos=[self._repo(provider_status=provider_status)],
+            provider_statuses=[provider_status],
+        )
+        output = format_status(status)
+        assert "claude-code limits unknown" in output
+
     def test_kennel_up_no_uptime(self) -> None:
         status = KennelStatus(kennel_pid=12345, kennel_uptime=None, repos=[])
         output = format_status(status)
@@ -1202,6 +1353,27 @@ class TestFormatStatus:
         output = format_status(status)
         assert "Issue:  #42 — Add widget" in output
         assert "Worker: task 3/3 — Do the thing" in output
+
+    def test_paused_provider_overrides_worker_state(self) -> None:
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.97,
+        )
+        repo = self._repo(
+            issue=42,
+            current_task="Do the thing",
+            task_number=3,
+            task_total=3,
+            provider_status=provider_status,
+        )
+        status = KennelStatus(
+            kennel_pid=None,
+            kennel_uptime=None,
+            repos=[repo],
+            provider_statuses=[provider_status],
+        )
+        output = format_status(status)
+        assert "Worker: paused for claude-code reset" in output
 
     def test_task_count_shows_question_mark_when_rescoping(self) -> None:
         repo = self._repo(
@@ -1599,6 +1771,54 @@ class TestFormatStatusColor:
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
         assert f"{_CODES['red']}BUSY" in output
+
+    def test_provider_warning_dim(self) -> None:
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.9,
+        )
+        repo = self._repo(provider_status=provider_status)
+        status = KennelStatus(
+            kennel_pid=None,
+            kennel_uptime=None,
+            repos=[repo],
+            provider_statuses=[provider_status],
+        )
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert f"{_CODES['dim']}claude-code 90%" in output
+
+    def test_provider_pause_dark_gray(self) -> None:
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.95,
+        )
+        repo = self._repo(provider_status=provider_status)
+        status = KennelStatus(
+            kennel_pid=None,
+            kennel_uptime=None,
+            repos=[repo],
+            provider_statuses=[provider_status],
+        )
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert f"{_CODES['dark_gray']}claude-code 95%" in output
+
+    def test_provider_ok_has_no_warning_color(self) -> None:
+        provider_status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.5,
+        )
+        status = KennelStatus(
+            kennel_pid=None,
+            kennel_uptime=None,
+            repos=[self._repo(provider_status=provider_status)],
+            provider_statuses=[provider_status],
+        )
+        with patch.dict("os.environ", self._color_env(), clear=True):
+            output = format_status(status)
+        assert f"{_CODES['dim']}claude-code 50%" not in output
+        assert f"{_CODES['dark_gray']}claude-code 50%" not in output
 
     def test_crash_red_bold(self) -> None:
         repo = self._repo(crash_count=2, last_crash_error="RuntimeError: boom")

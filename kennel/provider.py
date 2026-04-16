@@ -98,6 +98,63 @@ class ProviderLimitSnapshot:
         return self.windows[0] if self.windows else None
 
 
+PROVIDER_PRESSURE_WARN_THRESHOLD = 0.90
+PROVIDER_PRESSURE_PAUSE_THRESHOLD = 0.95
+
+
+@dataclass(frozen=True)
+class ProviderPressureStatus:
+    """Normalized provider-pressure summary used by status UI and pause policy."""
+
+    provider: ProviderID
+    window_name: str | None = None
+    pressure: float | None = None
+    resets_at: datetime | None = None
+    unavailable_reason: str | None = None
+
+    @classmethod
+    def from_snapshot(cls, snapshot: ProviderLimitSnapshot) -> "ProviderPressureStatus":
+        """Summarize the closest-to-hit window from *snapshot*."""
+        closest = snapshot.closest_to_exhaustion()
+        return cls(
+            provider=snapshot.provider,
+            window_name=closest.name if closest is not None else None,
+            pressure=closest.pressure if closest is not None else None,
+            resets_at=closest.resets_at if closest is not None else None,
+            unavailable_reason=snapshot.unavailable_reason,
+        )
+
+    @property
+    def percent_used(self) -> int | None:
+        """Return the nearest whole-percent pressure, or ``None`` when unknown."""
+        if self.pressure is None:
+            return None
+        return round(self.pressure * 100)
+
+    @property
+    def level(self) -> Literal["ok", "warning", "paused", "unavailable", "unknown"]:
+        """Return the normalized pressure level for display/policy."""
+        if self.unavailable_reason is not None:
+            return "unavailable"
+        if self.pressure is None:
+            return "unknown"
+        if self.pressure >= PROVIDER_PRESSURE_PAUSE_THRESHOLD:
+            return "paused"
+        if self.pressure >= PROVIDER_PRESSURE_WARN_THRESHOLD:
+            return "warning"
+        return "ok"
+
+    @property
+    def warning(self) -> bool:
+        """Return whether the provider has crossed the warning threshold."""
+        return self.level == "warning"
+
+    @property
+    def paused(self) -> bool:
+        """Return whether the provider has crossed the pause threshold."""
+        return self.level == "paused"
+
+
 class PromptSession(Protocol):
     """Persistent prompt/session collaborator owned by a repo worker thread."""
 

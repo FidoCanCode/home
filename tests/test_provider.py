@@ -7,6 +7,7 @@ from kennel.provider import (
     ProviderLimitSnapshot,
     ProviderLimitWindow,
     ProviderModel,
+    ProviderPressureStatus,
 )
 
 
@@ -52,6 +53,68 @@ class TestProviderLimitSnapshot:
     def test_closest_to_exhaustion_returns_none_for_empty_snapshot(self) -> None:
         snapshot = ProviderLimitSnapshot(provider=ProviderID.GEMINI)
         assert snapshot.closest_to_exhaustion() is None
+
+
+class TestProviderPressureStatus:
+    def test_from_snapshot_uses_closest_window(self) -> None:
+        low = ProviderLimitWindow(name="tokens", used=20, limit=100)
+        high = ProviderLimitWindow(
+            name="requests",
+            used=96,
+            limit=100,
+            resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=UTC),
+        )
+        status = ProviderPressureStatus.from_snapshot(
+            ProviderLimitSnapshot(
+                provider=ProviderID.CLAUDE_CODE,
+                windows=(low, high),
+            )
+        )
+        assert status.provider is ProviderID.CLAUDE_CODE
+        assert status.window_name == "requests"
+        assert status.pressure == 0.96
+        assert status.resets_at == datetime(2026, 4, 16, 7, 0, tzinfo=UTC)
+
+    def test_level_is_warning_at_ninety_percent(self) -> None:
+        status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.9,
+        )
+        assert status.level == "warning"
+        assert status.warning is True
+        assert status.paused is False
+
+    def test_level_is_paused_at_ninety_five_percent(self) -> None:
+        status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.95,
+        )
+        assert status.level == "paused"
+        assert status.warning is False
+        assert status.paused is True
+
+    def test_level_is_unavailable_when_reason_present(self) -> None:
+        status = ProviderPressureStatus(
+            provider=ProviderID.COPILOT_CLI,
+            pressure=0.99,
+            unavailable_reason="limits unavailable",
+        )
+        assert status.level == "unavailable"
+
+    def test_percent_used_rounds_to_nearest_whole_percent(self) -> None:
+        status = ProviderPressureStatus(provider=ProviderID.CLAUDE_CODE, pressure=0.946)
+        assert status.percent_used == 95
+
+    def test_percent_used_is_none_when_pressure_unknown(self) -> None:
+        status = ProviderPressureStatus(provider=ProviderID.CLAUDE_CODE)
+        assert status.percent_used is None
+
+    def test_level_is_ok_below_warning_threshold(self) -> None:
+        status = ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.42,
+        )
+        assert status.level == "ok"
 
 
 class TestProviderModel:

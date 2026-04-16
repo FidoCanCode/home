@@ -2601,6 +2601,31 @@ class TestClaudeAPI:
             timeout=20,
         )
 
+    def test_limit_snapshot_uses_five_minute_cache(self) -> None:
+        response = MagicMock()
+        response.json.return_value = {
+            "five_hour": {
+                "utilization": 37.0,
+                "resets_at": "2026-04-16T07:00:00+00:00",
+            }
+        }
+        session = MagicMock()
+        session.get.return_value = response
+        times = iter([100.0, 160.0, 200.0])
+        api = ClaudeAPI(
+            session=session,
+            oauth_state_fn=lambda: type(
+                "OAuthState", (), {"access_token": "tok-123"}
+            )(),
+            monotonic=lambda: next(times),
+        )
+
+        first = api.get_limit_snapshot()
+        second = api.get_limit_snapshot()
+
+        assert first == second
+        session.get.assert_called_once()
+
     def test_limit_snapshot_marks_non_subscription_accounts_unavailable(self) -> None:
         response = MagicMock()
         response.json.return_value = {
@@ -2621,7 +2646,7 @@ class TestClaudeAPI:
             unavailable_reason="Claude usage is only available for subscription plans.",
         )
 
-    def test_limit_snapshot_logs_and_raises_when_fetch_fails(
+    def test_limit_snapshot_logs_and_marks_unavailable_when_fetch_fails(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         response = MagicMock()
@@ -2635,11 +2660,14 @@ class TestClaudeAPI:
             )(),
         )
         with caplog.at_level(logging.ERROR, logger="kennel.claude"):
-            with pytest.raises(RuntimeError, match="boom"):
-                api.get_limit_snapshot()
+            snapshot = api.get_limit_snapshot()
+        assert snapshot == ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE,
+            unavailable_reason="Claude usage unavailable: boom",
+        )
         assert "ClaudeAPI: failed to fetch usage snapshot" in caplog.text
 
-    def test_limit_snapshot_logs_and_raises_when_payload_is_not_an_object(
+    def test_limit_snapshot_logs_and_marks_unavailable_when_payload_is_not_an_object(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         response = MagicMock()
@@ -2653,8 +2681,13 @@ class TestClaudeAPI:
             )(),
         )
         with caplog.at_level(logging.ERROR, logger="kennel.claude"):
-            with pytest.raises(ValueError, match="must be a JSON object"):
-                api.get_limit_snapshot()
+            snapshot = api.get_limit_snapshot()
+        assert snapshot == ProviderLimitSnapshot(
+            provider=ProviderID.CLAUDE_CODE,
+            unavailable_reason=(
+                "Claude usage unavailable: Claude usage response must be a JSON object"
+            ),
+        )
         assert "ClaudeAPI: failed to fetch usage snapshot" in caplog.text
 
 

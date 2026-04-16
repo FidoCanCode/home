@@ -46,6 +46,7 @@ _CLAUDE_API_TIMEOUT = 20
 _CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_USAGE_BETA = "oauth-2025-04-20"
 _CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.110"
+_CLAUDE_USAGE_CACHE_SECONDS = 300.0
 
 
 class _Trunc:
@@ -1365,54 +1366,81 @@ class ClaudeAPI(ProviderAPI):
         oauth_state_fn: Callable[
             [], _ClaudeOAuthState | None
         ] = _load_claude_oauth_state,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._session = session if session is not None else _requests.Session()
         self._oauth_state_fn = oauth_state_fn
+        self._monotonic = monotonic
+        self._limit_snapshot_lock = threading.Lock()
+        self._limit_snapshot_cached_at: float | None = None
+        self._limit_snapshot_cache: ProviderLimitSnapshot | None = None
 
     @property
     def provider_id(self) -> ProviderID:
         return ProviderID.CLAUDE_CODE
 
     def get_limit_snapshot(self) -> ProviderLimitSnapshot:
-        oauth_state = self._oauth_state_fn()
-        if oauth_state is None:
-            return ProviderLimitSnapshot(
-                provider=self.provider_id,
-                unavailable_reason="Claude Code is not logged in.",
-            )
-        try:
-            response = self._session.get(
-                _CLAUDE_USAGE_URL,
-                headers={
-                    "Authorization": f"Bearer {oauth_state.access_token}",
-                    "anthropic-beta": _CLAUDE_USAGE_BETA,
-                    "Content-Type": "application/json",
-                    "User-Agent": _CLAUDE_USAGE_USER_AGENT,
-                },
-                timeout=_CLAUDE_API_TIMEOUT,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, dict):
-                raise ValueError("Claude usage response must be a JSON object")
-            windows = tuple(
-                window
-                for window in (
-                    _usage_window("five_hour", payload.get("five_hour")),
-                    _usage_window("seven_day", payload.get("seven_day")),
-                    _usage_window("seven_day_sonnet", payload.get("seven_day_sonnet")),
+        with self._limit_snapshot_lock:
+            if (
+                self._limit_snapshot_cache is not None
+                and self._limit_snapshot_cached_at is not None
+                and self._monotonic() - self._limit_snapshot_cached_at
+                < _CLAUDE_USAGE_CACHE_SECONDS
+            ):
+                return self._limit_snapshot_cache
+            oauth_state = self._oauth_state_fn()
+            if oauth_state is None:
+                snapshot = ProviderLimitSnapshot(
+                    provider=self.provider_id,
+                    unavailable_reason="Claude Code is not logged in.",
                 )
-                if window is not None
-            )
-            if windows:
-                return ProviderLimitSnapshot(provider=self.provider_id, windows=windows)
-            return ProviderLimitSnapshot(
-                provider=self.provider_id,
-                unavailable_reason="Claude usage is only available for subscription plans.",
-            )
-        except Exception:
-            log.exception("ClaudeAPI: failed to fetch usage snapshot")
-            raise
+            else:
+                try:
+                    response = self._session.get(
+                        _CLAUDE_USAGE_URL,
+                        headers={
+                            "Authorization": f"Bearer {oauth_state.access_token}",
+                            "anthropic-beta": _CLAUDE_USAGE_BETA,
+                            "Content-Type": "application/json",
+                            "User-Agent": _CLAUDE_USAGE_USER_AGENT,
+                        },
+                        timeout=_CLAUDE_API_TIMEOUT,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    if not isinstance(payload, dict):
+                        raise ValueError("Claude usage response must be a JSON object")
+                    windows = tuple(
+                        window
+                        for window in (
+                            _usage_window("five_hour", payload.get("five_hour")),
+                            _usage_window("seven_day", payload.get("seven_day")),
+                            _usage_window(
+                                "seven_day_sonnet", payload.get("seven_day_sonnet")
+                            ),
+                        )
+                        if window is not None
+                    )
+                    if windows:
+                        snapshot = ProviderLimitSnapshot(
+                            provider=self.provider_id, windows=windows
+                        )
+                    else:
+                        snapshot = ProviderLimitSnapshot(
+                            provider=self.provider_id,
+                            unavailable_reason=(
+                                "Claude usage is only available for subscription plans."
+                            ),
+                        )
+                except Exception as exc:
+                    log.exception("ClaudeAPI: failed to fetch usage snapshot")
+                    snapshot = ProviderLimitSnapshot(
+                        provider=self.provider_id,
+                        unavailable_reason=f"Claude usage unavailable: {exc}",
+                    )
+            self._limit_snapshot_cache = snapshot
+            self._limit_snapshot_cached_at = self._monotonic()
+            return snapshot
 
 
 class ClaudeClient(ProviderAgent):

@@ -11,6 +11,7 @@ from kennel.color import (
     _RESET,
     BOLD,
     CYAN,
+    DARK_GRAY,
     DIM,
     GREEN,
     MAGENTA,
@@ -86,7 +87,7 @@ class TestColor:
 
     @pytest.mark.parametrize(
         "style",
-        [BOLD, DIM, RED, RED_BOLD, CYAN, MAGENTA, GREEN, YELLOW],
+        [BOLD, DIM, RED, RED_BOLD, CYAN, MAGENTA, GREEN, YELLOW, DARK_GRAY],
     )
     def test_each_style_wraps_with_ansi(self, style: str) -> None:
         with patch.dict("os.environ", self._enabled(), clear=True):
@@ -124,3 +125,7 @@ class TestColor:
     def test_color_enabled_yellow(self) -> None:
         with patch.dict("os.environ", self._enabled(), clear=True):
             assert color(YELLOW, "webhook") == "\033[33mwebhook\033[0m"
+
+    def test_color_enabled_dark_gray(self) -> None:
+        with patch.dict("os.environ", self._enabled(), clear=True):
+            assert color(DARK_GRAY, "paused") == "\033[90mpaused\033[0m"
