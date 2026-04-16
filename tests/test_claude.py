@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -746,6 +747,40 @@ class TestClaudeSessionInit:
         session = ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
         assert proc in _active_children
         # cleanup
+        session.stop()
+
+
+class TestClaudeSessionWakeupPipe:
+    def test_wake_writes_byte(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._wake()
+        data = os.read(session._wakeup_r, 16)
+        assert data == b"\x00"
+        session.stop()
+
+    def test_wake_tolerates_closed_pipe(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        os.close(session._wakeup_w)
+        session._wake()  # should not raise
+        session.stop()
+
+    def test_drain_wakeup_clears_pipe(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        os.write(session._wakeup_w, b"\x00\x00\x00")
+        session._drain_wakeup()
+        # Pipe should be empty — non-blocking read raises BlockingIOError
+        with pytest.raises(BlockingIOError):
+            os.read(session._wakeup_r, 1)
+        session.stop()
+
+    def test_drain_wakeup_tolerates_closed_pipe(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        os.close(session._wakeup_r)
+        session._drain_wakeup()  # should not raise
         session.stop()
 
 
@@ -2281,49 +2316,6 @@ class TestClaudeClientResumeSession:
             "sess-123", prompt_file, "claude-sonnet-4-6", idle_timeout=600.0
         )
         assert mock_stream.call_args[0][2] == 600.0
-
-
-class TestClaudeClientTriageComment:
-    def test_returns_first_line(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ACT: fix the thing\nextra"))
-        client = ClaudeClient(runner=mock_run)
-        assert client.triage_comment("triage this") == "ACT: fix the thing"
-
-    def test_returns_empty_on_nonzero(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ACT", returncode=1))
-        client = ClaudeClient(runner=mock_run)
-        assert client.triage_comment("triage this") == ""
-
-    def test_returns_empty_on_empty_output(self) -> None:
-        mock_run = MagicMock(return_value=_completed(""))
-        client = ClaudeClient(runner=mock_run)
-        assert client.triage_comment("triage this") == ""
-
-    def test_returns_empty_on_timeout(self) -> None:
-        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
-        client = ClaudeClient(runner=mock_run)
-        assert client.triage_comment("triage") == ""
-
-    def test_returns_empty_on_file_not_found(self) -> None:
-        mock_run = MagicMock(side_effect=FileNotFoundError)
-        client = ClaudeClient(runner=mock_run)
-        assert client.triage_comment("triage") == ""
-
-    def test_default_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ACT: thing"))
-        client = ClaudeClient(runner=mock_run)
-        client.triage_comment("triage this")
-        cmd = mock_run.call_args.args[0]
-        assert "claude-opus-4-6" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 15
-
-    def test_custom_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed("DO: fix"))
-        client = ClaudeClient(runner=mock_run)
-        client.triage_comment("triage", model="claude-haiku-4-5-20251001", timeout=5)
-        cmd = mock_run.call_args.args[0]
-        assert "claude-haiku-4-5-20251001" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 5
 
 
 class TestClaudeClientGenerateReply:
