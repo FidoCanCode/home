@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -749,6 +750,40 @@ class TestClaudeSessionInit:
         session.stop()
 
 
+class TestClaudeSessionWakeupPipe:
+    def test_wake_writes_byte(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._wake()
+        data = os.read(session._wakeup_r, 16)
+        assert data == b"\x00"
+        session.stop()
+
+    def test_wake_tolerates_closed_pipe(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        os.close(session._wakeup_w)
+        session._wake()  # should not raise
+        session.stop()
+
+    def test_drain_wakeup_clears_pipe(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        os.write(session._wakeup_w, b"\x00\x00\x00")
+        session._drain_wakeup()
+        # Pipe should be empty — non-blocking read raises BlockingIOError
+        with pytest.raises(BlockingIOError):
+            os.read(session._wakeup_r, 1)
+        session.stop()
+
+    def test_drain_wakeup_tolerates_closed_pipe(self, tmp_path: Path) -> None:
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        os.close(session._wakeup_r)
+        session._drain_wakeup()  # should not raise
+        session.stop()
+
+
 class TestClaudeSessionSend:
     def test_writes_json_user_message_to_stdin(self, tmp_path: Path) -> None:
         import json as _json
@@ -895,6 +930,32 @@ class TestClaudeSessionDrainToBoundary:
             session._drain_to_boundary(deadline=0.01)
         mock_restart.assert_called_once()
         assert session._in_turn is False
+
+    def test_select_includes_wakeup_pipe(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [_json.dumps({"type": "result", "result": "done"}) + "\n"]
+        proc = _make_session_proc(lines)
+        select_inputs: list[list[object]] = []
+
+        def tracking_selector(
+            rlist: list[object],
+            wlist: list[object],
+            xlist: list[object],
+            timeout: float,
+        ) -> tuple[list[object], list[object], list[object]]:
+            select_inputs.append(list(rlist))
+            return ([proc.stdout], [], [])
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        session = ClaudeSession(
+            system_file, popen=MagicMock(return_value=proc), selector=tracking_selector
+        )
+        session._in_turn = True
+        session._drain_to_boundary()
+        assert all(session._wakeup_r in inputs for inputs in select_inputs)
+        session.stop()
 
 
 class TestClaudeSessionLogEvent:
@@ -1204,6 +1265,68 @@ class TestClaudeSessionIterEvents:
         session_ref.append(session)
         events = list(session.iter_events())
         assert events == []
+        session.stop()
+
+    def test_select_includes_wakeup_pipe(self, tmp_path: Path) -> None:
+        import json as _json
+
+        lines = [_json.dumps({"type": "result", "result": "ok"}) + "\n"]
+        proc = _make_session_proc(lines)
+        select_inputs: list[list[object]] = []
+
+        def tracking_selector(
+            rlist: list[object],
+            wlist: list[object],
+            xlist: list[object],
+            timeout: float,
+        ) -> tuple[list[object], list[object], list[object]]:
+            select_inputs.append(list(rlist))
+            return ([proc.stdout], [], [])
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        session = ClaudeSession(
+            system_file, popen=MagicMock(return_value=proc), selector=tracking_selector
+        )
+        list(session.iter_events())
+        # Every select call must include the wakeup fd alongside stdout
+        assert all(session._wakeup_r in inputs for inputs in select_inputs)
+        session.stop()
+
+    def test_wakeup_only_ready_continues_to_cancel_check(self, tmp_path: Path) -> None:
+        """When only the wakeup pipe fires, iter_events loops back and checks cancel."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        proc.poll = MagicMock(return_value=None)  # never exits
+        fake_popen = MagicMock(return_value=proc)
+
+        session_ref: list[ClaudeSession] = []
+        call_count = [0]
+
+        def staged_selector(
+            rlist: list[object],
+            wlist: list[object],
+            xlist: list[object],
+            timeout: float,
+        ) -> tuple[list[object], list[object], list[object]]:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: only wakeup pipe ready, then set cancel so next
+                # iteration exits cleanly
+                wakeup_r = next(x for x in rlist if x != proc.stdout)
+                session_ref[0]._cancel.set()
+                return ([wakeup_r], [], [])
+            return ([], [], [])  # should not reach here
+
+        session = ClaudeSession(system_file, popen=fake_popen, selector=staged_selector)
+        session_ref.append(session)
+        os.write(session._wakeup_w, b"\x00")
+        events = list(session.iter_events())
+        assert events == []
+        assert session._last_turn_cancelled is True
+        # readline was never called because stdout was not in the ready list
+        assert proc.stdout.readline.call_count == 0
         session.stop()
 
 
@@ -1848,6 +1971,95 @@ class TestClaudeSessionLock:
         session.stop()
 
 
+class TestClaudeSessionPreemptLatency:
+    """Validate that webhook preemption completes well within the 30s latency target.
+
+    The worker holds the session lock and blocks in iter_events (real select on
+    a pipe). A preempter sets cancel and writes to the wakeup pipe. The worker's
+    select must wake instantly, detect cancel, and release the lock — all well
+    under the 30s budget from #559.
+    """
+
+    def test_preempt_handoff_under_worker_contention(self, tmp_path: Path) -> None:
+        """Worker releases lock within 2s of a cancel+wake signal (target: <30s)."""
+        import select as _select
+        import threading
+        import time
+
+        stdout_r, stdout_w = os.pipe()
+        os.set_blocking(stdout_r, False)
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 99999
+        proc.stdin = MagicMock()
+        proc.stdin.closed = False
+        proc.stdout = os.fdopen(stdout_r, "r")
+        proc.stderr = MagicMock()
+        proc.poll = MagicMock(return_value=None)  # never exits
+        proc.wait = MagicMock(return_value=0)
+        proc.returncode = 0
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=MagicMock(return_value=proc),
+            selector=_select.select,  # real select — wakeup pipe must work
+            repo_name="test/latency",
+            idle_timeout=30.0,
+        )
+
+        worker_in_select = threading.Event()
+        worker_exited_lock = threading.Event()
+
+        # Wrap selector so we know when the worker is blocking in select
+        real_selector = session._selector
+
+        def instrumented_selector(
+            rlist: list[object],
+            wlist: list[object],
+            xlist: list[object],
+            timeout: float,
+        ) -> tuple[list[object], list[object], list[object]]:
+            worker_in_select.set()
+            return real_selector(rlist, wlist, xlist, timeout)
+
+        session._selector = instrumented_selector
+
+        def worker() -> None:
+            with session:
+                for _ in session.iter_events():
+                    pass  # no events expected — just blocking on select
+            worker_exited_lock.set()
+
+        t = threading.Thread(target=worker)
+        t.start()
+
+        # Wait for worker to actually be blocking in select
+        assert worker_in_select.wait(timeout=2.0), "worker never entered select"
+
+        # Now preempt — this is the critical path we're measuring
+        start = time.monotonic()
+        session._cancel.set()
+        session._wake()
+
+        assert worker_exited_lock.wait(timeout=5.0), "worker did not release lock"
+        elapsed = time.monotonic() - start
+
+        # The 30s budget from #559 includes the actual Claude response; the
+        # lock-handoff portion must be negligible.  Assert < 2s — generous
+        # safety margin while still catching the old 10s+ poll-interval bug.
+        assert elapsed < 2.0, (
+            f"preempt handoff took {elapsed:.2f}s — must be well under 30s target"
+        )
+
+        t.join(timeout=2.0)
+        os.close(stdout_w)
+        session.stop()
+
+
 class TestClaudeSessionSendControlInterrupt:
     def test_writes_control_request_type(self, tmp_path: Path) -> None:
         import json as _json
@@ -2281,49 +2493,6 @@ class TestClaudeClientResumeSession:
             "sess-123", prompt_file, "claude-sonnet-4-6", idle_timeout=600.0
         )
         assert mock_stream.call_args[0][2] == 600.0
-
-
-class TestClaudeClientTriageComment:
-    def test_returns_first_line(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ACT: fix the thing\nextra"))
-        client = ClaudeClient(runner=mock_run)
-        assert client.triage_comment("triage this") == "ACT: fix the thing"
-
-    def test_returns_empty_on_nonzero(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ACT", returncode=1))
-        client = ClaudeClient(runner=mock_run)
-        assert client.triage_comment("triage this") == ""
-
-    def test_returns_empty_on_empty_output(self) -> None:
-        mock_run = MagicMock(return_value=_completed(""))
-        client = ClaudeClient(runner=mock_run)
-        assert client.triage_comment("triage this") == ""
-
-    def test_returns_empty_on_timeout(self) -> None:
-        mock_run = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 15))
-        client = ClaudeClient(runner=mock_run)
-        assert client.triage_comment("triage") == ""
-
-    def test_returns_empty_on_file_not_found(self) -> None:
-        mock_run = MagicMock(side_effect=FileNotFoundError)
-        client = ClaudeClient(runner=mock_run)
-        assert client.triage_comment("triage") == ""
-
-    def test_default_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ACT: thing"))
-        client = ClaudeClient(runner=mock_run)
-        client.triage_comment("triage this")
-        cmd = mock_run.call_args.args[0]
-        assert "claude-opus-4-6" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 15
-
-    def test_custom_model_and_timeout(self) -> None:
-        mock_run = MagicMock(return_value=_completed("DO: fix"))
-        client = ClaudeClient(runner=mock_run)
-        client.triage_comment("triage", model="claude-haiku-4-5-20251001", timeout=5)
-        cmd = mock_run.call_args.args[0]
-        assert "claude-haiku-4-5-20251001" in cmd
-        assert mock_run.call_args.kwargs["timeout"] == 5
 
 
 class TestClaudeClientGenerateReply:

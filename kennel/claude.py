@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import select
 import subprocess
@@ -18,10 +19,11 @@ from typing import Any, Literal
 
 log = logging.getLogger(__name__)
 
-# How many seconds select.select waits for stdout before checking for
-# process exit or idle-timeout.  Short enough to react quickly, long enough
-# not to busy-loop.
-_SELECT_POLL_INTERVAL = 10.0
+# Backstop timeout for select.select.  The wakeup pipe (_wakeup_r/_wakeup_w)
+# normally kicks select awake immediately on cancel; this value only matters
+# if the pipe write is lost.  Keep it short enough to bound worst-case
+# preempt latency without busy-looping.
+_SELECT_POLL_INTERVAL = 1.0
 
 # Maximum number of characters included when logging a raw line from the
 # claude subprocess, to keep log records readable.
@@ -646,6 +648,12 @@ class ClaudeSession:
         # :attr:`_cancel` — starving the preempter for a full worker turn.
         # See yield-starvation discussion in #499 comments.
         self._preempt_pending = threading.Event()
+        # Wakeup pipe: writing a byte to _wakeup_w kicks select() out of its
+        # blocking wait in iter_events() so the cancel signal is noticed
+        # immediately instead of waiting up to _SELECT_POLL_INTERVAL.
+        self._wakeup_r, self._wakeup_w = os.pipe()
+        os.set_blocking(self._wakeup_r, False)
+        os.set_blocking(self._wakeup_w, False)
         self._proc = self._spawn()
         _register_child(self._proc)
 
@@ -689,6 +697,21 @@ class ClaudeSession:
             _time.monotonic() - started,
         )
         return True
+
+    def _wake(self) -> None:
+        """Write a byte to the wakeup pipe to kick select() awake."""
+        try:
+            os.write(self._wakeup_w, b"\x00")
+        except OSError:
+            pass  # pipe full or closed — cancel event is the authority
+
+    def _drain_wakeup(self) -> None:
+        """Drain any pending bytes from the wakeup pipe."""
+        try:
+            while os.read(self._wakeup_r, 1024):
+                pass
+        except OSError:
+            pass  # EAGAIN (empty) or closed — either way, drained
 
     @property
     def repo_name(self) -> str | None:
@@ -901,9 +924,10 @@ class ClaudeSession:
         end_time = time.monotonic() + deadline
         while time.monotonic() < end_time:
             ready, _, _ = self._selector(
-                [self._proc.stdout], [], [], _SELECT_POLL_INTERVAL
+                [self._proc.stdout, self._wakeup_r], [], [], _SELECT_POLL_INTERVAL
             )
-            if ready:
+            self._drain_wakeup()
+            if self._proc.stdout in ready:
                 line = self._proc.stdout.readline()
                 if not line:
                     break  # EOF
@@ -973,6 +997,7 @@ class ClaudeSession:
         next :meth:`iter_events` caller to inherit.
         """
         self._cancel.set()
+        self._wake()
         with self._lock:
             self._send_control_interrupt()
             self.consume_until_result()
@@ -1010,6 +1035,7 @@ class ClaudeSession:
         there is nothing in-flight to interrupt.
         """
         self._cancel.set()
+        self._wake()
         # Mark that a preempter is queued so the current lock holder (a
         # worker) can wait_for_pending_preempt and cede the lock fairly
         # instead of racing to re-acquire after it yields.
@@ -1154,9 +1180,10 @@ class ClaudeSession:
                 # we're abandoning here.
                 break
             ready, _, _ = self._selector(
-                [self._proc.stdout], [], [], _SELECT_POLL_INTERVAL
+                [self._proc.stdout, self._wakeup_r], [], [], _SELECT_POLL_INTERVAL
             )
-            if ready:
+            self._drain_wakeup()
+            if self._proc.stdout in ready:
                 line = self._proc.stdout.readline()
                 if not line:
                     self._in_turn = False
@@ -1396,29 +1423,6 @@ class ClaudeClient:
         return output
 
     # ── Subprocess one-shot helpers ──────────────────────────────────────
-
-    def triage_comment(
-        self,
-        prompt: str,
-        model: str = "claude-opus-4-6",
-        timeout: int = 15,
-    ) -> str:
-        """Ask claude to triage a PR comment. Returns the raw first line of output."""
-        try:
-            result = _claude(
-                "--model",
-                model,
-                "--print",
-                "-p",
-                prompt,
-                timeout=timeout,
-                runner=self._runner,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip().splitlines()[0]
-            return ""
-        except subprocess.TimeoutExpired, FileNotFoundError:
-            return ""
 
     def generate_reply(
         self,
