@@ -1343,7 +1343,9 @@ class ClaudeClient(Provider):
     def get_limit_snapshot(self) -> ProviderLimitSnapshot | None:
         return ProviderLimitSnapshot(
             provider=self.provider_id,
-            unavailable_reason="Claude Code does not expose limit data yet.",
+            unavailable_reason=(
+                "This Claude Code integration does not surface Anthropic limit data yet."
+            ),
         )
 
     def _current_session(self) -> PromptSession:

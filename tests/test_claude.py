@@ -2277,7 +2277,9 @@ class TestClaudeClientSessionAttachment:
         client = ClaudeClient()
         assert client.get_limit_snapshot() == ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE,
-            unavailable_reason="Claude Code does not expose limit data yet.",
+            unavailable_reason=(
+                "This Claude Code integration does not surface Anthropic limit data yet."
+            ),
         )
 
 
