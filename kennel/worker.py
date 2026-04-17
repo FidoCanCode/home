@@ -53,7 +53,8 @@ class RepoContextFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.repo_name = getattr(_thread_repo, "repo_name", "-")  # type: ignore[attr-defined]
+        if not isinstance(getattr(record, "repo_name", None), str):
+            record.repo_name = getattr(_thread_repo, "repo_name", "-")  # type: ignore[attr-defined]
         return True
 
 

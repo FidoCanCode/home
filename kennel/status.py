@@ -675,6 +675,14 @@ def _styled_provider_status(status: ProviderPressureStatus) -> str:
     return color(_provider_status_style(status), _provider_status_summary(status))
 
 
+def _styled_repo_provider(repo: RepoStatus) -> str:
+    """Render the repo's provider label without repeating global limits details."""
+    provider_status = repo.provider_status
+    if provider_status is None:
+        return str(repo.provider)
+    return color(_provider_status_style(provider_status), str(provider_status.provider))
+
+
 def _format_provider_summary_line(statuses: list[ProviderPressureStatus]) -> str | None:
     if not statuses:
         return None
@@ -694,11 +702,7 @@ def _format_repo_header(repo: RepoStatus) -> str:
     """
     state_word = "running" if repo.fido_running else "idle"
     state_style = GREEN if repo.fido_running else DIM
-    stats: list[str] = []
-    if repo.provider_status is not None:
-        stats.append(_styled_provider_status(repo.provider_status))
-    else:
-        stats.append(str(repo.provider))
+    stats: list[str] = [_styled_repo_provider(repo)]
     if repo.crash_count > 0:
         stats.append(color(RED_BOLD, f"crashes {repo.crash_count}"))
     if repo.worker_uptime is not None:
@@ -736,12 +740,12 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
         body.append("  no assigned issues")
         return body
 
-    issue_line = f"  {color(BOLD, 'Issue:')}  {color(CYAN, f'#{repo.issue}')}"
+    issue_line = f"  {color(BOLD, 'Issue:')} {color(CYAN, f'#{repo.issue}')}"
     if repo.issue_title:
         issue_line += f" {color(DIM, '—')} {repo.issue_title}"
     if repo.issue_elapsed_seconds is not None:
         issue_line += (
-            f"  {color(DIM, f'(elapsed {_format_uptime(repo.issue_elapsed_seconds)})')}"
+            f" {color(DIM, f'(elapsed {_format_uptime(repo.issue_elapsed_seconds)})')}"
         )
     body.append(issue_line)
 
