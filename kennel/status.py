@@ -713,10 +713,18 @@ def _styled_provider_status(status: ProviderPressureStatus) -> str:
 
 def _styled_repo_provider(repo: RepoStatus) -> str:
     """Render the repo's provider label without repeating global limits details."""
+    provider_str = str(repo.provider)
     provider_status = repo.provider_status
-    if provider_status is None:
-        return str(repo.provider)
-    return color(_provider_status_style(provider_status), str(provider_status.provider))
+    if provider_status is not None:
+        base_style = _provider_status_style(provider_status)
+        if base_style:
+            # Warning/paused state wins over identity color — same precedence
+            # as the global limits line in _styled_provider_status.
+            return color(base_style, provider_str)
+    palette = palette_for(repo.provider)
+    if palette is not None:
+        return wrap_raw(rgb_fg(*palette.bright_fg), provider_str)
+    return provider_str
 
 
 def _format_provider_summary_line(statuses: list[ProviderPressureStatus]) -> str | None:

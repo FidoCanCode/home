@@ -2448,3 +2448,66 @@ class TestProviderColoredStatus:
         limits_line = next(ln for ln in output.splitlines() if "limits:" in ln)
         assert "codex 50%" in limits_line
         assert "\033[38;2;" not in limits_line
+
+    def test_repo_header_colors_provider_name_with_bright_fg(self) -> None:
+        # The provider token in the repo header stats line gets the provider's
+        # bright_fg color, matching the visual identity on the global limits line.
+        from kennel.color import rgb_fg
+        from kennel.provider import PROVIDER_PALETTES
+
+        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
+            provider_status = ProviderPressureStatus(
+                provider=ProviderID.CLAUDE_CODE,
+                pressure=0.50,
+                window_name="five_hour",
+            )
+            repo = self._repo(provider_status=provider_status)
+            status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+            output = format_status(status)
+        palette = PROVIDER_PALETTES[ProviderID.CLAUDE_CODE]
+        expected = rgb_fg(*palette.bright_fg) + "claude-code"
+        header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
+        assert expected in header_line
+
+    def test_repo_header_provider_name_respects_paused_style_over_bright_fg(
+        self,
+    ) -> None:
+        # Warning/paused state wins over the provider-color highlight in the
+        # repo header, same precedence as the global limits line.
+        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
+            provider_status = ProviderPressureStatus(
+                provider=ProviderID.CLAUDE_CODE,
+                pressure=0.99,
+            )
+            repo = self._repo(provider_status=provider_status)
+            status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+            output = format_status(status)
+        header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
+        # DARK_GRAY code (\033[90m) must be present on the header for the paused state.
+        assert "\033[90m" in header_line
+
+    def test_repo_header_provider_name_no_color_when_no_palette(self) -> None:
+        # Providers with no palette render the provider name as plain text.
+        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
+            repo = self._repo(provider=ProviderID.CODEX)
+            status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+            output = format_status(status)
+        header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
+        assert "codex" in header_line
+        # No truecolor fg escape for the provider token.
+        assert "\033[38;2;" not in header_line
+
+    def test_repo_header_provider_name_colored_when_no_provider_status(self) -> None:
+        # Even without a provider_status, the provider name gets bright_fg color
+        # from the palette when the palette exists.
+        from kennel.color import rgb_fg
+        from kennel.provider import PROVIDER_PALETTES
+
+        with patch.dict("os.environ", {"FORCE_COLOR": "1"}, clear=True):
+            repo = self._repo(provider=ProviderID.CLAUDE_CODE, provider_status=None)
+            status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+            output = format_status(status)
+        palette = PROVIDER_PALETTES[ProviderID.CLAUDE_CODE]
+        expected = rgb_fg(*palette.bright_fg) + "claude-code"
+        header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
+        assert expected in header_line
