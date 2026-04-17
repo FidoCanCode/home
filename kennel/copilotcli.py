@@ -15,8 +15,9 @@ import uuid
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import acp
 from acp.exceptions import RequestError
@@ -900,6 +901,10 @@ class CopilotCLISession:
         self._last_turn_cancelled = False
         self._model = coerce_provider_model(model)
         self._session_id: str | None = self._runtime.ensure_session(None, model)
+        # Kind the current lock holder is registered under in the shared
+        # talker registry (``"worker"`` / ``"webhook"``), or ``None`` when
+        # no one is inside the lock.  Set by :meth:`_register_talker_kind`.
+        self._registered_talker_kind: Literal["worker", "webhook"] | None = None
 
     @property
     def owner(self) -> str | None:
@@ -975,21 +980,67 @@ class CopilotCLISession:
     def stop(self) -> None:
         self._runtime.stop()
 
+    def _fire_worker_cancel(self) -> None:
+        """Provider-specific cancel mechanism handed to
+        :func:`claude.try_preempt_worker`.  Asks the Copilot ACP runtime to
+        cancel the currently-active prompt so the worker's turn returns with
+        ``stop_reason="cancelled"`` and releases the session lock.  No-op if
+        there is no active session id or the runtime is already down.
+        """
+        session_id = self._session_id
+        if session_id is not None and self._runtime.is_alive():
+            self._runtime.cancel(session_id)
+
     def __enter__(self) -> "CopilotCLISession":
         waited = not self._lock.acquire(blocking=False)
         if waited:
             with self._preempt_condition:
                 self._pending_preempts += 1
-            session_id = self._session_id
-            if session_id is not None and self._runtime.is_alive():
-                self._runtime.cancel(session_id)
+            # Only fire the runtime cancel when a webhook is preempting a
+            # worker — matches the shared decision gate used for claude.
+            # Another webhook waiting behind a webhook just queues on the
+            # lock; workers never cancel anyone.
+            claude.try_preempt_worker(self._repo_name, self._fire_worker_cancel)
             self._lock.acquire()
         self._thread_state.waited = waited
         with self._owner_lock:
             self._owner = threading.current_thread().name
+        self._register_talker_kind()
         return self
 
+    def _register_talker_kind(self) -> None:
+        """Register this thread with the shared talker registry so other
+        threads can tell, via :func:`claude.get_talker`, whether the current
+        lock holder is a worker or a webhook.  Matches what
+        :meth:`ClaudeSession.__enter__` does for the claude provider.
+
+        Tracked as :attr:`_registered_talker_kind` so :meth:`__exit__` knows
+        whether to unregister.
+        """
+        if self._repo_name is None:
+            self._registered_talker_kind = None
+            return
+        kind = claude.current_thread_kind()
+        try:
+            claude.register_talker(
+                claude.ClaudeTalker(
+                    repo_name=self._repo_name,
+                    thread_id=threading.get_ident(),
+                    kind=kind,
+                    description="copilot-cli session turn",
+                    claude_pid=0,  # no claude subprocess — ACP runtime
+                    started_at=datetime.now(tz=timezone.utc),
+                )
+            )
+            self._registered_talker_kind = kind
+        except claude.ClaudeLeakError:
+            self._lock.release()
+            raise
+
     def __exit__(self, *args: object) -> None:
+        if self._repo_name is not None and self._registered_talker_kind is not None:
+            claude.unregister_talker(self._repo_name, threading.get_ident())
+            self._registered_talker_kind = None
         with self._owner_lock:
             self._owner = None
         self._lock.release()
