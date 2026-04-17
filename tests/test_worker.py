@@ -9861,6 +9861,24 @@ class TestSyncTasks:
         gh.edit_pr_body.assert_not_called()
         assert "incomplete work queue markers" in caplog.text
 
+    def test_skips_patch_and_logs_when_body_unchanged(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
+        # Build a body whose queue already matches the single pending task
+        task = {"title": "Do it", "status": "pending", "type": "spec"}
+        from kennel.tasks import _format_work_queue
+
+        queue = _format_work_queue([task])
+        body = f"desc\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
+        gh.get_pr_body.return_value = body
+        with patch("kennel.tasks.Tasks.list", return_value=[task]):
+            sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
+        gh.edit_pr_body.assert_not_called()
+
     def test_get_repo_info_exception_propagates(self, tmp_path: Path) -> None:
         gh = MagicMock()
         fido_dir = self._fido_dir(tmp_path)

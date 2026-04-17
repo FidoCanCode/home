@@ -305,6 +305,12 @@ def sync_tasks(
             return
 
         new_body = _apply_queue_to_body(body, queue)
+        if new_body == body:
+            log.info(
+                "sync_tasks: PR #%s work queue already up to date — no change",
+                pr_number,
+            )
+            return
         gh.edit_pr_body(repo, pr_number, new_body)
         log.info("sync_tasks: PR #%s work queue synced", pr_number)
     finally:
