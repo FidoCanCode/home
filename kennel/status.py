@@ -245,16 +245,39 @@ def provider_statuses_for_repo_configs(
     for repo_cfg in repo_configs:
         if repo_cfg.provider in statuses:
             continue
-        provider = provider_factory.create_provider(
-            repo_cfg,
-            work_dir=repo_cfg.work_dir,
-            repo_name=repo_cfg.name,
-            session=None,
-        )
         statuses[repo_cfg.provider] = ProviderPressureStatus.from_snapshot(
-            provider.api.get_limit_snapshot()
+            provider_factory.create_api(repo_cfg).get_limit_snapshot()
         )
     return statuses
+
+
+def _parse_provider_status(raw: object) -> ProviderPressureStatus | None:
+    """Parse one serialized provider-pressure record from /status.json."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        provider = ProviderID(raw["provider"])
+    except KeyError, TypeError, ValueError:
+        return None
+    resets_at = raw.get("resets_at")
+    try:
+        parsed_reset = (
+            datetime.fromisoformat(resets_at) if isinstance(resets_at, str) else None
+        )
+    except ValueError:
+        parsed_reset = None
+    pressure = raw.get("pressure")
+    return ProviderPressureStatus(
+        provider=provider,
+        window_name=raw.get("window_name")
+        if isinstance(raw.get("window_name"), str)
+        else None,
+        pressure=float(pressure) if isinstance(pressure, int | float) else None,
+        resets_at=parsed_reset,
+        unavailable_reason=raw.get("unavailable_reason")
+        if isinstance(raw.get("unavailable_reason"), str)
+        else None,
+    )
 
 
 def _port_from_pid(pid: int) -> int | None:
@@ -276,7 +299,7 @@ def _port_from_pid(pid: int) -> int | None:
 def _fetch_activities(
     port: int, *, _urlopen: Callable[..., Any] = urllib.request.urlopen
 ) -> dict[str, dict[str, Any]]:
-    """Query GET /status.json, returning {repo_name: {what, crash_count, last_crash_error, is_stuck}}."""
+    """Query GET /status.json for live worker activity and provider pressure."""
     try:
         with _urlopen(f"http://localhost:{port}/status.json", timeout=2) as resp:
             data = json.loads(resp.read())
@@ -292,6 +315,8 @@ def _fetch_activities(
                 "session_alive": item.get("session_alive", False),
                 "session_pid": item.get("session_pid"),
                 "claude_talker": item.get("claude_talker"),
+                "provider_status": _parse_provider_status(item.get("provider_status")),
+                "rescoping": item.get("rescoping", False),
             }
             for item in data
             if "repo_name" in item and "what" in item
@@ -506,7 +531,6 @@ def collect() -> KennelStatus:
     pid = _kennel_pid()
     uptime = _process_uptime_seconds(pid) if pid is not None else None
     repo_configs = _repos_from_pid(pid) if pid is not None else []
-    provider_statuses = provider_statuses_for_repo_configs(repo_configs)
 
     activities: dict[str, Any] = {}
     if pid is not None:
@@ -514,6 +538,7 @@ def collect() -> KennelStatus:
         if port is not None:
             activities = _fetch_activities(port)
 
+    provider_statuses: dict[ProviderID, ProviderPressureStatus] = {}
     repos = []
     for rc in repo_configs:
         info = activities.get(rc.name)
@@ -542,6 +567,12 @@ def collect() -> KennelStatus:
                 )
             sp = info.get("session_pid")
             session_pid_val = int(sp) if sp is not None else None
+        provider_status = info.get("provider_status") if info else None
+        if (
+            isinstance(provider_status, ProviderPressureStatus)
+            and provider_status.provider not in provider_statuses
+        ):
+            provider_statuses[provider_status.provider] = provider_status
         repos.append(
             repo_status(
                 rc,
@@ -556,7 +587,7 @@ def collect() -> KennelStatus:
                 session_pid=session_pid_val,
                 claude_talker=talker_info,
                 rescoping=bool(info.get("rescoping")) if info else False,
-                provider_status=provider_statuses.get(rc.provider),
+                provider_status=provider_status,
             )
         )
     return KennelStatus(

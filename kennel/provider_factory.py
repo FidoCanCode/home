@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
-from kennel.claude import ClaudeClient, ClaudeCode
+from kennel.claude import ClaudeAPI, ClaudeClient, ClaudeCode
 from kennel.config import RepoConfig
-from kennel.copilotcli import CopilotCLI, CopilotCLIClient
-from kennel.provider import PromptSession, Provider, ProviderAgent, ProviderID
+from kennel.copilotcli import CopilotCLI, CopilotCLIAPI, CopilotCLIClient
+from kennel.provider import (
+    PromptSession,
+    Provider,
+    ProviderAgent,
+    ProviderAPI,
+    ProviderID,
+)
 
 
 class DefaultProviderFactory:
@@ -15,6 +22,23 @@ class DefaultProviderFactory:
 
     def __init__(self, *, session_system_file: Path) -> None:
         self._session_system_file = session_system_file
+        self._api_lock = threading.Lock()
+        self._apis: dict[ProviderID, ProviderAPI] = {}
+
+    def create_api(self, repo_cfg: RepoConfig) -> ProviderAPI:
+        with self._api_lock:
+            api = self._apis.get(repo_cfg.provider)
+            if api is not None:
+                return api
+            match repo_cfg.provider:
+                case ProviderID.CLAUDE_CODE:
+                    api = ClaudeAPI()
+                case ProviderID.COPILOT_CLI:
+                    api = CopilotCLIAPI()
+                case _:
+                    raise ValueError(f"unsupported provider: {repo_cfg.provider}")
+            self._apis[repo_cfg.provider] = api
+            return api
 
     def create_provider(
         self,

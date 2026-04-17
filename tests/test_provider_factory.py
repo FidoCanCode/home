@@ -10,6 +10,48 @@ from kennel.provider_factory import DefaultProviderFactory
 
 
 class TestDefaultProviderFactory:
+    def test_create_api_caches_by_provider(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        factory = DefaultProviderFactory(session_system_file=system_file)
+        repo_a = RepoConfig(
+            name="owner/a",
+            work_dir=tmp_path / "a",
+            provider=ProviderID.CLAUDE_CODE,
+        )
+        repo_b = RepoConfig(
+            name="owner/b",
+            work_dir=tmp_path / "b",
+            provider=ProviderID.CLAUDE_CODE,
+        )
+        assert factory.create_api(repo_a) is factory.create_api(repo_b)
+
+    def test_create_api_builds_copilot(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        factory = DefaultProviderFactory(session_system_file=system_file)
+        api = factory.create_api(
+            RepoConfig(
+                name="owner/repo",
+                work_dir=tmp_path,
+                provider=ProviderID.COPILOT_CLI,
+            )
+        )
+        assert api.provider_id == ProviderID.COPILOT_CLI
+
+    def test_create_api_rejects_unknown_provider(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        factory = DefaultProviderFactory(session_system_file=system_file)
+        with pytest.raises(ValueError, match="unsupported provider"):
+            factory.create_api(
+                RepoConfig(
+                    name="owner/repo",
+                    work_dir=tmp_path,
+                    provider=ProviderID.GEMINI,
+                )
+            )
+
     def test_create_provider_builds_claude(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")

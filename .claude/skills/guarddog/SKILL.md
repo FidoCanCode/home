@@ -38,7 +38,7 @@ Look deeper if you see:
 
 Investigation steps (look, don't touch):
 - `ps aux | grep claude | grep -v grep | grep -v "claude -c"` — any processes alive?
-- `tail -5 ~/log/kennel.log | grep -v '{"type'` — any errors?
+- `tail -5 ~/log/kennel-crash.log | grep -v '{"type'` — any errors?
 - Check if the fido session is still producing output
 - Check git status of managed repos for unexpected state
 
@@ -72,7 +72,7 @@ MY_PID=$PPID; ps aux | grep -E "kennel|claude" | grep -v grep | grep -v "claude 
 ```
 
 ### Step 3: Diagnose
-- Read the last 30 lines of `~/log/kennel.log` (filter out `{"type` JSON blobs)
+- Read the last 30 lines of `~/log/kennel-crash.log` (filter out `{"type` JSON blobs)
 - Check `tasks.json` state: `cat /home/rhencke/workspace/home/.git/fido/tasks.json`
 - Check `state.json`: `cat /home/rhencke/workspace/home/.git/fido/state.json`
 - Check git status and recent commits of managed repos
@@ -123,8 +123,7 @@ For each managed repo (kennel, confusio, home):
 ### Step 9: Restart kennel
 Kennel runs from the **runner clone** at `/home/rhencke/home-runner/`, not the workspace clone. The runner is always on `main`, never on a feature branch. Launch via the local launcher:
 ```bash
-/home/rhencke/start-kennel.sh >> ~/log/kennel.log 2>&1 &
-disown
+/home/rhencke/start-kennel.sh
 sleep 5 && /home/rhencke/home-runner/.venv/bin/kennel status
 ```
 
