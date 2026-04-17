@@ -9,8 +9,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from kennel.color import _CODES
 from kennel.config import RepoConfig as _RepoConfig
 from kennel.provider import (
@@ -160,13 +158,13 @@ class TestProviderStatusesForRepoConfigs:
         factory = MagicMock()
         first = MagicMock()
         second = MagicMock()
-        first.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+        first.get_limit_snapshot.return_value = ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE
         )
-        second.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+        second.get_limit_snapshot.return_value = ProviderLimitSnapshot(
             provider=ProviderID.COPILOT_CLI
         )
-        factory.create_provider.side_effect = [first, second]
+        factory.create_api.side_effect = [first, second]
 
         statuses = provider_statuses_for_repo_configs(
             [claude_a, claude_b, copilot],
@@ -174,18 +172,18 @@ class TestProviderStatusesForRepoConfigs:
         )
 
         assert list(statuses) == [ProviderID.CLAUDE_CODE, ProviderID.COPILOT_CLI]
-        factory.create_provider.assert_any_call(
-            claude_a,
-            work_dir=claude_a.work_dir,
-            repo_name=claude_a.name,
-            session=None,
+        factory.create_api.assert_any_call(claude_a)
+        factory.create_api.assert_any_call(copilot)
+
+    def test_builds_default_factory_when_not_injected(self, tmp_path: Path) -> None:
+        repo = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        factory = MagicMock()
+        factory.create_api.return_value.get_limit_snapshot.return_value = (
+            ProviderLimitSnapshot(provider=ProviderID.CLAUDE_CODE)
         )
-        factory.create_provider.assert_any_call(
-            copilot,
-            work_dir=copilot.work_dir,
-            repo_name=copilot.name,
-            session=None,
-        )
+        with patch("kennel.status.DefaultProviderFactory", return_value=factory):
+            statuses = provider_statuses_for_repo_configs([repo])
+        assert list(statuses) == [ProviderID.CLAUDE_CODE]
 
 
 class TestProcessUptimeSeconds:
@@ -507,6 +505,8 @@ class TestFetchActivities:
                 "session_alive": False,
                 "session_pid": None,
                 "claude_talker": None,
+                "provider_status": None,
+                "rescoping": False,
             }
         }
 
@@ -544,6 +544,8 @@ class TestFetchActivities:
                 "session_alive": False,
                 "session_pid": None,
                 "claude_talker": None,
+                "provider_status": None,
+                "rescoping": False,
             },
             "c/d": {
                 "what": "Fixing CI",
@@ -556,8 +558,83 @@ class TestFetchActivities:
                 "session_alive": False,
                 "session_pid": None,
                 "claude_talker": None,
+                "provider_status": None,
+                "rescoping": False,
             },
         }
+
+    def test_parses_provider_status_from_json(self) -> None:
+        data = json.dumps(
+            [
+                {
+                    "repo_name": "owner/repo",
+                    "what": "Working on: #1",
+                    "busy": True,
+                    "crash_count": 0,
+                    "last_crash_error": None,
+                    "is_stuck": False,
+                    "provider_status": {
+                        "provider": "claude-code",
+                        "window_name": "five_hour",
+                        "pressure": 0.96,
+                        "percent_used": 96,
+                        "resets_at": "2026-04-16T07:00:00+00:00",
+                        "unavailable_reason": None,
+                        "level": "paused",
+                        "warning": False,
+                        "paused": True,
+                    },
+                }
+            ]
+        ).encode()
+        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        assert result["owner/repo"]["provider_status"] == ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            window_name="five_hour",
+            pressure=0.96,
+            resets_at=datetime(2026, 4, 16, 7, 0, tzinfo=UTC),
+        )
+
+    def test_invalid_provider_status_defaults_to_none(self) -> None:
+        data = json.dumps(
+            [
+                {
+                    "repo_name": "owner/repo",
+                    "what": "Working on: #1",
+                    "busy": True,
+                    "crash_count": 0,
+                    "last_crash_error": None,
+                    "is_stuck": False,
+                    "provider_status": {"provider": "nope"},
+                }
+            ]
+        ).encode()
+        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        assert result["owner/repo"]["provider_status"] is None
+
+    def test_bad_provider_status_reset_time_defaults_to_none(self) -> None:
+        data = json.dumps(
+            [
+                {
+                    "repo_name": "owner/repo",
+                    "what": "Working on: #1",
+                    "busy": True,
+                    "crash_count": 0,
+                    "last_crash_error": None,
+                    "is_stuck": False,
+                    "provider_status": {
+                        "provider": "claude-code",
+                        "pressure": 0.5,
+                        "resets_at": "not-a-date",
+                    },
+                }
+            ]
+        ).encode()
+        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        assert result["owner/repo"]["provider_status"] == ProviderPressureStatus(
+            provider=ProviderID.CLAUDE_CODE,
+            pressure=0.5,
+        )
 
     def test_returns_empty_on_exception(self) -> None:
         mock_urlopen = MagicMock(side_effect=OSError("refused"))
@@ -883,11 +960,6 @@ class TestRepoStatus:
 
 
 class TestCollect:
-    @pytest.fixture(autouse=True)
-    def _stub_provider_statuses(self):
-        with patch("kennel.status.provider_statuses_for_repo_configs", return_value={}):
-            yield
-
     def _fake_repo_status(self, name: str = "owner/repo") -> RepoStatus:
         return RepoStatus(
             name=name,
@@ -947,10 +1019,12 @@ class TestCollect:
             patch("kennel.status._kennel_pid", return_value=42),
             patch("kennel.status._repos_from_pid", return_value=[rc]),
             patch("kennel.status._process_uptime_seconds", return_value=600),
-            patch("kennel.status._port_from_pid", return_value=None),
+            patch("kennel.status._port_from_pid", return_value=9000),
             patch(
-                "kennel.status.provider_statuses_for_repo_configs",
-                return_value={ProviderID.CLAUDE_CODE: provider_status},
+                "kennel.status._fetch_activities",
+                return_value={
+                    "owner/repo": self._activity_info(provider_status=provider_status)
+                },
             ),
             patch(
                 "kennel.status.repo_status", return_value=self._fake_repo_status()
@@ -971,6 +1045,7 @@ class TestCollect:
         webhook_activities: list | None = None,
         session_owner: str | None = None,
         rescoping: bool = False,
+        provider_status: ProviderPressureStatus | None = None,
     ) -> dict:
         return {
             "what": what,
@@ -981,6 +1056,7 @@ class TestCollect:
             "webhook_activities": webhook_activities or [],
             "session_owner": session_owner,
             "rescoping": rescoping,
+            "provider_status": provider_status,
         }
 
     def test_fetches_activities_when_port_known(self, tmp_path: Path) -> None:

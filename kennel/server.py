@@ -39,6 +39,7 @@ from kennel.infra import (
     ProcessRunner,
     real_infra,
 )
+from kennel.provider_factory import DefaultProviderFactory
 from kennel.registry import WorkerRegistry, make_registry
 from kennel.static_files import StaticFiles
 from kennel.status import provider_statuses_for_repo_configs
@@ -416,6 +417,7 @@ def _noop_after_post() -> None:
 class WebhookHandler(BaseHTTPRequestHandler):
     config: Config
     registry: WorkerRegistry
+    provider_factory: DefaultProviderFactory | None = None
     # Injectable collaborators — set as class attributes so HTTP-driven tests
     # can replace them without patching module-level names.
     gh: GitHub | None = None
@@ -748,7 +750,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         now = datetime.now(tz=timezone.utc)
         activities: list[dict[str, Any]] = []
         provider_statuses = provider_statuses_for_repo_configs(
-            list(self.config.repos.values())
+            list(self.config.repos.values()),
+            _provider_factory=self.provider_factory,
         )
         for a in self.registry.get_all_activities():
             crash = self.registry.get_crash_info(a.repo_name)
@@ -959,6 +962,9 @@ def run(
     WebhookHandler.gh = gh
     WebhookHandler.static_files = StaticFiles(
         Path(__file__).resolve().parent / "static"
+    )
+    WebhookHandler.provider_factory = DefaultProviderFactory(
+        session_system_file=config.sub_dir / "persona.md"
     )
     registry = _make_registry(config.repos, gh, config)
     WebhookHandler.registry = registry
