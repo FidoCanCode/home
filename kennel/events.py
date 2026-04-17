@@ -1066,20 +1066,14 @@ def _notify_thread_change(
     """Post a brief comment notifying a commenter that their task was rescoped.
 
     Called for each thread task that was dropped or modified during dependency
-    analysis.  Uses Opus (in Fido's voice) to generate the message; falls back
-    to a plain factual note if Opus returns nothing.
+    analysis.  Uses Opus (in Fido's voice) to generate the message.
 
-    For review comments (comment_type='pulls') replies in-thread via the pull
-    review comment API; for issue comments (comment_type='issues') posts via
-    the issue comments API.
+    Only fires for review comments (comment_type='pulls'), where it replies
+    in-thread via the pull review comment API.  Issue comments
+    (comment_type='issues') are skipped: the webhook handler already posted a
+    triage reply to the original comment, and a second notification here would
+    be a duplicate top-level issue comment.
     """
-    if agent is None:
-        agent = _configured_agent(
-            config, config.repos[change["task"]["thread"]["repo"]]
-        )
-    if prompts is None:
-        prompts = Prompts(_load_persona(config))
-
     task = change["task"]
     thread = task.get("thread") or {}
     comment_id = thread.get("comment_id")
@@ -1090,6 +1084,23 @@ def _notify_thread_change(
     comment_type = thread.get("comment_type", "issues")
     if not (comment_id and repo and pr):
         return
+
+    # Issue comments already received a triage reply from the webhook handler.
+    # Posting again here would produce a duplicate top-level PR comment.
+    if comment_type != "pulls":
+        log.info(
+            "skipping rescope notification for issue comment %s"
+            " (webhook already replied)",
+            comment_id,
+        )
+        return
+
+    if agent is None:
+        agent = _configured_agent(
+            config, config.repos[change["task"]["thread"]["repo"]]
+        )
+    if prompts is None:
+        prompts = Prompts(_load_persona(config))
 
     kind = change["kind"]
     original_title = task.get("title", "")
@@ -1128,10 +1139,7 @@ def _notify_thread_change(
         )
 
     try:
-        if comment_type == "pulls":
-            gh.reply_to_review_comment(repo, pr, body, comment_id)
-        else:
-            gh.comment_issue(repo, pr, body)
+        gh.reply_to_review_comment(repo, pr, body, comment_id)
         log.info("notified thread %s (%s)", comment_id, kind)
     except Exception:
         log.exception("failed to notify thread %s", comment_id)
