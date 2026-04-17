@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 from acp.exceptions import RequestError
 
-from kennel import claude
+from kennel import provider
 from kennel.copilotcli import (
     _ACP_STREAM_LIMIT,
     CopilotACPRuntime,
@@ -922,7 +922,6 @@ class TestCopilotCLISession:
     def test_webhook_preempts_worker_cancels_runtime(self, tmp_path: Path) -> None:
         """Worker holds the session; webhook contender fires the runtime
         cancel so the worker's turn returns and releases the lock."""
-        from kennel import claude as claude_mod
 
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
@@ -938,17 +937,17 @@ class TestCopilotCLISession:
         release = threading.Event()
 
         # Holder enters as worker so the shared talker registry reports it.
-        claude_mod.set_thread_kind("worker")
+        provider.set_thread_kind("worker")
         session.__enter__()
 
         def contender() -> None:
-            claude_mod.set_thread_kind("webhook")
+            provider.set_thread_kind("webhook")
             try:
                 with session:
                     acquired.set()
                     release.wait()
             finally:
-                claude_mod.set_thread_kind(None)
+                provider.set_thread_kind(None)
 
         thread = threading.Thread(target=contender, daemon=True)
         thread.start()
@@ -966,13 +965,12 @@ class TestCopilotCLISession:
             thread.join(timeout=1.0)
             assert session.wait_for_pending_preempt(timeout=1.0) is True
         finally:
-            claude_mod.set_thread_kind(None)
+            provider.set_thread_kind(None)
 
     def test_webhook_does_not_cancel_another_webhook(self, tmp_path: Path) -> None:
         """Webhook contender queues behind another webhook without firing
         the runtime cancel — FIFO on the lock instead of mutual cancellation
         (#637)."""
-        from kennel import claude as claude_mod
 
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
@@ -987,17 +985,17 @@ class TestCopilotCLISession:
         acquired = threading.Event()
         release = threading.Event()
 
-        claude_mod.set_thread_kind("webhook")
+        provider.set_thread_kind("webhook")
         session.__enter__()
 
         def contender() -> None:
-            claude_mod.set_thread_kind("webhook")
+            provider.set_thread_kind("webhook")
             try:
                 with session:
                     acquired.set()
                     release.wait()
             finally:
-                claude_mod.set_thread_kind(None)
+                provider.set_thread_kind(None)
 
         thread = threading.Thread(target=contender, daemon=True)
         thread.start()
@@ -1011,13 +1009,12 @@ class TestCopilotCLISession:
             thread.join(timeout=1.0)
             assert runtime.cancel_calls == []
         finally:
-            claude_mod.set_thread_kind(None)
+            provider.set_thread_kind(None)
 
     def test_enter_releases_lock_on_claude_leak_error(self, tmp_path: Path) -> None:
         """If another thread already registered a talker for this repo the
         session's __enter__ must release the lock before propagating so the
         existing holder can finish and unregister, not deadlock."""
-        from kennel import claude as claude_mod
 
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
@@ -1030,31 +1027,30 @@ class TestCopilotCLISession:
             repo_name="owner/repo",
         )
         # Pre-register a different tid as the active talker so the session's
-        # own register_talker inside __enter__ raises ClaudeLeakError.
-        claude_mod.register_talker(
-            claude_mod.ClaudeTalker(
+        # own register_talker inside __enter__ raises SessionLeakError.
+        provider.register_talker(
+            provider.SessionTalker(
                 repo_name="owner/repo",
                 thread_id=999_999,
                 kind="worker",
                 description="squatter",
                 claude_pid=0,
-                started_at=claude_mod._talker_now(),
+                started_at=provider.talker_now(),
             )
         )
         try:
-            with pytest.raises(claude_mod.ClaudeLeakError):
+            with pytest.raises(provider.SessionLeakError):
                 session.__enter__()
             # Lock must have been released on the leak path so a later
             # legitimate enter (after the squatter clears) still works.
             assert session._lock.acquire(blocking=False) is True
             session._lock.release()
         finally:
-            claude_mod.unregister_talker("owner/repo", 999_999)
+            provider.unregister_talker("owner/repo", 999_999)
 
     def test_worker_contender_does_not_cancel(self, tmp_path: Path) -> None:
         """Worker contender (e.g. its own retry) waits on the lock rather
         than cancelling whichever webhook currently holds it."""
-        from kennel import claude as claude_mod
 
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
@@ -1069,17 +1065,17 @@ class TestCopilotCLISession:
         acquired = threading.Event()
         release = threading.Event()
 
-        claude_mod.set_thread_kind("webhook")
+        provider.set_thread_kind("webhook")
         session.__enter__()
 
         def contender() -> None:
-            claude_mod.set_thread_kind("worker")
+            provider.set_thread_kind("worker")
             try:
                 with session:
                     acquired.set()
                     release.wait()
             finally:
-                claude_mod.set_thread_kind(None)
+                provider.set_thread_kind(None)
 
         thread = threading.Thread(target=contender, daemon=True)
         thread.start()
@@ -1092,7 +1088,7 @@ class TestCopilotCLISession:
             thread.join(timeout=1.0)
             assert runtime.cancel_calls == []
         finally:
-            claude_mod.set_thread_kind(None)
+            provider.set_thread_kind(None)
 
     def test_missing_system_file_and_runtime_factory_branch(
         self, tmp_path: Path
@@ -1167,14 +1163,14 @@ class TestCopilotCLIClient:
     def test_default_session_resolver_uses_current_repo(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "ok"
-        claude.set_session_resolver(lambda repo: session)
-        claude.set_thread_repo("owner/repo")
+        provider.set_session_resolver(lambda repo: session)
+        provider.set_thread_repo("owner/repo")
         try:
             client = CopilotCLIClient()
             assert client.run_turn("hi", model=client.voice_model) == "ok"
         finally:
-            claude.set_thread_repo(None)
-            claude.set_session_resolver(None)
+            provider.set_thread_repo(None)
+            provider.set_session_resolver(None)
 
     def test_session_attachment_and_properties(self) -> None:
         attached = MagicMock(owner="worker-home")

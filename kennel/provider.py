@@ -1,9 +1,22 @@
-"""Provider contracts and normalized provider-limit state."""
+"""Provider contracts and normalized provider-limit state.
+
+Also home to provider-neutral session coordination primitives:
+talker registry, thread-kind / thread-repo plumbing, preempt decision
+gate, and :class:`OwnedSession` — the base class both
+:class:`~kennel.claude.ClaudeSession` and
+:class:`~kennel.copilotcli.CopilotCLISession` inherit from.  These all
+used to live in :mod:`kennel.claude` under ``Claude``-prefixed names
+from before the copilot provider existed; they were moved here once both
+providers needed them so the naming stopped lying about scope.
+"""
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol, TypeAlias
@@ -238,6 +251,295 @@ class PromptSession(Protocol):
     def __exit__(self, *args: object) -> None:
         """Exit the session's turn-serialization context."""
         ...
+
+    def hold_for_handler(
+        self, *, preempt_worker: bool = False
+    ) -> "contextmanager[PromptSession]":  # type: ignore[type-arg]
+        """Hold the session lock across multiple prompt calls for webhook
+        handlers.  Implemented by :class:`OwnedSession` (fix for
+        #658)."""
+        ...
+
+
+# ── Provider-neutral session coordination ────────────────────────────────────
+# At most one thread per repo may be "talking to" a provider subprocess at any
+# moment — either via the persistent session's lock or via a one-shot
+# provider invocation.  Concurrent registration for the same repo means
+# something is leaking a sub-provider and we halt loud rather than silently
+# proliferate processes.
+
+
+class SessionLeakError(RuntimeError):
+    """Raised when a second thread tries to talk to a provider for a repo
+    that already has an active talker.  Fatal — kennel halts rather than
+    let provider subprocesses multiply silently."""
+
+
+@dataclass(frozen=True)
+class SessionTalker:
+    """Snapshot of the thread currently driving a provider subprocess.
+
+    *thread_id* is :func:`threading.get_ident` — a globally-unique integer
+    identifier for the live thread, used to match this talker entry to a
+    specific thread (e.g. a webhook handler's ``WebhookActivity``) when
+    rendering status.  The human-readable thread name is looked up at
+    display time rather than cached here.
+
+    *kind* distinguishes between the persistent session path (``"worker"`` —
+    the worker thread is inside a ``with session:`` block) and webhook
+    handler invocations (``"webhook"``).  *description* is a short human
+    label for status display.
+    """
+
+    repo_name: str
+    thread_id: int
+    kind: Literal["worker", "webhook"]
+    description: str
+    claude_pid: int
+    started_at: datetime
+
+
+_talkers: dict[str, SessionTalker] = {}
+_talkers_lock = threading.Lock()
+
+# Thread-local coordination state so downstream helpers (events, prompts)
+# know which repo they belong to and whether the caller is a worker or a
+# webhook.  Set at :func:`kennel.server.WebhookHandler._process_action`
+# entry and at :meth:`kennel.worker.WorkerThread.run` entry, cleared on
+# exit.  Reads fall back to sensible defaults for tests that don't set it.
+_thread_local: threading.local = threading.local()
+
+
+def set_thread_repo(repo_name: str | None) -> None:
+    """Set (or clear, with ``None``) the repo_name for this thread."""
+    if repo_name is None:
+        if hasattr(_thread_local, "repo_name"):
+            del _thread_local.repo_name
+    else:
+        _thread_local.repo_name = repo_name
+
+
+def current_repo() -> str | None:
+    """Return the repo_name set by :func:`set_thread_repo` on this thread."""
+    return getattr(_thread_local, "repo_name", None)
+
+
+def set_thread_kind(kind: Literal["worker", "webhook"] | None) -> None:
+    """Set (or clear, with ``None``) the caller kind for this thread.
+
+    Workers call this with ``"worker"`` at :meth:`WorkerThread.run` entry; the
+    webhook handler calls it with ``"webhook"`` at ``_process_action`` entry.
+    :meth:`ClaudeSession.prompt` and :meth:`CopilotCLISession.__enter__`
+    consult it to decide whether their preempt signal should fire —
+    webhooks preempt workers; workers and webhooks never preempt a running
+    webhook (fix for #637).
+    """
+    if kind is None:
+        if hasattr(_thread_local, "kind"):
+            del _thread_local.kind
+    else:
+        _thread_local.kind = kind
+
+
+def current_thread_kind() -> Literal["worker", "webhook"]:
+    """Return the caller kind for this thread.  Defaults to ``"worker"``
+    when not set (non-entry code paths and tests)."""
+    return getattr(_thread_local, "kind", "worker")
+
+
+def try_preempt_worker(
+    repo_name: str | None, cancel_fn: Callable[[], None]
+) -> tuple[bool, Literal["worker", "webhook"] | None]:
+    """Invoke *cancel_fn* iff the calling thread is a webhook AND the
+    session's current lock holder is a worker.  Otherwise do nothing.
+
+    Returns ``(preempted, current_kind)`` — *preempted* is ``True`` only when
+    *cancel_fn* was invoked; *current_kind* is the current holder's kind
+    (``"worker"``, ``"webhook"``, or ``None`` when the session is idle).
+    The caller uses that to log the outcome.
+
+    Provider-neutral decision gate for #637.  The *mechanism* of cancelling
+    a running turn differs across providers (stream-json ``control_request``
+    for claude, ACP ``cancel(session_id)`` for copilot), but the *decision*
+    is identical and lives here.  Worker callers never preempt anyone;
+    webhooks queue behind other webhooks (FIFO on the session lock) instead
+    of cancelling each other.
+    """
+    caller_kind = current_thread_kind()
+    current = get_talker(repo_name) if repo_name is not None else None
+    current_kind = current.kind if current is not None else None
+    if caller_kind == "webhook" and current_kind == "worker":
+        cancel_fn()
+        return True, current_kind
+    return False, current_kind
+
+
+def register_talker(talker: SessionTalker) -> None:
+    """Register *talker* as the active provider driver for its repo.
+
+    Raises :class:`SessionLeakError` if a talker for the same repo is
+    already registered — the guarantee is one provider session per repo
+    at a time.
+    """
+    with _talkers_lock:
+        existing = _talkers.get(talker.repo_name)
+        if existing is not None:
+            raise SessionLeakError(
+                f"provider session leak for repo {talker.repo_name}: "
+                f"tid={existing.thread_id} ({existing.kind}, "
+                f"{existing.description}, pid={existing.claude_pid}) "
+                f"still active when tid={talker.thread_id} ({talker.kind}, "
+                f"{talker.description}, pid={talker.claude_pid}) tried to start"
+            )
+        _talkers[talker.repo_name] = talker
+
+
+def unregister_talker(repo_name: str, thread_id: int) -> None:
+    """Remove the talker entry for *repo_name* if it belongs to *thread_id*.
+
+    Idempotent — safe to call from cleanup paths that may race the registry.
+    Non-matching ``thread_id`` is a no-op (defensive against cross-thread
+    cleanup bugs).
+    """
+    with _talkers_lock:
+        existing = _talkers.get(repo_name)
+        if existing is not None and existing.thread_id == thread_id:
+            del _talkers[repo_name]
+
+
+def get_talker(repo_name: str) -> SessionTalker | None:
+    """Return the active talker for *repo_name*, or ``None`` if idle."""
+    with _talkers_lock:
+        return _talkers.get(repo_name)
+
+
+def talker_now() -> datetime:
+    """Seam for tests — patch this to freeze time in talker timestamps."""
+    return datetime.now(tz=timezone.utc)
+
+
+_session_resolver: Callable[[str], PromptSession | None] | None = None
+"""Callback the event/webhook layer uses to find its repo's persistent
+:class:`PromptSession` — installed once by :mod:`kennel.server` at startup.
+
+Every in-process prompt call goes through the persistent session, so this
+is a required piece of wiring.  Callers fail loud if it's missing — the
+only time that should happen is a forgotten resolver install, not a real
+production path."""
+
+
+def set_session_resolver(
+    resolver: Callable[[str], PromptSession | None] | None,
+) -> None:
+    """Install (or clear) the session resolver callback."""
+    global _session_resolver
+    _session_resolver = resolver
+
+
+def current_repo_session() -> PromptSession:
+    """Return the live :class:`PromptSession` driving the current thread's
+    repo.  Raises when either the thread-local repo_name or the session
+    resolver is missing — those are wiring bugs, not conditions callers
+    should paper over.
+    """
+    repo = current_repo()
+    if repo is None:
+        raise RuntimeError(
+            "current_repo_session called without a thread-local repo_name"
+            " — server.WebhookHandler._process_action and WorkerThread.run"
+            " both set it; this caller is missing the install."
+        )
+    if _session_resolver is None:
+        raise RuntimeError(
+            "current_repo_session called before set_session_resolver — "
+            "server._run() installs it at startup; nothing should run before."
+        )
+    session = _session_resolver(repo)
+    if session is None:
+        raise RuntimeError(
+            f"no provider session registered for repo {repo} — worker thread "
+            "has not yet created its session"
+        )
+    if not session.is_alive():
+        raise RuntimeError(
+            f"provider session for repo {repo} is not alive — watchdog should "
+            "have restarted the worker thread"
+        )
+    return session
+
+
+class OwnedSession:
+    """Base class for :class:`~kennel.claude.ClaudeSession` and
+    :class:`~kennel.copilotcli.CopilotCLISession` providing the shared
+    reentrance counter and :meth:`hold_for_handler` context manager
+    (fix for #658).
+
+    Subclasses own their own lock (must be a :class:`threading.RLock` so
+    nested acquires by the same thread are free) and implement the
+    session-specific first-enter / last-exit work in their own ``__enter__``
+    and ``__exit__``.  This base only handles the per-thread depth
+    bookkeeping and the shared ``hold_for_handler`` wrapper so the two
+    providers don't drift apart.
+
+    Required subclass attributes:
+
+    - ``self._lock`` — :class:`threading.RLock`
+    - ``self._repo_name`` — ``str | None`` (fed to
+      :func:`try_preempt_worker` for the preempt decision)
+    - ``self._fire_worker_cancel()`` — method that aborts whatever turn the
+      current lock-holder's provider subprocess is running
+    """
+
+    _reentry_tls: threading.local
+    _repo_name: str | None
+
+    def _init_handler_reentry(self) -> None:
+        """Subclasses call this from their ``__init__`` to set up the
+        thread-local reentrance counter.  Separate method (not
+        ``__init__``) so the base doesn't compete with the subclass
+        constructor signature."""
+        self._reentry_tls = threading.local()
+
+    def _bump_entry_depth(self) -> int:
+        """Increment and return the new per-thread entry depth (1 at
+        outermost entry, 2 at first nested, etc.)."""
+        depth = getattr(self._reentry_tls, "depth", 0) + 1
+        self._reentry_tls.depth = depth
+        return depth
+
+    def _drop_entry_depth(self) -> int:
+        """Decrement and return the new per-thread entry depth (0 at
+        outermost exit)."""
+        depth = self._reentry_tls.depth - 1
+        self._reentry_tls.depth = depth
+        return depth
+
+    def _fire_worker_cancel(self) -> None:
+        """Abort the current lock-holder's turn.  Subclasses override
+        with their provider-specific cancel mechanism."""
+        raise NotImplementedError  # pragma: no cover — abstract hook
+
+    @contextmanager
+    def hold_for_handler(
+        self, *, preempt_worker: bool = False
+    ) -> Iterator["OwnedSession"]:
+        """Hold the session lock across multiple prompt calls.
+
+        Webhook handlers wrap their entire body in this so the worker
+        can't acquire the lock between individual turns (triage → reply
+        → reaction) and stall the reply behind a long worker turn (#658).
+        Inner ``with session:`` / ``session.prompt`` calls re-acquire the
+        RLock and skip the first-enter setup via the reentrance counter.
+
+        When *preempt_worker* is true, fires the caller's
+        :meth:`_fire_worker_cancel` once upfront (via
+        :func:`try_preempt_worker`) so a currently-running worker turn
+        aborts immediately rather than being waited out.
+        """
+        if preempt_worker:
+            try_preempt_worker(self._repo_name, self._fire_worker_cancel)
+        with self:  # type: ignore[attr-defined]
+            yield self
 
 
 class ProviderAgent(Protocol):

@@ -18,7 +18,7 @@ from typing import Any, cast
 from urllib.parse import urlparse
 from xml.etree.ElementTree import Element, SubElement, register_namespace, tostring
 
-from kennel import claude, reply_promises
+from kennel import provider, reply_promises
 from kennel.claude import kill_active_children
 from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.events import (
@@ -84,8 +84,8 @@ def _runner_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _serialize_talker(talker: claude.ClaudeTalker | None) -> dict[str, Any] | None:
-    """Convert a :class:`~kennel.claude.ClaudeTalker` to a JSON-friendly dict.
+def _serialize_talker(talker: provider.SessionTalker | None) -> dict[str, Any] | None:
+    """Convert a :class:`~kennel.provider.SessionTalker` to a JSON-friendly dict.
 
     Returns ``None`` when nobody is talking to claude for the repo.
     """
@@ -539,12 +539,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
             description,
             tid,
         )
-        claude.set_thread_repo(repo_cfg.name)
-        claude.set_thread_kind("webhook")
+        provider.set_thread_repo(repo_cfg.name)
+        provider.set_thread_kind("webhook")
+        session = self.registry.get_session(repo_cfg.name)
+        needs_model = self._action_uses_model(action)
         try:
             with self.registry.webhook_activity(repo_cfg.name, description) as activity:
-                self._process_action_inner(action, repo_cfg, activity)
-        except claude.ClaudeLeakError:
+                if session is not None and needs_model:
+                    # Hold the session across the whole handler (#658) so the
+                    # worker can't sneak in and acquire the lock between this
+                    # handler's individual turns — that stalled webhook replies
+                    # behind long worker turns.  Both ClaudeSession and
+                    # CopilotCLISession implement ``hold_for_handler``.
+                    with session.hold_for_handler(preempt_worker=True):
+                        self._process_action_inner(action, repo_cfg, activity)
+                else:
+                    self._process_action_inner(action, repo_cfg, activity)
+        except provider.SessionLeakError:
             # A webhook and a worker tried to talk to the same repo's claude
             # at the same time — the only safe action is to halt the whole
             # process so the supervisor (start-kennel.sh) restarts us fresh.
@@ -559,8 +570,19 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 repo_cfg.name,
                 tid,
             )
-            claude.set_thread_kind(None)
-            claude.set_thread_repo(None)
+            provider.set_thread_kind(None)
+            provider.set_thread_repo(None)
+
+    def _action_uses_model(self, action: Action) -> bool:
+        """True when the webhook action will call ``agent.run_turn``.
+
+        Reply-capable actions (PR comments, review comments, review threads)
+        generate a response through the model and therefore benefit from
+        holding the session lock across their whole handler (#658).  Plain
+        webhook-action events (merges, check_runs) only restart workers and
+        don't touch the model — no point blocking the worker for those.
+        """
+        return bool(action.reply_to or action.review_comments or action.comment_body)
 
     def _describe_action(self, action: Action) -> str:
         """Short label for status display — what this webhook handler is doing."""
@@ -726,7 +748,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 type(self)._fn_unblock_tasks(repo_cfg.work_dir)
             # Non-comment events just trigger kennel worker — no task needed
             type(self)._fn_launch_worker(repo_cfg, self.registry)
-        except claude.ClaudeLeakError:
+        except provider.SessionLeakError:
             # Let the outer _process_action handler halt kennel — we must not
             # swallow a leak into the generic "confused reaction" path below.
             raise
@@ -837,7 +859,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     "session_alive": self.registry.get_session_alive(a.repo_name),
                     "session_pid": self.registry.get_session_pid(a.repo_name),
                     "session_dropped_count": dropped_count,
-                    "claude_talker": _serialize_talker(claude.get_talker(a.repo_name)),
+                    "claude_talker": _serialize_talker(
+                        provider.get_talker(a.repo_name)
+                    ),
                     "rescoping": self.registry.is_rescoping(a.repo_name),
                 }
             )
@@ -1020,7 +1044,7 @@ def run(
     WebhookHandler.registry = registry
     # Route webhook-handler prompt calls through the per-repo persistent
     # ClaudeSession (closes #479 — "one claude per repo" invariant).
-    claude.set_session_resolver(registry.get_session)
+    provider.set_session_resolver(registry.get_session)
     _Watchdog(registry, config.repos).start_thread()
 
     server = _HTTPServer(("", config.port), WebhookHandler)

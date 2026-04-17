@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any, Protocol
 
-from kennel import claude, hooks, tasks
+from kennel import hooks, tasks
 from kennel.claude import ClaudeCode
 from kennel.config import Config, RepoConfig, RepoMembership
 from kennel.github import GitHub
@@ -27,7 +27,10 @@ from kennel.provider import (
     ProviderAgent,
     ProviderModel,
     ProviderPressureStatus,
+    SessionLeakError,
     TurnSessionMode,
+    set_thread_kind,
+    set_thread_repo,
 )
 from kennel.provider_factory import DefaultProviderFactory
 from kennel.state import (
@@ -2642,8 +2645,8 @@ class WorkerThread(threading.Thread):
     def run(self) -> None:
         """Main loop — runs until :meth:`stop` is called."""
         _thread_repo.repo_name = self._repo_name.split("/")[-1]
-        claude.set_thread_repo(self._repo_name)
-        claude.set_thread_kind("worker")
+        set_thread_repo(self._repo_name)
+        set_thread_kind("worker")
         try:
             while not self._stop:
                 if self._registry is not None:
@@ -2695,7 +2698,7 @@ class WorkerThread(threading.Thread):
                 timeout = _RETRY_TIMEOUT if result == 2 else _IDLE_TIMEOUT
                 self._wake.wait(timeout=timeout)
                 self._wake.clear()
-        except claude.ClaudeLeakError:
+        except SessionLeakError:
             # A worker and webhook tried to talk to the same repo's claude
             # at the same time — halt kennel so the supervisor restarts fresh
             # rather than let sub-claudes multiply silently.
@@ -2709,8 +2712,8 @@ class WorkerThread(threading.Thread):
             log.exception("WorkerThread %s: unexpected error", self.name)
             raise
         finally:
-            claude.set_thread_kind(None)
-            claude.set_thread_repo(None)
+            set_thread_kind(None)
+            set_thread_repo(None)
             # Only stop the session on orderly shutdown — a crashed thread
             # leaves it alive so the registry can hand it to the replacement.
             if self._stop:

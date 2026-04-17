@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kennel import provider
 from kennel.claude import (
     _LOG_LINE_TRUNCATE,
     _RETURNCODE_IDLE_TIMEOUT,
@@ -175,17 +176,16 @@ def session_resolver():
     repo, and wire the thread-local repo so ``run_turn`` can find it.
     Yields the fake session so tests can assert on ``session.prompt.*``.
     """
-    from kennel import claude as claude_module
 
     fake = MagicMock()
     fake.is_alive.return_value = True
-    claude_module.set_session_resolver(lambda repo: fake)
-    claude_module.set_thread_repo("owner/repo")
+    provider.set_session_resolver(lambda repo: fake)
+    provider.set_thread_repo("owner/repo")
     try:
         yield fake
     finally:
-        claude_module.set_session_resolver(None)
-        claude_module.set_thread_repo(None)
+        provider.set_session_resolver(None)
+        provider.set_thread_repo(None)
 
 
 class TestRunStreaming:
@@ -541,8 +541,7 @@ class TestRunStreamingTracksChildren:
         assert proc not in _active_children
 
     def test_current_repo_session_returns_live_session(self) -> None:
-        from kennel import claude as claude_module
-        from kennel.claude import (
+        from kennel.provider import (
             current_repo_session,
             set_session_resolver,
             set_thread_repo,
@@ -556,55 +555,51 @@ class TestRunStreamingTracksChildren:
             assert current_repo_session() is live
         finally:
             set_thread_repo(None)
-            claude_module.set_session_resolver(None)
+            provider.set_session_resolver(None)
 
     def test_current_repo_session_raises_without_repo(self) -> None:
-        from kennel import claude as claude_module
-        from kennel.claude import current_repo_session
+        from kennel.provider import current_repo_session
 
-        claude_module.set_thread_repo(None)
+        provider.set_thread_repo(None)
         with pytest.raises(RuntimeError, match="thread-local repo_name"):
             current_repo_session()
 
     def test_current_repo_session_raises_without_resolver(self) -> None:
-        from kennel import claude as claude_module
-        from kennel.claude import current_repo_session
+        from kennel.provider import current_repo_session
 
-        claude_module.set_session_resolver(None)
-        claude_module.set_thread_repo("owner/repo")
+        provider.set_session_resolver(None)
+        provider.set_thread_repo("owner/repo")
         try:
             with pytest.raises(RuntimeError, match="set_session_resolver"):
                 current_repo_session()
         finally:
-            claude_module.set_thread_repo(None)
+            provider.set_thread_repo(None)
 
     def test_current_repo_session_raises_when_no_session(self) -> None:
-        from kennel import claude as claude_module
-        from kennel.claude import current_repo_session
+        from kennel.provider import current_repo_session
 
-        claude_module.set_session_resolver(lambda repo: None)
-        claude_module.set_thread_repo("owner/repo")
+        provider.set_session_resolver(lambda repo: None)
+        provider.set_thread_repo("owner/repo")
         try:
-            with pytest.raises(RuntimeError, match="no ClaudeSession registered"):
+            with pytest.raises(RuntimeError, match="no provider session registered"):
                 current_repo_session()
         finally:
-            claude_module.set_thread_repo(None)
-            claude_module.set_session_resolver(None)
+            provider.set_thread_repo(None)
+            provider.set_session_resolver(None)
 
     def test_current_repo_session_raises_when_not_alive(self) -> None:
-        from kennel import claude as claude_module
-        from kennel.claude import current_repo_session
+        from kennel.provider import current_repo_session
 
         dead = MagicMock()
         dead.is_alive.return_value = False
-        claude_module.set_session_resolver(lambda repo: dead)
-        claude_module.set_thread_repo("owner/repo")
+        provider.set_session_resolver(lambda repo: dead)
+        provider.set_thread_repo("owner/repo")
         try:
             with pytest.raises(RuntimeError, match="not alive"):
                 current_repo_session()
         finally:
-            claude_module.set_thread_repo(None)
-            claude_module.set_session_resolver(None)
+            provider.set_thread_repo(None)
+            provider.set_session_resolver(None)
 
     def test_thread_name_for_id_returns_none_when_not_found(self) -> None:
         from kennel.claude import _thread_name_for_id
@@ -616,13 +611,10 @@ class TestRunStreamingTracksChildren:
         self, tmp_path: Path
     ) -> None:
         """When thread-local repo_name is set, _run_streaming registers a
-        webhook-kind ClaudeTalker for the duration of the subprocess and
+        webhook-kind SessionTalker for the duration of the subprocess and
         unregisters it on exit."""
-        from kennel.claude import (
-            _run_streaming,
-            get_talker,
-            set_thread_repo,
-        )
+        from kennel.claude import _run_streaming
+        from kennel.provider import get_talker, set_thread_repo
 
         stdin_file = tmp_path / "in"
         stdin_file.write_text("hi")
@@ -1934,16 +1926,15 @@ class TestClaudeSessionLock:
     def test_enter_raises_on_concurrent_talker_and_releases_lock(
         self, tmp_path: Path
     ) -> None:
-        """__enter__ raises ClaudeLeakError if another talker is registered and
+        """__enter__ raises SessionLeakError if another talker is registered and
         releases the session lock so callers don't deadlock."""
         from datetime import datetime, timezone
 
-        from kennel import claude as claude_module
-        from kennel.claude import ClaudeLeakError, ClaudeTalker, register_talker
+        from kennel.provider import SessionLeakError, SessionTalker, register_talker
 
         session = _make_session(tmp_path, _make_session_proc([]))
         register_talker(
-            ClaudeTalker(
+            SessionTalker(
                 repo_name="owner/repo",
                 thread_id=999,
                 kind="webhook",
@@ -1952,13 +1943,13 @@ class TestClaudeSessionLock:
                 started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
         )
-        with pytest.raises(ClaudeLeakError):
+        with pytest.raises(SessionLeakError):
             session.__enter__()
         # Session lock must be released so we don't deadlock future callers.
         assert session._lock.acquire(blocking=False)
         session._lock.release()
-        with claude_module._talkers_lock:
-            claude_module._talkers.clear()
+        with provider._talkers_lock:
+            provider._talkers.clear()
         session.stop()
 
     def test_context_manager_blocks_second_thread(self, tmp_path: Path) -> None:

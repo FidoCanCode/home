@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import pytest
 
-from kennel import claude
+from kennel import provider
 
 
 @pytest.fixture(autouse=True)
 def _reset_claude_talker_registry():
-    """Clear the global :class:`~kennel.claude.ClaudeTalker` registry between
+    """Clear the global :class:`~kennel.provider.SessionTalker` registry between
     tests so entries from one test can't leak into the next and cause a
-    spurious :class:`~kennel.claude.ClaudeLeakError`.  Also clears any
+    spurious :class:`~kennel.provider.SessionLeakError`.  Also clears any
     thread-local repo_name the test may have set via
-    :func:`kennel.claude.set_thread_repo`.
+    :func:`kennel.provider.set_thread_repo`.
     """
     yield
-    with claude._talkers_lock:
-        claude._talkers.clear()
-    claude.set_thread_repo(None)
+    with provider._talkers_lock:
+        provider._talkers.clear()
+    provider.set_thread_repo(None)

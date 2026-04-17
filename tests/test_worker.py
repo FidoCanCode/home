@@ -14,6 +14,7 @@ from unittest.mock import ANY, MagicMock, PropertyMock, call, patch
 import pytest
 
 import kennel.worker as worker_module
+from kennel import provider
 from kennel.claude import ClaudeClient
 from kennel.config import RepoConfig, RepoMembership
 from kennel.prompts import Prompts
@@ -10416,8 +10417,7 @@ class TestWorkerThread:
     def test_run_halts_on_claude_leak_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """ClaudeLeakError in the worker loop calls os._exit(3)."""
-        from kennel import claude
+        """SessionLeakError in the worker loop calls os._exit(3)."""
         from kennel import worker as worker_module
 
         wt = self._make_thread(tmp_path)
@@ -10425,7 +10425,7 @@ class TestWorkerThread:
         monkeypatch.setattr(worker_module.os, "_exit", exits.append)
         # Force the loop to raise a leak error on the first iteration.
         wt._registry = MagicMock()
-        wt._registry.report_activity.side_effect = claude.ClaudeLeakError("leak")
+        wt._registry.report_activity.side_effect = provider.SessionLeakError("leak")
         wt.run()
         assert exits == [3]
 

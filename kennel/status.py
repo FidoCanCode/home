@@ -37,7 +37,7 @@ class WebhookActivityInfo:
     """Lightweight in-flight webhook handler, used purely for display.
 
     *thread_id* matches the ``thread_id`` stored on
-    :class:`~kennel.claude.ClaudeTalker` so display can identify which
+    :class:`~kennel.provider.SessionTalker` so display can identify which
     webhook (if any) is currently driving claude.
     """
 

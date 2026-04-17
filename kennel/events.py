@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from kennel import reply_promises
-from kennel.claude import ClaudeClient, set_thread_repo
+from kennel.claude import ClaudeClient
 from kennel.config import Config, RepoConfig
 from kennel.github import GitHub
 from kennel.prompts import NO_TOOLS_CLAUSE, Prompts
-from kennel.provider import ProviderAgent
+from kennel.provider import ProviderAgent, set_thread_repo
 from kennel.provider_factory import DefaultProviderFactory
 from kennel.registry import WorkerRegistry
 from kennel.state import State
