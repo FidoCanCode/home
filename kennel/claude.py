@@ -676,6 +676,7 @@ class ClaudeSession:
         popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
         selector: Callable[..., tuple[list[Any], list[Any], list[Any]]] = select.select,
         repo_name: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         self._idle_timeout = idle_timeout
         self._selector = selector
@@ -696,9 +697,11 @@ class ClaudeSession:
         # Latest session_id seen in a stream-json event.  Updated inside
         # :meth:`iter_events` so a subsequent :meth:`switch_model` can
         # restart with ``--resume <sid>`` and keep conversation context
-        # across the model swap.  Empty until the first claude event with
-        # a session_id arrives.
-        self._session_id = ""
+        # across the model swap.  Seeded from the *session_id* constructor
+        # kwarg so the first :meth:`_spawn` can ``--resume`` a durable
+        # claude conversation persisted across kennel restarts (#649).
+        # Empty until the first claude event with a session_id arrives.
+        self._session_id = session_id or ""
         # True when the most recent :meth:`iter_events` call exited early
         # because :attr:`_cancel` was set (i.e. another thread preempted the
         # turn via :meth:`prompt`).  Cleared at the start of each turn.
@@ -1592,7 +1595,12 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
     def provider_id(self) -> ProviderID:
         return ProviderID.CLAUDE_CODE
 
-    def _spawn_owned_session(self, model: ProviderModel | None = None) -> PromptSession:
+    def _spawn_owned_session(
+        self,
+        model: ProviderModel | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> PromptSession:
         system_file = self._session_system_file
         work_dir = self._work_dir
         assert system_file is not None
@@ -1602,9 +1610,15 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
             work_dir=work_dir,
             repo_name=self._repo_name,
             model=model,
+            session_id=session_id,
         )
 
-    def ensure_session(self, model: ProviderModel | None = None) -> None:
+    def ensure_session(
+        self,
+        model: ProviderModel | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> None:
         created = False
         with self._session_lock:
             session = self._session
@@ -1617,7 +1631,7 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
                     raise ValueError(
                         "ClaudeClient.ensure_session requires model when creating a session"
                     )
-                session = self._spawn_owned_session(model)
+                session = self._spawn_owned_session(model, session_id=session_id)
                 self._session = session
                 created = True
         if model is None or (created and model == self.voice_model):

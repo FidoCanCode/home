@@ -1272,6 +1272,7 @@ class TestCopilotCLIClient:
             work_dir=tmp_path,
             model=client.voice_model,
             repo_name=None,
+            session_id=None,
         )
         session.reset.assert_called_once_with(client.work_model)
         session.switch_model.assert_not_called()
@@ -1307,6 +1308,7 @@ class TestCopilotCLIClient:
             work_dir=tmp_path,
             model=client.voice_model,
             repo_name=None,
+            session_id=None,
         )
         session.reset.assert_not_called()
 

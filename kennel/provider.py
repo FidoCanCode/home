@@ -290,8 +290,16 @@ class ProviderAgent(Protocol):
         """Detach and return the current persistent session, if any."""
         ...
 
-    def ensure_session(self, model: ProviderModel | None = None) -> None:
-        """Ensure that a persistent session exists, optionally seeded with *model*."""
+    def ensure_session(
+        self,
+        model: ProviderModel | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> None:
+        """Ensure that a persistent session exists, optionally seeded with
+        *model* and resumed from *session_id* (for providers that support
+        durable conversation ids — claude ``--resume``, Copilot ACP
+        ``load_session``)."""
         ...
 
     def stop_session(self) -> None:

@@ -2432,6 +2432,7 @@ class TestClaudeClientSessionAttachment:
             work_dir=tmp_path,
             repo_name=None,
             model="claude-opus-4-6",
+            session_id=None,
         )
         session.reset.assert_not_called()
 

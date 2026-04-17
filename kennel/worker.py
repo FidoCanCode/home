@@ -2534,13 +2534,72 @@ class WorkerThread(threading.Thread):
             return provider
 
     def _create_session(self) -> PromptSession:
-        """Eagerly create the persistent provider session for this thread."""
+        """Eagerly create the persistent provider session for this thread.
+
+        Seeds the provider with the durable session id persisted in
+        ``state.json`` so a kennel self-restart can resume the same
+        provider conversation instead of starting fresh (fix for #649).
+        When the persisted id is no longer recognised by the provider
+        (e.g. evicted server-side), the provider's own stale-session
+        recovery path transparently creates a new one.
+        """
         provider = self._ensure_provider()
-        provider.agent.ensure_session(provider.agent.voice_model)
+        persisted_session_id = self._load_persisted_session_id()
+        provider.agent.ensure_session(
+            provider.agent.voice_model, session_id=persisted_session_id
+        )
         session = provider.agent.session
         if session is None:
             raise RuntimeError("provider.ensure_session() returned no session")
         return session
+
+    def _resolve_fido_dir(self) -> Path | None:
+        """Return the ``.git/fido`` directory for this worker's work_dir,
+        or ``None`` when *work_dir* is not a git worktree (e.g. pytest
+        tmp_path fixtures that don't initialise a repo).  Callers that
+        want to read or write ``state.json`` should treat ``None`` as
+        "no persistence available" rather than raising.
+        """
+        try:
+            return _resolve_git_dir(self.work_dir) / "fido"
+        except subprocess.CalledProcessError, FileNotFoundError, OSError:
+            return None
+
+    def _load_persisted_session_id(self) -> str | None:
+        fido_dir = self._resolve_fido_dir()
+        if fido_dir is None:
+            return None
+        try:
+            data = State(fido_dir).load()
+        except OSError:
+            return None
+        sid = data.get("session_id")
+        return sid if isinstance(sid, str) and sid else None
+
+    def _persist_session_id(self) -> None:
+        """Write the live session's durable id back to ``state.json`` so the
+        next kennel run can resume the same provider conversation.  Silently
+        no-ops when no live session / no session id / no persistence target.
+        """
+        with self._provider_lock:
+            provider = self._provider
+        if provider is None:
+            return
+        session = provider.agent.session
+        if session is None:
+            return
+        sid = getattr(session, "session_id", None)
+        if not isinstance(sid, str) or not sid:
+            return
+        fido_dir = self._resolve_fido_dir()
+        if fido_dir is None:
+            return
+        try:
+            with State(fido_dir).modify() as data:
+                if data.get("session_id") != sid:
+                    data["session_id"] = sid
+        except OSError as exc:
+            log.warning("failed to persist session_id: %s", exc)
 
     def run(self) -> None:
         """Main loop — runs until :meth:`stop` is called."""
@@ -2578,6 +2637,7 @@ class WorkerThread(threading.Thread):
                     with self._provider_lock:
                         self._provider = worker._provider  # pyright: ignore[reportPrivateUsage]
                     self._session_issue = worker._session_issue  # pyright: ignore[reportPrivateUsage]
+                    self._persist_session_id()
 
                 if result == 1:
                     # Did work — loop immediately without waiting.
