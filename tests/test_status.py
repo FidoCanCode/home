@@ -1824,8 +1824,8 @@ class TestFormatStatus:
         assert "triaging comment" in webhook_lines[1]
         assert "→ pid" not in webhook_lines[1]
 
-    def test_worker_line_shows_provider_marker_when_worker_is_talker(self) -> None:
-        """Worker line gets a <- {provider} marker when the worker owns the session."""
+    def test_worker_line_has_no_provider_suffix_when_worker_is_talker(self) -> None:
+        """Worker line has no '<- provider' suffix even when the worker owns the session."""
         repo = self._repo(
             issue=1,
             current_task="Do thing",
@@ -1841,7 +1841,7 @@ class TestFormatStatus:
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
         worker_line = next(ln for ln in output.splitlines() if "Worker:" in ln)
-        assert "<- claude-code" in worker_line
+        assert "<-" not in worker_line
 
     def test_worker_line_no_marker_when_not_talker(self) -> None:
         """Worker line has no provider marker when the worker is on a task but not talking."""
@@ -1856,8 +1856,8 @@ class TestFormatStatus:
         worker_line = next(ln for ln in output.splitlines() if "Worker:" in ln)
         assert "<-" not in worker_line
 
-    def test_webhook_line_shows_provider_marker_when_talker(self) -> None:
-        """Active webhook talker line gets a <- {provider} marker."""
+    def test_webhook_talker_sorts_first_and_has_no_provider_suffix(self) -> None:
+        """Active webhook talker sorts to top; neither line has a '<- provider' suffix."""
         repo = self._repo(
             issue=1,
             webhook_activities=[
@@ -1878,49 +1878,12 @@ class TestFormatStatus:
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
         webhook_lines = [ln for ln in output.splitlines() if "webhook:" in ln]
-        # Active talker (replying to review, tid=2) sorts to top and gets marker.
+        # Active talker (replying to review, tid=2) sorts to top.
         assert "replying to review" in webhook_lines[0]
-        assert "<- claude-code" in webhook_lines[0]
-        # Non-talker has no marker.
+        assert "<-" not in webhook_lines[0]
+        # Non-talker also has no suffix.
         assert "triaging comment" in webhook_lines[1]
         assert "<-" not in webhook_lines[1]
-
-    def test_webhook_marker_uses_provider_name(self) -> None:
-        """Marker uses the configured provider name, not a hardcoded string."""
-        repo = self._repo(
-            issue=1,
-            provider=ProviderID.COPILOT_CLI,
-            webhook_activities=[
-                WebhookActivityInfo(
-                    description="triaging", elapsed_seconds=3, thread_id=5
-                ),
-            ],
-            claude_talker=ClaudeTalkerInfo(
-                thread_id=5,
-                kind="webhook",
-                description="copilot session",
-                claude_pid=77,
-            ),
-        )
-        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
-        output = format_status(status)
-        webhook_line = next(ln for ln in output.splitlines() if "webhook:" in ln)
-        assert "<- copilot-cli" in webhook_line
-
-    def test_worker_marker_uses_provider_name(self) -> None:
-        """Worker marker uses the configured provider name, not a hardcoded string."""
-        repo = self._repo(
-            issue=1,
-            provider=ProviderID.COPILOT_CLI,
-            current_task="Do thing",
-            task_number=1,
-            task_total=1,
-            session_owner="worker-orly",
-        )
-        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
-        output = format_status(status)
-        worker_line = next(ln for ln in output.splitlines() if "Worker:" in ln)
-        assert "<- copilot-cli" in worker_line
 
     def test_webhook_overflow_summary_when_more_than_five(self) -> None:
         """More than 5 webhook activities → first 5 shown + '+N more' line."""
