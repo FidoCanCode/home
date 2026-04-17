@@ -1831,6 +1831,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
@@ -1857,6 +1858,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
@@ -1888,6 +1890,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
@@ -1919,6 +1922,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
@@ -1960,6 +1964,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
@@ -1991,6 +1996,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
@@ -2020,6 +2026,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
@@ -2061,6 +2068,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
@@ -2115,6 +2123,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
@@ -2150,6 +2159,7 @@ class TestRun:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
@@ -2184,6 +2194,7 @@ class TestRun:
                 _populate_memberships=MagicMock(),
                 _startup_pull=MagicMock(),
                 _preflight_repo_identity=MagicMock(),
+                _sync_workspace_repos=MagicMock(),
                 _preflight_tools=MagicMock(),
                 _preflight_sub_dir=MagicMock(),
                 _preflight_gh_auth=MagicMock(),
@@ -2445,6 +2456,7 @@ class TestPreflightRepoIdentity:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=mock_preflight,
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
@@ -2452,6 +2464,39 @@ class TestPreflightRepoIdentity:
         )
 
         mock_preflight.assert_called_once_with(fake_cfg.repos, ANY)
+
+    def test_run_calls_sync_workspace_repos(self, tmp_path: Path) -> None:
+        from kennel.server import run
+
+        fake_cfg = Config(
+            port=0,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_sync = MagicMock()
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=MagicMock(),
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=mock_sync,
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
+            _GitHub=MagicMock,
+        )
+
+        mock_sync.assert_called_once_with(fake_cfg.repos, ANY)
 
     def test_run_calls_preflight_tools(self, tmp_path: Path) -> None:
         from kennel.server import run
@@ -2477,6 +2522,7 @@ class TestPreflightRepoIdentity:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=mock_preflight,
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
@@ -2509,6 +2555,7 @@ class TestPreflightRepoIdentity:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=mock_preflight,
@@ -2541,6 +2588,7 @@ class TestPreflightRepoIdentity:
             _populate_memberships=MagicMock(),
             _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
+            _sync_workspace_repos=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=mock_preflight,
             _preflight_gh_auth=MagicMock(),
@@ -2578,6 +2626,7 @@ class TestPreflightRepoIdentity:
                 _preflight_gh_auth=MagicMock(),
                 _GitHub=MagicMock,
                 _preflight_repo_identity=MagicMock(),
+                _sync_workspace_repos=MagicMock(),
             )
 
 
@@ -2770,6 +2819,125 @@ class TestRunnerDir:
 
         result = _runner_dir()
         assert (result / "kennel" / "server.py").exists()
+
+
+class TestSyncWorkspaceRepos:
+    def test_syncs_each_repo_to_clean_origin_main(self, tmp_path: Path) -> None:
+        from kennel.server import sync_workspace_repos
+
+        repo_one = tmp_path / "one"
+        repo_two = tmp_path / "two"
+        repos = {
+            "owner/repo1": RepoConfig(name="owner/repo1", work_dir=repo_one),
+            "owner/repo2": RepoConfig(name="owner/repo2", work_dir=repo_two),
+        }
+        fake = _FakeProcessRunner(
+            [
+                MagicMock(),
+                MagicMock(),
+                MagicMock(),
+                MagicMock(stdout=""),
+                MagicMock(),
+                MagicMock(),
+                MagicMock(),
+                MagicMock(stdout="Removing junk.txt\n"),
+            ]
+        )
+
+        sync_workspace_repos(repos, fake)
+
+        assert fake.calls == [
+            (
+                ["git", "fetch", "origin", "main"],
+                {
+                    "cwd": str(repo_one),
+                    "capture_output": True,
+                    "text": True,
+                    "check": True,
+                },
+            ),
+            (
+                ["git", "checkout", "-B", "main", "origin/main"],
+                {
+                    "cwd": str(repo_one),
+                    "capture_output": True,
+                    "text": True,
+                    "check": True,
+                },
+            ),
+            (
+                ["git", "reset", "--hard", "origin/main"],
+                {
+                    "cwd": str(repo_one),
+                    "capture_output": True,
+                    "text": True,
+                    "check": True,
+                },
+            ),
+            (
+                ["git", "clean", "-df"],
+                {
+                    "cwd": str(repo_one),
+                    "capture_output": True,
+                    "text": True,
+                    "check": True,
+                },
+            ),
+            (
+                ["git", "fetch", "origin", "main"],
+                {
+                    "cwd": str(repo_two),
+                    "capture_output": True,
+                    "text": True,
+                    "check": True,
+                },
+            ),
+            (
+                ["git", "checkout", "-B", "main", "origin/main"],
+                {
+                    "cwd": str(repo_two),
+                    "capture_output": True,
+                    "text": True,
+                    "check": True,
+                },
+            ),
+            (
+                ["git", "reset", "--hard", "origin/main"],
+                {
+                    "cwd": str(repo_two),
+                    "capture_output": True,
+                    "text": True,
+                    "check": True,
+                },
+            ),
+            (
+                ["git", "clean", "-df"],
+                {
+                    "cwd": str(repo_two),
+                    "capture_output": True,
+                    "text": True,
+                    "check": True,
+                },
+            ),
+        ]
+
+    def test_raises_when_git_sync_fails(self, tmp_path: Path) -> None:
+        from kennel.server import sync_workspace_repos
+
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        fake = _FakeProcessRunner([subprocess.CalledProcessError(1, ["git", "fetch"])])
+
+        with pytest.raises(PreflightError, match="startup sync: owner/repo"):
+            sync_workspace_repos(repos, fake)
+
+    def test_raises_when_git_not_found(self, tmp_path: Path) -> None:
+        from kennel.server import sync_workspace_repos
+
+        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
+        fake = _FakeProcessRunner(error=FileNotFoundError())
+
+        with pytest.raises(PreflightError, match="startup sync: owner/repo"):
+            sync_workspace_repos(repos, fake)
 
 
 class TestPullWithBackoff:

@@ -271,6 +271,56 @@ def preflight_repo_identity(
         log.info("preflight: %s: work_dir identity confirmed", name)
 
 
+def sync_workspace_repos(
+    repos: dict[str, RepoConfig],
+    proc: ProcessRunner,
+) -> None:
+    """Force each configured workspace clone back to a clean ``origin/main``.
+
+    Startup must not inherit stale feature branches or dirty files from an older
+    local workspace clone.  For every configured repo, fetch the latest remote
+    main, recreate/reset the local ``main`` branch to that remote tip, hard
+    reset, then remove untracked files.
+    """
+    for name, repo_cfg in repos.items():
+        try:
+            proc.run(
+                ["git", "fetch", "origin", "main"],
+                cwd=str(repo_cfg.work_dir),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            proc.run(
+                ["git", "checkout", "-B", "main", "origin/main"],
+                cwd=str(repo_cfg.work_dir),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            proc.run(
+                ["git", "reset", "--hard", "origin/main"],
+                cwd=str(repo_cfg.work_dir),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            cleaned = proc.run(
+                ["git", "clean", "-df"],
+                cwd=str(repo_cfg.work_dir),
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        except subprocess.CalledProcessError as e:
+            raise PreflightError(f"startup sync: {name}: git sync failed: {e}") from e
+        except FileNotFoundError as e:
+            raise PreflightError(f"startup sync: {name}: git not found: {e}") from e
+        if cleaned:
+            log.info("startup sync: %s: git clean removed:\n%s", name, cleaned)
+        log.info("startup sync: %s: workspace synced to origin/main", name)
+
+
 _REQUIRED_TOOLS = ("git", "gh", "claude")
 
 
@@ -891,6 +941,7 @@ def run(
     _startup_pull: Callable[..., None] = _startup_pull,
     _Watchdog: type[Watchdog] = Watchdog,
     _preflight_repo_identity: Callable[..., None] = preflight_repo_identity,
+    _sync_workspace_repos: Callable[..., None] = sync_workspace_repos,
     _preflight_tools: Callable[..., None] = preflight_tools,
     _preflight_sub_dir: Callable[..., None] = preflight_sub_dir,
     _preflight_gh_auth: Callable[..., None] = preflight_gh_auth,
@@ -953,6 +1004,7 @@ def run(
         _preflight_sub_dir(config, infra.fs)
         _preflight_gh_auth(gh)
         _preflight_repo_identity(config.repos, infra.proc)
+        _sync_workspace_repos(config.repos, infra.proc)
     except PreflightError as e:
         raise SystemExit(str(e)) from e
 
