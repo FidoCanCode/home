@@ -1323,7 +1323,7 @@ class TestFormatStatus:
         output = format_status(status)
         assert output == "kennel: UP (pid 12345, uptime 2h13m)"
 
-    def test_includes_provider_limits_summary_and_repo_pressure(self) -> None:
+    def test_includes_provider_limits_summary_and_repo_provider(self) -> None:
         provider_status = ProviderPressureStatus(
             provider=ProviderID.CLAUDE_CODE,
             pressure=0.91,
@@ -1337,7 +1337,8 @@ class TestFormatStatus:
         )
         output = format_status(status)
         assert "limits: claude-code 91% (five hour)" in output
-        assert "owner/repo: fido idle — claude-code 91% (five hour)" in output
+        assert "owner/repo: fido idle — claude-code" in output
+        assert "owner/repo: fido idle — claude-code 91% (five hour)" not in output
 
     def test_includes_provider_reset_time_in_summary(self) -> None:
         provider_status = ProviderPressureStatus(
@@ -1379,6 +1380,8 @@ class TestFormatStatus:
         )
         output = format_status(status)
         assert "claude-code limits unknown" in output
+        assert "owner/repo: fido idle — claude-code" in output
+        assert "owner/repo: fido idle — claude-code limits unknown" not in output
 
     def test_includes_copilot_unknown_summary(self) -> None:
         provider_status = ProviderPressureStatus(provider=ProviderID.COPILOT_CLI)
@@ -1394,6 +1397,8 @@ class TestFormatStatus:
         )
         output = format_status(status)
         assert "copilot-cli limits unknown" in output
+        assert "owner/repo: fido idle — copilot-cli" in output
+        assert "owner/repo: fido idle — copilot-cli limits unknown" not in output
 
     def test_kennel_up_no_uptime(self) -> None:
         status = KennelStatus(kennel_pid=12345, kennel_uptime=None, repos=[])
@@ -1438,7 +1443,7 @@ class TestFormatStatus:
         )
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "Issue:  #42 — Add widget" in output
+        assert "Issue: #42 — Add widget" in output
         assert "Worker: task 3/3 — Do the thing" in output
 
     def test_paused_provider_overrides_worker_state(self) -> None:
@@ -1491,14 +1496,14 @@ class TestFormatStatus:
         repo = self._repo(issue=5, pending=2, completed=0, task_number=1, task_total=2)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "Issue:  #5" in output
+        assert "Issue: #5" in output
         assert "Worker: task 1/2" in output
 
     def test_repo_issue_no_tasks(self) -> None:
         repo = self._repo(issue=3)
         status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
         output = format_status(status)
-        assert "Issue:  #3" in output
+        assert "Issue: #3" in output
         # No task → Worker line shows idle
         assert "Worker: idle" in output
 
@@ -1848,6 +1853,8 @@ class TestFormatStatusColor:
         with patch.dict("os.environ", self._color_env(), clear=True):
             output = format_status(status)
         assert f"{_CODES['dim']}(elapsed 2m)" in output
+        assert f"  {_CODES['dim']}(elapsed 2m)" not in output
+        assert f" {_CODES['dim']}(elapsed 2m)" in output
 
     def test_busy_red(self) -> None:
         repo = self._repo(worker_stuck=True)
