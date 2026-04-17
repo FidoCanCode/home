@@ -115,10 +115,13 @@ def _xml_text(value: object) -> str | None:
 
 
 def _repo_status(act: dict[str, Any]) -> str:
-    """Derive a single status word from activity flags.
+    """Derive a status string from activity flags.
 
-    Priority: paused > stuck > crashed > busy > idle.  Used as the ``dog:status``
-    attribute on ``<repo>`` elements so XSLT and CSS can style by state.
+    Priority: paused > stuck > crashed > busy > what (falling back to
+    "waiting").  Used as the ``dog:status`` attribute on ``<repo>`` elements
+    so XSLT and CSS can style by state.  When the worker is not actively busy,
+    the live ``what`` field (e.g. "waiting: no issues found") is used so the
+    attribute carries the specific reason rather than a generic label.
     """
     provider_status = act.get("provider_status")
     if isinstance(provider_status, dict) and provider_status.get("paused"):
@@ -129,7 +132,7 @@ def _repo_status(act: dict[str, Any]) -> str:
         return "crashed"
     if act.get("busy"):
         return "busy"
-    return "idle"
+    return act.get("what") or "waiting"
 
 
 def _activities_to_xml(activities: list[dict[str, Any]]) -> bytes:

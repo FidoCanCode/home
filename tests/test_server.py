@@ -474,9 +474,35 @@ class TestRepoStatus:
             ({"is_stuck": True, "crash_count": 2, "busy": True}, "stuck"),
             ({"is_stuck": False, "crash_count": 3, "busy": True}, "crashed"),
             ({"is_stuck": False, "crash_count": 0, "busy": True}, "busy"),
-            ({"is_stuck": False, "crash_count": 0, "busy": False}, "idle"),
+            ({"is_stuck": False, "crash_count": 0, "busy": False}, "waiting"),
+            (
+                {
+                    "is_stuck": False,
+                    "crash_count": 0,
+                    "busy": False,
+                    "what": "waiting: no issues found",
+                },
+                "waiting: no issues found",
+            ),
+            (
+                {
+                    "is_stuck": False,
+                    "crash_count": 0,
+                    "busy": False,
+                    "what": "scanning for work",
+                },
+                "scanning for work",
+            ),
         ],
-        ids=["paused", "stuck", "crashed", "busy", "idle"],
+        ids=[
+            "paused",
+            "stuck",
+            "crashed",
+            "busy",
+            "waiting",
+            "waiting-what",
+            "scanning",
+        ],
     )
     def test_repo_status_priority(self, act: dict, expected: str) -> None:
         assert _repo_status(act) == expected
