@@ -3460,14 +3460,18 @@ class TestNotifyThreadChange:
         t.update(overrides)
         return t
 
-    def test_completed_posts_comment(self, tmp_path: Path) -> None:
+    def test_completed_issue_comment_skips(self, tmp_path: Path) -> None:
+        """Issue comments are silently skipped — webhook already replied."""
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         change = {"task": self._task(), "kind": "completed"}
-        _notify_thread_change(change, cfg, mock_gh, agent=_client("Noted!"))
-        mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Noted!")
+        agent = _client("Should not be called")
+        _notify_thread_change(change, cfg, mock_gh, agent=agent)
+        mock_gh.comment_issue.assert_not_called()
+        mock_gh.reply_to_review_comment.assert_not_called()
 
-    def test_modified_posts_comment(self, tmp_path: Path) -> None:
+    def test_modified_issue_comment_skips(self, tmp_path: Path) -> None:
+        """Issue comments are silently skipped — webhook already replied."""
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         change = {
@@ -3476,8 +3480,10 @@ class TestNotifyThreadChange:
             "new_title": "Updated title",
             "new_description": "",
         }
-        _notify_thread_change(change, cfg, mock_gh, agent=_client("Updated!"))
-        mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Updated!")
+        agent = _client("Should not be called")
+        _notify_thread_change(change, cfg, mock_gh, agent=agent)
+        mock_gh.comment_issue.assert_not_called()
+        mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_missing_thread_skips_comment(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -3488,18 +3494,26 @@ class TestNotifyThreadChange:
         _notify_thread_change(change, cfg, mock_gh, agent=_client())
         mock_gh.comment_issue.assert_not_called()
 
-    def test_empty_opus_raises_for_completed(self, tmp_path: Path) -> None:
+    def test_review_comment_empty_opus_raises_for_completed(
+        self, tmp_path: Path
+    ) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
-        change = {"task": self._task(), "kind": "completed"}
+        task = self._task()
+        task["thread"]["comment_type"] = "pulls"
+        change = {"task": task, "kind": "completed"}
         with pytest.raises(ValueError, match="_notify_thread_change"):
             _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
 
-    def test_empty_opus_raises_for_modified(self, tmp_path: Path) -> None:
+    def test_review_comment_empty_opus_raises_for_modified(
+        self, tmp_path: Path
+    ) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
+        task = self._task()
+        task["thread"]["comment_type"] = "pulls"
         change = {
-            "task": self._task(),
+            "task": task,
             "kind": "modified",
             "new_title": "New title",
             "new_description": "",
@@ -3534,14 +3548,15 @@ class TestNotifyThreadChange:
         # Should not raise
         _notify_thread_change(change, cfg, mock_gh, agent=_client("ok"))
 
-    def test_no_comment_type_defaults_to_issue_comment(self, tmp_path: Path) -> None:
+    def test_no_comment_type_defaults_to_skip(self, tmp_path: Path) -> None:
+        """Missing comment_type defaults to the 'issues' skip path."""
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         task = self._task()
         del task["thread"]["comment_type"]
         change = {"task": task, "kind": "completed"}
         _notify_thread_change(change, cfg, mock_gh, agent=_client("Fallback"))
-        mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Fallback")
+        mock_gh.comment_issue.assert_not_called()
         mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_author_in_opus_instruction(self, tmp_path: Path) -> None:
@@ -3552,24 +3567,38 @@ class TestNotifyThreadChange:
             captured_prompt.append(prompt)
             return "ok"
 
-        change = {"task": self._task(), "kind": "completed"}
+        task = self._task()
+        task["thread"]["comment_type"] = "pulls"
+        change = {"task": task, "kind": "completed"}
         _notify_thread_change(
             change, cfg, MagicMock(), agent=_client(side_effect=fake_pp)
         )
         assert "alice" in captured_prompt[0]
 
-    def test_comment_issue_exception_does_not_raise(self, tmp_path: Path) -> None:
+    def test_issue_comment_skips_before_opus_call(self, tmp_path: Path) -> None:
+        """Issue comments must not invoke the LLM — return before the expensive call."""
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
-        mock_gh.comment_issue.side_effect = RuntimeError("api error")
+        invoked: list[bool] = []
+
+        def should_not_be_called(prompt, model, **kwargs):
+            invoked.append(True)
+            return "oops"
+
         change = {"task": self._task(), "kind": "completed"}
-        # Should not raise
-        _notify_thread_change(change, cfg, mock_gh, agent=_client("ok"))
+        _notify_thread_change(
+            change, cfg, mock_gh, agent=_client(side_effect=should_not_be_called)
+        )
+        assert not invoked
+        mock_gh.comment_issue.assert_not_called()
+        mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_default_repo_configured_agent_used(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
-        change = {"task": self._task(), "kind": "completed"}
+        task = self._task()
+        task["thread"]["comment_type"] = "pulls"
+        change = {"task": task, "kind": "completed"}
         with patch("kennel.events.DefaultProviderFactory") as factory_cls:
             factory_cls.return_value.create_agent.return_value = _client("Auto reply")
             _notify_thread_change(change, cfg, mock_gh)
@@ -3578,7 +3607,10 @@ class TestNotifyThreadChange:
             work_dir=tmp_path,
             repo_name="owner/repo",
         )
-        mock_gh.comment_issue.assert_called_once_with("owner/repo", 42, "Auto reply")
+        mock_gh.reply_to_review_comment.assert_called_once_with(
+            "owner/repo", 42, "Auto reply", 999
+        )
+        mock_gh.comment_issue.assert_not_called()
 
 
 class TestLaunchSync:
