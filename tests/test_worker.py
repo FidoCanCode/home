@@ -9927,6 +9927,41 @@ class TestSyncTasks:
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_not_called()
 
+    def test_completed_task_appears_in_pr_body_after_sync(self, tmp_path: Path) -> None:
+        """End-to-end: add a task, complete it, sync — PR body must show it done."""
+        from kennel.tasks import Tasks
+        from kennel.types import TaskType
+
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+
+        # Use real Tasks operations — no task-list mock
+        task = Tasks(tmp_path).add("Replace the marker", TaskType.SPEC)
+        Tasks(tmp_path).complete_by_id(task["id"])
+
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 42, "state": "OPEN"}
+        gh.get_pr_body.return_value = (
+            "desc\n\n---\n\n## Work queue\n\n"
+            "<!-- WORK_QUEUE_START -->\n"
+            "- [ ] Replace the marker **→ next** <!-- type:spec -->\n"
+            "<!-- WORK_QUEUE_END -->"
+        )
+
+        sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
+
+        gh.edit_pr_body.assert_called_once()
+        new_body = gh.edit_pr_body.call_args[0][2]
+        # Completed task must appear inside the <details> block, not as a pending item
+        assert "Replace the marker" in new_body
+        assert "- [x]" in new_body
+        assert "<details>" in new_body
+        assert "Completed (1)" in new_body
+        # Must not remain as a pending checkbox
+        assert "- [ ] Replace the marker" not in new_body
+
     def test_get_repo_info_exception_propagates(self, tmp_path: Path) -> None:
         gh = MagicMock()
         fido_dir = self._fido_dir(tmp_path)
