@@ -2139,17 +2139,37 @@ class TestWorkerPostPickupComment:
         gh.get_issue_events.return_value = []
         return Worker(tmp_path, gh, provider_agent=provider_agent), gh
 
-    def test_skips_when_already_commented(self, tmp_path: Path) -> None:
+    def test_skips_when_pickup_marker_present(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.get_issue_comments.return_value = [
             {
                 "user": {"login": "fido-bot"},
-                "body": "Woof!",
+                "body": "Woof! On it!\n\n<!-- fido:pickup -->",
                 "created_at": "2024-02-01T00:00:00Z",
             }
         ]
         worker.post_pickup_comment("owner/repo", 1, "Fix bug", "fido-bot")
         gh.comment_issue.assert_not_called()
+
+    def test_posts_when_previous_comment_lacks_marker(self, tmp_path: Path) -> None:
+        """#636 regression: a fido-bot comment without the pickup marker
+        (e.g. a clarifying follow-up Fido added to its own issue) must not
+        suppress the pickup comment."""
+        mock_client = _client()
+        mock_client.generate_reply.return_value = "Woof! On it!"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        worker._prompts = Prompts("I am Fido.")
+        gh.get_issue_comments.return_value = [
+            {
+                "user": {"login": "fido-bot"},
+                "body": "Some clarification, not a pickup comment.",
+                "created_at": "2024-02-01T00:00:00Z",
+            }
+        ]
+        worker.post_pickup_comment("owner/repo", 1, "Fix bug", "fido-bot")
+        gh.comment_issue.assert_called_once_with(
+            "owner/repo", 1, "Woof! On it!\n\n<!-- fido:pickup -->"
+        )
 
     def test_posts_comment_when_no_previous_comment(self, tmp_path: Path) -> None:
         mock_client = _client()
@@ -2160,7 +2180,9 @@ class TestWorkerPostPickupComment:
             {"user": {"login": "other-user"}, "body": "Hi"}
         ]
         worker.post_pickup_comment("owner/repo", 1, "Fix bug", "fido-bot")
-        gh.comment_issue.assert_called_once_with("owner/repo", 1, "Woof! On it!")
+        gh.comment_issue.assert_called_once_with(
+            "owner/repo", 1, "Woof! On it!\n\n<!-- fido:pickup -->"
+        )
 
     def test_posts_comment_when_no_existing_comments(self, tmp_path: Path) -> None:
         mock_client = _client()
@@ -2181,7 +2203,7 @@ class TestWorkerPostPickupComment:
         gh.get_issue_comments.return_value = []
         worker.post_pickup_comment("owner/repo", 5, "A task", "fido-bot")
         gh.comment_issue.assert_called_once_with(
-            "owner/repo", 5, "Picking up issue: A task"
+            "owner/repo", 5, "Picking up issue: A task\n\n<!-- fido:pickup -->"
         )
 
     def test_uses_persona_from_sub_dir(self, tmp_path: Path) -> None:
@@ -2232,7 +2254,7 @@ class TestWorkerPostPickupComment:
         gh.get_issue_comments.return_value = [
             {
                 "user": {"login": "fido-bot"},
-                "body": "Woof!",
+                "body": "Woof!\n\n<!-- fido:pickup -->",
                 "created_at": "2024-02-01T00:00:00Z",
             }
         ]
@@ -2241,7 +2263,8 @@ class TestWorkerPostPickupComment:
         assert "already exists" in caplog.text
 
     def test_posts_comment_on_reopened_issue(self, tmp_path: Path) -> None:
-        """Old comment predates reopen, so a new pickup comment is posted."""
+        """Old pickup-marked comment predates reopen, so a new pickup comment
+        is posted after reopen."""
         mock_client = _client()
         mock_client.generate_reply.return_value = "Back on it!"
         worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
@@ -2251,13 +2274,15 @@ class TestWorkerPostPickupComment:
         gh.get_issue_comments.return_value = [
             {
                 "user": {"login": "fido-bot"},
-                "body": "Woof!",
+                "body": "Woof!\n\n<!-- fido:pickup -->",
                 "created_at": "2024-02-01T00:00:00Z",
             }
         ]
         worker._prompts = Prompts("I am Fido.")
         worker.post_pickup_comment("owner/repo", 1, "Fix bug", "fido-bot")
-        gh.comment_issue.assert_called_once_with("owner/repo", 1, "Back on it!")
+        gh.comment_issue.assert_called_once_with(
+            "owner/repo", 1, "Back on it!\n\n<!-- fido:pickup -->"
+        )
 
 
 class TestRun:

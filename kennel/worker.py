@@ -39,6 +39,11 @@ from kennel.types import TaskStatus, TaskType
 
 _CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
 
+# Invisible HTML marker appended to pickup comments so future runs can
+# distinguish a genuine pickup comment from other things Fido's account may
+# have commented on its own issue (fix for #636).
+_PICKUP_COMMENT_MARKER = "<!-- fido:pickup -->"
+
 log = logging.getLogger(__name__)
 
 _thread_repo: threading.local = threading.local()
@@ -1898,14 +1903,14 @@ class Worker:
     ) -> None:
         """Post a Fido-flavoured pickup comment on the issue if not already posted.
 
-        Checks whether gh_user has commented since the issue was last opened
-        (handles reopened issues). Otherwise generates the comment via the
-        provider agent (using the Fido persona) and posts it. Falls back to a
-        plain-text comment if the provider returns nothing.
+        Detects a prior pickup comment by looking for
+        :data:`_PICKUP_COMMENT_MARKER` in a gh_user comment created after the
+        issue was last opened (handles reopened issues). Without the marker
+        we can't tell a pickup comment apart from other things Fido's account
+        may have said on its own issue (fix for #636).
         """
         issue_data = self.gh.view_issue(repo, issue)
         issue_created = issue_data.get("created_at", "")
-        # For reopened issues, use the most recent open event
         events = self.gh.get_issue_events(repo, issue)
         last_opened = issue_created
         for e in events:
@@ -1913,12 +1918,13 @@ class Worker:
                 last_opened = e.get("created_at", last_opened)
 
         comments = self.gh.get_issue_comments(repo, issue)
-        has_recent_comment = any(
+        has_pickup_comment = any(
             c.get("user", {}).get("login") == gh_user
             and c.get("created_at", "") >= last_opened
+            and _PICKUP_COMMENT_MARKER in c.get("body", "")
             for c in comments
         )
-        if has_recent_comment:
+        if has_pickup_comment:
             log.info("issue #%s: pickup comment already exists — skipping", issue)
             return
 
@@ -1930,7 +1936,8 @@ class Worker:
         if not msg:
             msg = f"Picking up issue: {issue_title}"
 
-        self.gh.comment_issue(repo, issue, msg)
+        body = f"{msg}\n\n{_PICKUP_COMMENT_MARKER}"
+        self.gh.comment_issue(repo, issue, body)
         log.info("posted pickup comment on issue #%s", issue)
 
     def _has_substantive_branch_commits(
