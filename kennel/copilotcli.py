@@ -879,6 +879,7 @@ class CopilotCLISession:
         repo_name: str | None = None,
         runtime: CopilotACPRuntime | None = None,
         runtime_factory: Callable[..., CopilotACPRuntime] | None = None,
+        session_id: str | None = None,
     ) -> None:
         self._work_dir = Path(work_dir)
         self._repo_name = repo_name
@@ -900,7 +901,11 @@ class CopilotCLISession:
         self._pending_content: str | None = None
         self._last_turn_cancelled = False
         self._model = coerce_provider_model(model)
-        self._session_id: str | None = self._runtime.ensure_session(None, model)
+        # Resume an existing Copilot ACP session when *session_id* is given
+        # (fix for #649 — persisted across kennel restarts in state.json).
+        # When the id is no longer known to Copilot, ensure_session falls
+        # back to creating a fresh session automatically.
+        self._session_id: str | None = self._runtime.ensure_session(session_id, model)
         # Kind the current lock holder is registered under in the shared
         # talker registry (``"worker"`` / ``"webhook"``), or ``None`` when
         # no one is inside the lock.  Set by :meth:`_register_talker_kind`.
@@ -1136,7 +1141,9 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
     def provider_id(self) -> ProviderID:
         return ProviderID.COPILOT_CLI
 
-    def _spawn_owned_session(self, model: ProviderModel) -> PromptSession:
+    def _spawn_owned_session(
+        self, model: ProviderModel, *, session_id: str | None = None
+    ) -> PromptSession:
         system_file = self._session_system_file
         work_dir = self._work_dir
         assert system_file is not None
@@ -1146,6 +1153,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
             work_dir=work_dir,
             model=model,
             repo_name=self._repo_name,
+            session_id=session_id,
         )
 
     def _should_retry_prompt_failure(

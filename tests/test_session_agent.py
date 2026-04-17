@@ -34,7 +34,8 @@ class _FakeAgent(SessionBackedAgent):
             session=session,
         )
 
-    def _spawn_owned_session(self, model: ProviderModel):
+    def _spawn_owned_session(self, model: ProviderModel, *, session_id=None):
+        self._last_session_id = session_id
         return self._session_factory(model)
 
     def run_turn(

@@ -86,7 +86,20 @@ class SessionBackedAgent:
         dropped = getattr(session, "dropped_session_count")
         return dropped if isinstance(dropped, int) and dropped >= 0 else 0
 
-    def ensure_session(self, model: ProviderModel | None = None) -> None:
+    def ensure_session(
+        self,
+        model: ProviderModel | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> None:
+        """Ensure a persistent session exists, optionally resuming *session_id*.
+
+        When *session_id* is provided and no session has been created yet,
+        the new session spawns with that id so the provider can resume the
+        prior conversation (claude ``--resume``, Copilot ACP ``load_session``).
+        Ignored when the session already exists.  Fix for #649 — without
+        this, every kennel self-restart drops the conversation context.
+        """
         with self._session_lock:
             session = self._session
             if session is None:
@@ -98,7 +111,7 @@ class SessionBackedAgent:
                     raise ValueError(
                         f"{type(self).__name__}.ensure_session requires model when creating a session"
                     )
-                self._session = self._spawn_owned_session(model)
+                self._session = self._spawn_owned_session(model, session_id=session_id)
                 return
         if model is not None:
             session.switch_model(model)
@@ -164,7 +177,9 @@ class SessionBackedAgent:
         del content, model, system_prompt, retry_on_preempt, session_mode
         raise NotImplementedError
 
-    def _spawn_owned_session(self, model: ProviderModel) -> PromptSession:
+    def _spawn_owned_session(
+        self, model: ProviderModel, *, session_id: str | None = None
+    ) -> PromptSession:
         raise NotImplementedError
 
     def _run_turn_json_value(
