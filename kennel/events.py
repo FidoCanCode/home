@@ -643,6 +643,21 @@ def reply_to_comment(
             f"review-comment reply: run_turn returned empty for PR #{info['pr']}"
         )
 
+    # Re-fetch the thread right before posting so the edit-vs-post decision
+    # uses current GitHub state rather than the snapshot taken before triage.
+    # Concurrent handlers may have posted replies during the triage + generation
+    # window; without a re-fetch the stale snapshot leads to duplicate posts.
+    if info.get("repo") and info.get("pr") and info.get("comment_id"):
+        refreshed = gh.fetch_comment_thread(
+            info["repo"], info["pr"], info["comment_id"]
+        )
+        if refreshed:
+            thread_comments = list(refreshed)
+            log.info(
+                "re-fetched %d comment(s) in thread before posting",
+                len(thread_comments),
+            )
+
     # Edit the last Fido reply only if it is the most recent comment in the thread
     # (i.e. no human has spoken since). If a human posted a new comment after
     # Fido's last reply, post a fresh reply so the conversation stays coherent.

@@ -4015,6 +4015,224 @@ class TestReplyToCommentTerseEnrichment:
         assert "sibling_threads" not in captured_context
 
 
+# ── reply_to_comment: thread re-fetch before posting ─────────────────────────
+
+
+class TestReplyToCommentThreadRefetch:
+    """The thread is re-fetched from GitHub right before posting so the
+    edit-vs-post decision uses current state, not the stale snapshot from
+    before triage.  Closes #438."""
+
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        return RepoConfig(name="owner/repo", work_dir=tmp_path)
+
+    def test_fetch_comment_thread_called_twice(self, tmp_path: Path) -> None:
+        """fetch_comment_thread is called once for context (before triage) and
+        once right before posting (after reply generation)."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 500},
+            comment_body="please refactor this",
+            is_bot=False,
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: refactor"
+            if "Convert this PR review comment" in prompt:
+                return "Refactor this module"
+            return "On it!"
+
+        mock_gh = MagicMock()
+        mock_gh.fetch_comment_thread.return_value = [
+            {"id": 500, "author": "reviewer", "body": "please refactor this"}
+        ]
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+
+        # Must be called exactly twice: initial context fetch + pre-post re-fetch
+        assert mock_gh.fetch_comment_thread.call_count == 2
+        mock_gh.fetch_comment_thread.assert_called_with("owner/repo", 1, 500)
+
+    def test_refetch_result_used_for_edit_vs_post(self, tmp_path: Path) -> None:
+        """If the re-fetch reveals a Fido reply that wasn't in the initial
+        snapshot (posted by a concurrent handler during triage), the decision
+        to edit vs. post uses the fresh data."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 501},
+            comment_body="add type hints",
+            is_bot=False,
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: add type hints"
+            if "Convert this PR review comment" in prompt:
+                return "Add type hints"
+            return "Will do!"
+
+        mock_gh = MagicMock()
+        call_count = 0
+
+        def fetch_side_effect(repo, pr, cid):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Initial fetch: no Fido reply yet
+                return [{"id": 501, "author": "reviewer", "body": "add type hints"}]
+            else:
+                # Re-fetch: concurrent handler posted a Fido reply during triage
+                return [
+                    {"id": 501, "author": "reviewer", "body": "add type hints"},
+                    {"id": 502, "author": "fidocancode", "body": "Got it!"},
+                ]
+
+        mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+
+        # Re-fetch shows Fido reply is last → edit it rather than posting new
+        mock_gh.edit_review_comment.assert_called_once_with(
+            "owner/repo", 502, "Will do!"
+        )
+        mock_gh.reply_to_review_comment.assert_not_called()
+
+    def test_refetch_human_comment_added_during_triage_triggers_new_post(
+        self, tmp_path: Path
+    ) -> None:
+        """If a human comments AFTER the initial fetch but BEFORE the re-fetch,
+        the fresh data shows them as last speaker, so a new reply is posted
+        rather than editing the old Fido reply."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 503},
+            comment_body="please add tests",
+            is_bot=False,
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: add tests"
+            if "Convert this PR review comment" in prompt:
+                return "Add tests"
+            return "Adding tests now!"
+
+        mock_gh = MagicMock()
+        call_count = 0
+
+        def fetch_side_effect(repo, pr, cid):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Initial fetch: Fido is last speaker
+                return [
+                    {"id": 503, "author": "reviewer", "body": "please add tests"},
+                    {"id": 504, "author": "fidocancode", "body": "On it!"},
+                ]
+            else:
+                # Re-fetch: human replied after the initial fetch
+                return [
+                    {"id": 503, "author": "reviewer", "body": "please add tests"},
+                    {"id": 504, "author": "fidocancode", "body": "On it!"},
+                    {
+                        "id": 505,
+                        "author": "reviewer",
+                        "body": "also add integration tests",
+                    },
+                ]
+
+        mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+
+        # Fresh data shows human is last speaker → post new reply, never edit
+        mock_gh.reply_to_review_comment.assert_called_once()
+        mock_gh.edit_review_comment.assert_not_called()
+
+    def test_refetch_returns_empty_falls_back_to_initial(self, tmp_path: Path) -> None:
+        """If the re-fetch returns empty/None (e.g. race with deletion), the
+        stale initial snapshot is kept and posting proceeds normally."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 506},
+            comment_body="fix the import",
+            is_bot=False,
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: fix import"
+            if "Convert this PR review comment" in prompt:
+                return "Fix the import"
+            return "Fixed!"
+
+        mock_gh = MagicMock()
+        call_count = 0
+
+        def fetch_side_effect(repo, pr, cid):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [{"id": 506, "author": "reviewer", "body": "fix the import"}]
+            else:
+                return None  # re-fetch returned nothing
+
+        mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+
+        # Falls back to initial snapshot (no Fido reply) → posts new reply
+        mock_gh.reply_to_review_comment.assert_called_once()
+        mock_gh.edit_review_comment.assert_not_called()
+
+
 # ── _rewrite_pr_description ───────────────────────────────────────────────────
 
 
