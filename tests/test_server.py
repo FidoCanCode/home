@@ -16,12 +16,13 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from kennel import provider
+from kennel.claimed import RepliedComments
 from kennel.config import Config
 from kennel.config import RepoConfig as _RepoConfig
 from kennel.events import Action, recover_reply_promises
 from kennel.infra import Infra
 from kennel.provider import ProviderID
-from kennel.server import PreflightError, RepliedComments, WebhookHandler, _repo_status
+from kennel.server import PreflightError, WebhookHandler, _repo_status
 
 
 class RepoConfig(_RepoConfig):
