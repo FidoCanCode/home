@@ -18,10 +18,14 @@ When invoked, determine the current state automatically. Never ask — just dete
 
 ## Watch mode
 
-Create a recurring 2-minute cron. Every tick:
+Use a long-lived monitor tool/session for watch mode instead of ad-hoc one-shot
+checks. Keep it running and sample every 2 minutes:
 
 ### Collect status
 Run `uv run kennel status` from `/home/rhencke/workspace/home`.
+
+Also watch `~/log/kennel-crash.log` in the same monitor session so status
+changes and fresh errors are observed together.
 
 ### All good — report deltas only
 Compare to the previous check. Report only what changed:
@@ -48,7 +52,7 @@ If you discover missing diagnostic tools or logging that would have helped, file
 
 ### Confirmed bad — transition to Vet mode
 If the problem persists across two checks:
-1. Cancel the 2-minute cron
+1. Cancel the monitor session
 2. Gather diagnostic context: what you observed, relevant log snippets, how many cycles the problem persisted, the last known good status
 3. Transition to **Vet mode** below, passing all that context
 
