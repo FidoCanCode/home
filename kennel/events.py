@@ -579,6 +579,16 @@ def reply_to_comment(
                 "fetched %d comment(s) in thread for context", len(thread_comments)
             )
 
+    # Fido login set — used for initial snapshot and post-re-fetch comparison.
+    _fido_logins = {"fidocancode", "fido-can-code"}
+
+    # Capture Fido reply IDs from the initial snapshot so we can detect new
+    # replies posted by concurrent handlers during the triage + generation
+    # window (compared against the re-fetched thread below).
+    initial_fido_ids: set[int] = {
+        c["id"] for c in thread_comments if c.get("author", "").lower() in _fido_logins
+    }
+
     # Root comment body — used for task title generation.
     # When the webhook fires on a reply (e.g. "Yes" or "Woof, you're right!"),
     # the task title should describe the reviewer's original feedback, not the reply.
@@ -643,10 +653,41 @@ def reply_to_comment(
             f"review-comment reply: run_turn returned empty for PR #{info['pr']}"
         )
 
+    # Re-fetch the thread right before posting so the edit-vs-post decision
+    # uses current GitHub state rather than the snapshot taken before triage.
+    # Concurrent handlers may have posted replies during the triage + generation
+    # window; without a re-fetch the stale snapshot leads to duplicate posts.
+    if info.get("repo") and info.get("pr") and info.get("comment_id"):
+        refreshed = gh.fetch_comment_thread(
+            info["repo"], info["pr"], info["comment_id"]
+        )
+        if refreshed:
+            thread_comments = list(refreshed)
+            log.info(
+                "re-fetched %d comment(s) in thread before posting",
+                len(thread_comments),
+            )
+
+    # Skip posting if a concurrent handler already replied during triage.
+    # A Fido reply ID in the re-fetched thread that was not in the initial
+    # snapshot means another handler handled this comment — adding a second
+    # reply would be a duplicate.  Return early with the triage result so
+    # the caller can still queue tasks based on the category.
+    current_fido_ids: set[int] = {
+        c["id"] for c in thread_comments if c.get("author", "").lower() in _fido_logins
+    }
+    if current_fido_ids - initial_fido_ids:
+        log.info(
+            "concurrent handler already replied — skipping post for comment %s",
+            info.get("comment_id"),
+        )
+        if lock_fd:
+            lock_fd.close()
+        return (category, titles)
+
     # Edit the last Fido reply only if it is the most recent comment in the thread
     # (i.e. no human has spoken since). If a human posted a new comment after
     # Fido's last reply, post a fresh reply so the conversation stays coherent.
-    _fido_logins = {"fidocancode", "fido-can-code"}
     last_thread_author = (
         thread_comments[-1].get("author", "").lower() if thread_comments else ""
     )
