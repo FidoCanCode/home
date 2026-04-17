@@ -7512,6 +7512,62 @@ class TestExecuteTask:
         assert result is True
         mock_complete.assert_called_once()
 
+    def test_thread_task_resolves_review_thread_on_completion(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #673: execute_task must resolve the review thread when
+        a thread task completes, not just mark the task done.
+
+        complete_with_resolve is NOT mocked here — the full resolution path runs
+        end-to-end so gh.resolve_thread is what we assert on.
+        """
+        from kennel.tasks import Tasks
+        from kennel.types import TaskType
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+
+        # Add a real thread task to the task file so both Tasks.list() and
+        # complete_with_resolve() operate against the actual filesystem.
+        thread = {"repo": "owner/repo", "pr": 5, "comment_id": 42}
+        Tasks(tmp_path).add("Fix the review comment", TaskType.THREAD, thread=thread)
+
+        # Set up gh to confirm fido posted the last reply on the thread.
+        gh.get_user.return_value = "fido-bot"
+        gh.get_pull_comments.return_value = [
+            {
+                "id": 42,
+                "in_reply_to_id": None,
+                "user": {"login": "reviewer"},
+                "created_at": "2024-01-01T00:00:00Z",
+            },
+            {
+                "id": 99,
+                "in_reply_to_id": 42,
+                "user": {"login": "fido-bot"},
+                "created_at": "2024-01-02T00:00:00Z",
+            },
+        ]
+        gh.get_review_threads.return_value = [
+            {
+                "id": "thread-node-xyz",
+                "isResolved": False,
+                "comments": {"nodes": [{"databaseId": 42}]},
+            }
+        ]
+
+        with (
+            patch.object(worker, "set_status"),
+            patch("kennel.worker.build_prompt"),
+            patch("kennel.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("kennel.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 5, "branch")
+
+        gh.resolve_thread.assert_called_once_with("thread-node-xyz")
+
 
 class TestRunExecuteTaskIntegration:
     """Tests that Worker.run() calls execute_task after handle_threads."""
