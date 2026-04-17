@@ -1700,6 +1700,40 @@ class TestReplyToComment:
         )
         mock_gh.reply_to_review_comment.assert_not_called()
 
+    def test_reply_run_turn_uses_retry_on_preempt(self, tmp_path: Path) -> None:
+        """Reply generation run_turn must pass retry_on_preempt=True so a
+        session preemption mid-generation retries rather than silently
+        returning an empty or truncated body."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 10},
+            comment_body="please add logging",
+            is_bot=False,
+        )
+        all_run_turn_kwargs: list[dict] = []
+
+        def fake_pp(prompt, model, **kwargs):
+            all_run_turn_kwargs.append(kwargs)
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: add logging"
+            if "Convert this PR review comment" in prompt:
+                return "Add logging"
+            return "I will add logging."
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            MagicMock(),
+            agent=_client(side_effect=fake_pp),
+        )
+        # At least one run_turn call must carry retry_on_preempt=True — that is
+        # the reply generation call, which must survive session preemption.
+        assert any(kw.get("retry_on_preempt") is True for kw in all_run_turn_kwargs)
+
 
 class TestReplyToReview:
     def _cfg(self, tmp_path: Path) -> Config:
@@ -2043,6 +2077,30 @@ class TestReplyToIssueComment:
         )
         assert cat == "ACT"
         assert titles == ["add unit tests", "update documentation"]
+
+    def test_reply_run_turn_uses_retry_on_preempt(self, tmp_path: Path) -> None:
+        """Reply generation run_turn must pass retry_on_preempt=True so a
+        session preemption mid-generation retries rather than silently
+        returning an empty or truncated body."""
+        cfg = self._cfg(tmp_path)
+        all_run_turn_kwargs: list[dict] = []
+
+        def fake_pp(prompt, model, **kwargs):
+            all_run_turn_kwargs.append(kwargs)
+            if "Triage" in prompt:
+                return "ACT: fix the bug"
+            return "I'll fix that."
+
+        reply_to_issue_comment(
+            self._action(),
+            cfg,
+            self._repo_cfg(tmp_path),
+            MagicMock(),
+            agent=_client(side_effect=fake_pp),
+        )
+        # At least one run_turn call must carry retry_on_preempt=True — that is
+        # the reply generation call, which must survive session preemption.
+        assert any(kw.get("retry_on_preempt") is True for kw in all_run_turn_kwargs)
 
 
 class TestCreateTask:

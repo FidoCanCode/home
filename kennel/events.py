@@ -631,6 +631,7 @@ def reply_to_comment(
         prompts.persona_wrap(instr),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
+        retry_on_preempt=True,
     )
     log.info(
         "reply generator: returned %d chars (preview=%r)",
@@ -938,6 +939,7 @@ def reply_to_issue_comment(
         prompts.persona_wrap(instr),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
+        retry_on_preempt=True,
     )
     log.info(
         "reply generation returned for PR #%s — body_len=%d preview=%r",
