@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import signal
 import subprocess
 import threading
@@ -24,7 +25,9 @@ from kennel.copilotcli import (
     _combine_prompt,
     _CopilotACPClient,
     _normalize_model,
+    _preview_log_value,
     _TerminalManager,
+    _tool_input_preview,
     extract_result_text,
     extract_session_id,
 )
@@ -221,6 +224,19 @@ def _spawn_factory(*connections: FakeConnection):
 
 
 class TestHelpers:
+    def test_preview_log_value_falls_back_to_str(self) -> None:
+        class Unserializable:
+            def __str__(self) -> str:
+                return "weird object"
+
+        assert _preview_log_value(Unserializable()) == "weird object"
+
+    def test_tool_input_preview_branches(self) -> None:
+        assert _tool_input_preview("plain text") == "plain text"
+        assert _tool_input_preview({"query": "find this"}) == "find this"
+        assert _tool_input_preview({"prompt": "say hi"}) == "say hi"
+        assert _tool_input_preview({"other": "value"}) == "value"
+
     def test_extract_helpers_ignore_invalid_lines(self) -> None:
         output = "\n".join(
             [
@@ -437,9 +453,10 @@ class TestCopilotACPClient:
         runtime.record_session_update.assert_called_once_with("sess", update)
 
     def test_on_connect_is_noop(self) -> None:
-        assert (
-            asyncio.run(_CopilotACPClient(MagicMock()).on_connect(MagicMock())) is None
-        )
+        runtime = MagicMock()
+        client = _CopilotACPClient(runtime)
+        assert client.on_connect(MagicMock()) is None
+        runtime.log_info.assert_called_once_with("copilot system: connected")
 
 
 class TestCopilotACPRuntime:
@@ -591,6 +608,133 @@ class TestCopilotACPRuntime:
         with pytest.raises(RuntimeError, match="runtime is stopped"):
             runtime._run_async(object())  # pyright: ignore[reportPrivateUsage]
 
+    def test_logs_tool_activity_with_repo_name(self, tmp_path: Path, caplog) -> None:
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            repo_name="owner/orly",
+            spawn_agent_process=_spawn_factory(FakeConnection()),
+        )
+        try:
+            runtime._active_prompt_session_id = "sess"  # pyright: ignore[reportPrivateUsage]
+            with caplog.at_level(logging.INFO):
+                runtime.record_session_update(
+                    "sess",
+                    SimpleNamespace(
+                        session_update="tool_call",
+                        tool_call_id="tool-1",
+                        title="run shell command",
+                        raw_input={"command": "make test"},
+                    ),
+                )
+                runtime.record_session_update(
+                    "sess",
+                    SimpleNamespace(
+                        session_update="tool_call_update",
+                        tool_call_id="tool-1",
+                        title="run shell command",
+                        status="completed",
+                        raw_output={"stdout": "ok"},
+                    ),
+                )
+            assert "copilot tool: run shell command — make test" in caplog.text
+            assert (
+                'copilot tool result: run shell command — {"stdout": "ok"}'
+                in caplog.text
+            )
+            assert all(record.repo_name == "orly" for record in caplog.records)
+        finally:
+            runtime.stop()
+
+    def test_logs_tool_fallback_branches(self, tmp_path: Path, caplog) -> None:
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            repo_name="owner/orly",
+            spawn_agent_process=_spawn_factory(FakeConnection()),
+        )
+        try:
+            runtime._active_prompt_session_id = "sess"  # pyright: ignore[reportPrivateUsage]
+            with caplog.at_level(logging.INFO):
+                runtime.record_session_update(
+                    "sess",
+                    SimpleNamespace(
+                        session_update="tool_call",
+                        tool_call_id="tool-1",
+                        title="bare tool",
+                        raw_input=None,
+                    ),
+                )
+                runtime.record_session_update(
+                    "sess",
+                    SimpleNamespace(
+                        session_update="tool_call_update",
+                        tool_call_id="tool-1",
+                        title="bare tool",
+                        status="completed",
+                        raw_output=None,
+                    ),
+                )
+                runtime.record_session_update(
+                    "sess",
+                    SimpleNamespace(
+                        session_update="tool_call_update",
+                        tool_call_id="tool-2",
+                        title="failed tool",
+                        status="failed",
+                        raw_output=None,
+                    ),
+                )
+                runtime.record_session_update(
+                    "sess",
+                    SimpleNamespace(
+                        session_update="tool_call_update",
+                        tool_call_id="tool-3",
+                        title="failed tool with output",
+                        status="failed",
+                        raw_output={"stderr": "boom"},
+                    ),
+                )
+            assert "copilot tool: bare tool" in caplog.text
+            assert "copilot tool result: bare tool" in caplog.text
+            assert "copilot tool failed: failed tool" in caplog.text
+            assert (
+                'copilot tool failed: failed tool with output — {"stderr": "boom"}'
+                in caplog.text
+            )
+        finally:
+            runtime.stop()
+
+    def test_ignores_duplicate_and_incomplete_tool_results(
+        self, tmp_path: Path
+    ) -> None:
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            repo_name="owner/orly",
+            spawn_agent_process=_spawn_factory(FakeConnection()),
+        )
+        try:
+            runtime._active_prompt_session_id = "sess"  # pyright: ignore[reportPrivateUsage]
+            runtime._tool_results_logged.add("tool-1")  # pyright: ignore[reportPrivateUsage]
+            runtime.record_session_update(
+                "sess",
+                SimpleNamespace(
+                    session_update="tool_call_update",
+                    tool_call_id="tool-1",
+                    status="completed",
+                    raw_output={"stdout": "ignored"},
+                ),
+            )
+            runtime.record_session_update(
+                "sess",
+                SimpleNamespace(
+                    session_update="tool_call_update",
+                    tool_call_id="tool-2",
+                    status="in_progress",
+                    raw_output=None,
+                ),
+            )
+        finally:
+            runtime.stop()
+
     def test_connection_start_failure_closes_context(self, tmp_path: Path) -> None:
         class BrokenConnection(FakeConnection):
             async def initialize(
@@ -726,6 +870,29 @@ class TestCopilotCLISession:
         acquired.wait(timeout=1.0)
         thread.join(timeout=1.0)
         assert runtime.cancel_calls == []
+
+    def test_prompt_logs_transcript(self, tmp_path: Path, caplog) -> None:
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("persona")
+        runtime = FakeRuntime()
+        runtime.next_prompt = ("done", "end_turn", "sess-2")
+        session = CopilotCLISession(
+            system_file,
+            work_dir=tmp_path,
+            model=CopilotCLIClient.work_model,
+            runtime=runtime,
+            repo_name="owner/orly",
+        )
+        with caplog.at_level(logging.INFO):
+            assert (
+                session.prompt(
+                    "task", model=CopilotCLIClient.voice_model, system_prompt="system"
+                )
+                == "done"
+            )
+        assert "copilot prompt >>>" in caplog.text
+        assert "persona\n\n---\n\nsystem\n\n---\n\ntask" in caplog.text
+        assert "copilot result >>>\ndone\n<<< copilot result" in caplog.text
 
 
 class TestCopilotCLIAPI:
@@ -1013,6 +1180,19 @@ class TestCopilotCLIClient:
         runner = MagicMock(return_value=_completed("", returncode=1))
         client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
         assert client._run_cli_prompt("body", model="claude-opus-4-6", timeout=1) == ""
+
+    def test_cli_prompt_logs_transcript(self, tmp_path: Path, caplog) -> None:
+        runner = MagicMock(return_value=_completed(_copilot_output("cli result")))
+        client = CopilotCLIClient(
+            runner=runner,
+            work_dir=tmp_path,
+            repo_name="owner/orly",
+        )
+        with caplog.at_level(logging.INFO):
+            output = client._run_cli_prompt("body", model="gpt-5.4", timeout=1)
+        assert extract_result_text(output) == "cli result"
+        assert "copilot prompt >>>\nbody\n<<< copilot prompt" in caplog.text
+        assert "copilot result >>>\ncli result\n<<< copilot result" in caplog.text
 
 
 class TestCopilotCLI:

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -140,6 +141,56 @@ def _copilot(
     )
 
 
+def _repo_log_extra(repo_name: str | None) -> dict[str, str]:
+    """Return a logging extra dict that routes records to the repo log."""
+    if not repo_name:
+        return {}
+    return {"repo_name": repo_name.rsplit("/", 1)[-1]}
+
+
+def _log_for_repo(
+    level: int,
+    repo_name: str | None,
+    message: str,
+    *args: object,
+) -> None:
+    extra = _repo_log_extra(repo_name)
+    if extra:
+        log.log(level, message, *args, extra=extra)
+        return
+    log.log(level, message, *args)
+
+
+def _transcript_block(label: str, content: str) -> str:
+    """Render one multiline transcript block for the log."""
+    return f"{label} >>>\n{content}\n<<< {label}"
+
+
+def _preview_log_value(value: object, limit: int = 200) -> str:
+    """Return a compact one-line preview suitable for human logs."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, sort_keys=True)
+        except TypeError:
+            text = str(value)
+    return re.sub(r"\s+", " ", text).strip()[:limit]
+
+
+def _tool_input_preview(raw_input: object) -> str:
+    if not isinstance(raw_input, dict):
+        return _preview_log_value(raw_input)
+    preview = raw_input.get("command") or raw_input.get("path") or raw_input.get("url")
+    if not preview:
+        preview = raw_input.get("query") or raw_input.get("prompt")
+    if not preview and raw_input:
+        preview = next(iter(raw_input.values()))
+    return _preview_log_value(preview)
+
+
 @dataclass
 class _TerminalRecord:
     process: subprocess.Popen[str]
@@ -271,8 +322,9 @@ class _CopilotACPClient:
         self._runtime = runtime
         self._terminals = _TerminalManager() if terminals is None else terminals
 
-    async def on_connect(self, conn: acp.Agent) -> None:
-        return None
+    def on_connect(self, conn: acp.Agent) -> None:
+        del conn
+        self._runtime.log_info("copilot system: connected")
 
     async def read_text_file(
         self,
@@ -412,6 +464,7 @@ class CopilotACPRuntime:
         self,
         *,
         work_dir: Path,
+        repo_name: str | None = None,
         command: Sequence[str] = _COPILOT_COMMAND,
         spawn_agent_process: Callable[..., AbstractAsyncContextManager[Any]] = (
             acp.spawn_agent_process
@@ -422,6 +475,7 @@ class CopilotACPRuntime:
         client_info: Implementation | None = None,
     ) -> None:
         self._work_dir = work_dir
+        self._repo_name = repo_name
         self._command_base = tuple(command)
         self._spawn_agent_process = spawn_agent_process
         self._client_factory = (
@@ -452,6 +506,8 @@ class CopilotACPRuntime:
         self._current_effort: ReasoningEffort | None = None
         self._active_prompt_session_id: str | None = None
         self._prompt_chunks: list[str] = []
+        self._tool_starts_logged: set[str] = set()
+        self._tool_results_logged: set[str] = set()
         self._thread = threading.Thread(
             target=self._run_loop,
             name=f"copilot-acp-{work_dir.name}",
@@ -464,6 +520,12 @@ class CopilotACPRuntime:
         self, runtime: "CopilotACPRuntime"
     ) -> _CopilotACPClient:
         return _CopilotACPClient(runtime)
+
+    def log_info(self, message: str, *args: object) -> None:
+        _log_for_repo(logging.INFO, self._repo_name, message, *args)
+
+    def log_warning(self, message: str, *args: object) -> None:
+        _log_for_repo(logging.WARNING, self._repo_name, message, *args)
 
     def _command_for_effort(self, effort: ReasoningEffort | None) -> tuple[str, ...]:
         if effort is None:
@@ -518,12 +580,62 @@ class CopilotACPRuntime:
     def record_session_update(self, session_id: str, update: Any) -> None:
         if session_id != self._active_prompt_session_id:
             return
-        if getattr(update, "session_update", "") != "agent_message_chunk":
+        update_type = getattr(update, "session_update", "")
+        if update_type == "agent_message_chunk":
+            content = getattr(update, "content", None)
+            text = getattr(content, "text", None)
+            if isinstance(text, str):
+                self._prompt_chunks.append(text)
             return
-        content = getattr(update, "content", None)
-        text = getattr(content, "text", None)
-        if isinstance(text, str):
-            self._prompt_chunks.append(text)
+        if update_type == "tool_call":
+            self._log_tool_call(update)
+            return
+        if update_type == "tool_call_update":
+            self._log_tool_result(update)
+
+    def _log_tool_call(self, update: Any) -> None:
+        tool_call_id = getattr(update, "tool_call_id", None)
+        if (
+            not isinstance(tool_call_id, str)
+            or tool_call_id in self._tool_starts_logged
+        ):
+            return
+        self._tool_starts_logged.add(tool_call_id)
+        title = str(
+            getattr(update, "title", None) or getattr(update, "kind", None) or "?"
+        )
+        preview = _tool_input_preview(getattr(update, "raw_input", None))
+        if preview:
+            self.log_info("copilot tool: %s — %s", title, preview)
+            return
+        self.log_info("copilot tool: %s", title)
+
+    def _log_tool_result(self, update: Any) -> None:
+        tool_call_id = getattr(update, "tool_call_id", None)
+        if (
+            not isinstance(tool_call_id, str)
+            or tool_call_id in self._tool_results_logged
+        ):
+            return
+        status = getattr(update, "status", None)
+        raw_output = getattr(update, "raw_output", None)
+        if raw_output is None and status not in {"completed", "failed"}:
+            return
+        self._tool_results_logged.add(tool_call_id)
+        title = str(
+            getattr(update, "title", None) or getattr(update, "kind", None) or "?"
+        )
+        preview = _preview_log_value(raw_output)
+        if status == "failed":
+            if preview:
+                self.log_warning("copilot tool failed: %s — %s", title, preview)
+                return
+            self.log_warning("copilot tool failed: %s", title)
+            return
+        if preview:
+            self.log_info("copilot tool result: %s — %s", title, preview)
+            return
+        self.log_info("copilot tool result: %s", title)
 
     async def _ensure_session_async(
         self, session_id: str | None, model: ProviderModel | str | None
@@ -558,6 +670,8 @@ class CopilotACPRuntime:
             raise RuntimeError("Copilot ACP connection is not available")
         self._active_prompt_session_id = target_session_id
         self._prompt_chunks = []
+        self._tool_starts_logged = set()
+        self._tool_results_logged = set()
         response = await connection.prompt(
             prompt=[acp.text_block(content)],
             session_id=target_session_id,
@@ -565,6 +679,8 @@ class CopilotACPRuntime:
         text = "".join(self._prompt_chunks)
         self._active_prompt_session_id = None
         self._prompt_chunks = []
+        self._tool_starts_logged = set()
+        self._tool_results_logged = set()
         return text, response.stop_reason, target_session_id
 
     async def _cancel_async(self, session_id: str) -> None:
@@ -658,6 +774,8 @@ class CopilotACPRuntime:
         self._current_effort = None
         self._active_prompt_session_id = None
         self._prompt_chunks = []
+        self._tool_starts_logged = set()
+        self._tool_results_logged = set()
         if agent_cm is not None:
             await agent_cm.__aexit__(None, None, None)
 
@@ -713,7 +831,7 @@ class CopilotCLISession:
             self._runtime = runtime
         else:
             factory = CopilotACPRuntime if runtime_factory is None else runtime_factory
-            self._runtime = factory(work_dir=self._work_dir)
+            self._runtime = factory(work_dir=self._work_dir, repo_name=repo_name)
         self._lock = threading.Lock()
         self._owner_lock = threading.Lock()
         self._owner: str | None = None
@@ -833,6 +951,12 @@ class CopilotCLISession:
             base_system_prompt=self._base_system_prompt,
             system_prompt=system_prompt,
         )
+        _log_for_repo(
+            logging.INFO,
+            self._repo_name,
+            "%s",
+            _transcript_block("copilot prompt", prompt),
+        )
         result, stop_reason, session_id = self._runtime.prompt(
             self._session_id or "",
             prompt,
@@ -842,6 +966,12 @@ class CopilotCLISession:
         if model is not None:
             self._model = coerce_provider_model(model)
         self._last_turn_cancelled = stop_reason == "cancelled"
+        _log_for_repo(
+            logging.INFO,
+            self._repo_name,
+            "%s",
+            _transcript_block("copilot result", result),
+        )
         return result
 
 
@@ -1003,6 +1133,12 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
     ) -> str:
         normalized = _normalize_model(model)
         assert normalized is not None
+        _log_for_repo(
+            logging.INFO,
+            self._repo_name,
+            "%s",
+            _transcript_block("copilot prompt", prompt),
+        )
         efforts = normalized.efforts or (None,)
         for effort in efforts:
             cmd = ["--model", normalized.model]
@@ -1019,6 +1155,13 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
                 runner=self._runner,
             )
             if result.returncode == 0:
+                text = extract_result_text(result.stdout.strip())
+                _log_for_repo(
+                    logging.INFO,
+                    self._repo_name,
+                    "%s",
+                    _transcript_block("copilot result", text),
+                )
                 return result.stdout.strip()
         return ""
 

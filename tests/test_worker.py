@@ -170,6 +170,16 @@ class TestRepoContextFilter:
         record = logging.LogRecord("", logging.WARNING, "", 0, "", (), None)
         assert RepoContextFilter().filter(record) is True
 
+    def test_filter_preserves_explicit_repo_name(self) -> None:
+        _thread_repo.repo_name = "confusio"
+        record = logging.LogRecord("", logging.INFO, "", 0, "", (), None)
+        record.repo_name = "orly"  # type: ignore[attr-defined]
+        try:
+            assert RepoContextFilter().filter(record) is True
+            assert record.repo_name == "orly"  # type: ignore[attr-defined]
+        finally:
+            del _thread_repo.repo_name
+
 
 class TestRepoNameFilter:
     def _record_with_repo(self, repo_name: str) -> logging.LogRecord:
