@@ -557,7 +557,9 @@ def reply_to_comment(
         except OSError:
             log.info("comment %s locked by another process — skipping", cid)
             lock_fd.close()
-            return ("ACT", [action.comment_body[:80]])
+            # Return empty titles so the caller creates no phantom tasks.
+            # Another process holds the lock and will handle reply + task creation.
+            return ("ACT", [])
     else:
         lock_fd = None
 

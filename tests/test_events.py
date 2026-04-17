@@ -1435,8 +1435,12 @@ class TestReplyToComment:
                 agent=_client(side_effect=fake_pp),
             )
 
-    def test_lock_race_returns_act(self, tmp_path: Path) -> None:
-        """Second call with same comment_id is blocked by lock."""
+    def test_lock_race_returns_act_with_no_titles(self, tmp_path: Path) -> None:
+        """Second call with same comment_id is blocked by lock.
+
+        Must return empty titles so the server creates no phantom tasks —
+        the process that holds the lock will handle reply and task creation.
+        """
         import fcntl
 
         cfg = self._cfg(tmp_path)
@@ -1456,6 +1460,7 @@ class TestReplyToComment:
                 action, cfg, self._repo_cfg(tmp_path), MagicMock()
             )
             assert cat == "ACT"  # returns without posting
+            assert titles == []  # no phantom tasks — other process handles it
         finally:
             lock_fd.close()
 
