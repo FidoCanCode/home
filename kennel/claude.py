@@ -181,6 +181,34 @@ def current_thread_kind() -> Literal["worker", "webhook"]:
     return getattr(_thread_local, "kind", "worker")
 
 
+def try_preempt_worker(
+    repo_name: str | None, cancel_fn: Callable[[], None]
+) -> tuple[bool, Literal["worker", "webhook"] | None]:
+    """Invoke *cancel_fn* iff the calling thread is a webhook AND the
+    session's current lock holder is a worker.  Otherwise do nothing.
+
+    Returns ``(preempted, current_kind)`` — *preempted* is ``True`` only when
+    *cancel_fn* was invoked; *current_kind* is the current holder's kind
+    (``"worker"``, ``"webhook"``, or ``None`` when the session is idle).
+    The caller uses that triple to log the outcome ("preempting worker" vs
+    "queuing behind <kind>").
+
+    Provider-neutral decision gate for #637.  The *mechanism* of cancelling a
+    running turn differs across providers (stream-json ``control_request``
+    for claude, ACP ``cancel(session_id)`` for copilot), but the *decision*
+    is identical and lives here.  Worker callers never preempt anyone;
+    webhooks queue behind other webhooks (FIFO on the session lock) instead
+    of cancelling each other.
+    """
+    caller_kind = current_thread_kind()
+    current = get_talker(repo_name) if repo_name is not None else None
+    current_kind = current.kind if current is not None else None
+    if caller_kind == "webhook" and current_kind == "worker":
+        cancel_fn()
+        return True, current_kind
+    return False, current_kind
+
+
 def register_talker(talker: ClaudeTalker) -> None:
     """Register *talker* as the active claude driver for its repo.
 
@@ -1025,6 +1053,27 @@ class ClaudeSession:
         self._in_turn = False
         self.recover()
 
+    def _fire_worker_cancel(self) -> None:
+        """Provider-specific cancel mechanism handed to
+        :func:`try_preempt_worker`.  Sets the cancel event, wakes the
+        worker's ``select()`` so it exits its turn early, and — when a
+        turn is actually in flight — writes a stream-json
+        ``control_request`` so claude aborts the running tool on its
+        side rather than completing it first.
+
+        Gated on :attr:`_in_turn` because ``control_request`` sent to an
+        idle subprocess never elicits a ``type=result`` back and would
+        hang the next :meth:`consume_until_result` indefinitely (hazard
+        called out in the original :meth:`prompt` docstring).
+        """
+        self._cancel.set()
+        self._wake()
+        if self._in_turn:
+            try:
+                self._send_control_interrupt()
+            except (BrokenPipeError, OSError) as exc:
+                log.warning("session.prompt: early control_request failed: %s", exc)
+
     def _send_control_interrupt(self) -> None:
         """Write a stream-json ``control_request`` interrupt to subprocess stdin.
 
@@ -1099,25 +1148,10 @@ class ClaudeSession:
         lingering boundary events from the aborted turn), and
         :meth:`consume_until_result`.
         """
-        caller_kind = current_thread_kind()
-        current = get_talker(self._repo_name) if self._repo_name is not None else None
-        current_kind = current.kind if current is not None else None
-        should_preempt = caller_kind == "webhook" and current_kind == "worker"
-        if should_preempt:
-            self._cancel.set()
-            self._wake()
-            # Kick the subprocess off its in-flight tool.  Without this the
-            # worker's iter_events only notices _cancel between stream-json
-            # events — which don't arrive while claude is running a long
-            # tool (pytest, rg, etc.).  Only send control_request when a
-            # turn is actually in flight; sending to an idle subprocess
-            # never gets a result event back and consume_until_result
-            # would hang indefinitely.
-            if self._in_turn:
-                try:
-                    self._send_control_interrupt()
-                except (BrokenPipeError, OSError) as exc:
-                    log.warning("session.prompt: early control_request failed: %s", exc)
+        preempted, current_kind = try_preempt_worker(
+            self._repo_name, self._fire_worker_cancel
+        )
+        if preempted:
             self._preempt_pending.set()
             log.info(
                 "session.prompt: preempting worker (tid=%d, model=%s)",
@@ -1131,7 +1165,7 @@ class ClaudeSession:
                 threading.get_ident(),
                 self._model if model is None else model_name(model),
             )
-        self._pending_talker_kind = caller_kind
+        self._pending_talker_kind = current_thread_kind()
         try:
             with self:
                 if model is not None:
