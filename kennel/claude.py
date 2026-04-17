@@ -12,15 +12,16 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import requests as _requests
 
+from kennel import provider
 from kennel.provider import (
+    OwnedSession,
     PromptSession,
     Provider,
     ProviderAgent,
@@ -95,224 +96,11 @@ def _unregister_child(proc: subprocess.Popen[str]) -> None:
         _active_children.discard(proc)
 
 
-# ── Claude-talker registry ────────────────────────────────────────────────────
-# At most one thread per repo may be "talking to" a claude subprocess at any
-# moment — either via the persistent :class:`ClaudeSession` lock or via a
-# one-shot ``claude --print`` (streaming or batch).  Concurrent registration
-# for the same repo means something is leaking a sub-claude and we halt loud
-# rather than silently proliferate processes.
-
-
-class ClaudeLeakError(RuntimeError):
-    """Raised when a second thread tries to talk to claude for a repo that
-    already has an active talker.  Fatal — kennel halts rather than let
-    sub-claudes multiply silently."""
-
-
-@dataclass(frozen=True)
-class ClaudeTalker:
-    """Snapshot of the thread currently driving a claude subprocess.
-
-    *thread_id* is :func:`threading.get_ident` — a globally-unique integer
-    identifier for the live thread, used to match this talker entry to a
-    specific thread (e.g. a webhook handler's :class:`WebhookActivity`) when
-    rendering status.  The human-readable thread name is looked up at
-    display time rather than cached here.
-
-    *kind* distinguishes between the persistent session path (``"worker"`` —
-    the worker thread is inside a ``with session:`` block) and one-shot
-    ``claude --print`` invocations from a webhook handler (``"webhook"``).
-    *description* is a short human label for status display.
-    """
-
-    repo_name: str
-    thread_id: int
-    kind: Literal["worker", "webhook"]
-    description: str
-    claude_pid: int
-    started_at: datetime
-
-
-_talkers: dict[str, ClaudeTalker] = {}
-_talkers_lock = threading.Lock()
-
-# Thread-local repo_name so downstream one-shot claude calls know which
-# repo they belong to without plumbing repo_name through every helper in
-# :mod:`kennel.events`.  Set at :func:`kennel.server.WebhookHandler._process_action`
-# entry and at :meth:`kennel.worker.WorkerThread.run` entry, cleared on
-# exit.  Reads fall back to ``None`` in tests and tools that do not set it.
-_thread_local: threading.local = threading.local()
-
-
-def set_thread_repo(repo_name: str | None) -> None:
-    """Set (or clear, with ``None``) the repo_name for this thread."""
-    if repo_name is None:
-        if hasattr(_thread_local, "repo_name"):
-            del _thread_local.repo_name
-    else:
-        _thread_local.repo_name = repo_name
-
-
-def current_repo() -> str | None:
-    """Return the repo_name set by :func:`set_thread_repo` on this thread."""
-    return getattr(_thread_local, "repo_name", None)
-
-
-def set_thread_kind(kind: Literal["worker", "webhook"] | None) -> None:
-    """Set (or clear, with ``None``) the caller kind for this thread.
-
-    Workers call this with ``"worker"`` at :meth:`WorkerThread.run` entry; the
-    webhook handler calls it with ``"webhook"`` at ``_process_action`` entry.
-    :meth:`ClaudeSession.prompt` consults it to decide whether its preempt
-    signal (cancel + ``control_request``) should fire: webhooks preempt
-    workers, workers and webhooks never preempt a running webhook (fix for
-    #637 — without this guard a burst of webhooks cancel each other and
-    nobody's reply lands).
-    """
-    if kind is None:
-        if hasattr(_thread_local, "kind"):
-            del _thread_local.kind
-    else:
-        _thread_local.kind = kind
-
-
-def current_thread_kind() -> Literal["worker", "webhook"]:
-    """Return the caller kind for this thread.  Defaults to ``"worker"``
-    when not set (non-entry code paths and tests)."""
-    return getattr(_thread_local, "kind", "worker")
-
-
-def try_preempt_worker(
-    repo_name: str | None, cancel_fn: Callable[[], None]
-) -> tuple[bool, Literal["worker", "webhook"] | None]:
-    """Invoke *cancel_fn* iff the calling thread is a webhook AND the
-    session's current lock holder is a worker.  Otherwise do nothing.
-
-    Returns ``(preempted, current_kind)`` — *preempted* is ``True`` only when
-    *cancel_fn* was invoked; *current_kind* is the current holder's kind
-    (``"worker"``, ``"webhook"``, or ``None`` when the session is idle).
-    The caller uses that triple to log the outcome ("preempting worker" vs
-    "queuing behind <kind>").
-
-    Provider-neutral decision gate for #637.  The *mechanism* of cancelling a
-    running turn differs across providers (stream-json ``control_request``
-    for claude, ACP ``cancel(session_id)`` for copilot), but the *decision*
-    is identical and lives here.  Worker callers never preempt anyone;
-    webhooks queue behind other webhooks (FIFO on the session lock) instead
-    of cancelling each other.
-    """
-    caller_kind = current_thread_kind()
-    current = get_talker(repo_name) if repo_name is not None else None
-    current_kind = current.kind if current is not None else None
-    if caller_kind == "webhook" and current_kind == "worker":
-        cancel_fn()
-        return True, current_kind
-    return False, current_kind
-
-
-def register_talker(talker: ClaudeTalker) -> None:
-    """Register *talker* as the active claude driver for its repo.
-
-    Raises :class:`ClaudeLeakError` if a talker for the same repo is already
-    registered — the guarantee is one claude per repo at a time.
-    """
-    with _talkers_lock:
-        existing = _talkers.get(talker.repo_name)
-        if existing is not None:
-            raise ClaudeLeakError(
-                f"claude leak for repo {talker.repo_name}: "
-                f"tid={existing.thread_id} ({existing.kind}, "
-                f"{existing.description}, pid={existing.claude_pid}) "
-                f"still active when tid={talker.thread_id} ({talker.kind}, "
-                f"{talker.description}, pid={talker.claude_pid}) tried to start"
-            )
-        _talkers[talker.repo_name] = talker
-
-
-def unregister_talker(repo_name: str, thread_id: int) -> None:
-    """Remove the talker entry for *repo_name* if it belongs to *thread_id*.
-
-    Idempotent — safe to call from cleanup paths that may race the registry.
-    Non-matching ``thread_id`` is a no-op (defensive against cross-thread
-    cleanup bugs).
-    """
-    with _talkers_lock:
-        existing = _talkers.get(repo_name)
-        if existing is not None and existing.thread_id == thread_id:
-            del _talkers[repo_name]
-
-
-def get_talker(repo_name: str) -> ClaudeTalker | None:
-    """Return the active talker for *repo_name*, or ``None`` if idle."""
-    with _talkers_lock:
-        return _talkers.get(repo_name)
-
-
-def _talker_now() -> datetime:
-    """Seam for tests — override this module attribute to freeze time."""
-    return datetime.now(tz=timezone.utc)
-
-
-_session_resolver: Callable[[str], PromptSession | None] | None = None
-"""Callback the event/webhook layer uses to find its repo's persistent
-:class:`ClaudeSession` — installed once by :mod:`kennel.server` at startup.
-
-Every in-process prompt call goes through the persistent session, so
-this is a required piece of wiring.  Callers (:meth:`ClaudeClient.run_turn`) fail
-loud if it's missing — the only time that should happen is a forgotten
-resolver install, not a real production path."""
-
-
-def set_session_resolver(
-    resolver: Callable[[str], PromptSession | None] | None,
-) -> None:
-    """Install (or clear) the session resolver callback."""
-    global _session_resolver
-    _session_resolver = resolver
-
-
-def current_repo_session() -> PromptSession:
-    """Return the live :class:`ClaudeSession` driving the current thread's repo.
-
-    Production always has both a thread-local ``repo_name`` (set by
-    :func:`set_thread_repo` in the worker thread and webhook handler
-    entrypoints) and an installed :func:`set_session_resolver` callback,
-    and every worker reaches this code after :meth:`Worker.create_session`
-    has populated the session.  So this raises rather than falling back —
-    a missing session is a wiring bug, not a condition callers should
-    paper over.
-    """
-    repo = current_repo()
-    if repo is None:
-        raise RuntimeError(
-            "ClaudeClient.run_turn called without a thread-local repo_name"
-            " — server.WebhookHandler._process_action and WorkerThread.run"
-            " both set it; this caller is missing the install."
-        )
-    if _session_resolver is None:
-        raise RuntimeError(
-            "ClaudeClient.run_turn called before set_session_resolver — "
-            "server._run() installs it at startup; nothing should run before."
-        )
-    session = _session_resolver(repo)
-    if session is None:
-        raise RuntimeError(
-            f"no ClaudeSession registered for repo {repo} — worker thread "
-            "has not yet created its session"
-        )
-    if not session.is_alive():
-        raise RuntimeError(
-            f"ClaudeSession for repo {repo} is not alive — watchdog should "
-            "have restarted the worker thread"
-        )
-    return session
-
-
 def _thread_name_for_id(thread_id: int) -> str | None:
     """Return the human-readable name of the live thread with *thread_id*,
     or ``None`` if that thread has exited.
 
-    Used by status display to render a :class:`ClaudeTalker`'s thread
+    Used by status display to render a :class:`provider.SessionTalker`'s thread
     without caching the name in the registry — a dead thread's entry is
     already being cleaned up and the name would be stale.
     """
@@ -589,18 +377,18 @@ def _run_streaming(
     )
     _register_child(proc)
     assert proc.stdout is not None  # guaranteed by stdout=PIPE
-    repo_name = current_repo()
+    repo_name = provider.current_repo()
     thread_id = threading.get_ident()
     talker_registered = False
     if repo_name is not None:
-        register_talker(
-            ClaudeTalker(
+        provider.register_talker(
+            provider.SessionTalker(
                 repo_name=repo_name,
                 thread_id=thread_id,
                 kind="webhook",
                 description=f"one-shot claude --print (pid {proc.pid})",
                 claude_pid=proc.pid,
-                started_at=_talker_now(),
+                started_at=provider.talker_now(),
             )
         )
         talker_registered = True
@@ -634,14 +422,14 @@ def _run_streaming(
             raise ClaudeStreamError(proc.returncode)
     finally:
         if talker_registered and repo_name is not None:
-            unregister_talker(repo_name, thread_id)
+            provider.unregister_talker(repo_name, thread_id)
         _unregister_child(proc)
 
 
 # ── Persistent bidirectional session ─────────────────────────────────────────
 
 
-class ClaudeSession:
+class ClaudeSession(OwnedSession):
     """A long-lived claude process driven via bidirectional stream-json.
 
     Spawns ``claude --input-format stream-json --output-format stream-json``
@@ -737,7 +525,7 @@ class ClaudeSession:
         # Per-thread reentrance counter for the ``with self:`` context so
         # :meth:`hold_for_handler` can nest inner :meth:`prompt` calls
         # without double-registering the talker (fix for #658).
-        self._entry_tls: threading.local = threading.local()
+        self._init_handler_reentry()
         # Wakeup pipe: writing a byte to _wakeup_w kicks select() out of its
         # blocking wait in iter_events() so the cancel signal is noticed
         # immediately instead of waiting up to _SELECT_POLL_INTERVAL.
@@ -805,7 +593,7 @@ class ClaudeSession:
 
     @property
     def repo_name(self) -> str | None:
-        """Repo this session belongs to, for :class:`ClaudeTalker` registration."""
+        """Repo this session belongs to, for :class:`provider.SessionTalker` registration."""
         return self._repo_name
 
     @property
@@ -915,7 +703,7 @@ class ClaudeSession:
     def owner(self) -> str | None:
         """Name of the thread currently holding the session lock, or ``None``.
 
-        Derived from the global :class:`ClaudeTalker` registry so reads are
+        Derived from the global :class:`provider.SessionTalker` registry so reads are
         always serialized through ``_talkers_lock`` — correct under the
         free-threaded (3.14t) runtime without relying on the GIL.  Returns
         ``None`` for sessions without a ``repo_name`` (unit-test fixtures)
@@ -923,7 +711,7 @@ class ClaudeSession:
         """
         if self._repo_name is None:
             return None
-        talker = get_talker(self._repo_name)
+        talker = provider.get_talker(self._repo_name)
         if talker is None or talker.kind != "worker":
             return None
         return _thread_name_for_id(talker.thread_id)
@@ -931,92 +719,58 @@ class ClaudeSession:
     def __enter__(self) -> "ClaudeSession":
         """Acquire the session lock, serializing send/receive across threads.
 
-        Registers a :class:`ClaudeTalker` with the kind set by :meth:`prompt`
-        via :attr:`_pending_talker_kind` (falling back to the thread-local
-        kind otherwise).  The talker kind lets other threads tell — via
-        :func:`get_talker` — whether they may preempt (fix for #637:
-        webhooks must not preempt each other).
-
-        Supports reentrance via :meth:`hold_for_handler` (#658): when the
-        current thread is already inside a hold-for-handler block, the
-        RLock is re-acquired and the talker is NOT re-registered.  The
-        outermost entry owns the registration and unregisters in
-        :meth:`__exit__` when its depth returns to zero.
+        On the outermost entry (via the :class:`OwnedSession`
+        reentrance counter), registers a :class:`provider.SessionTalker` with the
+        kind set by :meth:`prompt` via :attr:`_pending_talker_kind`
+        (falling back to the thread-local kind otherwise).  Nested entries
+        (from :meth:`hold_for_handler`) re-acquire the RLock and skip the
+        talker re-registration.
 
         Does *not* clear the cancel event — that is deferred to
         :meth:`iter_events` so a signal that lands between one holder's
         :meth:`__exit__` and the next holder's :meth:`iter_events` is not
         silently dropped.
 
-        Raises :class:`ClaudeLeakError` if another thread is already
-        registered as the talker for this repo — indicates a sub-claude is
-        leaking.  On leak, the session lock is released before raising so the
-        holder we would have taken over from does not deadlock.
+        Raises :class:`provider.SessionLeakError` on the outermost entry if another
+        thread is already registered as the talker for this repo.  The
+        session lock is released before raising so the prior holder isn't
+        deadlocked.
         """
         self._lock.acquire()
         # We hold the lock now; any preempter waiting on this
         # (wait_for_pending_preempt) can wake.
         self._preempt_pending.clear()
-        depth = getattr(self._entry_tls, "depth", 0)
-        if depth == 0:
-            kind = self._pending_talker_kind or current_thread_kind()
+        depth = self._bump_entry_depth()
+        if depth == 1:
+            kind = self._pending_talker_kind or provider.current_thread_kind()
             self._pending_talker_kind = None
             if self._repo_name is not None:
                 try:
-                    register_talker(
-                        ClaudeTalker(
+                    provider.register_talker(
+                        provider.SessionTalker(
                             repo_name=self._repo_name,
                             thread_id=threading.get_ident(),
                             kind=kind,
                             description="persistent session turn",
                             claude_pid=self._proc.pid,
-                            started_at=_talker_now(),
+                            started_at=provider.talker_now(),
                         )
                     )
-                except ClaudeLeakError:
+                except provider.SessionLeakError:
+                    self._drop_entry_depth()
                     self._lock.release()
                     raise
-        self._entry_tls.depth = depth + 1
         return self
 
     def __exit__(self, *args: object) -> None:
-        """Release the session lock.  Unregisters the :class:`ClaudeTalker`
-        before releasing the lock so no other thread can race in and see our
-        stale talker entry.  When called from within a :meth:`hold_for_handler`
-        (#658), only decrements the per-thread reentrance counter — the
-        outermost exit unregisters and fully releases.
+        """Release the session lock.  Unregisters the :class:`provider.SessionTalker`
+        before releasing the lock on the outermost exit so no other thread
+        can race in and see our stale talker entry.
         """
-        depth = self._entry_tls.depth - 1
-        if depth == 0:
-            if self._repo_name is not None:
-                unregister_talker(self._repo_name, threading.get_ident())
-            self._entry_tls.depth = 0
-        else:
-            self._entry_tls.depth = depth
+        depth = self._drop_entry_depth()
+        if depth == 0 and self._repo_name is not None:
+            provider.unregister_talker(self._repo_name, threading.get_ident())
         self._lock.release()
-
-    @contextmanager
-    def hold_for_handler(
-        self, *, preempt_worker: bool = False
-    ) -> Iterator["ClaudeSession"]:
-        """Hold the session lock across multiple :meth:`prompt` calls.
-
-        Webhook handlers wrap their entire body in this so the worker can't
-        acquire the lock between individual turns (triage → reply →
-        reaction) and stall the reply behind a long worker turn (#658).
-        Inner :meth:`prompt` / ``with session:`` calls see a non-zero
-        reentrance depth and skip talker re-registration; the RLock handles
-        reentrant acquisition natively.
-
-        When *preempt_worker* is true, the caller's :attr:`_fire_worker_cancel`
-        fires once on entry so a currently-running worker turn is aborted
-        immediately instead of being waited out before the lock is acquired.
-        """
-        if preempt_worker:
-            try_preempt_worker(self._repo_name, self._fire_worker_cancel)
-        self._pending_talker_kind = current_thread_kind()
-        with self:
-            yield self
 
     def send(self, content: str) -> None:
         """Write a user message to the session stdin, flushing immediately.
@@ -1195,7 +949,7 @@ class ClaudeSession:
         lingering boundary events from the aborted turn), and
         :meth:`consume_until_result`.
         """
-        preempted, current_kind = try_preempt_worker(
+        preempted, current_kind = provider.try_preempt_worker(
             self._repo_name, self._fire_worker_cancel
         )
         if preempted:
@@ -1212,7 +966,7 @@ class ClaudeSession:
                 threading.get_ident(),
                 self._model if model is None else model_name(model),
             )
-        self._pending_talker_kind = current_thread_kind()
+        self._pending_talker_kind = provider.current_thread_kind()
         tid = threading.get_ident()
         t_start = time.monotonic()
         try:
@@ -1628,7 +1382,7 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
     def __init__(
         self,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-        session_fn: Callable[[], PromptSession] = current_repo_session,
+        session_fn: Callable[[], PromptSession] = provider.current_repo_session,
         streaming_runner: Callable[..., Iterator[str]] = _run_streaming,
         sleep_fn: Callable[[float], None] = time.sleep,
         session_factory: Callable[..., PromptSession] | None = None,

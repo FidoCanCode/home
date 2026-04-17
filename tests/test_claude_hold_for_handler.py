@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import threading
-import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from kennel import claude as claude_mod
-from kennel.claude import ClaudeSession, ClaudeTalker, _talker_now
+from kennel import provider
+from kennel.claude import ClaudeSession
+from kennel.provider import SessionTalker, talker_now
 
 
 def _make_session_proc(lines: list[str]) -> MagicMock:
@@ -44,18 +44,18 @@ def _setup_session(tmp_path: Path, repo: str = "owner/repo") -> ClaudeSession:
 
 def test_hold_acquires_lock_and_registers_talker(tmp_path: Path) -> None:
     session = _setup_session(tmp_path)
-    claude_mod.set_thread_kind("webhook")
+    provider.set_thread_kind("webhook")
     try:
         with session.hold_for_handler():
-            talker = claude_mod.get_talker("owner/repo")
+            talker = provider.get_talker("owner/repo")
             assert talker is not None
             assert talker.kind == "webhook"
             assert session._lock._is_owned()  # type: ignore[attr-defined]
         # After exit, talker unregistered, lock released.
-        assert claude_mod.get_talker("owner/repo") is None
+        assert provider.get_talker("owner/repo") is None
         assert not session._lock._is_owned()  # type: ignore[attr-defined]
     finally:
-        claude_mod.set_thread_kind(None)
+        provider.set_thread_kind(None)
         session.stop()
 
 
@@ -63,17 +63,17 @@ def test_nested_with_inside_hold_does_not_double_register(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Re-entering ``with session:`` inside ``hold_for_handler`` must not
-    attempt a second talker registration (would raise ClaudeLeakError)."""
+    attempt a second talker registration (would raise SessionLeakError)."""
     session = _setup_session(tmp_path)
     register_calls = []
-    real_register = claude_mod.register_talker
+    real_register = provider.register_talker
 
     def counting_register(talker):
         register_calls.append(talker.kind)
         real_register(talker)
 
-    monkeypatch.setattr(claude_mod, "register_talker", counting_register)
-    claude_mod.set_thread_kind("webhook")
+    monkeypatch.setattr(provider, "register_talker", counting_register)
+    provider.set_thread_kind("webhook")
     try:
         with session.hold_for_handler():
             assert len(register_calls) == 1  # outer entry registered once
@@ -81,9 +81,9 @@ def test_nested_with_inside_hold_does_not_double_register(
                 assert len(register_calls) == 1  # not re-registered
             assert len(register_calls) == 1  # still registered after inner exit
         # After outer exit, unregistered.
-        assert claude_mod.get_talker("owner/repo") is None
+        assert provider.get_talker("owner/repo") is None
     finally:
-        claude_mod.set_thread_kind(None)
+        provider.set_thread_kind(None)
         session.stop()
 
 
@@ -94,29 +94,25 @@ def test_hold_preempt_fires_cancel_when_worker_holds(
     the current lock holder is a worker and the caller is a webhook."""
     session = _setup_session(tmp_path)
 
-    def fake_talker(kind: str) -> ClaudeTalker:
-        return ClaudeTalker(
+    def fake_talker(kind: str) -> SessionTalker:
+        return SessionTalker(
             repo_name="owner/repo",
             thread_id=999_999,
             kind=kind,  # type: ignore[arg-type]
             description="fake",
             claude_pid=55555,
-            started_at=_talker_now(),
+            started_at=talker_now(),
         )
 
-    monkeypatch.setattr(
-        claude_mod, "get_talker", lambda _repo: fake_talker("worker")
-    )
+    monkeypatch.setattr(provider, "get_talker", lambda _repo: fake_talker("worker"))
     cancel_calls = []
-    monkeypatch.setattr(
-        session, "_fire_worker_cancel", lambda: cancel_calls.append(1)
-    )
-    claude_mod.set_thread_kind("webhook")
+    monkeypatch.setattr(session, "_fire_worker_cancel", lambda: cancel_calls.append(1))
+    provider.set_thread_kind("webhook")
     try:
         with session.hold_for_handler(preempt_worker=True):
             pass
     finally:
-        claude_mod.set_thread_kind(None)
+        provider.set_thread_kind(None)
         session.stop()
     assert cancel_calls == [1]
 
@@ -128,23 +124,19 @@ def test_hold_preempt_skipped_when_no_preempt_worker_flag(
     holder."""
     session = _setup_session(tmp_path)
 
-    def fake_talker(kind: str) -> ClaudeTalker:
-        return ClaudeTalker(
+    def fake_talker(kind: str) -> SessionTalker:
+        return SessionTalker(
             repo_name="owner/repo",
             thread_id=999_999,
             kind=kind,  # type: ignore[arg-type]
             description="fake",
             claude_pid=55555,
-            started_at=_talker_now(),
+            started_at=talker_now(),
         )
 
-    monkeypatch.setattr(
-        claude_mod, "get_talker", lambda _repo: fake_talker("worker")
-    )
+    monkeypatch.setattr(provider, "get_talker", lambda _repo: fake_talker("worker"))
     cancel_calls = []
-    monkeypatch.setattr(
-        session, "_fire_worker_cancel", lambda: cancel_calls.append(1)
-    )
+    monkeypatch.setattr(session, "_fire_worker_cancel", lambda: cancel_calls.append(1))
     try:
         with session.hold_for_handler():  # preempt_worker default False
             pass
@@ -164,22 +156,22 @@ def test_other_thread_blocks_while_held(tmp_path: Path) -> None:
     other_finished = threading.Event()
 
     def holder() -> None:
-        claude_mod.set_thread_kind("webhook")
+        provider.set_thread_kind("webhook")
         try:
             with session.hold_for_handler():
                 holder_entered.set()
                 release_holder.wait(timeout=5.0)
         finally:
-            claude_mod.set_thread_kind(None)
+            provider.set_thread_kind(None)
 
     def other() -> None:
-        claude_mod.set_thread_kind("worker")
+        provider.set_thread_kind("worker")
         try:
             with session:
                 other_acquired.set()
             other_finished.set()
         finally:
-            claude_mod.set_thread_kind(None)
+            provider.set_thread_kind(None)
 
     t1 = threading.Thread(target=holder, daemon=True)
     t1.start()
@@ -199,24 +191,24 @@ def test_other_thread_blocks_while_held(tmp_path: Path) -> None:
 def test_hold_reraises_leak_error_and_releases_lock(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """If register_talker raises ClaudeLeakError inside hold, the lock must
+    """If register_talker raises SessionLeakError inside hold, the lock must
     be released before the exception propagates so we don't deadlock."""
     session = _setup_session(tmp_path)
     # Pre-register a talker for the same repo from a different thread id so
     # the hold's register_talker collides.
-    claude_mod.register_talker(
-        ClaudeTalker(
+    provider.register_talker(
+        SessionTalker(
             repo_name="owner/repo",
             thread_id=111_111,  # different tid — triggers leak
             kind="worker",
             description="squatter",
             claude_pid=0,
-            started_at=_talker_now(),
+            started_at=talker_now(),
         )
     )
-    claude_mod.set_thread_kind("webhook")
+    provider.set_thread_kind("webhook")
     try:
-        with pytest.raises(claude_mod.ClaudeLeakError):
+        with pytest.raises(provider.SessionLeakError):
             with session.hold_for_handler():
                 pass  # should not reach here
         # Lock must be released so other threads can acquire.
@@ -224,6 +216,6 @@ def test_hold_reraises_leak_error_and_releases_lock(
         assert acquired
         session._lock.release()
     finally:
-        claude_mod.set_thread_kind(None)
-        claude_mod.unregister_talker("owner/repo", 111_111)
+        provider.set_thread_kind(None)
+        provider.unregister_talker("owner/repo", 111_111)
         session.stop()

@@ -33,8 +33,9 @@ from acp.schema import (
     ToolCallUpdate,
 )
 
-from kennel import claude
+from kennel import provider
 from kennel.provider import (
+    OwnedSession,
     PromptSession,
     Provider,
     ProviderAgent,
@@ -867,7 +868,7 @@ class CopilotACPRuntime:
         self._loop.close()
 
 
-class CopilotCLISession:
+class CopilotCLISession(OwnedSession):
     """Persistent Copilot CLI ACP session."""
 
     def __init__(
@@ -892,7 +893,8 @@ class CopilotCLISession:
         else:
             factory = CopilotACPRuntime if runtime_factory is None else runtime_factory
             self._runtime = factory(work_dir=self._work_dir, repo_name=repo_name)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._init_handler_reentry()
         self._owner_lock = threading.Lock()
         self._owner: str | None = None
         self._pending_preempts = 0
@@ -987,7 +989,7 @@ class CopilotCLISession:
 
     def _fire_worker_cancel(self) -> None:
         """Provider-specific cancel mechanism handed to
-        :func:`claude.try_preempt_worker`.  Asks the Copilot ACP runtime to
+        :func:`provider.try_preempt_worker`.  Asks the Copilot ACP runtime to
         cancel the currently-active prompt so the worker's turn returns with
         ``stop_reason="cancelled"`` and releases the session lock.  No-op if
         there is no active session id or the runtime is already down.
@@ -997,6 +999,13 @@ class CopilotCLISession:
             self._runtime.cancel(session_id)
 
     def __enter__(self) -> "CopilotCLISession":
+        if getattr(self._reentry_tls, "depth", 0) > 0:
+            # Reentrant call from within :meth:`hold_for_handler` — RLock
+            # handles the nested acquire; owner and talker state stay owned
+            # by the outermost entry.
+            self._lock.acquire()
+            self._bump_entry_depth()
+            return self
         waited = not self._lock.acquire(blocking=False)
         if waited:
             with self._preempt_condition:
@@ -1005,17 +1014,18 @@ class CopilotCLISession:
             # worker — matches the shared decision gate used for claude.
             # Another webhook waiting behind a webhook just queues on the
             # lock; workers never cancel anyone.
-            claude.try_preempt_worker(self._repo_name, self._fire_worker_cancel)
+            provider.try_preempt_worker(self._repo_name, self._fire_worker_cancel)
             self._lock.acquire()
         self._thread_state.waited = waited
         with self._owner_lock:
             self._owner = threading.current_thread().name
         self._register_talker_kind()
+        self._bump_entry_depth()
         return self
 
     def _register_talker_kind(self) -> None:
         """Register this thread with the shared talker registry so other
-        threads can tell, via :func:`claude.get_talker`, whether the current
+        threads can tell, via :func:`provider.get_talker`, whether the current
         lock holder is a worker or a webhook.  Matches what
         :meth:`ClaudeSession.__enter__` does for the claude provider.
 
@@ -1025,10 +1035,10 @@ class CopilotCLISession:
         if self._repo_name is None:
             self._registered_talker_kind = None
             return
-        kind = claude.current_thread_kind()
+        kind = provider.current_thread_kind()
         try:
-            claude.register_talker(
-                claude.ClaudeTalker(
+            provider.register_talker(
+                provider.SessionTalker(
                     repo_name=self._repo_name,
                     thread_id=threading.get_ident(),
                     kind=kind,
@@ -1038,13 +1048,19 @@ class CopilotCLISession:
                 )
             )
             self._registered_talker_kind = kind
-        except claude.ClaudeLeakError:
+        except provider.SessionLeakError:
             self._lock.release()
             raise
 
     def __exit__(self, *args: object) -> None:
+        if self._drop_entry_depth() > 0:
+            # Inner exit of a :meth:`hold_for_handler` nest — only drop
+            # the reentrant RLock acquire; owner / talker / waited state
+            # stays until the outermost exit.
+            self._lock.release()
+            return
         if self._repo_name is not None and self._registered_talker_kind is not None:
-            claude.unregister_talker(self._repo_name, threading.get_ident())
+            provider.unregister_talker(self._repo_name, threading.get_ident())
             self._registered_talker_kind = None
         with self._owner_lock:
             self._owner = None
@@ -1128,7 +1144,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
             CopilotCLISession if session_factory is None else session_factory
         )
         super().__init__(
-            session_fn=claude.current_repo_session
+            session_fn=provider.current_repo_session
             if session_fn is None
             else session_fn,
             session_system_file=session_system_file,

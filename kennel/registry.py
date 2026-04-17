@@ -52,7 +52,7 @@ class WebhookActivity:
 
     *thread_id* is :func:`threading.get_ident` captured at context entry so
     status display can match this webhook to the active
-    :class:`~kennel.claude.ClaudeTalker` (whose ``thread_id`` field is from
+    :class:`~kennel.provider.SessionTalker` (whose ``thread_id`` field is from
     the same call) — letting the CLI attach claude stats to the specific
     webhook line that's driving claude.
     """
@@ -366,7 +366,7 @@ class WorkerRegistry:
     def get_session(self, repo_name: str) -> PromptSession | None:
         """Return the live persistent session for *repo_name*.
 
-        Used by :func:`kennel.claude.set_session_resolver` so webhook-handler
+        Used by :func:`kennel.provider.set_session_resolver` so webhook-handler
         prompt calls can route through the per-repo persistent session
         instead of spawning extra one-shot subprocesses.  Returns ``None``
         when no worker thread is registered for the repo or the thread has

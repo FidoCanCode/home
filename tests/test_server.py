@@ -15,6 +15,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
+from kennel import provider
 from kennel.config import Config
 from kennel.config import RepoConfig as _RepoConfig
 from kennel.events import Action, recover_reply_promises
@@ -561,11 +562,11 @@ class TestStatusXml:
     def test_status_xml_includes_claude_talker(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
-        from kennel.claude import ClaudeTalker
+        from kennel.provider import SessionTalker
         from kennel.registry import WorkerActivity
 
         url, _ = server
-        talker = ClaudeTalker(
+        talker = SessionTalker(
             repo_name="owner/repo",
             thread_id=42,
             kind="worker",
@@ -589,7 +590,7 @@ class TestStatusXml:
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
-        with patch("kennel.claude.get_talker", return_value=talker):
+        with patch("kennel.provider.get_talker", return_value=talker):
             resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
         assert "<kind>worker</kind>" in body
@@ -1573,14 +1574,14 @@ class TestProcessAction:
             assert "handling webhook action" not in args
 
     def test_status_endpoint_includes_claude_talker(self, server: tuple) -> None:
-        """Active ClaudeTalker appears in /status as a structured object."""
+        """Active SessionTalker appears in /status as a structured object."""
         from datetime import datetime, timezone
 
-        from kennel.claude import ClaudeTalker
+        from kennel.provider import SessionTalker
         from kennel.registry import WorkerActivity
 
         url, _ = server
-        talker = ClaudeTalker(
+        talker = SessionTalker(
             repo_name="owner/repo",
             thread_id=12321,
             kind="worker",
@@ -1604,7 +1605,7 @@ class TestProcessAction:
         WebhookHandler.registry.get_session_alive.return_value = True
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
-        with patch("kennel.claude.get_talker", return_value=talker):
+        with patch("kennel.provider.get_talker", return_value=talker):
             resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
         talker_data = data[0]["claude_talker"]
@@ -1618,8 +1619,7 @@ class TestProcessAction:
         server: tuple,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """ClaudeLeakError from a webhook handler calls os._exit(3)."""
-        from kennel import claude
+        """SessionLeakError from a webhook handler calls os._exit(3)."""
         from kennel import server as server_module
 
         url, cfg = server
@@ -1630,7 +1630,7 @@ class TestProcessAction:
         }
         WebhookHandler.gh = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock(
-            side_effect=claude.ClaudeLeakError("leaked")
+            side_effect=provider.SessionLeakError("leaked")
         )
         exits: list[int] = []
         monkeypatch.setattr(server_module.os, "_exit", exits.append)

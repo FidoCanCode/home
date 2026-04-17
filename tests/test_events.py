@@ -3280,7 +3280,7 @@ class TestReorderTasksBackground:
 
     def test_sets_thread_local_repo_name_during_reorder(self, tmp_path: Path) -> None:
         """Thread-local repo_name is set to repo_cfg.name when reorder runs."""
-        from kennel.claude import current_repo
+        from kennel.provider import current_repo
 
         started: list = []
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -3304,7 +3304,7 @@ class TestReorderTasksBackground:
 
     def test_clears_thread_local_repo_name_after_reorder(self, tmp_path: Path) -> None:
         """Thread-local repo_name is cleared in the finally block after reorder."""
-        from kennel.claude import current_repo, set_thread_repo
+        from kennel.provider import current_repo, set_thread_repo
 
         started: list = []
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -3328,7 +3328,7 @@ class TestReorderTasksBackground:
         self, tmp_path: Path
     ) -> None:
         """Thread-local repo_name is cleared even when reorder raises."""
-        from kennel.claude import current_repo
+        from kennel.provider import current_repo
 
         started: list = []
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -3352,7 +3352,7 @@ class TestReorderTasksBackground:
 
     def test_no_thread_local_set_when_no_repo_cfg(self, tmp_path: Path) -> None:
         """When repo_cfg is None, set_thread_repo is not called (no crash)."""
-        from kennel.claude import current_repo
+        from kennel.provider import current_repo
 
         started: list = []
         seen: list = []

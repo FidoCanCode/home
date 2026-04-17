@@ -1192,7 +1192,7 @@ class TestCollect:
         )
 
     def test_passes_claude_talker_to_repo_status(self, tmp_path: Path) -> None:
-        """An active ClaudeTalker in /status → ClaudeTalkerInfo on RepoStatus."""
+        """An active SessionTalker in /status → ClaudeTalkerInfo on RepoStatus."""
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
         activity_info = {
             "what": "running",
