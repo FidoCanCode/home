@@ -35,6 +35,26 @@ class GraphQLError(Exception):
         self.errors = errors
 
 
+def _auto_merge_unavailable(exc: GraphQLError) -> bool:
+    """True when *exc* is a GraphQL ``enablePullRequestAutoMerge`` failure
+    caused by the repository having auto-merge disabled.
+
+    GitHub returns ``{'type': 'UNPROCESSABLE', 'message': 'Pull request Auto
+    merge is not allowed for this repository', ...}``.  Callers treat that
+    as a \"fall back to immediate merge\" signal rather than a crash (fix
+    for #643).
+    """
+    for err in exc.errors:
+        if not isinstance(err, dict):
+            continue
+        if err.get("type") != "UNPROCESSABLE":
+            continue
+        message = err.get("message") or ""
+        if "Auto merge is not allowed" in message:
+            return True
+    return False
+
+
 def _gh_token(
     runner: Any = subprocess.run,
     environ: Any = os.environ,
@@ -679,37 +699,66 @@ class GitHub:
         if pr_data.get("merged"):
             log.info("PR %s/#%s already merged — skipping", repo, pr)
             return
-        if auto:
-            node_id = pr_data["node_id"]
-            merge_method = "SQUASH" if squash else "MERGE"
-            query = (
-                "mutation($prId:ID!,$mergeMethod:PullRequestMergeMethod!){"
-                "enablePullRequestAutoMerge(input:{pullRequestId:$prId,"
-                "mergeMethod:$mergeMethod})"
-                "{pullRequest{autoMergeRequest{mergeMethod}}}}"
+        if auto and self._try_enable_auto_merge(repo, pr, pr_data, squash):
+            return
+        merge_method = "squash" if squash else "merge"
+        try:
+            self._put(
+                f"/repos/{repo}/pulls/{pr}/merge",
+                merge_method=merge_method,
             )
+        except _requests.HTTPError as e:
+            # Re-check: if the PR was merged between our initial get_pr and
+            # the merge call (race with webhook-triggered self-restart on
+            # another process), treat 405 as success.
+            if e.response is not None and e.response.status_code == 405:
+                recheck = self._get(f"/repos/{repo}/pulls/{pr}")
+                if recheck.get("merged"):
+                    log.info(
+                        "PR %s/#%s merged concurrently — treating 405 as success",
+                        repo,
+                        pr,
+                    )
+                    return
+            raise
+
+    def _try_enable_auto_merge(
+        self,
+        repo: str,
+        pr: int | str,
+        pr_data: dict[str, Any],
+        squash: bool,
+    ) -> bool:
+        """Try to enable auto-merge on *pr*.
+
+        Returns True on success.  Returns False when the repository has
+        auto-merge disabled (GraphQL UNPROCESSABLE), so the caller can
+        fall back to an immediate REST merge.  Re-raises any other
+        :class:`GraphQLError` — callers are not equipped to continue past
+        a genuine protocol failure.
+        """
+        node_id = pr_data["node_id"]
+        merge_method = "SQUASH" if squash else "MERGE"
+        query = (
+            "mutation($prId:ID!,$mergeMethod:PullRequestMergeMethod!){"
+            "enablePullRequestAutoMerge(input:{pullRequestId:$prId,"
+            "mergeMethod:$mergeMethod})"
+            "{pullRequest{autoMergeRequest{mergeMethod}}}}"
+        )
+        try:
             self._graphql(query, prId=node_id, mergeMethod=merge_method)
-        else:
-            merge_method = "squash" if squash else "merge"
-            try:
-                self._put(
-                    f"/repos/{repo}/pulls/{pr}/merge",
-                    merge_method=merge_method,
-                )
-            except _requests.HTTPError as e:
-                # Re-check: if the PR was merged between our initial get_pr and
-                # the merge call (race with webhook-triggered self-restart on
-                # another process), treat 405 as success.
-                if e.response is not None and e.response.status_code == 405:
-                    recheck = self._get(f"/repos/{repo}/pulls/{pr}")
-                    if recheck.get("merged"):
-                        log.info(
-                            "PR %s/#%s merged concurrently — treating 405 as success",
-                            repo,
-                            pr,
-                        )
-                        return
+            return True
+        except GraphQLError as exc:
+            if not _auto_merge_unavailable(exc):
                 raise
+            log.info(
+                "PR %s/#%s: auto-merge disabled on repo — "
+                "falling back to immediate %s merge",
+                repo,
+                pr,
+                "squash" if squash else "merge",
+            )
+            return False
 
     def get_pr(self, repo: str, pr: int | str) -> dict[str, Any]:
         """Return PR data (reviews, isDraft, mergeStateStatus, body, commits)."""

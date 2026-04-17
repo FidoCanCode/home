@@ -1481,6 +1481,68 @@ class TestGitHubClass:
         with _pytest.raises(_requests.HTTPError):
             gh.pr_merge("o/r", 10)
 
+    def test_pr_merge_auto_falls_back_on_auto_merge_disabled(self) -> None:
+        """#643: if the repo has auto-merge disabled (GraphQL UNPROCESSABLE),
+        fall back to an immediate squash merge rather than crashing."""
+        gh, mock_s = self._gh()
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
+        mock_s.get.return_value = pr_resp
+        graphql_resp = MagicMock()
+        graphql_resp.json.return_value = {
+            "data": None,
+            "errors": [
+                {
+                    "type": "UNPROCESSABLE",
+                    "path": ["enablePullRequestAutoMerge"],
+                    "message": "Pull request Auto merge is not allowed for this repository",
+                }
+            ],
+        }
+        mock_s.post.return_value = graphql_resp
+        put_resp = MagicMock()
+        put_resp.raise_for_status = MagicMock()
+        mock_s.put.return_value = put_resp
+        gh.pr_merge("o/r", 10, auto=True)
+        mock_s.put.assert_called_once()
+        # PUT body should request a squash merge via REST.
+        call = mock_s.put.call_args
+        assert "/pulls/10/merge" in call.args[0]
+        assert call.kwargs["json"]["merge_method"] == "squash"
+
+    def test_pr_merge_auto_non_dict_error_entries_skipped(self) -> None:
+        """#643 helper ignores non-dict entries in GraphQLError.errors (GitHub's
+        error list occasionally contains bare strings)."""
+        from kennel.github import GraphQLError, _auto_merge_unavailable
+
+        exc = GraphQLError(["string-error", {"type": "OTHER"}])
+        assert _auto_merge_unavailable(exc) is False
+
+    def test_pr_merge_auto_reraises_other_graphql_errors(self) -> None:
+        """Non-\"auto-merge disabled\" GraphQL errors must not be swallowed."""
+        from kennel.github import GraphQLError
+
+        gh, mock_s = self._gh()
+        pr_resp = MagicMock()
+        pr_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
+        mock_s.get.return_value = pr_resp
+        graphql_resp = MagicMock()
+        graphql_resp.json.return_value = {
+            "data": None,
+            "errors": [
+                {
+                    "type": "FORBIDDEN",
+                    "message": "not allowed",
+                }
+            ],
+        }
+        mock_s.post.return_value = graphql_resp
+        import pytest as _pytest
+
+        with _pytest.raises(GraphQLError):
+            gh.pr_merge("o/r", 10, auto=True)
+        mock_s.put.assert_not_called()
+
     def test_pr_merge_non_405_error_reraises(self) -> None:
         """Non-405 errors (e.g. 500) should not be swallowed."""
         import requests as _requests
