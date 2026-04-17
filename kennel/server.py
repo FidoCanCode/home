@@ -53,7 +53,64 @@ from kennel.worker import RepoContextFilter, RepoNameFilter
 log = logging.getLogger(__name__)
 
 
-_replied_comments: set[int] = set()
+class RepliedComments:
+    """Thread-safe set of already-replied comment IDs with atomic claim.
+
+    Eliminates the TOCTOU window between the membership check and the add
+    that allowed duplicate webhook deliveries to both pass the dedup guard
+    and each independently call reply_to_comment() (closes #566).
+
+    Usage pattern::
+
+        if not _replied_comments.claim(cid):
+            return  # already handled by another delivery
+        # safe to proceed — this thread holds the exclusive claim
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._ids: set[int] = set()
+
+    def claim(self, cid: int) -> bool:
+        """Atomically claim *cid*.
+
+        Returns ``True`` if this call is the first to claim *cid* (newly
+        claimed — caller should proceed with the reply).  Returns ``False``
+        if *cid* was already present (another thread or a prior delivery
+        already claimed it — caller should skip the reply).
+        """
+        with self._lock:
+            if cid in self._ids:
+                return False
+            self._ids.add(cid)
+            return True
+
+    def add(self, cid: int) -> None:
+        """Non-atomic add — for test pre-seeding only."""
+        with self._lock:
+            self._ids.add(cid)
+
+    def release(self, cid: int) -> None:
+        """Release a previously claimed *cid* after a failed reply attempt.
+
+        Removes *cid* so a subsequent webhook redelivery can claim it and
+        retry the reply.  Call this in the failure path (exception handler)
+        after a claim succeeded but the reply call raised.
+        """
+        with self._lock:
+            self._ids.discard(cid)
+
+    def discard(self, cid: int) -> None:
+        """Remove *cid* if present — for test cleanup only."""
+        with self._lock:
+            self._ids.discard(cid)
+
+    def __contains__(self, cid: object) -> bool:
+        with self._lock:
+            return cid in self._ids
+
+
+_replied_comments = RepliedComments()
 
 # Exponential backoff for git pull during self-restart: 10s, 30s, 60s
 # with a 10-minute total budget. Retries stop once the cumulative delay
@@ -628,7 +685,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             if action.reply_to:
                 promise = self._reply_promise(action)
                 cid = action.reply_to.get("comment_id")
-                if cid and cid in _replied_comments:
+                if cid is not None and not _replied_comments.claim(cid):
                     log.info("already replied to comment %s — skipping", cid)
                     handled = True
                     category, titles = None, []
@@ -640,17 +697,21 @@ class WebhookHandler(BaseHTTPRequestHandler):
                             promise[0],
                             promise[1],
                         )
-                    category, titles = type(self)._fn_reply_to_comment(
-                        action, self.config, repo_cfg, gh
-                    )
+                    try:
+                        category, titles = type(self)._fn_reply_to_comment(
+                            action, self.config, repo_cfg, gh
+                        )
+                    except Exception:
+                        # Release the claim so a GitHub redelivery can retry.
+                        if cid is not None:
+                            _replied_comments.release(cid)
+                        raise
                     if promise is not None:
                         reply_promises.remove_reply_promise(
                             repo_cfg.work_dir / ".git" / "fido",
                             promise[0],
                             promise[1],
                         )
-                    if cid:
-                        _replied_comments.add(cid)
                     handled = True
                 # Create task based on triage result.
                 # DEFER files a GitHub issue (handled in reply_to_comment) — no tasks.json entry.
@@ -673,16 +734,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
             if action.review_comments:
                 activity.set_description("replying to review thread")
-                type(self)._fn_reply_to_review(
-                    action, self.config, repo_cfg, gh, already_replied=_replied_comments
-                )
+                type(self)._fn_reply_to_review(action, self.config, repo_cfg, gh)
                 handled = True  # inline comments handled individually
 
             # Top-level PR comments (issue_comment) — no reply_to, but has comment_body
             if not handled and action.comment_body:
                 promise = self._reply_promise(action)
                 cid = action.thread.get("comment_id") if action.thread else None
-                if cid and cid in _replied_comments:
+                if cid is not None and not _replied_comments.claim(cid):
                     log.info("already replied to comment %s — skipping", cid)
                     category, titles = None, []
                 else:
@@ -693,17 +752,21 @@ class WebhookHandler(BaseHTTPRequestHandler):
                             promise[0],
                             promise[1],
                         )
-                    category, titles = type(self)._fn_reply_to_issue_comment(
-                        action, self.config, repo_cfg, gh
-                    )
+                    try:
+                        category, titles = type(self)._fn_reply_to_issue_comment(
+                            action, self.config, repo_cfg, gh
+                        )
+                    except Exception:
+                        # Release the claim so a GitHub redelivery can retry.
+                        if cid is not None:
+                            _replied_comments.release(cid)
+                        raise
                     if promise is not None:
                         reply_promises.remove_reply_promise(
                             repo_cfg.work_dir / ".git" / "fido",
                             promise[0],
                             promise[1],
                         )
-                    if cid:
-                        _replied_comments.add(cid)
                 handled = True
                 # DEFER files a GitHub issue — no tasks.json entry.
                 if category not in ("DUMP", "ANSWER", "ASK", "DEFER"):
