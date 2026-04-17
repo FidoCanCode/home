@@ -971,6 +971,55 @@ class TestWorker:
 
         assert call_order == ["create_session", "find_or_create_pr"]
 
+    def test_run_pickup_comment_fires_before_session_creation(
+        self, tmp_path: Path
+    ) -> None:
+        """post_pickup_comment runs before create_session — no session during pickup work.
+
+        The whole point of deferring session startup is that pickup operations
+        (posting the "on it!" comment) happen without a live session, using the
+        one-shot fallback path instead.  This test pins that ordering so any
+        regression that eagerly starts the session before pickup is caught.
+        """
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        call_order: list[str] = []
+
+        def record_pickup(*_a: object, **_kw: object) -> None:
+            call_order.append("post_pickup_comment")
+
+        def record_create() -> None:
+            call_order.append("create_session")
+
+        def record_focp(*_a: object, **_kw: object) -> tuple[int, str, bool]:
+            call_order.append("find_or_create_pr")
+            return (42, "fix-bug", True)
+
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment", side_effect=record_pickup),
+            patch.object(worker, "create_session", side_effect=record_create),
+            patch.object(worker, "find_or_create_pr", side_effect=record_focp),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "execute_task", return_value=False),
+            patch.object(worker, "handle_promote_merge", return_value=0),
+        ):
+            worker.run()
+
+        assert call_order == [
+            "post_pickup_comment",
+            "create_session",
+            "find_or_create_pr",
+        ]
+
     def test_run_recovers_reply_promises_before_normal_handlers(
         self, tmp_path: Path
     ) -> None:
