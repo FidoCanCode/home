@@ -1,5 +1,5 @@
 (** Rocq → Python extraction backend.
-    Phase 2: expression printer — all [ml_ast] nodes except [MLfix]. *)
+    Phase 2: expression printer — all [ml_ast] nodes. *)
 
 open Pp
 open Names
@@ -301,8 +301,38 @@ let rec pp_expr state env = function
         in
         str "match " ++ pp_expr state env scrutinee ++ str ":" ++ fnl () ++
         prlist_with_sep fnl pp_branch (Array.to_list branches)
-  (* Stub — replaced in the MLfix task *)
-  | MLfix   _ -> str "# UNIMPL MLfix"
+  | MLfix (i, ids, defs) ->
+      (* Mutual fixpoint: push all n names into the env (reversed, per the
+         extraction convention so [ids.(0)] becomes the outermost binder),
+         emit one [def] per function, then reference [ids.(i)] as the value.
+         Python [def] is a statement, not an expression, so this is
+         well-formed only at statement level; the "Wire Dterm and Dfix" task
+         handles hoisting it into a function body when needed. *)
+      let n = Array.length ids in
+      (* [ids] is already [Id.t array]; no [id_of_mlid] needed. *)
+      let id_list = List.rev (Array.to_list ids) in
+      let names_rev, env' = push_vars id_list env in
+      (* [List.rev names_rev] restores original array order:
+         [name_arr.(j)] is the (possibly renamed) identifier for [ids.(j)]. *)
+      let name_arr = Array.of_list (List.rev names_rev) in
+      let pp_one j =
+        (* Unwrap the body's lambdas to emit:
+             def fname(p1, p2, ...):
+                 return body
+           If the body has no lambdas, emit [def fname(): return body]. *)
+        let lam_ids, body = collect_lams defs.(j) in
+        let params = List.map id_of_mlid lam_ids in
+        let params', env'' = push_vars params env' in
+        let pp_param id =
+          if Id.equal id dummy_name then str "_" else Id.print id
+        in
+        str "def " ++ Id.print name_arr.(j) ++ str "(" ++
+        prlist_with_sep (fun () -> str ", ") pp_param (List.rev params') ++
+        str "):" ++ fnl () ++
+        str "    return " ++ pp_expr state env'' body
+      in
+      prlist_with_sep fnl pp_one (List.init n (fun j -> j)) ++ fnl () ++
+      Id.print name_arr.(i)
 
 (*s Declaration printer.  [Dterm] now emits real Python for the RHS
     expression (simple [name = expr] form).  Full lambda-aware wiring
