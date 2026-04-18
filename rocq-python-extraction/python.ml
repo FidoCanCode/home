@@ -471,12 +471,31 @@ let pp_term_decl state env name a =
     str "    " ++ pp_return_body state env' 4 body ++ fnl ()
 
 (*s Inductive type emission as Python dataclasses.
-    Each live constructor becomes a [@dataclass] class whose fields are the
-    constructor arguments.  Record types use the declared field names; all
-    others use positional names [arg0], [arg1], …. *)
+    Each live constructor becomes a frozen [@dataclass] class whose fields
+    are the constructor arguments.  Record types use the declared field
+    names; all others use positional names [arg0], [arg1], ….
 
-(** Emit one [@dataclass] class for constructor [j] of [packet]. *)
-let pp_one_cons state packet fields_opt j =
+    Standard and Coinductive inductives also get a shared base class so that
+    Python's [match]/[case] discriminator can be written against the type
+    name rather than enumerating every constructor:
+
+      class Nat:
+          pass
+
+      @dataclass(frozen=True)
+      class Nat_O(Nat):
+          pass
+
+      @dataclass(frozen=True)
+      class Nat_S(Nat):
+          arg0: object
+
+    Records have a single constructor that *is* the type, so no separate
+    base class is emitted there. *)
+
+(** Emit one [@dataclass(frozen=True)] class for constructor [j] of [packet].
+    If [base_opt] is [Some base], the class inherits from [base]. *)
+let pp_one_cons state packet fields_opt base_opt j =
   let cname = pp_global state Cons packet.ip_consnames_ref.(j) in
   let nargs  = List.length packet.ip_types.(j) in
   let ind_kn = kn_of_ind packet.ip_typename_ref in
@@ -488,8 +507,12 @@ let pp_one_cons state packet fields_opt j =
           | None    -> Printf.sprintf "arg%d" i )
     | None -> Printf.sprintf "arg%d" i
   in
-  str "@dataclass" ++ fnl () ++
-  str "class " ++ str cname ++ str ":" ++ fnl () ++
+  let pp_bases = match base_opt with
+    | None      -> mt ()
+    | Some base -> str "(" ++ str base ++ str ")"
+  in
+  str "@dataclass(frozen=True)" ++ fnl () ++
+  str "class " ++ str cname ++ pp_bases ++ str ":" ++ fnl () ++
   ( if nargs = 0 then str "    pass" ++ fnl ()
     else
       prlist_with_sep mt
@@ -518,7 +541,9 @@ let pp_ind_decl state (ind : ml_ind) =
         str "# " ++ Id.print p.ip_typename ++
         str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
       else
-        pp_one_cons state p (Some fields) 0
+        (* Records have a single constructor that doubles as the type; no
+           separate base class is needed. *)
+        pp_one_cons state p (Some fields) None 0
   | Standard | Coinductive ->
       let pp_packet p =
         if p.ip_logical then
@@ -527,9 +552,16 @@ let pp_ind_decl state (ind : ml_ind) =
           str "# " ++ Id.print p.ip_typename ++
           str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
         else
+          let tname = pp_global state Term p.ip_typename_ref in
           let n = Array.length p.ip_types in
+          (* Shared base class — one plain [class] with no fields.  Each
+             constructor inherits from it so downstream code can type-check
+             against the inductive name and [match]/[case] gets a common root. *)
+          str "class " ++ str tname ++ str ":" ++ fnl () ++
+          str "    pass" ++ fnl () ++
+          fnl () ++
           prlist_with_sep (fun () -> fnl ())
-            (fun j -> pp_one_cons state p None j)
+            (fun j -> pp_one_cons state p None (Some tname) j)
             (List.init n (fun j -> j))
       in
       prlist_with_sep (fun () -> fnl ())
