@@ -14,8 +14,11 @@
 
 Declare ML Module "rocq-python-extraction".
 
-(* Extraction vernaculars come from the ML plugin; [nat], [bool], [option],
-   [prod], and [list] are prelude types — no Stdlib imports required. *)
+(* [Extract Inductive] and related vernaculars are registered by the
+   rocq-runtime.plugins.extraction ML plugin, part of rocq-core.  Load it
+   directly — no rocq-stdlib import needed.  [nat], [bool], [option], [prod],
+   and [list] are prelude types; always in scope without explicit imports. *)
+Declare ML Module "rocq-runtime.plugins.extraction".
 
 (* ------------------------------------------------------------------ *)
 (*  bool → Python bool                                                 *)

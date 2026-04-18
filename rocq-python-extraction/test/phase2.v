@@ -28,13 +28,16 @@
 
 Declare ML Module "rocq-python-extraction".
 
-(* The extraction vernaculars (Extract Inductive, etc.) are registered by
-   the rocq-runtime.plugins.extraction ML plugin, which our plugin depends
-   on.  No Stdlib theory import is required — they are available the moment
-   the plugin is loaded via [Declare ML Module] above.
+(* [Extract Inductive] and related vernaculars are registered by the
+   rocq-runtime.plugins.extraction ML plugin.  That plugin is part of
+   rocq-core (not rocq-stdlib), so it is always available.  We load it
+   directly here rather than going through [From Stdlib Require Import
+   extraction.Extraction], which would require a compatible rocq-stdlib
+   release (none exists for rocq-core.9.2.0 in the default opam repo).
 
-   Similarly, [int], [float], and primitive string literals are kernel
-   primitives; no Stdlib import is needed for their basic use. *)
+   [int], [float], and primitive string literals are kernel primitives;
+   no Stdlib import is needed for their basic use. *)
+Declare ML Module "rocq-runtime.plugins.extraction".
 
 (* ------------------------------------------------------------------ *)
 (*  Extract Inductive bool → Python True/False (enables ternary emit)  *)
