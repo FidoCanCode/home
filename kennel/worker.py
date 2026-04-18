@@ -1208,6 +1208,91 @@ class Worker:
         else:
             log.info("git clean: nothing to remove")
 
+    def _salvage_interrupted_pr(
+        self,
+        fido_dir: Path,
+        repo_ctx: RepoContext,
+        issue: int,
+        request: str,
+        remote: str,
+    ) -> tuple[int, str, bool] | None:
+        """Recover from a prior ``find_or_create_pr`` that crashed after setup
+        ran but before :meth:`GitHub.create_pr`.  Fix for #795.
+
+        Symptoms of the limbo state:
+        - ``find_pr`` returned ``None`` (no PR exists on GitHub);
+        - the current local branch is not the default branch;
+        - that branch has at least one commit ahead of the upstream default;
+        - ``tasks.json`` is populated (setup completed).
+
+        When all four hold, the prior iteration got as far as "push branch +
+        run setup" but never opened the PR.  Rather than delete the branch
+        and re-run setup from scratch (the old behavior — confusio's #206
+        loop), open the draft PR against the existing branch and continue as
+        if setup had just finished.
+
+        Returns the ``(pr_number, slug, is_fresh=True)`` tuple to hand back
+        to the caller, or ``None`` when no salvage is possible.
+        """
+        # Cheap check first: no tasks → nothing to salvage, no git calls.
+        if not self._tasks.list():
+            return None
+        try:
+            current_stdout = self._git(["branch", "--show-current"]).stdout
+        except subprocess.CalledProcessError:
+            return None
+        if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            current_stdout, str
+        ):
+            return None
+        current = current_stdout.strip()
+        if not current or current == repo_ctx.default_branch:
+            return None
+        try:
+            ahead_stdout = self._git(
+                [
+                    "rev-list",
+                    "--count",
+                    f"{remote}/{repo_ctx.default_branch}..HEAD",
+                ]
+            ).stdout
+        except subprocess.CalledProcessError:
+            return None
+        if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            ahead_stdout, str
+        ):
+            return None
+        ahead = ahead_stdout.strip()
+        if not ahead.isdigit() or int(ahead) < 1:
+            return None
+        log.info(
+            "salvage: interrupted attempt on branch %s — opening PR against "
+            "existing branch instead of rebuilding (see #795)",
+            current,
+        )
+        url = self.gh.create_pr(
+            repo_ctx.repo,
+            request,
+            f"Fixes #{issue}.",
+            repo_ctx.default_branch,
+            current,
+        )
+        pr_number = int(url.rstrip("/").split("/")[-1])
+        with State(fido_dir).modify() as state:
+            state["pr_number"] = pr_number
+            state["pr_title"] = request
+        _write_pr_description(
+            self.work_dir,
+            self.gh,
+            repo_ctx.repo,
+            pr_number,
+            issue,
+            self._tasks.list(),
+            agent=self._provider_agent,
+        )
+        log.info("salvage: PR #%s opened on branch %s  %s", pr_number, current, url)
+        return pr_number, current, True
+
     def find_or_create_pr(
         self,
         fido_dir: Path,
@@ -1284,6 +1369,18 @@ class Worker:
                 pr_number,
             )
             return pr_number, slug, False
+
+        # Recovery path for #795: if a previous iteration got as far as
+        # running setup (tasks.json populated) and pushing a branch, but
+        # crashed before ``create_pr``, then the current branch is the slug
+        # from that attempt and there is no PR on GitHub.  Before starting
+        # over from scratch, try to salvage that work: open the PR against
+        # the existing branch and treat it like a fresh PR from here on.
+        salvaged = self._salvage_interrupted_pr(
+            fido_dir, repo_ctx, issue, request, remote
+        )
+        if salvaged is not None:
+            return salvaged
 
         # Generate branch slug via the provider brief model
         raw_slug = self._provider_agent.generate_branch_name(

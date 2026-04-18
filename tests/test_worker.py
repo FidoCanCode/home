@@ -4332,6 +4332,290 @@ class TestFindOrCreatePr:
         assert "42" in caplog.text
 
 
+class TestSalvageInterruptedPr:
+    """Recovery path for #795: prior iteration ran setup + pushed branch but
+    crashed before ``create_pr``.  Salvage opens the PR on the existing branch
+    instead of rebuilding."""
+
+    def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido"
+        gh.get_default_branch.return_value = "main"
+        gh.create_pr.return_value = "https://github.com/owner/repo/pull/88"
+        return Worker(tmp_path, gh, provider_agent=_client()), gh
+
+    def _fido_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / ".git" / "fido"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _repo_ctx(self) -> RepoContext:
+        return RepoContext(
+            repo="owner/repo",
+            owner="owner",
+            repo_name="repo",
+            gh_user="fido",
+            default_branch="main",
+        )
+
+    def _git_side_effect(self, branch: str, ahead: str):
+        def _side(args, *_, **__):
+            if args == ["branch", "--show-current"]:
+                return subprocess.CompletedProcess(args, 0, stdout=branch, stderr="")
+            if args[0] == "rev-list":
+                return subprocess.CompletedProcess(args, 0, stdout=ahead, stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        return _side
+
+    def test_salvages_when_branch_has_commits_and_tasks_exist(
+        self, tmp_path: Path
+    ) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(
+                worker,
+                "_git",
+                side_effect=self._git_side_effect("rescue-me", "3\n"),
+            ),
+            patch("kennel.worker._write_pr_description") as mock_write,
+            patch(
+                "kennel.tasks.Tasks.list",
+                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
+            ),
+        ):
+            result = worker._salvage_interrupted_pr(
+                fido_dir, self._repo_ctx(), 42, "title (closes #42)", "origin"
+            )
+        assert result == (88, "rescue-me", True)
+        gh.create_pr.assert_called_once_with(
+            "owner/repo", "title (closes #42)", "Fixes #42.", "main", "rescue-me"
+        )
+        mock_write.assert_called_once()
+        state = State(fido_dir).load()
+        assert state["pr_number"] == 88
+        assert state["pr_title"] == "title (closes #42)"
+
+    def test_skips_when_on_default_branch(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        with (
+            patch.object(
+                worker,
+                "_git",
+                side_effect=self._git_side_effect("main", "0\n"),
+            ),
+            patch(
+                "kennel.tasks.Tasks.list",
+                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
+            ),
+        ):
+            result = worker._salvage_interrupted_pr(
+                self._fido_dir(tmp_path),
+                self._repo_ctx(),
+                1,
+                "t",
+                "origin",
+            )
+        assert result is None
+        gh.create_pr.assert_not_called()
+
+    def test_skips_when_branch_has_no_commits_ahead(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        with (
+            patch.object(
+                worker,
+                "_git",
+                side_effect=self._git_side_effect("work", "0\n"),
+            ),
+            patch(
+                "kennel.tasks.Tasks.list",
+                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
+            ),
+        ):
+            result = worker._salvage_interrupted_pr(
+                self._fido_dir(tmp_path),
+                self._repo_ctx(),
+                1,
+                "t",
+                "origin",
+            )
+        assert result is None
+        gh.create_pr.assert_not_called()
+
+    def test_skips_when_tasks_empty(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        with (
+            patch.object(
+                worker,
+                "_git",
+                side_effect=self._git_side_effect("work", "2\n"),
+            ),
+            patch("kennel.tasks.Tasks.list", return_value=[]),
+        ):
+            result = worker._salvage_interrupted_pr(
+                self._fido_dir(tmp_path),
+                self._repo_ctx(),
+                1,
+                "t",
+                "origin",
+            )
+        assert result is None
+        gh.create_pr.assert_not_called()
+
+    def test_skips_when_branch_query_fails(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+
+        def _raise(*_, **__):
+            raise subprocess.CalledProcessError(1, ["git"])
+
+        with (
+            patch.object(worker, "_git", side_effect=_raise),
+            patch(
+                "kennel.tasks.Tasks.list",
+                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
+            ),
+        ):
+            result = worker._salvage_interrupted_pr(
+                self._fido_dir(tmp_path),
+                self._repo_ctx(),
+                1,
+                "t",
+                "origin",
+            )
+        assert result is None
+        gh.create_pr.assert_not_called()
+
+    def test_skips_when_rev_list_fails(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        calls: list[list[str]] = []
+
+        def _side(args, *_, **__):
+            calls.append(args)
+            if args == ["branch", "--show-current"]:
+                return subprocess.CompletedProcess(args, 0, stdout="work", stderr="")
+            raise subprocess.CalledProcessError(1, ["git", *args])
+
+        with (
+            patch.object(worker, "_git", side_effect=_side),
+            patch(
+                "kennel.tasks.Tasks.list",
+                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
+            ),
+        ):
+            result = worker._salvage_interrupted_pr(
+                self._fido_dir(tmp_path),
+                self._repo_ctx(),
+                1,
+                "t",
+                "origin",
+            )
+        assert result is None
+        gh.create_pr.assert_not_called()
+
+    def test_skips_when_ahead_is_not_numeric(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        with (
+            patch.object(
+                worker,
+                "_git",
+                side_effect=self._git_side_effect("work", "garbage\n"),
+            ),
+            patch(
+                "kennel.tasks.Tasks.list",
+                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
+            ),
+        ):
+            result = worker._salvage_interrupted_pr(
+                self._fido_dir(tmp_path),
+                self._repo_ctx(),
+                1,
+                "t",
+                "origin",
+            )
+        assert result is None
+        gh.create_pr.assert_not_called()
+
+    def test_skips_when_branch_query_returns_non_string(self, tmp_path: Path) -> None:
+        """Defensive: if ``_git`` ever hands back a non-str stdout (mocks,
+        future refactors), salvage bails rather than exploding downstream."""
+        worker, gh = self._make_worker(tmp_path)
+        fake = MagicMock()
+        fake.stdout = None
+        with (
+            patch.object(worker, "_git", return_value=fake),
+            patch(
+                "kennel.tasks.Tasks.list",
+                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
+            ),
+        ):
+            result = worker._salvage_interrupted_pr(
+                self._fido_dir(tmp_path),
+                self._repo_ctx(),
+                1,
+                "t",
+                "origin",
+            )
+        assert result is None
+        gh.create_pr.assert_not_called()
+
+    def test_skips_when_ahead_stdout_is_non_string(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+
+        def _side(args, *_, **__):
+            if args == ["branch", "--show-current"]:
+                return subprocess.CompletedProcess(args, 0, stdout="work", stderr="")
+            fake = MagicMock()
+            fake.stdout = None
+            return fake
+
+        with (
+            patch.object(worker, "_git", side_effect=_side),
+            patch(
+                "kennel.tasks.Tasks.list",
+                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
+            ),
+        ):
+            result = worker._salvage_interrupted_pr(
+                self._fido_dir(tmp_path),
+                self._repo_ctx(),
+                1,
+                "t",
+                "origin",
+            )
+        assert result is None
+        gh.create_pr.assert_not_called()
+
+    def test_find_or_create_pr_uses_salvage_before_rebuild(
+        self, tmp_path: Path
+    ) -> None:
+        """End-to-end: when no PR exists but the workspace has an interrupted
+        attempt, ``find_or_create_pr`` returns via the salvage path without
+        running the setup sub-agent again."""
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = None
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(
+                worker,
+                "_git",
+                side_effect=self._git_side_effect("rescue-me", "2\n"),
+            ),
+            patch("kennel.worker._write_pr_description"),
+            patch(
+                "kennel.tasks.Tasks.list",
+                return_value=[{"id": "t1", "title": "x", "status": "pending"}],
+            ),
+            patch("kennel.worker.provider_start") as mock_setup,
+        ):
+            result = worker.find_or_create_pr(
+                fido_dir, self._repo_ctx(), 7, "fix thing"
+            )
+        assert result == (88, "rescue-me", True)
+        mock_setup.assert_not_called()
+
+
 class TestSeedTasksFromPrBody:
     """Tests for Worker.seed_tasks_from_pr_body."""
 
