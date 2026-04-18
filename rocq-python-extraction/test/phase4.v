@@ -25,6 +25,15 @@ Extract Inductive nat  => "int"
   [ "0" "(lambda x: x + 1)" ]
   "(lambda fO, fS, n: fO() if n == 0 else fS(n - 1))".
 
+(* Prevent user-defined parameterised inductives from being treated as
+   universe-polymorphic.  In Rocq 9.1.0 the extraction infrastructure
+   cannot erase the universe variable from an ML constructor pattern,
+   which causes "constructor expected N argument(s)" errors at every
+   match site that pattern-matches on a non-remapped constructor.
+   Remapped inductives (bool, nat, option, list) are unaffected because
+   their match arms never go through the Miniml arity check. *)
+Unset Universe Polymorphism.
+
 (* ------------------------------------------------------------------ *)
 (*  1. Polymorphic singly-linked list                                   *)
 (* ------------------------------------------------------------------ *)
