@@ -2,4 +2,12 @@
  (name rocq_python_extraction_plugin)
  (synopsis "Rocq → Python extraction plugin")
  (flags :standard -rectypes -open Extraction_plugin)
- (libraries rocq-runtime.plugins.extraction))
+ (libraries
+  rocq-runtime.plugins.extraction
+  rocq-runtime.interp
+  rocq-runtime.vernac))
+
+(rule
+ (targets g_python_extraction.ml)
+ (deps    (:mlg g_python_extraction.mlg))
+ (action  (chdir %{project_root} (run rocq pp-mlg %{deps}))))
