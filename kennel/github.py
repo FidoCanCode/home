@@ -13,6 +13,8 @@ from typing import Any
 
 import requests as _requests
 
+from kennel.types import GitIdentity
+
 log = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT: int = 30  # seconds for all outbound GitHub HTTP requests
@@ -446,6 +448,22 @@ class GitHub:
         """Return the authenticated GitHub username."""
         data = self._get("/user")
         return data["login"]
+
+    def get_authenticated_identity(self) -> GitIdentity:
+        """Return the git commit identity derived from the authenticated GitHub user.
+
+        Name: the account's display name, falling back to ``login`` when unset.
+        Email: the GitHub noreply form
+        ``{id}+{login}@users.noreply.github.com`` — never the real email.
+        """
+        data = self._get("/user")
+        login = data["login"]
+        uid = data["id"]
+        name = data.get("name") or login
+        return GitIdentity(
+            name=name,
+            email=f"{uid}+{login}@users.noreply.github.com",
+        )
 
     def get_collaborators(self, repo: str) -> list[str]:
         """Return logins of collaborators with write+ permission on *repo*.

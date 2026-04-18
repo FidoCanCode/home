@@ -36,7 +36,9 @@ from kennel.tasks import (
     sync_tasks,
     sync_tasks_background,
 )
+from kennel.types import GitIdentity
 from kennel.worker import (
+    GitIdentityError,
     LockHeld,
     RepoContext,
     RepoContextFilter,
@@ -96,6 +98,11 @@ class Worker(_WorkerBase):
                 membership=kwargs.get("membership"),
             )
         super().__init__(work_dir, gh, *args, **kwargs)
+
+    def assert_git_identity(self, *, phase: str) -> None:
+        """No-op by default in tests — the git identity invariant is exercised
+        in ``TestAssertGitIdentity`` directly against the real method."""
+        return None
 
 
 class WorkerThread(_WorkerThreadBase):
@@ -2104,6 +2111,73 @@ class TestIssueHasOpenSubIssues:
         gh.get_sub_issues.return_value = iter([])
         worker._issue_has_open_sub_issues("FidoCanCode/home", 710)
         gh.get_sub_issues.assert_called_once_with("FidoCanCode", "home", 710)
+
+
+class TestAssertGitIdentity:
+    """Pre/post invariant: workspace git identity must match the authenticated
+    GitHub user (fix for #792)."""
+
+    _EXPECTED = GitIdentity(
+        name="Fido Can Code",
+        email="190991155+FidoCanCode@users.noreply.github.com",
+    )
+
+    def _worker(self, tmp_path: Path) -> tuple[_WorkerBase, MagicMock]:
+        """Use the real Worker class (not the module-level test shim) so the
+        guard method is exercised, not the no-op override."""
+        gh = MagicMock()
+        gh.get_authenticated_identity.return_value = self._EXPECTED
+        return _WorkerBase(tmp_path, gh), gh
+
+    def _init_repo(
+        self, tmp_path: Path, *, name: str | None, email: str | None
+    ) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        if name is not None:
+            subprocess.run(
+                ["git", "config", "user.name", name], cwd=tmp_path, check=True
+            )
+        if email is not None:
+            subprocess.run(
+                ["git", "config", "user.email", email], cwd=tmp_path, check=True
+            )
+
+    def test_passes_when_config_matches(self, tmp_path: Path) -> None:
+        self._init_repo(
+            tmp_path,
+            name="Fido Can Code",
+            email="190991155+FidoCanCode@users.noreply.github.com",
+        )
+        worker, _ = self._worker(tmp_path)
+        worker.assert_git_identity(phase="pre")  # must not raise
+
+    def test_raises_on_name_mismatch(self, tmp_path: Path) -> None:
+        self._init_repo(
+            tmp_path,
+            name="test",
+            email="190991155+FidoCanCode@users.noreply.github.com",
+        )
+        worker, _ = self._worker(tmp_path)
+        with pytest.raises(GitIdentityError, match="invariant violated \\(pre\\)"):
+            worker.assert_git_identity(phase="pre")
+
+    def test_raises_on_email_mismatch(self, tmp_path: Path) -> None:
+        self._init_repo(tmp_path, name="Fido Can Code", email="test@example.com")
+        worker, _ = self._worker(tmp_path)
+        with pytest.raises(GitIdentityError, match="invariant violated \\(post\\)"):
+            worker.assert_git_identity(phase="post")
+
+    def test_message_uses_git_style_identity_format(self, tmp_path: Path) -> None:
+        self._init_repo(tmp_path, name="test", email="test@example.com")
+        worker, _ = self._worker(tmp_path)
+        with pytest.raises(GitIdentityError) as excinfo:
+            worker.assert_git_identity(phase="pre")
+        msg = str(excinfo.value)
+        assert "test <test@example.com>" in msg
+        assert "Fido Can Code <190991155+FidoCanCode@users.noreply.github.com>" in msg
+
+    def test_git_identity_str_is_git_author_format(self) -> None:
+        assert str(GitIdentity(name="A Dog", email="a@b.c")) == "A Dog <a@b.c>"
 
 
 class TestNoCommitNudge:
