@@ -450,6 +450,9 @@ let pp_ind_decl state (ind : ml_ind) =
       let p = ind.ind_packets.(0) in
       if p.ip_logical then
         str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
+      else if is_custom p.ip_typename_ref then
+        str "# " ++ Id.print p.ip_typename ++
+        str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
       else
         str "# " ++ Id.print p.ip_typename ++
         str ": singleton inductive, constructor was " ++
@@ -458,12 +461,18 @@ let pp_ind_decl state (ind : ml_ind) =
       let p = ind.ind_packets.(0) in
       if p.ip_logical then
         str "# " ++ Id.print p.ip_typename ++ str ": logical record" ++ fnl ()
+      else if is_custom p.ip_typename_ref then
+        str "# " ++ Id.print p.ip_typename ++
+        str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
       else
         pp_one_cons state p (Some fields) 0
   | Standard | Coinductive ->
       let pp_packet p =
         if p.ip_logical then
           str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
+        else if is_custom p.ip_typename_ref then
+          str "# " ++ Id.print p.ip_typename ++
+          str ": remapped to Python primitive via Extract Inductive" ++ fnl ()
         else
           let n = Array.length p.ip_types in
           prlist_with_sep (fun () -> fnl ())
