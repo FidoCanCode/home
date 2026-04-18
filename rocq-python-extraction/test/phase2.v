@@ -14,9 +14,6 @@
       [MLcase]      — bool ternary + general structural match
       [MLfix]       — Dfix mutual-fixpoint declaration
       [Dind]        — Standard, Record, Coinductive inductive declarations
-      [MLuint]      — 63-bit integer literal
-      [MLfloat]     — IEEE 754 float literal
-      [MLstring]    — primitive byte-string literal
       [MLaxiom]     — unproved axiom
       [MLdummy]     — erased (logical) argument
 
@@ -24,6 +21,12 @@
       [MLexn]     — requires empty-match or erasure edge-cases; deferred
       [MLmagic]   — internal extraction coercion; hard to trigger directly
       [MLparray]  — persistent arrays intentionally not supported (MVP stub)
+      [MLuint]    — 63-bit integer literal; requires [PrimInt63] from rocq-stdlib,
+                    which has no opam release compatible with rocq-core.9.2.0
+      [MLfloat]   — IEEE 754 float literal; requires [PrimFloat] from rocq-stdlib,
+                    same constraint as MLuint
+      [MLstring]  — primitive byte-string literal; requires [PrimString] from
+                    rocq-stdlib, same constraint as MLuint
 *)
 
 Declare ML Module "rocq-python-extraction".
@@ -31,19 +34,10 @@ Declare ML Module "rocq-python-extraction".
 (* [Extract Inductive] and related vernaculars are registered by the
    rocq-runtime.plugins.extraction ML plugin.  That plugin is part of
    rocq-core (not rocq-stdlib), so it is always available.  We load it
-   directly rather than via [From Stdlib Require Import extraction.Extraction],
-   which has no compatible release for rocq-core.9.2.0 in the default opam repo.
-
-   The primitive-type theories (PrimInt63, PrimFloat, PrimString) are bundled
-   inside rocq-core and accessible via Rocq's search path even though there is
-   no separate rocq-stdlib opam package installed; dune does not need a
-   [(theories Stdlib)] entry to find them at compile time. *)
+   directly rather than via [From Stdlib Require Import extraction.Extraction]:
+   no rocq-stdlib release is compatible with rocq-core.9.2.0 in the default
+   opam repo, so all [From Stdlib Require Import] are unavailable in CI. *)
 Declare ML Module "rocq-runtime.plugins.extraction".
-
-From Stdlib Require Import
-  Numbers.Cyclic.Int63.PrimInt63  (* provides the [int] type *)
-  Floats.PrimFloat                 (* provides the [float] type *)
-  Strings.PrimString.              (* provides the [%pstring] notation *)
 
 (* ------------------------------------------------------------------ *)
 (*  Extract Inductive bool → Python True/False (enables ternary emit)  *)
@@ -113,17 +107,6 @@ Fixpoint nat_add (n m : nat) : nat :=
   | S n' => S (nat_add n' m)
   end.
 
-(** MLuint: 63-bit machine integer literal. *)
-Definition uint_val : int := 42.
-
-(** MLfloat: IEEE 754 float literal. *)
-Definition float_val : float := 3.14.
-
-(** MLstring: primitive byte-string literal.  Type inferred from the
-    [%pstring] notation; no [PrimString.string] qualified annotation needed
-    when the Stdlib is not installed. *)
-Definition str_val := "hello"%pstring.
-
 (** MLaxiom: unproved assumption — extracts to [raise NotImplementedError]. *)
 Axiom todo_val : nat.
 
@@ -141,15 +124,6 @@ Python Extraction mk_pair_r.
 
 (** [zeros.py]: covers stream (Dind Coinductive), MLcons Coinductive. *)
 Python Extraction zeros.
-
-(** [uint_val.py]: MLuint literal. *)
-Python Extraction uint_val.
-
-(** [float_val.py]: MLfloat literal. *)
-Python Extraction float_val.
-
-(** [str_val.py]: MLstring literal. *)
-Python Extraction str_val.
 
 (** [todo_val.py]: MLaxiom. *)
 Python Extraction todo_val.
