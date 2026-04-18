@@ -897,6 +897,52 @@ class TestGitHubClass:
         assert url.endswith("/user")
         assert result == "fido"
 
+    def test_get_authenticated_identity_builds_noreply_email(self) -> None:
+        from kennel.types import GitIdentity
+
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "login": "FidoCanCode",
+            "id": 190991155,
+            "name": "Fido Can Code",
+        }
+        mock_s.get.return_value = mock_resp
+        assert gh.get_authenticated_identity() == GitIdentity(
+            name="Fido Can Code",
+            email="190991155+FidoCanCode@users.noreply.github.com",
+        )
+
+    def test_get_authenticated_identity_falls_back_to_login_when_name_missing(
+        self,
+    ) -> None:
+        from kennel.types import GitIdentity
+
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"login": "fido", "id": 1, "name": None}
+        mock_s.get.return_value = mock_resp
+        assert gh.get_authenticated_identity() == GitIdentity(
+            name="fido", email="1+fido@users.noreply.github.com"
+        )
+
+    def test_get_authenticated_identity_never_leaks_real_email(self) -> None:
+        """Even if the API exposes an email, we build the noreply form — the
+        real address never appears on a commit.
+        """
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "login": "fido",
+            "id": 42,
+            "name": "Fido",
+            "email": "real.person@example.com",
+        }
+        mock_s.get.return_value = mock_resp
+        identity = gh.get_authenticated_identity()
+        assert "real.person@example.com" not in identity.email
+        assert identity.email == "42+fido@users.noreply.github.com"
+
     def test_get_collaborators_filters_by_permission(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()

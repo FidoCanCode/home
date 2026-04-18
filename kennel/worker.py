@@ -41,7 +41,15 @@ from kennel.state import (
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
 )
 from kennel.tasks import Tasks
-from kennel.types import TaskStatus, TaskType
+from kennel.types import GitIdentity, TaskStatus, TaskType
+
+
+class GitIdentityError(Exception):
+    """Raised when a workspace's git identity doesn't match the authenticated
+    GitHub user — fails closed so we never ship commits under the wrong author
+    (see #792).
+    """
+
 
 _CI_LOG_TAIL = 200  # max lines of failure log to include in the CI prompt
 
@@ -2445,6 +2453,45 @@ class Worker:
         log.info("rescope_before_pick: rescoping task list before next pick")
         reorder_tasks(self.work_dir, commit_summary, **kwargs)
 
+    def assert_git_identity(self, *, phase: str) -> None:
+        """Enforce the git-identity invariant (see #792).
+
+        An invariant, checked at both the start (pre-condition) and end
+        (post-condition) of every worker iteration: the workspace's configured
+        git identity must match the authenticated GitHub user.  If it doesn't,
+        raise — loud failure in the crash log beats silently shipping a commit
+        under the wrong author.
+
+        The expected identity is derived dynamically from the GitHub API —
+        ``name`` from the account's display name (fallback: login), ``email``
+        from the noreply form ``{id}+{login}@users.noreply.github.com`` so a
+        real address is never used.
+
+        A post-condition failure (``phase="post"``) is the scary case: it means
+        something *during the iteration* mutated the config.  Either way the
+        worker aborts and the watchdog restarts.
+        """
+        expected = self.gh.get_authenticated_identity()
+        actual = GitIdentity(
+            name=self._git_config_get("user.name"),
+            email=self._git_config_get("user.email"),
+        )
+        if actual != expected:
+            raise GitIdentityError(
+                f"git identity invariant violated ({phase}) in {self.work_dir}: "
+                f"actual={actual} expected={expected}"
+            )
+
+    def _git_config_get(self, key: str) -> str:
+        """Return ``git config --get <key>`` in the workspace, empty on unset."""
+        result = subprocess.run(
+            ["git", "config", "--get", key],
+            cwd=self.work_dir,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+
     def run(self) -> int:
         """Run one iteration of the worker loop.
 
@@ -2462,116 +2509,122 @@ class Worker:
         with ctx:
             log.info("worker started for %s (git_dir=%s)", self.work_dir, ctx.git_dir)
 
-            repo_ctx = self.discover_repo_context()
-            log.info(
-                "repo=%s user=%s default_branch=%s",
-                repo_ctx.repo,
-                repo_ctx.gh_user,
-                repo_ctx.default_branch,
-            )
-
-            compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
-            session_fresh = self._session is None
-            if session_fresh:
-                self.create_session()
+            self.assert_git_identity(phase="pre")
             try:
-                issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
-                if issue is None:
-                    issue = self.find_next_issue(ctx.fido_dir, repo_ctx)
-                if issue is None:
-                    return 0
-
-                # Guard: if the active issue has acquired open sub-issues
-                # post-pickup (e.g. fido groomed it into sub-issues, or a
-                # human added children), it is no longer a leaf.  Drop the
-                # issue out of state.json so the next iteration's picker
-                # re-descends from the true root and lands on the first
-                # open child.  Assignees are not touched (per-repo policy).
-                # Fix for #780.
-                if self._issue_has_open_sub_issues(repo_ctx.repo, issue):
-                    log.warning(
-                        "issue #%s has acquired open sub-issues — abandoning "
-                        "state so picker re-descends next iteration (see #780)",
-                        issue,
-                    )
-                    with State(ctx.fido_dir).modify() as state:
-                        state.pop("issue", None)
-                        state.pop("issue_title", None)
-                        state.pop("issue_started_at", None)
-                        state.pop("pr_number", None)
-                        state.pop("pr_title", None)
-                        state.pop("current_task_id", None)
-                    return 0
-
-                self._next_turn_session_mode = TurnSessionMode.REUSE
-                if not session_fresh and issue != self._session_issue:
-                    log.info(
-                        "worker: new issue #%s — restarting session at issue boundary",
-                        issue,
-                    )
-                    self._next_turn_session_mode = TurnSessionMode.FRESH
-                self._session_issue = issue
-
-                issue_data = self.gh.view_issue(repo_ctx.repo, issue)
-                issue_title = issue_data["title"]
-                issue_body = issue_data.get("body", "") or ""
-                pr_number, slug, pr_is_fresh = self.find_or_create_pr(
-                    ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
-                )
-                recovery_provider = (
-                    self._ensure_provider().provider_id
-                    if self._repo_cfg is None
-                    else self._repo_cfg.provider
-                )
-                recovery_repo_cfg = RepoConfig(
-                    name=repo_ctx.repo,
-                    work_dir=self.work_dir,
-                    provider=recovery_provider,
-                    membership=repo_ctx.membership,
-                )
-                recovery_config = Config(
-                    port=0,
-                    secret=b"",
-                    repos={repo_ctx.repo: recovery_repo_cfg},
-                    allowed_bots=frozenset(),
-                    log_level="WARNING",
-                    sub_dir=_sub_dir(),
-                )
-                from kennel.events import recover_reply_promises
-
-                recovered_promises = recover_reply_promises(
-                    ctx.fido_dir,
-                    recovery_config,
-                    recovery_repo_cfg,
-                    self.gh,
-                    pr_number,
-                    agent=self._provider_agent,
-                    prompts=self._get_prompts(),
-                )
-                self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
-                if pr_is_fresh:
-                    log.info("fresh PR — skipping CI/thread/rescope checks")
-                else:
-                    self.rescope_before_pick()
-                    if self.handle_merge_conflict(
-                        ctx.fido_dir, repo_ctx, pr_number, slug
-                    ):
-                        return 1
-                    if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
-                        return 1
-                    if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
-                        return 1
-                if self.execute_task(ctx.fido_dir, repo_ctx, pr_number, slug):
-                    self.resolve_addressed_threads(repo_ctx, pr_number)
-                    return 1
-                promote_result = self.handle_promote_merge(
-                    ctx.fido_dir, repo_ctx, pr_number, slug, issue
-                )
-                return (
-                    1 if recovered_promises and promote_result == 0 else promote_result
-                )
+                return self._run_iteration(ctx)
             finally:
-                self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
+                self.assert_git_identity(phase="post")
+
+    def _run_iteration(self, ctx: WorkerContext) -> int:
+        """Body of :meth:`run` — guaranteed to run between the pre- and
+        post-condition identity checks in :meth:`run`.
+        """
+        repo_ctx = self.discover_repo_context()
+        log.info(
+            "repo=%s user=%s default_branch=%s",
+            repo_ctx.repo,
+            repo_ctx.gh_user,
+            repo_ctx.default_branch,
+        )
+
+        compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
+        session_fresh = self._session is None
+        if session_fresh:
+            self.create_session()
+        try:
+            issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
+            if issue is None:
+                issue = self.find_next_issue(ctx.fido_dir, repo_ctx)
+            if issue is None:
+                return 0
+
+            # Guard: if the active issue has acquired open sub-issues
+            # post-pickup (e.g. fido groomed it into sub-issues, or a
+            # human added children), it is no longer a leaf.  Drop the
+            # issue out of state.json so the next iteration's picker
+            # re-descends from the true root and lands on the first
+            # open child.  Assignees are not touched (per-repo policy).
+            # Fix for #780.
+            if self._issue_has_open_sub_issues(repo_ctx.repo, issue):
+                log.warning(
+                    "issue #%s has acquired open sub-issues — abandoning "
+                    "state so picker re-descends next iteration (see #780)",
+                    issue,
+                )
+                with State(ctx.fido_dir).modify() as state:
+                    state.pop("issue", None)
+                    state.pop("issue_title", None)
+                    state.pop("issue_started_at", None)
+                    state.pop("pr_number", None)
+                    state.pop("pr_title", None)
+                    state.pop("current_task_id", None)
+                return 0
+
+            self._next_turn_session_mode = TurnSessionMode.REUSE
+            if not session_fresh and issue != self._session_issue:
+                log.info(
+                    "worker: new issue #%s — restarting session at issue boundary",
+                    issue,
+                )
+                self._next_turn_session_mode = TurnSessionMode.FRESH
+            self._session_issue = issue
+
+            issue_data = self.gh.view_issue(repo_ctx.repo, issue)
+            issue_title = issue_data["title"]
+            issue_body = issue_data.get("body", "") or ""
+            pr_number, slug, pr_is_fresh = self.find_or_create_pr(
+                ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
+            )
+            recovery_provider = (
+                self._ensure_provider().provider_id
+                if self._repo_cfg is None
+                else self._repo_cfg.provider
+            )
+            recovery_repo_cfg = RepoConfig(
+                name=repo_ctx.repo,
+                work_dir=self.work_dir,
+                provider=recovery_provider,
+                membership=repo_ctx.membership,
+            )
+            recovery_config = Config(
+                port=0,
+                secret=b"",
+                repos={repo_ctx.repo: recovery_repo_cfg},
+                allowed_bots=frozenset(),
+                log_level="WARNING",
+                sub_dir=_sub_dir(),
+            )
+            from kennel.events import recover_reply_promises
+
+            recovered_promises = recover_reply_promises(
+                ctx.fido_dir,
+                recovery_config,
+                recovery_repo_cfg,
+                self.gh,
+                pr_number,
+                agent=self._provider_agent,
+                prompts=self._get_prompts(),
+            )
+            self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
+            if pr_is_fresh:
+                log.info("fresh PR — skipping CI/thread/rescope checks")
+            else:
+                self.rescope_before_pick()
+                if self.handle_merge_conflict(ctx.fido_dir, repo_ctx, pr_number, slug):
+                    return 1
+                if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
+                    return 1
+                if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
+                    return 1
+            if self.execute_task(ctx.fido_dir, repo_ctx, pr_number, slug):
+                self.resolve_addressed_threads(repo_ctx, pr_number)
+                return 1
+            promote_result = self.handle_promote_merge(
+                ctx.fido_dir, repo_ctx, pr_number, slug, issue
+            )
+            return 1 if recovered_promises and promote_result == 0 else promote_result
+        finally:
+            self.teardown_hooks(ctx.fido_dir, compact_cmd, sync_cmd)
 
 
 _IDLE_TIMEOUT = 60.0  # seconds to wait when there was no work to do
