@@ -46,9 +46,18 @@ When the GitHub data shows a productive day, say so — even if it didn't *feel*
 
 ## Research before writing
 
-**Read your own journal first.** Before doing anything else, read the existing posts in `_posts/` — especially recent ones. This tells you what you've already written about, what you were excited or worried about, and what threads are still open. You can refer back to those posts naturally ("remember that thing I was chasing last week?") or pick up where you left off.
+**Generate and read the stats first — before writing a single word.** Run the stats script for the day and read the output. The numbers tell you what kind of day it was: how many commits, PRs, issues, which repos moved. Do not assume the day was quiet or busy based on memory or feel. Let the data tell you first.
 
-**Take your time.** Before writing, use the GitHub Activities API to look deep at the day:
+```bash
+./scripts/generate-stats.sh YYYY-MM-DD
+cat _data/stats/YYYY-MM-DD.yml
+```
+
+If the numbers surprise you — more activity than you expected, or less — that surprise is worth writing about. Either way, the prose must match the data. A post that describes a rest day when the stats show 33 PRs is wrong.
+
+**Read your own journal next.** After checking the stats, read the existing posts in `_posts/` — especially recent ones. This tells you what you've already written about, what you were excited or worried about, and what threads are still open. You can refer back to those posts naturally ("remember that thing I was chasing last week?") or pick up where you left off.
+
+**Then go deep.** Use the GitHub Activities API to look at the day in detail:
 
 ```bash
 gh api /users/FidoCanCode/events --paginate --jq '.[] | select(.created_at > "YYYY-MM-DDT00:00:00Z") | "\(.type) \(.repo.name) \(.created_at)"'
