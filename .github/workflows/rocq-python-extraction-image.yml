@@ -6,6 +6,7 @@ on:
     paths:
       - 'rocq-python-extraction/Dockerfile'
       - '.github/workflows/rocq-python-extraction-image.yml'
+  workflow_dispatch:
 
 jobs:
   publish:
