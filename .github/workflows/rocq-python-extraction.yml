@@ -1,0 +1,30 @@
+name: rocq-python-extraction CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rocq-python-extraction/**'
+      - '.github/workflows/rocq-python-extraction.yml'
+  pull_request:
+    paths:
+      - 'rocq-python-extraction/**'
+      - '.github/workflows/rocq-python-extraction.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull or build container image
+        run: |
+          docker pull ghcr.io/fidocancode/rocq-python-extraction:latest || \
+          docker build -t ghcr.io/fidocancode/rocq-python-extraction:latest \
+            rocq-python-extraction
+
+      - name: Build and test
+        run: |
+          docker run --rm -v "$PWD:/src:ro" ghcr.io/fidocancode/rocq-python-extraction:latest \
+            sh -c "cp -r /src /tmp/work && cd /tmp/work/rocq-python-extraction && opam exec -- make test"
