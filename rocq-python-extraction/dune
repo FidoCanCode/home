@@ -23,7 +23,7 @@
  (deps test/phase2.vo)
  (action
   (bash "\
-for f in nat_add.py mk_pair_r.py zeros.py todo_val.py; do \
+for f in nat_add.py mk_pair_r.py zeros.py uint_val.py float_val.py str_val.py todo_val.py; do \
   python3 -m py_compile \"$f\" || exit 1; \
 done && echo 'All extracted .py files are syntactically valid Python.'"
   )))

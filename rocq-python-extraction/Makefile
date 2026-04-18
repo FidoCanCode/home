@@ -9,6 +9,9 @@ PY_ARTIFACTS := \
 	_build/default/nat_add.py \
 	_build/default/mk_pair_r.py \
 	_build/default/zeros.py \
+	_build/default/uint_val.py \
+	_build/default/float_val.py \
+	_build/default/str_val.py \
 	_build/default/todo_val.py \
 	_build/default/bool_not.py \
 	_build/default/nat_double.py \
