@@ -1,6 +1,5 @@
 (** Rocq → Python extraction backend.
-    Phase 2: expression printer — leaf nodes, [MLglob], [MLapp], [MLlam],
-    [MLletin], [MLtuple], [MLcons]. *)
+    Phase 2: expression printer — all [ml_ast] nodes except [MLfix]. *)
 
 open Pp
 open Names
@@ -106,10 +105,50 @@ let str_cons state r =
   if is_inline_custom r then find_custom r
   else pp_global state Cons r
 
+(*s Pattern printer for Python [case] syntax. *)
+
+(** Check whether pattern [p] has a custom extraction equal to string [s].
+    Used to detect bool patterns mapped to ["True"] / ["False"]. *)
+let is_bool_patt p s =
+  try
+    let r = match p with
+      | Pusual r | Pcons (r, []) -> r
+      | _ -> raise Not_found
+    in
+    String.equal (find_custom r) s
+  with Not_found -> false
+
+(** Pretty-print an [ml_pattern] in Python [case] syntax.
+    [ids] are the branch binder names in source order (outermost first),
+    already renamed and ready to emit.
+    [env'] is the de Bruijn environment with those binders pushed. *)
+let rec pp_pattern state ids env' = function
+  | Pcons (r, []) ->
+      let cons = str_cons state r in
+      (* Erased / empty-name constructor: emit wildcard so the arm still matches *)
+      if String.equal "" cons then str "_"
+      else str cons ++ str "()"
+  | Pcons (r, pats) ->
+      str (str_cons state r) ++ str "(" ++
+      prlist_with_sep (fun () -> str ", ") (pp_pattern state ids env') pats ++
+      str ")"
+  | Pusual r ->
+      (* Shorthand for [Pcons(r,[Prel n;…;Prel 1])].  [ids] already holds the
+         renamed binders in source order — emit them positionally. *)
+      str (str_cons state r) ++ str "(" ++
+      prlist_with_sep (fun () -> str ", ") Id.print ids ++
+      str ")"
+  | Ptuple pats ->
+      str "(" ++
+      prlist_with_sep (fun () -> str ", ") (pp_pattern state ids env') pats ++
+      str ")"
+  | Prel n ->
+      Id.print (get_db_name n env')
+  | Pwild ->
+      str "_"
+
 (*s Core expression printer.
-    [env] carries de Bruijn binder names (innermost first).
-    Compound nodes not yet implemented emit [# UNIMPL <Node>] stubs;
-    they will be replaced in subsequent Phase 2 tasks. *)
+    [env] carries de Bruijn binder names (innermost first). *)
 
 let rec pp_expr state env = function
   | MLrel n ->
@@ -227,8 +266,42 @@ let rec pp_expr state env = function
           str cons_name ++ str "(" ++
           prlist_with_sep (fun () -> str ", ") (pp_expr state env) args ++
           str ")"
-  (* Stubs — replaced in subsequent tasks *)
-  | MLcase  _ -> str "# UNIMPL MLcase"
+  | MLcase (_, scrutinee, branches) ->
+      (* Boolean match: [if cond then e1 else e2] → Python ternary [e1 if cond else e2].
+         Detect the bool pattern by checking if the two arms are mapped to
+         ["True"] and ["False"] via [Extract Inductive bool]. *)
+      let is_bool =
+        Array.length branches = 2 &&
+        ( let (_, p0, _) = branches.(0) in
+          let (_, p1, _) = branches.(1) in
+          is_bool_patt p0 "True" && is_bool_patt p1 "False" )
+      in
+      if is_bool then
+        let (_, _, body_true)  = branches.(0) in
+        let (_, _, body_false) = branches.(1) in
+        pp_expr state env body_true  ++ str " if " ++
+        pp_expr state env scrutinee  ++ str " else " ++
+        pp_expr state env body_false
+      else
+        (* General match: emit Python [match]/[case] statement.
+           This is a statement in Python, so it only works correctly when the
+           surrounding [Dterm] or [MLletin] emits it inside a function body.
+           The "Wire Dterm and Dfix" task handles that lifting.  For now we
+           emit the raw statement form so the structure is visible. *)
+        let pp_branch (ids, pat, body) =
+          (* [push_vars] wants ids innermost-first (de Bruijn order).
+             [collect_lams]/branch ids come outermost-first, so reverse. *)
+          let ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
+          (* After push, [ids'] are also innermost-first; re-reverse for
+             source order so [pp_pattern] can emit positional names correctly. *)
+          let pp_pat  = pp_pattern state (List.rev ids') env' pat in
+          let pp_body = pp_expr state env' body in
+          str "    case " ++ pp_pat ++ str ":" ++ fnl () ++
+          str "        " ++ pp_body
+        in
+        str "match " ++ pp_expr state env scrutinee ++ str ":" ++ fnl () ++
+        prlist_with_sep fnl pp_branch (Array.to_list branches)
+  (* Stub — replaced in the MLfix task *)
   | MLfix   _ -> str "# UNIMPL MLfix"
 
 (*s Declaration printer.  [Dterm] now emits real Python for the RHS
