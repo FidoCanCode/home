@@ -11,11 +11,13 @@ RUN sudo apt-get update \
         python3 \
     && sudo rm -rf /var/lib/apt/lists/*
 
-# Install Rocq 9.1, rocq-stdlib 9.1.0, and dune, then clean up opam cache.
-# rocq-stdlib.9.1.0 is the latest release with an opam package that matches
-# rocq-core.9.1.0; it provides PrimInt63, PrimFloat, and PrimString (needed for
-# MLuint/MLfloat/MLstring test coverage).
-RUN opam install -y rocq-core.9.1.0 rocq-stdlib.9.1.0 dune \
+# Add the rocq-prover opam repository, which carries rocq-stdlib.9.1.0 (not
+# yet in the default opam repository).  Then install Rocq 9.1, rocq-stdlib
+# 9.1.0, and dune, and clean up the opam cache.  rocq-stdlib.9.1.0 provides
+# PrimInt63, PrimFloat, and PrimString (needed for MLuint/MLfloat/MLstring
+# test coverage).
+RUN opam repo add rocq-released https://rocq-prover.org/opam/released \
+    && opam install -y rocq-core.9.1.0 rocq-stdlib.9.1.0 dune \
     && opam clean --all
 
 WORKDIR /workspace
