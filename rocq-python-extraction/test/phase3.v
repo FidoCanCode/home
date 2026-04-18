@@ -8,6 +8,7 @@
       bool   → Python bool      ([True]/[False] ternary, both directions)
       nat    → Python int       (constructor inline lambdas + custom match)
       option → Python Optional  (Some erased to value; None → Python None)
+      prod   → Python tuple     (erased constructor; tuple patterns in match)
 *)
 
 Declare ML Module "rocq-python-extraction".
@@ -82,3 +83,28 @@ Definition option_inc (o : option nat) : option nat :=
   end.
 
 Python Extraction option_inc.
+
+(* ------------------------------------------------------------------ *)
+(*  prod → Python tuple                                                *)
+(*                                                                     *)
+(*  Constructor mapping:                                               *)
+(*    pair → ""   (multi-arg erasure: emit (a, b) directly)           *)
+(*  No custom match function needed: Python tuple patterns work natively *)
+(*  in [match]/[case], so the general structural match path handles it. *)
+(* ------------------------------------------------------------------ *)
+
+Extract Inductive prod => "" [ "" ].
+
+(** [pair_swap]: swap the two components of a [nat * nat] pair.
+    Exercises both tuple construction ([MLcons]/[MLtuple] with erased
+    constructor → [(a, b)] literal) and tuple pattern matching
+    ([Pcons]/[Ptuple] → [(a, b)] pattern).  With [nat → int] and
+    [prod → tuple], the extracted function operates on plain Python tuples
+    of ints.
+    Expected: pair_swap (a, b) = (b, a) for all a, b. *)
+Definition pair_swap (p : nat * nat) : nat * nat :=
+  match p with
+  | (a, b) => (b, a)
+  end.
+
+Python Extraction pair_swap.
