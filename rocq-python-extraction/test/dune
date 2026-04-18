@@ -1,5 +1,6 @@
 (rocq.theory
  (name PyExtractTest)
- (synopsis "Phase 1 acceptance test")
+ (synopsis "Phase 2 acceptance tests — all core term nodes")
  (plugins rocq-python-extraction)
- (modules acceptance))
+ (theories Stdlib)
+ (modules acceptance phase2))

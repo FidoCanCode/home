@@ -12,3 +12,18 @@
  (targets g_python_extraction.ml)
  (deps    (:mlg g_python_extraction.mlg))
  (action  (chdir %{project_root} (run rocq pp-mlg %{deps}))))
+
+; Validate that every .py produced by phase2.v is syntactically valid Python.
+; These files are written as side-effects of the rocq.theory build and land in
+; the project's build root (_build/default/).  The theory .vo is listed as a
+; dep so dune builds it first; the .py files exist in the same build pass
+; before dune's next-invocation cleanup removes undeclared artifacts.
+(rule
+ (alias runtest)
+ (deps test/phase2.vo)
+ (action
+  (bash "\
+for f in nat_add.py mk_pair_r.py zeros.py uint_val.py float_val.py str_val.py todo_val.py; do \
+  python3 -m py_compile \"$f\" || exit 1; \
+done && echo 'All extracted .py files are syntactically valid Python.'"
+  )))

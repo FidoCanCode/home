@@ -70,6 +70,14 @@ let pp_float_lit f =
   | "neg_infinity" -> str "float('-inf')"
   | s              -> str s
 
+(*s Python-safe identifier printer.
+    Rocq/OCaml allow primed identifiers ([n''], [f'']) that are illegal in
+    Python.  Convert each apostrophe to an underscore so names like [n'] become
+    [n_] and remain valid Python identifiers. *)
+
+let pp_pyid id =
+  str (String.map (function '\'' -> '_' | c -> c) (Id.to_string id))
+
 (*s Global reference printer.  Honours [Extract Constant ... => "..."]
     inline-custom declarations. *)
 
@@ -137,14 +145,14 @@ let rec pp_pattern state ids env' = function
       (* Shorthand for [Pcons(r,[Prel n;…;Prel 1])].  [ids] already holds the
          renamed binders in source order — emit them positionally. *)
       str (str_cons state r) ++ str "(" ++
-      prlist_with_sep (fun () -> str ", ") Id.print ids ++
+      prlist_with_sep (fun () -> str ", ") pp_pyid ids ++
       str ")"
   | Ptuple pats ->
       str "(" ++
       prlist_with_sep (fun () -> str ", ") (pp_pattern state ids env') pats ++
       str ")"
   | Prel n ->
-      Id.print (get_db_name n env')
+      pp_pyid (get_db_name n env')
   | Pwild ->
       str "_"
 
@@ -156,8 +164,7 @@ let rec pp_expr state env = function
       (* De Bruijn variable: look up the binder name.  The dummy name [_]
          signals an erased binder; emit [__] (the module-level sentinel). *)
       let id = get_db_name n env in
-      let id = if Id.equal id dummy_name then Id.of_string "__" else id in
-      Id.print id
+      if Id.equal id dummy_name then str "__" else pp_pyid id
   | MLglob r ->
       pp_glob state r
   | MLdummy _ ->
@@ -204,7 +211,7 @@ let rec pp_expr state env = function
       let params, env' = push_vars params env in
       let pp_param id =
         (* Erased binders use [_] (Python's throwaway) in binder position. *)
-        if Id.equal id dummy_name then str "_" else Id.print id
+        if Id.equal id dummy_name then str "_" else pp_pyid id
       in
       str "lambda " ++
       prlist_with_sep (fun () -> str ", ") pp_param (List.rev params) ++
@@ -218,7 +225,7 @@ let rec pp_expr state env = function
       let params, env' = push_vars [id_of_mlid id] env in
       let bname = List.hd params in
       let pp_binder =
-        if Id.equal bname dummy_name then str "_" else Id.print bname
+        if Id.equal bname dummy_name then str "_" else pp_pyid bname
       in
       str "(lambda " ++ pp_binder ++ str ": " ++
       pp_expr state env' a2 ++ str ")(" ++
@@ -325,24 +332,29 @@ let rec pp_expr state env = function
         let params = List.map id_of_mlid lam_ids in
         let params', env'' = push_vars params env' in
         let pp_param id =
-          if Id.equal id dummy_name then str "_" else Id.print id
+          if Id.equal id dummy_name then str "_" else pp_pyid id
         in
-        str "def " ++ Id.print name_arr.(j) ++ str "(" ++
+        str "def " ++ pp_pyid name_arr.(j) ++ str "(" ++
         prlist_with_sep (fun () -> str ", ") pp_param (List.rev params') ++
         str "):" ++ fnl () ++
         str "    return " ++ pp_expr state env'' body
       in
       prlist_with_sep fnl pp_one (List.init n (fun j -> j)) ++ fnl () ++
-      Id.print name_arr.(i)
+      pp_pyid name_arr.(i)
 
 (*s Statement-level body printer for Python [def] bodies.
     Inside a [def], [return <match-stmt>] is invalid Python because [match] is
     a statement, not an expression.  This printer recurses into [MLcase]
     branches so that each leaf arm gets its own [return], producing valid
     Python.  The boolean ternary (two-arm bool match) is still treated as an
-    expression and wrapped in a single [return]. *)
+    expression and wrapped in a single [return].
 
-let rec pp_return_body state env = function
+    [indent] is the indentation level (in spaces) at which the [match] keyword
+    itself will appear.  [case] arms are emitted at [indent + 4], and their
+    bodies at [indent + 8].  The first line of the emitted text does NOT include
+    leading whitespace — the caller is responsible for that. *)
+
+let rec pp_return_body state env indent = function
   | MLcase (_, scrutinee, branches) as expr ->
       let is_bool =
         Array.length branches = 2 &&
@@ -355,15 +367,22 @@ let rec pp_return_body state env = function
         str "return " ++ pp_expr state env expr
       else
         (* General match: put [return] inside each arm so the branch is
-           a valid statement. *)
+           a valid statement.  [case] must be indented inside the [match]
+           block; [body] must be indented inside the [case] block. *)
+        let case_pfx = String.make (indent + 4) ' ' in
+        let body_pfx = String.make (indent + 8) ' ' in
         let pp_branch (ids, pat, body) =
           let ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
           let pp_pat  = pp_pattern state (List.rev ids') env' pat in
-          str "    case " ++ pp_pat ++ str ":" ++ fnl () ++
-          str "        " ++ pp_return_body state env' body
+          str case_pfx ++ str "case " ++ pp_pat ++ str ":" ++ fnl () ++
+          str body_pfx ++ pp_return_body state env' (indent + 8) body
         in
         str "match " ++ pp_expr state env scrutinee ++ str ":" ++ fnl () ++
         prlist_with_sep fnl pp_branch (Array.to_list branches)
+  | MLaxiom _ | MLexn _ | MLparray _ as expr ->
+      (* These emit [raise …], which is a valid Python statement but NOT a
+         valid expression.  Emit bare — no [return] prefix. *)
+      pp_expr state env expr
   | expr ->
       str "return " ++ pp_expr state env expr
 
@@ -376,18 +395,27 @@ let rec pp_return_body state env = function
 let pp_term_decl state env name a =
   let lam_ids, body = collect_lams a in
   if List.is_empty lam_ids then
-    (* Non-function value: simple assignment. *)
-    str name ++ str " = " ++ pp_expr state env a ++ fnl ()
+    (* Non-function value: simple assignment — unless the body is a [raise]
+       expression (MLaxiom / MLexn / MLparray), which cannot appear as the
+       RHS of an assignment.  In that case emit the statement bare. *)
+    ( match a with
+      | MLaxiom _ | MLexn _ | MLparray _ ->
+          pp_expr state env a ++ fnl ()
+      | _ ->
+          str name ++ str " = " ++ pp_expr state env a ++ fnl () )
   else
     let params = List.map id_of_mlid lam_ids in
     let params', env' = push_vars params env in
     let pp_param id =
-      if Id.equal id dummy_name then str "_" else Id.print id
+      if Id.equal id dummy_name then str "_" else pp_pyid id
     in
     str "def " ++ str name ++ str "(" ++
     prlist_with_sep (fun () -> str ", ") pp_param (List.rev params') ++
     str "):" ++ fnl () ++
-    str "    " ++ pp_return_body state env' body ++ fnl ()
+    (* [indent=4]: the body is indented by 4 spaces inside the def; [case] arms
+       at 8, case bodies at 12.  The "    " prefix handles the first line only;
+       [pp_return_body] generates the rest with absolute column positions. *)
+    str "    " ++ pp_return_body state env' 4 body ++ fnl ()
 
 (*s Inductive type emission as Python dataclasses.
     Each live constructor becomes a [@dataclass] class whose fields are the
