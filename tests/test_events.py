@@ -3869,6 +3869,38 @@ class TestBackfillMissedPrComments:
         assert count == 0
         mock_create.assert_not_called()
 
+    def test_skips_already_claimed_comments(self, tmp_path: Path) -> None:
+        """Comments with a durable claim file are not re-queued on restart.
+
+        reply_to_issue_comment writes .git/fido/comments/<id>.lock after
+        posting; backfill must honour that file and skip re-queueing —
+        closes #834.
+        """
+        from kennel.events import _comment_lock, backfill_missed_pr_comments
+
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = [
+            self._comment(100, body="already answered"),
+            self._comment(200, body="not yet handled"),
+        ]
+        mock_gh.is_thread_resolved_for_comment.return_value = False
+        # Pre-create the claim file for comment 100 (simulates a prior reply).
+        _comment_lock(tmp_path, 100).touch(exist_ok=True)
+
+        with patch("kennel.events.create_task") as mock_create:
+            backfill_missed_pr_comments(
+                self._cfg(tmp_path),
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                1,
+                gh_user="fidocancode",
+            )
+
+        # Only comment 200 (unclaimed) should be queued.
+        assert mock_create.call_count == 1
+        _, kwargs = mock_create.call_args
+        assert kwargs["thread"]["comment_id"] == 200
+
 
 class TestLaunchSync:
     def _cfg(self, tmp_path: Path) -> Config:

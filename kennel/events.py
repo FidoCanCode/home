@@ -1531,10 +1531,12 @@ def backfill_missed_pr_comments(
     iteration by ``Worker.handle_threads``, so the worker loop backfills
     those on its own — only issue-comments are invisible to the loop.
 
-    Idempotent: :func:`create_task` dedups on ``comment_id`` regardless of
-    status, so replaying the same comment after fido already replied is a
-    no-op.  This function is intended to run **once per WorkerThread
-    lifetime** (at startup) — not every iteration.
+    Idempotent: comments with a durable claim file
+    (``.git/fido/comments/<id>.lock``) are skipped — fido already replied
+    to them.  Comments handled with a task (ACT/DO) are additionally
+    deduped by :func:`create_task` via ``comment_id`` in ``tasks.json``.
+    This function is intended to run **once per WorkerThread lifetime** (at
+    startup) — not every iteration.
     """
     log.info("backfill: scanning PR #%s for missed top-level comments", pr_number)
     comments = gh.get_issue_comments(repo_cfg.name, pr_number)
@@ -1550,6 +1552,13 @@ def backfill_missed_pr_comments(
             continue
         comment_id = c.get("id")
         if comment_id is None:
+            continue
+        # Skip comments fido already replied to (claim file written by
+        # reply_to_issue_comment after posting).  Without this check,
+        # ANSWER/DUMP/ASK replies — which create no tasks.json entry —
+        # would be re-queued on every kennel restart (closes #834).
+        if _comment_lock(repo_cfg.work_dir, comment_id).exists():
+            log.info("backfill: comment %s already claimed — skipping", comment_id)
             continue
         body = c.get("body", "") or ""
         is_bot = user.endswith("[bot]")
