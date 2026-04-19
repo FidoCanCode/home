@@ -1573,9 +1573,22 @@ class TestWorkerFindNextIssue:
         d.mkdir()
         return d
 
+    def _load_issues(self, worker: "Worker", issues: list) -> None:
+        """Pre-populate the worker's issue cache (replaces the old lazy bootstrap).
+
+        The cache is now seeded eagerly at kennel startup (#837); tests must
+        do the same rather than relying on _pick_from_cache to fetch.
+        """
+        from datetime import datetime, timezone
+
+        worker._issue_cache.load_inventory(  # pyright: ignore[reportPrivateUsage]
+            issues,
+            snapshot_started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
     def test_returns_none_when_no_issues(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        gh.find_all_open_issues.return_value = []
+        # Empty cache (no load_inventory call needed) → no candidates → None.
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
@@ -1672,7 +1685,7 @@ class TestWorkerFindNextIssue:
             "assignees": {"nodes": [{"login": "fido-bot"}]},
             "subIssues": {"nodes": []},
         }
-        gh.find_all_open_issues.return_value = [issue]
+        self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         with (
@@ -1692,7 +1705,7 @@ class TestWorkerFindNextIssue:
             "assignees": {"nodes": [{"login": "fido-bot"}]},
             "subIssues": {"nodes": [{"state": "CLOSED"}, {"state": "CLOSED"}]},
         }
-        gh.find_all_open_issues.return_value = [issue]
+        self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         with (
@@ -1720,7 +1733,7 @@ class TestWorkerFindNextIssue:
             "title": "Blocked",
             "subIssues": {"nodes": [child]},
         }
-        gh.find_all_open_issues.return_value = [parent_issue, child]
+        self._load_issues(worker, [parent_issue, child])
         gh.find_issues.return_value = [parent_issue]
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
@@ -1745,7 +1758,7 @@ class TestWorkerFindNextIssue:
                 "subIssues": {"nodes": []},
             },
         ]
-        gh.find_all_open_issues.return_value = issues
+        self._load_issues(worker, issues)
         gh.find_issues.return_value = issues
         fido_dir = self._fido_dir(tmp_path)
         with (
@@ -1763,7 +1776,7 @@ class TestWorkerFindNextIssue:
             "assignees": {"nodes": [{"login": "fido-bot"}]},
             "subIssues": {"nodes": []},
         }
-        gh.find_all_open_issues.return_value = [issue]
+        self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         with (
@@ -1778,7 +1791,7 @@ class TestWorkerFindNextIssue:
 
     def test_does_not_save_state_when_no_issue(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        gh.find_all_open_issues.return_value = []
+        # Empty cache → no candidates → no state saved.
         gh.find_issues.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
@@ -1793,7 +1806,7 @@ class TestWorkerFindNextIssue:
             "assignees": {"nodes": [{"login": "fido-bot"}]},
             "subIssues": {"nodes": []},
         }
-        gh.find_all_open_issues.return_value = [issue]
+        self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         mock_status = MagicMock()
@@ -1812,7 +1825,7 @@ class TestWorkerFindNextIssue:
             "assignees": {"nodes": [{"login": "fido-bot"}]},
             "subIssues": {"nodes": []},
         }
-        gh.find_all_open_issues.return_value = [issue]
+        self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         mock_pickup = MagicMock()
@@ -1825,29 +1838,24 @@ class TestWorkerFindNextIssue:
 
     def test_calls_set_status_done_when_no_issue(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        gh.find_all_open_issues.return_value = []
-        gh.find_issues.return_value = []
+        # Empty cache → no candidates → "All done" status.
         fido_dir = self._fido_dir(tmp_path)
         mock_status = MagicMock()
         with patch.object(worker, "set_status", mock_status):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
         mock_status.assert_called_once_with("All done — no issues to fetch", busy=False)
 
-    def test_bootstraps_inventory_with_correct_args(self, tmp_path: Path) -> None:
-        worker, gh = self._make_worker(tmp_path)
-        gh.find_all_open_issues.return_value = []
-        fido_dir = self._fido_dir(tmp_path)
-        repo_ctx = self._make_repo_ctx(owner="org", repo_name="myrepo", gh_user="bot")
-        with patch.object(worker, "set_status"):
-            worker.find_next_issue(fido_dir, repo_ctx)
-        gh.find_all_open_issues.assert_called_once_with("org", "myrepo")
-
     def test_logs_info_when_starting_issue(self, tmp_path: Path, caplog) -> None:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
-        issue = {"number": 9, "title": "Chase squirrel", "subIssues": {"nodes": []}}
-        gh.find_all_open_issues.return_value = [issue]
+        issue = {
+            "number": 9,
+            "title": "Chase squirrel",
+            "assignees": {"nodes": [{"login": "fido-bot"}]},
+            "subIssues": {"nodes": []},
+        }
+        self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         with (
@@ -1862,8 +1870,7 @@ class TestWorkerFindNextIssue:
         import logging
 
         worker, gh = self._make_worker(tmp_path)
-        gh.find_all_open_issues.return_value = []
-        gh.find_issues.return_value = []
+        # Empty cache → no candidates → "no eligible" log line.
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
@@ -1873,8 +1880,8 @@ class TestWorkerFindNextIssue:
         assert "no eligible" in caplog.text
 
     def test_walks_up_via_issue_index(self, tmp_path: Path) -> None:
-        """Assigned issue has a parent — worker uses the issue index built from
-        find_all_open_issues to walk up to the root before descending."""
+        """Assigned issue has a parent — walker uses the issue index from the
+        pre-loaded cache to walk up to the root before descending."""
         worker, gh = self._make_worker(tmp_path)
         child = {
             "number": 200,
@@ -1902,7 +1909,7 @@ class TestWorkerFindNextIssue:
                 ]
             },
         }
-        gh.find_all_open_issues.return_value = [root, child]
+        self._load_issues(worker, [root, child])
         gh.find_issues.return_value = [child]
         fido_dir = self._fido_dir(tmp_path)
         with (
@@ -1911,7 +1918,7 @@ class TestWorkerFindNextIssue:
         ):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 200
-        gh.find_all_open_issues.assert_called_once_with("alice", "proj")
+        gh.find_all_open_issues.assert_not_called()
 
     def test_picks_first_open_sub_issue_under_owned_parent(
         self, tmp_path: Path
@@ -1948,7 +1955,7 @@ class TestWorkerFindNextIssue:
             "assignees": {"nodes": [{"login": "fido-bot"}]},
             "subIssues": {"nodes": [closed_child, open_child]},
         }
-        gh.find_all_open_issues.return_value = [parent_issue, open_child]
+        self._load_issues(worker, [parent_issue, open_child])
         gh.find_issues.return_value = [parent_issue]
         fido_dir = self._fido_dir(tmp_path)
         with (
@@ -1963,8 +1970,7 @@ class TestWorkerFindNextIssue:
     def test_does_not_claim_when_no_eligible_issue(self, tmp_path: Path) -> None:
         """When the picker returns None, no leaf-claim fires."""
         worker, gh = self._make_worker(tmp_path)
-        gh.find_all_open_issues.return_value = []
-        gh.find_issues.return_value = []
+        # Empty cache → no candidates → no leaf-claim.
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
@@ -1982,7 +1988,7 @@ class TestWorkerFindNextIssue:
             "assignees": {"nodes": [{"login": "fido-bot"}]},
             "subIssues": {"nodes": []},
         }
-        gh.find_all_open_issues.return_value = [issue]
+        self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         with (
@@ -2004,7 +2010,7 @@ class TestWorkerFindNextIssue:
             "assignees": {"nodes": [{"login": "fido-bot"}]},
             "subIssues": {"nodes": []},
         }
-        gh.find_all_open_issues.return_value = [issue]
+        self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         mock_pickup = MagicMock()
@@ -2025,8 +2031,7 @@ class TestWorkerFindNextIssue:
         self, tmp_path: Path
     ) -> None:
         worker, gh = self._make_worker(tmp_path)
-        gh.find_all_open_issues.return_value = []
-        gh.find_issues.return_value = []
+        # Empty cache → no candidates → no pickup comment.
         fido_dir = self._fido_dir(tmp_path)
         mock_pickup = MagicMock()
         with (
@@ -2649,23 +2654,25 @@ class TestWorkerPickFromCache:
             membership=RepoMembership(collaborators=frozenset({"owner"})),
         )
 
-    def test_loads_inventory_when_not_yet_loaded(self, tmp_path: Path) -> None:
+    def test_picks_from_preloaded_cache_without_api_call(self, tmp_path: Path) -> None:
         cache = IssueTreeCache("owner/repo")
+        cache.load_inventory(
+            [
+                {
+                    "number": 1,
+                    "title": "Solo",
+                    "createdAt": "2026-04-01T00:00:00Z",
+                    "assignees": {"nodes": [{"login": "fido"}]},
+                    "subIssues": {"nodes": []},
+                }
+            ],
+            snapshot_started_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
+        )
         worker, gh = self._worker_with_cache(tmp_path, cache)
-        gh.find_all_open_issues.return_value = [
-            {
-                "number": 1,
-                "title": "Solo",
-                "createdAt": "2026-04-01T00:00:00Z",
-                "assignees": {"nodes": [{"login": "fido"}]},
-                "subIssues": {"nodes": []},
-            }
-        ]
         gh.view_issue.return_value = {"state": "OPEN"}
         choice = worker._pick_from_cache(self._repo_ctx())
         assert choice is not None and choice.number == 1
-        gh.find_all_open_issues.assert_called_once_with("owner", "repo")
-        assert cache.is_loaded
+        gh.find_all_open_issues.assert_not_called()
 
     def test_does_not_reload_inventory_when_cache_already_loaded(
         self, tmp_path: Path
