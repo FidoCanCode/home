@@ -1259,11 +1259,13 @@ class Worker:
     def _pick_from_cache(self, repo_ctx: RepoContext) -> PickerChoice | None:
         """Cache-driven picker (closes #812).
 
-        Bootstraps the cache from a single ``find_all_open_issues`` call
-        when not yet loaded, then runs the same priority-rank +
-        strict-first-priority descent as the GraphQL path — but reading
-        cached :class:`~kennel.issue_cache.IssueNode` data instead of
-        re-querying every iteration.
+        Reads candidates + the full issue tree from the per-repo
+        :class:`~kennel.issue_cache.IssueTreeCache` — zero GraphQL on the
+        steady-state pick — and runs the same priority-rank +
+        strict-first-priority descent as the old GraphQL path.
+
+        The cache is bootstrapped eagerly at kennel startup (closes #837)
+        so it is always loaded by the time this method runs.
 
         Before returning a non-None choice, makes one cheap REST call
         (``GET /repos/{repo}/issues/{n}``) to confirm the issue is still
@@ -1271,21 +1273,6 @@ class Worker:
         the cache read and the ``add_assignee`` write.
         """
         cache = self._issue_cache
-        if not cache.is_loaded:
-            snapshot_started_at = datetime.now(tz=timezone.utc)
-            log.info(
-                "picker[cache]: cache empty for %s — bootstrapping inventory "
-                "via find_all_open_issues",
-                repo_ctx.repo,
-            )
-            inventory = self.gh.find_all_open_issues(repo_ctx.owner, repo_ctx.repo_name)
-            cache.load_inventory(inventory, snapshot_started_at=snapshot_started_at)
-            log.info(
-                "picker[cache]: bootstrap loaded %d open issues for %s",
-                len(inventory),
-                repo_ctx.repo,
-            )
-
         cache_index = cache.all_open()
         issue_index = {
             n: _node_to_dict(node, cache_index) for n, node in cache_index.items()
