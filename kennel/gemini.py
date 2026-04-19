@@ -1,4 +1,4 @@
-"""Copilot CLI provider implementation."""
+"""Gemini CLI provider implementation."""
 
 from __future__ import annotations
 
@@ -26,28 +26,18 @@ from kennel.provider import (
     ProviderID,
     ProviderLimitSnapshot,
     ProviderModel,
-    coerce_provider_model,
 )
 
 log = logging.getLogger(__name__)
 
-_COPILOT_COMMAND = ("copilot", "--acp", "--allow-all")
-_COPILOT_JSON_BASE_ARGS = (
-    "--output-format",
-    "json",
-    "--stream",
-    "off",
-    "--allow-all",
-    "-s",
-)
+_GEMINI_COMMAND = ("gemini", "--experimental-acp")
 
-# #666: Copilot CLI emits this exact string as its final assistant content
-# when a turn is cancelled mid-flight.
-_COPILOT_CANCEL_SENTINEL = "Info: Operation cancelled by user"
+# Gemini CLI's cancellation sentinel in ACP mode.
+_GEMINI_CANCEL_SENTINEL = "Info: Operation cancelled by user"
 
 
 def extract_result_text(output: str) -> str:
-    """Extract the last assistant message content from Copilot JSONL output."""
+    """Extract the last assistant message content from Gemini JSONL output."""
     result = ""
     for obj in iter_jsonl(output):
         if obj.get("type") != "assistant.message":
@@ -62,7 +52,7 @@ def extract_result_text(output: str) -> str:
 
 
 def extract_session_id(output: str) -> str:
-    """Extract the final Copilot session id from JSONL output."""
+    """Extract the final Gemini session id from JSONL output."""
     result = ""
     for obj in iter_jsonl(output):
         if obj.get("type") != "result":
@@ -73,28 +63,14 @@ def extract_session_id(output: str) -> str:
     return result
 
 
-def _normalize_model(model: ProviderModel | str | None) -> ProviderModel | None:
-    if model is None:
-        return None
-    normalized = coerce_provider_model(model)
-    lowered = normalized.model.lower()
-    if lowered.startswith("claude-opus"):
-        return ProviderModel("gpt-5.4", normalized.effort)
-    if lowered.startswith("claude-sonnet"):
-        return ProviderModel("gpt-5.4", normalized.effort)
-    if lowered.startswith("claude-haiku"):
-        return ProviderModel("gpt-5.4", normalized.effort)
-    return normalized
-
-
-def _copilot(
+def _gemini(
     *args: str,
     timeout: int = 30,
     cwd: Path | str | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> subprocess.CompletedProcess[str]:
     return runner(
-        ["copilot", *args],
+        ["gemini", *args],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -102,36 +78,35 @@ def _copilot(
     )
 
 
-class CopilotACPRuntime(ACPRuntime):
-    """Own the long-lived Copilot ACP subprocess and connection."""
+class GeminiACPRuntime(ACPRuntime):
+    """Own the long-lived Gemini ACP subprocess and connection."""
 
     def __init__(
         self,
         *,
         work_dir: Path,
         repo_name: str | None = None,
-        command: Sequence[str] = _COPILOT_COMMAND,
+        command: Sequence[str] = _GEMINI_COMMAND,
         **kwargs: Any,
     ) -> None:
         super().__init__(
-            ProviderID.COPILOT_CLI,
+            ProviderID.GEMINI,
             command,
             work_dir=work_dir,
             repo_name=repo_name,
-            normalize_model=_normalize_model,
             **kwargs,
         )
 
-    def _default_client_factory(self, runtime: ACPRuntime) -> _CopilotACPClient:
-        return _CopilotACPClient(runtime)
+    def _default_client_factory(self, runtime: ACPRuntime) -> _GeminiACPClient:
+        return _GeminiACPClient(runtime)
 
 
-class _CopilotACPClient(ACPClientBase):
-    """Copilot-specific ACP client implementation."""
+class _GeminiACPClient(ACPClientBase):
+    """Gemini-specific ACP client implementation."""
 
 
-class CopilotCLISession(ACPSession):
-    """Persistent Copilot CLI ACP session."""
+class GeminiSession(ACPSession):
+    """Persistent Gemini CLI ACP session."""
 
     def __init__(
         self,
@@ -140,30 +115,30 @@ class CopilotCLISession(ACPSession):
         work_dir: Path | str,
         model: ProviderModel | str,
         repo_name: str | None = None,
-        runtime: CopilotACPRuntime | None = None,
-        runtime_factory: Callable[..., CopilotACPRuntime] | None = None,
+        runtime: GeminiACPRuntime | None = None,
+        runtime_factory: Callable[..., GeminiACPRuntime] | None = None,
         session_id: str | None = None,
     ) -> None:
         if runtime is None:
-            factory = CopilotACPRuntime if runtime_factory is None else runtime_factory
+            factory = GeminiACPRuntime if runtime_factory is None else runtime_factory
             runtime = factory(work_dir=Path(work_dir), repo_name=repo_name)
         super().__init__(
             system_file,
             work_dir=work_dir,
             model=model,
-            cancel_sentinel=_COPILOT_CANCEL_SENTINEL,
+            cancel_sentinel=_GEMINI_CANCEL_SENTINEL,
             repo_name=repo_name,
             runtime=runtime,
             session_id=session_id,
         )
 
 
-class CopilotCLIClient(ACPClient, ProviderAgent):
-    """Injectable collaborator for Copilot CLI interactions."""
+class GeminiClient(ACPClient, ProviderAgent):
+    """Injectable collaborator for Gemini CLI interactions."""
 
-    voice_model = ProviderModel("gpt-5.4", "high")
-    work_model = ProviderModel("gpt-5.4", "medium")
-    brief_model = ProviderModel("gpt-5.4", "low")
+    voice_model = ProviderModel("gemini-2.0-flash", "high")
+    work_model = ProviderModel("gemini-2.0-pro-exp", "medium")
+    brief_model = ProviderModel("gemini-2.0-flash", "low")
 
     def __init__(
         self,
@@ -173,13 +148,13 @@ class CopilotCLIClient(ACPClient, ProviderAgent):
     ) -> None:
         self._runner = runner
         self._session_factory = (
-            CopilotCLISession if session_factory is None else session_factory
+            GeminiSession if session_factory is None else session_factory
         )
         super().__init__(**kwargs)
 
     @property
     def provider_id(self) -> ProviderID:
-        return ProviderID.COPILOT_CLI
+        return ProviderID.GEMINI
 
     def _spawn_owned_session(
         self, model: ProviderModel, *, session_id: str | None = None
@@ -242,43 +217,40 @@ class CopilotCLIClient(ACPClient, ProviderAgent):
         cwd: Path | str | None = None,
         session_id: str | None = None,
     ) -> str:
-        normalized = _normalize_model(model)
-        assert normalized is not None
+        # Gemini CLI doesn't currently support efforts in the same way
+        # as Copilot CLI, so we just use the model name.
         log_for_repo(
             logging.INFO,
             self._repo_name,
             "%s",
-            transcript_block("copilot prompt", prompt),
+            transcript_block("gemini prompt", prompt),
         )
-        efforts = normalized.efforts or (None,)
-        for effort in efforts:
-            cmd = ["--model", normalized.model]
-            if effort is not None:
-                cmd += ["--effort", effort]
-            cmd += [*_COPILOT_JSON_BASE_ARGS]
-            if session_id is not None:
-                cmd.append(f"--resume={session_id}")
-            cmd += ["-p", prompt]
-            result = _copilot(
-                *cmd,
-                timeout=timeout,
-                cwd=self._work_dir if cwd is None else cwd,
-                runner=self._runner,
+
+        cmd = ["-p", prompt]
+        if session_id is not None:
+            cmd += ["--resume", session_id]
+        cmd += ["--output-format", "json"]
+
+        result = _gemini(
+            *cmd,
+            timeout=timeout,
+            cwd=self._work_dir if cwd is None else cwd,
+            runner=self._runner,
+        )
+        if result.returncode == 0:
+            text = extract_result_text(result.stdout.strip())
+            log_for_repo(
+                logging.INFO,
+                self._repo_name,
+                "%s",
+                transcript_block("gemini result", text),
             )
-            if result.returncode == 0:
-                text = extract_result_text(result.stdout.strip())
-                log_for_repo(
-                    logging.INFO,
-                    self._repo_name,
-                    "%s",
-                    transcript_block("copilot result", text),
-                )
-                return result.stdout.strip()
+            return result.stdout.strip()
         return ""
 
 
-class CopilotCLI(Provider):
-    """Composite Copilot provider with separate API and runtime agent."""
+class Gemini(Provider):
+    """Composite Gemini provider with separate API and runtime agent."""
 
     def __init__(
         self,
@@ -288,31 +260,31 @@ class CopilotCLI(Provider):
         session: PromptSession | None = None,
     ) -> None:
         if agent is None:
-            agent = CopilotCLIClient(session=session)
+            agent = GeminiClient(session=session)
         elif session is not None:
             agent.attach_session(session)
-        self._api = CopilotCLIAPI() if api is None else api
+        self._api = GeminiAPI() if api is None else api
         self._agent = agent
 
     @property
-    def provider_id(self) -> ProviderID:
-        return ProviderID.COPILOT_CLI
+    def agent(self) -> ProviderAgent:
+        return self._agent
 
     @property
     def api(self) -> ProviderAPI:
         return self._api
 
     @property
-    def agent(self) -> ProviderAgent:
-        return self._agent
+    def provider_id(self) -> ProviderID:
+        return ProviderID.GEMINI
 
 
-class CopilotCLIAPI(ProviderAPI):
-    """Read-only account API for Copilot CLI."""
+class GeminiAPI(ProviderAPI):
+    """Read-only account API for Gemini."""
 
     @property
     def provider_id(self) -> ProviderID:
-        return ProviderID.COPILOT_CLI
+        return ProviderID.GEMINI
 
     def get_limit_snapshot(self) -> ProviderLimitSnapshot:
         return ProviderLimitSnapshot(provider=self.provider_id)

@@ -155,12 +155,11 @@ class TestProviderPalette:
         assert palette.bright_fg == (180, 130, 255)
 
     def test_palette_for_codex_returns_none(self) -> None:
-        # CODEX/GEMINI have no palette registered today — callers must
+        # CODEX has no palette registered today — callers must
         # handle None as "render without provider color", not as an error.
         from kennel.provider import ProviderID, palette_for
 
         assert palette_for(ProviderID.CODEX) is None
-        assert palette_for(ProviderID.GEMINI) is None
 
     @staticmethod
     def _relative_luminance(rgb: tuple[int, int, int]) -> float:

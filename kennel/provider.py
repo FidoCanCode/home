@@ -75,6 +75,10 @@ PROVIDER_PALETTES: dict[ProviderID, ProviderPalette] = {
         dim_bg=(40, 20, 60),  # obvious plum tint, still dark
         bright_fg=(180, 130, 255),  # Copilot-purple, legible on dark terminals
     ),
+    ProviderID.GEMINI: ProviderPalette(
+        dim_bg=(10, 40, 60),  # distinctive blue tint, still dark
+        bright_fg=(100, 200, 255),  # Gemini-blue, legible on dark terminals
+    ),
 }
 
 
