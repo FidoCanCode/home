@@ -47,6 +47,7 @@ from kennel.status import provider_statuses_for_repo_configs
 from kennel.tasks import unblock_tasks
 from kennel.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
+    ReconcileWatchdog,
     Watchdog,
 )
 from kennel.worker import RepoContextFilter, RepoNameFilter
@@ -208,6 +209,33 @@ def _serialize_provider_status(status: Any) -> dict[str, Any] | None:
         "level": status.level,
         "warning": status.warning,
         "paused": status.paused,
+    }
+
+
+def _serialize_issue_cache(cache: Any) -> dict[str, Any] | None:
+    """Serialize an :class:`~kennel.issue_cache.IssueTreeCache` snapshot for
+    the /status.json payload (#812).  Returns ``None`` when the cache has
+    not been bootstrapped yet (or when *cache* isn't a real cache, which
+    happens in tests that hand the server a MagicMock registry) — fido
+    status hides the line in that case.
+    """
+    from kennel.issue_cache import IssueTreeCache
+
+    if not isinstance(cache, IssueTreeCache):
+        return None
+    metrics = cache.metrics()
+    return {
+        "loaded": metrics.inventory_loaded_at is not None,
+        "open_issues": metrics.open_issue_count,
+        "events_applied": metrics.events_applied,
+        "events_dropped_stale": metrics.events_dropped_stale,
+        "last_event_at": metrics.last_event_at.isoformat()
+        if metrics.last_event_at
+        else None,
+        "last_reconcile_at": metrics.last_reconcile_at.isoformat()
+        if metrics.last_reconcile_at
+        else None,
+        "last_reconcile_drift": metrics.last_reconcile_drift,
     }
 
 
@@ -899,6 +927,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         provider.get_talker(a.repo_name)
                     ),
                     "rescoping": self.registry.is_rescoping(a.repo_name),
+                    "issue_cache": _serialize_issue_cache(
+                        self.registry.get_issue_cache(a.repo_name)
+                    ),
                 }
             )
         return activities
@@ -1000,6 +1031,7 @@ def run(
     _kill_active_children: Callable[..., None] = kill_active_children,
     _startup_pull: Callable[..., None] = _startup_pull,
     _Watchdog: type[Watchdog] = Watchdog,
+    _ReconcileWatchdog: type[ReconcileWatchdog] = ReconcileWatchdog,
     _preflight_repo_identity: Callable[..., None] = preflight_repo_identity,
     _preflight_tools: Callable[..., None] = preflight_tools,
     _preflight_sub_dir: Callable[..., None] = preflight_sub_dir,
@@ -1082,6 +1114,7 @@ def run(
     # ClaudeSession (closes #479 — "one claude per repo" invariant).
     provider.set_session_resolver(registry.get_session)
     _Watchdog(registry, config.repos).start_thread()
+    _ReconcileWatchdog(registry, config.repos, gh).start_thread()
 
     server = _HTTPServer(("", config.port), WebhookHandler)
 

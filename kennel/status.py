@@ -66,6 +66,25 @@ class ClaudeTalkerInfo:
 
 
 @dataclass
+class IssueCacheInfo:
+    """Snapshot of the per-repo issue tree cache for ``kennel status`` display
+    (closes #812).
+
+    Mirrors the fields on :class:`~kennel.issue_cache.CacheMetrics` but
+    keeps display-only here so the status module does not depend on the
+    cache module's class identity.
+    """
+
+    loaded: bool
+    open_issues: int
+    events_applied: int
+    events_dropped_stale: int
+    last_event_at: datetime | None
+    last_reconcile_at: datetime | None
+    last_reconcile_drift: int
+
+
+@dataclass
 class RepoStatus:
     name: str
     fido_running: bool
@@ -95,6 +114,7 @@ class RepoStatus:
     session_dropped_count: int = 0
     claude_talker: ClaudeTalkerInfo | None = None
     rescoping: bool = False  # True while a background Opus reorder is in flight
+    issue_cache: IssueCacheInfo | None = None
 
 
 @dataclass
@@ -291,6 +311,31 @@ def _parse_provider_status(raw: object) -> ProviderPressureStatus | None:
     )
 
 
+def _parse_iso_datetime(raw: object) -> datetime | None:
+    """Parse an ISO-8601 string into a tz-aware datetime, or ``None``."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _parse_issue_cache(raw: object) -> IssueCacheInfo | None:
+    """Parse one serialized issue-cache record from /status.json (#812)."""
+    if not isinstance(raw, dict):
+        return None
+    return IssueCacheInfo(
+        loaded=bool(raw.get("loaded", False)),
+        open_issues=int(raw.get("open_issues", 0)),
+        events_applied=int(raw.get("events_applied", 0)),
+        events_dropped_stale=int(raw.get("events_dropped_stale", 0)),
+        last_event_at=_parse_iso_datetime(raw.get("last_event_at")),
+        last_reconcile_at=_parse_iso_datetime(raw.get("last_reconcile_at")),
+        last_reconcile_drift=int(raw.get("last_reconcile_drift", 0)),
+    )
+
+
 def _port_from_pid(pid: int) -> int | None:
     """Extract the --port value from kennel's /proc/<pid>/cmdline, or None."""
     try:
@@ -329,6 +374,7 @@ def _fetch_activities(
                 "claude_talker": item.get("claude_talker"),
                 "provider_status": _parse_provider_status(item.get("provider_status")),
                 "rescoping": item.get("rescoping", False),
+                "issue_cache": item.get("issue_cache"),
             }
             for item in data
             if "repo_name" in item and "what" in item
@@ -449,6 +495,7 @@ def repo_status(
     claude_talker: ClaudeTalkerInfo | None = None,
     rescoping: bool = False,
     provider_status: ProviderPressureStatus | None = None,
+    issue_cache: IssueCacheInfo | None = None,
 ) -> RepoStatus:
     """Collect status for a single repo."""
     webhook_activities = list(webhook_activities or [])
@@ -482,6 +529,7 @@ def repo_status(
             session_dropped_count=session_dropped_count,
             claude_talker=claude_talker,
             rescoping=rescoping,
+            issue_cache=issue_cache,
         )
 
     fido_dir = git_dir / "fido"
@@ -537,6 +585,7 @@ def repo_status(
         session_dropped_count=session_dropped_count,
         claude_talker=claude_talker,
         rescoping=rescoping,
+        issue_cache=issue_cache,
     )
 
 
@@ -581,6 +630,7 @@ def collect() -> KennelStatus:
                 )
             sp = info.get("session_pid")
             session_pid_val = int(sp) if sp is not None else None
+        cache_info = _parse_issue_cache(info.get("issue_cache")) if info else None
         provider_status = info.get("provider_status") if info else None
         if (
             isinstance(provider_status, ProviderPressureStatus)
@@ -605,6 +655,7 @@ def collect() -> KennelStatus:
                 claude_talker=talker_info,
                 rescoping=bool(info.get("rescoping")) if info else False,
                 provider_status=provider_status,
+                issue_cache=cache_info,
             )
         )
     return KennelStatus(
@@ -661,6 +712,25 @@ def _format_agent_line(repo: RepoStatus) -> str | None:
 def _format_reset_at(resets_at: datetime) -> str:
     """Format provider reset times in a compact UTC form."""
     return resets_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _format_cache_line(repo: RepoStatus) -> str | None:
+    """One-line picker-cache summary (#812).
+
+    Hidden when the cache hasn't been bootstrapped — the line would just
+    be noise for a repo that hasn't run a worker iteration yet.
+    """
+    cache = repo.issue_cache
+    if cache is None or not cache.loaded:
+        return None
+    parts: list[str] = [color(DIM, f"{cache.open_issues} open")]
+    parts.append(color(DIM, f"applied {cache.events_applied}"))
+    if cache.events_dropped_stale:
+        parts.append(color(DIM, f"stale-dropped {cache.events_dropped_stale}"))
+    if cache.last_reconcile_at is not None:
+        parts.append(color(DIM, f"reconciled drift {cache.last_reconcile_drift}"))
+    label = color(BOLD, "Cache:")
+    return f"  {label}  {', '.join(parts)}"
 
 
 def _worker_is_agent_talker(repo: RepoStatus) -> bool:
@@ -784,6 +854,10 @@ def _format_repo_body(repo: RepoStatus) -> list[str]:
     agent_line = _format_agent_line(repo)
     if agent_line is not None:
         body.append(agent_line)
+
+    cache_line = _format_cache_line(repo)
+    if cache_line is not None:
+        body.append(cache_line)
 
     if repo.issue is None:
         body.append("  no assigned issues")

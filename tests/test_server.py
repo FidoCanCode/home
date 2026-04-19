@@ -389,6 +389,94 @@ class TestGetEndpoint:
         data = json.loads(resp.read())
         assert data[0]["rescoping"] is True
 
+    def test_status_endpoint_serializes_loaded_issue_cache(self, server: tuple) -> None:
+        """Wire a real loaded :class:`IssueTreeCache` through the registry
+        and verify the /status.json payload includes the cache snapshot
+        (closes #812 status half).
+        """
+        from datetime import datetime, timezone
+
+        from kennel.issue_cache import IssueTreeCache
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Working on: #1",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+
+        cache = IssueTreeCache("owner/repo")
+        cache.load_inventory(
+            [
+                {
+                    "number": 7,
+                    "title": "demo",
+                    "createdAt": "2026-04-01T00:00:00Z",
+                    "assignees": {"nodes": []},
+                    "subIssues": {"nodes": []},
+                }
+            ],
+            snapshot_started_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
+        )
+        WebhookHandler.registry.get_issue_cache.return_value = cache
+
+        resp = urllib.request.urlopen(f"{url}/status.json")
+        data = json.loads(resp.read())
+        cache_blob = data[0]["issue_cache"]
+        assert cache_blob is not None
+        assert cache_blob["loaded"] is True
+        assert cache_blob["open_issues"] == 1
+        assert cache_blob["events_applied"] == 0
+        assert cache_blob["last_event_at"] is None
+        assert cache_blob["last_reconcile_at"] is None
+        assert cache_blob["last_reconcile_drift"] == 0
+
+    def test_status_endpoint_omits_issue_cache_when_registry_returns_non_cache(
+        self, server: tuple
+    ) -> None:
+        """A MagicMock registry (default in these tests) returns a Mock
+        from ``get_issue_cache``; ``_serialize_issue_cache`` must reject
+        it as non-cache and emit ``None`` rather than raise.
+        """
+        from datetime import datetime, timezone
+
+        from kennel.registry import WorkerActivity
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Working on: #1",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+        # registry.get_issue_cache returns a MagicMock by default, not a
+        # real IssueTreeCache — must serialize to None.
+        resp = urllib.request.urlopen(f"{url}/status.json")
+        data = json.loads(resp.read())
+        assert data[0]["issue_cache"] is None
+
     def test_status_endpoint_includes_provider_status(self, server: tuple) -> None:
         from datetime import UTC, datetime
 
@@ -2619,10 +2707,46 @@ class TestRun:
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
             _Watchdog=mock_watchdog_cls,
+            _ReconcileWatchdog=MagicMock(),
         )
 
         mock_watchdog_cls.assert_called_once_with(mock_registry, fake_cfg.repos)
         mock_watchdog_cls.return_value.start_thread.assert_called_once()
+
+    def test_run_starts_reconcile_watchdog_with_registry_repos_and_gh(
+        self, tmp_path: Path
+    ) -> None:
+        from kennel.server import run
+
+        fake_cfg = self._fake_cfg(tmp_path)
+        mock_server = MagicMock()
+        mock_server.serve_forever.side_effect = KeyboardInterrupt
+        mock_registry = MagicMock()
+        mock_make_registry = MagicMock(return_value=mock_registry)
+        mock_reconcile_cls = MagicMock()
+        mock_gh_instance = MagicMock()
+
+        run(
+            _from_args=lambda: fake_cfg,
+            _HTTPServer=lambda *a, **kw: mock_server,
+            _make_registry=mock_make_registry,
+            _path_home=lambda: tmp_path,
+            _basic_config=MagicMock(),
+            _populate_memberships=MagicMock(),
+            _startup_pull=MagicMock(),
+            _preflight_repo_identity=MagicMock(),
+            _preflight_tools=MagicMock(),
+            _preflight_sub_dir=MagicMock(),
+            _preflight_gh_auth=MagicMock(),
+            _GitHub=lambda: mock_gh_instance,
+            _Watchdog=MagicMock(),
+            _ReconcileWatchdog=mock_reconcile_cls,
+        )
+
+        mock_reconcile_cls.assert_called_once_with(
+            mock_registry, fake_cfg.repos, mock_gh_instance
+        )
+        mock_reconcile_cls.return_value.start_thread.assert_called_once()
 
     def test_run_installs_excepthooks(self, tmp_path: Path) -> None:
         """Uncaught exceptions (main thread and worker threads) should route

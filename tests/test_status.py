@@ -18,6 +18,7 @@ from kennel.provider import (
 )
 from kennel.status import (
     ClaudeTalkerInfo,
+    IssueCacheInfo,
     KennelStatus,
     RepoStatus,
     WebhookActivityInfo,
@@ -26,9 +27,12 @@ from kennel.status import (
     _fetch_activities,
     _fido_running,
     _format_agent_line,
+    _format_cache_line,
     _format_uptime,
     _git_dir,
     _kennel_pid,
+    _parse_iso_datetime,
+    _parse_issue_cache,
     _pgrep,
     _port_from_pid,
     _process_uptime_seconds,
@@ -509,6 +513,7 @@ class TestFetchActivities:
                 "claude_talker": None,
                 "provider_status": None,
                 "rescoping": False,
+                "issue_cache": None,
             }
         }
 
@@ -549,6 +554,7 @@ class TestFetchActivities:
                 "claude_talker": None,
                 "provider_status": None,
                 "rescoping": False,
+                "issue_cache": None,
             },
             "c/d": {
                 "what": "Fixing CI",
@@ -564,6 +570,7 @@ class TestFetchActivities:
                 "claude_talker": None,
                 "provider_status": None,
                 "rescoping": False,
+                "issue_cache": None,
             },
         }
 
@@ -1123,6 +1130,7 @@ class TestCollect:
             session_dropped_count=0,
             claude_talker=None,
             rescoping=False,
+            issue_cache=None,
         )
 
     def test_passes_crash_info_to_repo_status(self, tmp_path: Path) -> None:
@@ -1160,6 +1168,7 @@ class TestCollect:
             session_dropped_count=0,
             claude_talker=None,
             rescoping=False,
+            issue_cache=None,
         )
 
     def test_worker_what_none_for_unknown_repo(self, tmp_path: Path) -> None:
@@ -1190,6 +1199,7 @@ class TestCollect:
             session_dropped_count=0,
             claude_talker=None,
             rescoping=False,
+            issue_cache=None,
         )
 
     def test_passes_claude_talker_to_repo_status(self, tmp_path: Path) -> None:
@@ -1268,6 +1278,7 @@ class TestCollect:
             session_dropped_count=0,
             claude_talker=None,
             rescoping=False,
+            issue_cache=None,
         )
 
     def test_passes_rescoping_true_to_repo_status(self, tmp_path: Path) -> None:
@@ -2497,3 +2508,175 @@ class TestProviderColoredStatus:
         expected = rgb_fg(*palette.bright_fg) + "claude-code"
         header_line = next(ln for ln in output.splitlines() if "owner/repo" in ln)
         assert expected in header_line
+
+
+# ── Issue cache display (closes #812) ────────────────────────────────────────
+
+
+class TestParseIsoDatetime:
+    def test_returns_none_for_non_string(self) -> None:
+        assert _parse_iso_datetime(None) is None
+        assert _parse_iso_datetime(123) is None
+
+    def test_returns_none_for_invalid_string(self) -> None:
+        assert _parse_iso_datetime("not a timestamp") is None
+
+    def test_parses_valid_iso_string(self) -> None:
+        d = _parse_iso_datetime("2026-04-19T12:00:00+00:00")
+        assert d is not None
+        assert d.year == 2026
+
+
+class TestParseIssueCache:
+    def test_returns_none_for_non_dict(self) -> None:
+        assert _parse_issue_cache(None) is None
+        assert _parse_issue_cache("oops") is None
+
+    def test_parses_minimal_payload(self) -> None:
+        info = _parse_issue_cache(
+            {
+                "loaded": True,
+                "open_issues": 5,
+                "events_applied": 10,
+                "events_dropped_stale": 2,
+                "last_event_at": "2026-04-19T12:00:00+00:00",
+                "last_reconcile_at": None,
+                "last_reconcile_drift": 0,
+            }
+        )
+        assert info is not None
+        assert info.loaded is True
+        assert info.open_issues == 5
+        assert info.events_applied == 10
+        assert info.events_dropped_stale == 2
+        assert info.last_event_at is not None
+        assert info.last_reconcile_at is None
+        assert info.last_reconcile_drift == 0
+
+    def test_defaults_when_keys_missing(self) -> None:
+        info = _parse_issue_cache({})
+        assert info is not None
+        assert info.loaded is False
+        assert info.open_issues == 0
+
+
+class TestFormatCacheLine:
+    def _repo(self, **kwargs) -> RepoStatus:
+        defaults = dict(
+            name="owner/repo",
+            fido_running=False,
+            issue=None,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+        )
+        defaults.update(kwargs)
+        return RepoStatus(**defaults)
+
+    def test_returns_none_when_no_cache(self) -> None:
+        assert _format_cache_line(self._repo(issue_cache=None)) is None
+
+    def test_returns_none_when_cache_unloaded(self) -> None:
+        info = IssueCacheInfo(
+            loaded=False,
+            open_issues=0,
+            events_applied=0,
+            events_dropped_stale=0,
+            last_event_at=None,
+            last_reconcile_at=None,
+            last_reconcile_drift=0,
+        )
+        assert _format_cache_line(self._repo(issue_cache=info)) is None
+
+    def test_renders_basic_loaded_cache(self) -> None:
+        info = IssueCacheInfo(
+            loaded=True,
+            open_issues=42,
+            events_applied=7,
+            events_dropped_stale=0,
+            last_event_at=None,
+            last_reconcile_at=None,
+            last_reconcile_drift=0,
+        )
+        line = _format_cache_line(self._repo(issue_cache=info))
+        assert line is not None
+        assert "42 open" in line
+        assert "applied 7" in line
+        assert "stale-dropped" not in line
+        assert "reconciled" not in line
+
+    def test_includes_stale_dropped_when_nonzero(self) -> None:
+        info = IssueCacheInfo(
+            loaded=True,
+            open_issues=10,
+            events_applied=20,
+            events_dropped_stale=3,
+            last_event_at=None,
+            last_reconcile_at=None,
+            last_reconcile_drift=0,
+        )
+        line = _format_cache_line(self._repo(issue_cache=info))
+        assert line is not None
+        assert "stale-dropped 3" in line
+
+    def test_includes_reconcile_when_present(self) -> None:
+        info = IssueCacheInfo(
+            loaded=True,
+            open_issues=10,
+            events_applied=20,
+            events_dropped_stale=0,
+            last_event_at=None,
+            last_reconcile_at=datetime(2026, 4, 19, tzinfo=UTC),
+            last_reconcile_drift=2,
+        )
+        line = _format_cache_line(self._repo(issue_cache=info))
+        assert line is not None
+        assert "reconciled drift 2" in line
+
+
+class TestFormatStatusCacheLineIntegration:
+    def _repo(self, **kwargs) -> RepoStatus:
+        defaults = dict(
+            name="owner/repo",
+            fido_running=False,
+            issue=None,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+        )
+        defaults.update(kwargs)
+        return RepoStatus(**defaults)
+
+    def test_format_status_includes_cache_line_when_loaded(self) -> None:
+        info = IssueCacheInfo(
+            loaded=True,
+            open_issues=99,
+            events_applied=1,
+            events_dropped_stale=0,
+            last_event_at=None,
+            last_reconcile_at=None,
+            last_reconcile_drift=0,
+        )
+        repo = self._repo(issue_cache=info)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        out = format_status(status)
+        assert "Cache:" in out
+        assert "99 open" in out
+
+    def test_format_status_omits_cache_line_when_absent(self) -> None:
+        repo = self._repo(issue_cache=None)
+        status = KennelStatus(kennel_pid=None, kennel_uptime=None, repos=[repo])
+        out = format_status(status)
+        assert "Cache:" not in out
