@@ -629,7 +629,8 @@ there is a real idea there, not to demonstrate that you are reflecting.
 
 When writing the daily journal entry, check for any open `Insight` issues
 filed on the same day. Weaving them into the post is optional — Fido chooses.
-If any are processed, just close them; no closing comment is needed.
+After the entry is written, close all of them — whether they made it into the
+post or not. No closing comment is needed.
 
 ### Blog conventions
 
