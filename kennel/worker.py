@@ -1877,7 +1877,7 @@ class Worker:
         log.info("CI fix done (session=%s)", session_id)
 
         # CI failures have no task entry — no complete call needed
-        tasks.sync_tasks(self.work_dir, self.gh)
+        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
         return True
 
     def _filter_threads(
@@ -2248,7 +2248,7 @@ class Worker:
         with State(fido_dir).modify() as state:
             state.pop("current_task_id", None)
         self._abort_task.clear()
-        tasks.sync_tasks(self.work_dir, self.gh)
+        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
 
     def execute_task(
         self,
@@ -2412,7 +2412,7 @@ class Worker:
             self._tasks.complete_with_resolve(task["id"], self.gh)
             with State(fido_dir).modify() as state:
                 state.pop("current_task_id", None)
-            tasks.sync_tasks(self.work_dir, self.gh)
+            tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
         # Sweep any leaked top-level PR comments (BLOCKED: ...) the provider
         # improvised during this task turn.  Runs after task completion so a
         # transient GitHub error during cleanup doesn't block progress.
