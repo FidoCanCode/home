@@ -161,11 +161,26 @@ let is_bool_patt p s =
     String.equal (find_custom r) s
   with Not_found -> false
 
+(** Expand a top-level [Pusual r] into [Pcons(r, [Prel n; …; Prel 1])]
+    before the pattern reaches [pp_pattern].  [n] is the number of branch
+    binders (i.e. [List.length ids] in the enclosing [pp_branch]).
+
+    [Pusual r] is a shorthand emitted by Rocq's extraction only at the
+    outermost level of a branch pattern — never nested inside another
+    [Pcons] or [Ptuple].  Expanding it here into ordinary [Pcons]/[Prel]
+    nodes means [pp_pattern] can work purely from the de Bruijn environment
+    without a separate [ids] list, which in turn means nested sub-patterns
+    (e.g. [Pcons(MCons, [Prel 2, Pcons(MCons, [Prel 1, Pwild])])]) render
+    correctly: each [Prel n] resolves to the right binder name via [env']. *)
+let expand_pusual n = function
+  | Pusual r -> Pcons (r, List.init n (fun i -> Prel (n - i)))
+  | pat      -> pat
+
 (** Pretty-print an [ml_pattern] in Python [case] syntax.
-    [ids] are the branch binder names in source order (outermost first),
-    already renamed and ready to emit.
-    [env'] is the de Bruijn environment with those binders pushed. *)
-let rec pp_pattern state ids env' = function
+    [env'] is the de Bruijn environment with all branch binders pushed.
+    Call [expand_pusual] on the top-level pattern before entering here so
+    that [Pusual] nodes never reach this function. *)
+let rec pp_pattern state env' = function
   | Pcons (r, []) ->
       let cons = str_cons state r in
       (* Erased / empty-name constructor: emit wildcard so the arm still matches *)
@@ -173,17 +188,14 @@ let rec pp_pattern state ids env' = function
       else str cons ++ str "()"
   | Pcons (r, pats) ->
       str (str_cons state r) ++ str "(" ++
-      prlist_with_sep (fun () -> str ", ") (pp_pattern state ids env') pats ++
+      prlist_with_sep (fun () -> str ", ") (pp_pattern state env') pats ++
       str ")"
-  | Pusual r ->
-      (* Shorthand for [Pcons(r,[Prel n;…;Prel 1])].  [ids] already holds the
-         renamed binders in source order — emit them positionally. *)
-      str (str_cons state r) ++ str "(" ++
-      prlist_with_sep (fun () -> str ", ") pp_pyid ids ++
-      str ")"
+  | Pusual _ ->
+      (* Should have been expanded by [expand_pusual] before this call. *)
+      assert false
   | Ptuple pats ->
       str "(" ++
-      prlist_with_sep (fun () -> str ", ") (pp_pattern state ids env') pats ++
+      prlist_with_sep (fun () -> str ", ") (pp_pattern state env') pats ++
       str ")"
   | Prel n ->
       pp_pyid (get_db_name n env')
@@ -344,10 +356,10 @@ let rec pp_expr state env = function
         let pp_branch (ids, pat, body) =
           (* [push_vars] wants ids innermost-first (de Bruijn order).
              [collect_lams]/branch ids come outermost-first, so reverse. *)
-          let ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
-          (* After push, [ids'] are also innermost-first; re-reverse for
-             source order so [pp_pattern] can emit positional names correctly. *)
-          let pp_pat  = pp_pattern state (List.rev ids') env' pat in
+          let _ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
+          (* Expand any top-level [Pusual r] into [Pcons(r,[Prel n;…;Prel 1])]
+             so that [pp_pattern] can resolve every binder via [env'] alone. *)
+          let pp_pat  = pp_pattern state env' (expand_pusual (List.length ids) pat) in
           let pp_body = pp_expr state env' body in
           str "    case " ++ pp_pat ++ str ":" ++ fnl () ++
           str "        " ++ pp_body
@@ -474,8 +486,8 @@ let rec pp_return_body state env indent = function
         let case_pfx = String.make (indent + 4) ' ' in
         let body_pfx = String.make (indent + 8) ' ' in
         let pp_branch (ids, pat, body) =
-          let ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
-          let pp_pat  = pp_pattern state (List.rev ids') env' pat in
+          let _ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
+          let pp_pat  = pp_pattern state env' (expand_pusual (List.length ids) pat) in
           str case_pfx ++ str "case " ++ pp_pat ++ str ":" ++ fnl () ++
           str body_pfx ++ pp_return_body state env' (indent + 8) body
         in
