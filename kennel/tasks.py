@@ -254,14 +254,17 @@ def sync_tasks(
     work_dir: Path,
     gh: GitHub,
     *,
+    blocking: bool = False,
     _resolve_git_dir_fn: Callable[[Path], Path] = _resolve_git_dir,
     _auto_complete_ask_tasks_fn: Callable[..., None] = _auto_complete_ask_tasks,
 ) -> None:
     """Sync tasks.json → PR body work queue.
 
-    Protected by a flock so concurrent
-    calls silently skip rather than race.  Re-runs if tasks.json changes while
-    the body is being updated.
+    Protected by a flock so concurrent calls don't race.  By default
+    (``blocking=False``) a concurrent sync causes this call to silently skip.
+    Pass ``blocking=True`` at authoritative call sites (e.g. post-completion)
+    to wait for the lock instead — this guarantees the PR body converges even
+    if a background sync holds the lock with stale data.
     """
     try:
         git_dir = _resolve_git_dir_fn(work_dir)
@@ -273,12 +276,15 @@ def sync_tasks(
     fido_dir.mkdir(parents=True, exist_ok=True)
     sync_lock_path = fido_dir / "sync.lock"
     sync_lock_fd = open(sync_lock_path, "w")  # noqa: SIM115
-    try:
-        fcntl.flock(sync_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        log.info("sync_tasks: another sync running — skipping")
-        sync_lock_fd.close()
-        return
+    if blocking:
+        fcntl.flock(sync_lock_fd, fcntl.LOCK_EX)
+    else:
+        try:
+            fcntl.flock(sync_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log.info("sync_tasks: another sync running — skipping")
+            sync_lock_fd.close()
+            return
 
     try:
         state = State(fido_dir).load()

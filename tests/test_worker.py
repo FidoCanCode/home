@@ -11376,6 +11376,48 @@ class TestSyncTasks:
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.find_pr.assert_not_called()
 
+    def test_blocking_mode_waits_for_lock_and_proceeds(self, tmp_path: Path) -> None:
+        """blocking=True waits rather than skipping — the post-completion sync always fires."""
+        import fcntl
+        import threading
+
+        fido_dir = self._fido_dir(tmp_path)
+        self._state_with_issue(fido_dir)
+        sync_lock_path = fido_dir / "sync.lock"
+
+        gh = MagicMock()
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.get_user.return_value = "fido-bot"
+        gh.find_pr.return_value = {"number": 7, "state": "OPEN"}
+        body = "desc\n<!-- WORK_QUEUE_START -->\nstale\n<!-- WORK_QUEUE_END -->"
+        gh.get_pr_body.return_value = body
+
+        sync_started = threading.Event()
+        lock_released = threading.Event()
+
+        def hold_lock_briefly() -> None:
+            with open(sync_lock_path, "w") as lock_fd:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                sync_started.set()
+                lock_released.wait(timeout=5)
+
+        holder = threading.Thread(target=hold_lock_briefly, daemon=True)
+        holder.start()
+        sync_started.wait(timeout=5)
+
+        task = {"title": "Fresh task", "status": "pending", "type": "spec"}
+        with patch("kennel.tasks.Tasks.list", return_value=[task]):
+            # Release the lock just after blocking sync starts waiting
+            release_timer = threading.Timer(0.1, lock_released.set)
+            release_timer.start()
+            sync_tasks(tmp_path, gh, blocking=True, **self._sync_kwargs(fido_dir))
+
+        holder.join(timeout=2)
+        # blocking=True must have waited and then executed the sync
+        gh.edit_pr_body.assert_called_once()
+        new_body = gh.edit_pr_body.call_args[0][2]
+        assert "Fresh task" in new_body
+
     def test_returns_early_when_no_open_pr(self, tmp_path: Path) -> None:
         gh = MagicMock()
         fido_dir = self._fido_dir(tmp_path)
