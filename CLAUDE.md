@@ -598,8 +598,8 @@ hard parts too.
 
 If, during the course of real work, you notice something that would make a good
 blog post on its own — a surprising invariant, a bug whose root cause has a
-broader lesson, a small moment that resonated — **file an issue** titled
-`Insight: <topic>` with the `Insight` label. Keep the body short: the hook,
+broader lesson, a small moment that resonated — **file an issue on
+`FidoCanCode/home`** titled `Insight: <topic>` with the `Insight` label. Keep the body short: the hook,
 2–3 sentences of why it mattered, and any references (PRs, commits, code
 pointers).
 
