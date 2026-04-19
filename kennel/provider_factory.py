@@ -8,6 +8,7 @@ from pathlib import Path
 from kennel.claude import ClaudeAPI, ClaudeClient, ClaudeCode
 from kennel.config import RepoConfig
 from kennel.copilotcli import CopilotCLI, CopilotCLIAPI, CopilotCLIClient
+from kennel.gemini import Gemini, GeminiAPI, GeminiClient
 from kennel.provider import (
     PromptSession,
     Provider,
@@ -35,6 +36,8 @@ class DefaultProviderFactory:
                     api = ClaudeAPI()
                 case ProviderID.COPILOT_CLI:
                     api = CopilotCLIAPI()
+                case ProviderID.GEMINI:
+                    api = GeminiAPI()
                 case _:
                     raise ValueError(f"unsupported provider: {repo_cfg.provider}")
             self._apis[repo_cfg.provider] = api
@@ -61,6 +64,15 @@ class DefaultProviderFactory:
             case ProviderID.COPILOT_CLI:
                 return CopilotCLI(
                     agent=CopilotCLIClient(
+                        session_system_file=self._session_system_file,
+                        work_dir=work_dir,
+                        repo_name=repo_name,
+                        session=session,
+                    )
+                )
+            case ProviderID.GEMINI:
+                return Gemini(
+                    agent=GeminiClient(
                         session_system_file=self._session_system_file,
                         work_dir=work_dir,
                         repo_name=repo_name,
