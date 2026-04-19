@@ -190,15 +190,13 @@ print('Phase 4 MyOpt round-trip: OK')\
 ; Even/Odd (mutual, non-parameterised): even_depth measures alternating parity depth.
 ; Exercises: (a) a mutual inductive group with cross-referencing constructors, and
 ; (b) a mutually-recursive fixpoint (Dfix) that pattern-matches both packets.
-; The ../ prefix is needed because dune action CWD is _build/default/rocq-python-extraction/
-; while the extraction side-effects land in _build/default/.
 (rule
  (alias runtest)
  (deps test/phase4.vo)
  (action
   (bash "\
 python3 -c \"\
-exec(open('../even_depth.py').read()); \
+exec(open('even_depth.py').read()); \
 assert even_depth(EvenO()) == 0, 'even_depth(EvenO()): got ' + repr(even_depth(EvenO())); \
 assert even_depth(EvenS(OddS(EvenO()))) == 2, 'even_depth depth-2: got ' + repr(even_depth(EvenS(OddS(EvenO())))); \
 assert even_depth(EvenS(OddS(EvenS(OddS(EvenO()))))) == 4, 'even_depth depth-4: got ' + repr(even_depth(EvenS(OddS(EvenS(OddS(EvenO())))))); \
@@ -218,7 +216,7 @@ print('Phase 4 Even/Odd round-trip: OK')\
  (action
   (bash "\
 python3 -c \"\
-exec(open('../is_even.py').read()); \
+exec(open('is_even.py').read()); \
 assert is_even(0) is True,  'is_even(0): got '  + repr(is_even(0)); \
 assert is_even(1) is False, 'is_even(1): got '  + repr(is_even(1)); \
 assert is_even(2) is True,  'is_even(2): got '  + repr(is_even(2)); \
@@ -237,7 +235,7 @@ print('Phase 4 is_even round-trip: OK')\
  (action
   (bash "\
 python3 -c \"\
-exec(open('../ntree_is_leaf.py').read()); \
+exec(open('ntree_is_leaf.py').read()); \
 assert ntree_is_leaf(NLeaf()) is True,  'ntree_is_leaf(NLeaf()): got '  + repr(ntree_is_leaf(NLeaf())); \
 assert ntree_is_leaf(NNode([])) is False, 'ntree_is_leaf(NNode([])): got ' + repr(ntree_is_leaf(NNode([]))); \
 assert ntree_is_leaf(NNode([NLeaf()])) is False, 'ntree_is_leaf(NNode([NLeaf()])): got ' + repr(ntree_is_leaf(NNode([NLeaf()]))); \
