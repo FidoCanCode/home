@@ -60,7 +60,6 @@ from kennel.worker import (
     latest_decisive_review,
     provider_run,
     provider_start,
-    run,
     should_rerequest_review,
 )
 from kennel.worker import (
@@ -100,6 +99,8 @@ class Worker(_WorkerBase):
                 repo_name=kwargs.get("repo_name", ""),
                 membership=kwargs.get("membership"),
             )
+        if "issue_cache" not in kwargs:
+            kwargs["issue_cache"] = IssueTreeCache(kwargs.get("repo_name", "test/repo"))
         super().__init__(work_dir, gh, *args, **kwargs)
 
     def assert_git_identity(self, *, phase: str) -> None:
@@ -117,6 +118,8 @@ class WorkerThread(_WorkerThreadBase):
                 repo_name=repo_name,
                 membership=kwargs.get("membership"),
             )
+        if "issue_cache" not in kwargs:
+            kwargs["issue_cache"] = IssueTreeCache(repo_name)
         super().__init__(work_dir, repo_name, gh, *args, **kwargs)
 
 
@@ -1540,6 +1543,9 @@ class TestWorkerFindNextIssue:
 
     def _make_worker(self, tmp_path: Path) -> tuple["Worker", MagicMock]:
         gh = MagicMock()
+        # Default verify returns OPEN — individual tests override when they
+        # want to exercise the verify-failed branch.
+        gh.view_issue.return_value = {"state": "OPEN"}
         provider = MagicMock()
         provider.api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE
@@ -1570,7 +1576,6 @@ class TestWorkerFindNextIssue:
     def test_returns_none_when_no_issues(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.find_all_open_issues.return_value = []
-        gh.find_issues.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         with patch.object(worker, "set_status"):
             result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
@@ -1828,16 +1833,14 @@ class TestWorkerFindNextIssue:
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
         mock_status.assert_called_once_with("All done — no issues to fetch", busy=False)
 
-    def test_passes_correct_args_to_find_issues(self, tmp_path: Path) -> None:
+    def test_bootstraps_inventory_with_correct_args(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.find_all_open_issues.return_value = []
-        gh.find_issues.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         repo_ctx = self._make_repo_ctx(owner="org", repo_name="myrepo", gh_user="bot")
         with patch.object(worker, "set_status"):
             worker.find_next_issue(fido_dir, repo_ctx)
         gh.find_all_open_issues.assert_called_once_with("org", "myrepo")
-        gh.find_issues.assert_called_once_with("org", "myrepo", "bot")
 
     def test_logs_info_when_starting_issue(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -2061,59 +2064,72 @@ def _issue(
 
 
 class TestIssueHasOpenSubIssues:
-    """Helper that drives the sub-issue-drift guard (fix for #780)."""
+    """Helper that drives the sub-issue-drift guard (fix for #780).
 
-    def _worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+    Reads from the cache (closes #812 follow-up): a child is open iff
+    its number is still in the cache index.
+    """
+
+    def _worker(self, tmp_path: Path, inventory: list[dict] | None = None) -> Worker:
         gh = MagicMock()
-        return Worker(tmp_path, gh), gh
+        cache = IssueTreeCache("owner/repo")
+        if inventory is not None:
+            cache.load_inventory(
+                inventory,
+                snapshot_started_at=datetime(2026, 4, 19, tzinfo=timezone.utc),
+            )
+        return Worker(tmp_path, gh, issue_cache=cache)
+
+    def _issue(
+        self,
+        number: int,
+        *,
+        sub_issues: list[int] | None = None,
+        assignees: list[str] | None = None,
+    ) -> dict:
+        return {
+            "number": number,
+            "title": f"#{number}",
+            "createdAt": "2026-04-01T00:00:00Z",
+            "assignees": {"nodes": [{"login": a} for a in (assignees or [])]},
+            "subIssues": {"nodes": [{"number": c} for c in (sub_issues or [])]},
+        }
 
     def test_returns_true_when_at_least_one_sub_issue_is_open(
         self, tmp_path: Path
     ) -> None:
-        worker, gh = self._worker(tmp_path)
-        gh.get_sub_issues.return_value = iter(
-            [
-                {"number": 202, "state": "OPEN"},
-                {"number": 203, "state": "CLOSED"},
-            ]
+        # Parent #201 has children 202 (open, in cache) and 203 (open).
+        worker = self._worker(
+            tmp_path,
+            inventory=[
+                self._issue(201, sub_issues=[202, 203]),
+                self._issue(202),
+                self._issue(203),
+            ],
         )
         assert worker._issue_has_open_sub_issues("owner/repo", 201) is True
 
     def test_returns_false_when_all_sub_issues_closed(self, tmp_path: Path) -> None:
-        worker, gh = self._worker(tmp_path)
-        gh.get_sub_issues.return_value = iter(
-            [
-                {"number": 202, "state": "CLOSED"},
-                {"number": 203, "state": "CLOSED"},
-            ]
+        # Parent #201 references 202 + 203 in sub_issues, but neither
+        # is in the cache index → both are closed.
+        worker = self._worker(
+            tmp_path,
+            inventory=[self._issue(201, sub_issues=[202, 203])],
         )
         assert worker._issue_has_open_sub_issues("owner/repo", 201) is False
 
     def test_returns_false_when_no_sub_issues(self, tmp_path: Path) -> None:
-        worker, gh = self._worker(tmp_path)
-        gh.get_sub_issues.return_value = iter([])
+        worker = self._worker(
+            tmp_path,
+            inventory=[self._issue(201)],
+        )
         assert worker._issue_has_open_sub_issues("owner/repo", 201) is False
 
-    def test_short_circuits_on_first_open_child(self, tmp_path: Path) -> None:
-        """Iterator is consumed only up to the first OPEN entry — large
-        sub-trees don't cause extra API pagination."""
-        worker, gh = self._worker(tmp_path)
-        sentinel_hit = []
-
-        def lazy_iter():
-            yield {"number": 202, "state": "OPEN"}
-            sentinel_hit.append(True)  # should not be reached
-            yield {"number": 203, "state": "OPEN"}
-
-        gh.get_sub_issues.return_value = lazy_iter()
-        assert worker._issue_has_open_sub_issues("owner/repo", 201) is True
-        assert sentinel_hit == []
-
-    def test_splits_repo_correctly_for_api_call(self, tmp_path: Path) -> None:
-        worker, gh = self._worker(tmp_path)
-        gh.get_sub_issues.return_value = iter([])
-        worker._issue_has_open_sub_issues("FidoCanCode/home", 710)
-        gh.get_sub_issues.assert_called_once_with("FidoCanCode", "home", 710)
+    def test_returns_false_when_parent_not_in_cache(self, tmp_path: Path) -> None:
+        """Parent itself absent from the cache (closed/transferred) →
+        treat as no open children."""
+        worker = self._worker(tmp_path, inventory=[])
+        assert worker._issue_has_open_sub_issues("owner/repo", 999) is False
 
 
 class TestAssertGitIdentity:
@@ -2130,7 +2146,10 @@ class TestAssertGitIdentity:
         guard method is exercised, not the no-op override."""
         gh = MagicMock()
         gh.get_authenticated_identity.return_value = self._EXPECTED
-        return _WorkerBase(tmp_path, gh), gh
+        return (
+            _WorkerBase(tmp_path, gh, issue_cache=IssueTreeCache("test/repo")),
+            gh,
+        )
 
     def _init_repo(
         self, tmp_path: Path, *, name: str | None, email: str | None
@@ -2912,24 +2931,6 @@ class TestWorkerPostPickupComment:
         gh.comment_issue.assert_called_once_with(
             "owner/repo", 1, "Back on it!\n\n<!-- fido:pickup -->"
         )
-
-
-class TestRun:
-    def test_creates_worker_and_calls_run(self, tmp_path: Path) -> None:
-        mock_worker = MagicMock()
-        mock_worker.run.return_value = 0
-        mock_gh_cls = MagicMock()
-        with patch("kennel.worker.Worker", return_value=mock_worker) as mock_worker_cls:
-            result = run(tmp_path, _GitHub=mock_gh_cls)
-        mock_worker_cls.assert_called_once_with(tmp_path, mock_gh_cls.return_value)
-        mock_worker.run.assert_called_once()
-        assert result == 0
-
-    def test_returns_worker_run_result(self, tmp_path: Path) -> None:
-        mock_worker = MagicMock()
-        mock_worker.run.return_value = 2
-        with patch("kennel.worker.Worker", return_value=mock_worker):
-            assert run(tmp_path, _GitHub=MagicMock()) == 2
 
 
 class TestCreateCompactScript:

@@ -864,7 +864,8 @@ class Worker:
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
         first_iteration: bool = False,
-        issue_cache: IssueTreeCache | None = None,
+        *,
+        issue_cache: IssueTreeCache,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
@@ -874,12 +875,10 @@ class Worker:
         # lifetime (at startup).  Fix for #794 — without this, top-level PR
         # comments that land while kennel is down go unanswered on restart.
         self._first_iteration = first_iteration
-        # Per-repo issue tree cache (closes #812).  When provided, the
+        # Per-repo issue tree cache (closes #812).  Required — the
         # picker reads from the cache instead of issuing fresh
         # find_all_open_issues / find_issues GraphQL calls every
-        # iteration; webhook events keep the cache in sync.  When None,
-        # falls back to the legacy GraphQL polling path so existing
-        # tests + standalone ``run()`` keep working.
+        # iteration; webhook events keep the cache in sync.
         self._issue_cache = issue_cache
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
@@ -1069,15 +1068,17 @@ class Worker:
 
         Called each outer iteration so fido abandons an issue that was a
         leaf at pickup but has since acquired children (e.g. fido itself
-        groomed it into sub-issues, or a human added children).  Uses the
-        existing :meth:`GitHub.get_sub_issues` iterator; returns on the
-        first open child to avoid paginating the whole sub-tree.
+        groomed it into sub-issues, or a human added children).  Reads
+        from the per-repo :class:`IssueTreeCache` (closes #812 follow-up):
+        a child is open iff its number is still in the cache index.
         """
-        owner, repo_name = repo.split("/", 1)
-        for child in self.gh.get_sub_issues(owner, repo_name, number):
-            if child.get("state") != "CLOSED":
-                return True
-        return False
+        del repo  # repo is the cache's scope already
+        cache = self._issue_cache
+        index = cache.all_open()
+        node = index.get(number)
+        if node is None:
+            return False
+        return any(child in index for child in node.sub_issues)
 
     def set_status(
         self,
@@ -1167,15 +1168,11 @@ class Worker:
     def find_next_issue(self, fido_dir: Path, repo_ctx: RepoContext) -> int | None:
         """Find the next eligible open issue assigned to gh_user.
 
-        When an :class:`~kennel.issue_cache.IssueTreeCache` was injected
-        (production path, fix #812), reads candidates + the issue tree
-        from the cache (zero GraphQL on the steady-state pick) and
-        verifies the chosen issue is still open via a single REST call
-        before committing the assignment.
-
-        Falls back to the legacy GraphQL polling path when no cache is
-        injected (standalone ``run()`` invocations and tests that don't
-        exercise the cache).
+        Reads candidates + the issue tree from the per-repo
+        :class:`~kennel.issue_cache.IssueTreeCache` (closes #812) — zero
+        GraphQL on the steady-state pick — and verifies the chosen issue
+        is still open via a single REST call before committing the
+        assignment.
         """
         log.info("finding next eligible issue")
         provider_status = self._provider_pressure_status()
@@ -1187,23 +1184,7 @@ class Worker:
             )
             self._set_provider_pause_status(provider_status)
             return None
-        if self._issue_cache is not None:
-            choice = self._pick_from_cache(repo_ctx)
-        else:
-            all_issues = self.gh.find_all_open_issues(
-                repo_ctx.owner, repo_ctx.repo_name
-            )
-            issue_index: dict[int, dict[str, Any]] = {
-                i["number"]: i for i in all_issues
-            }
-            candidates = self.gh.find_issues(
-                repo_ctx.owner, repo_ctx.repo_name, repo_ctx.gh_user
-            )
-            choice = _pick_next_issue(
-                candidates,
-                repo_ctx.gh_user,
-                issue_index=issue_index,
-            )
+        choice = self._pick_from_cache(repo_ctx)
         if choice is None:
             log.info(
                 "no eligible issues assigned to %s in %s",
@@ -1244,7 +1225,6 @@ class Worker:
         OPEN — guards against the race where a webhook arrives between
         the cache read and the ``add_assignee`` write.
         """
-        assert self._issue_cache is not None
         cache = self._issue_cache
         if not cache.is_loaded:
             snapshot_started_at = datetime.now(tz=timezone.utc)
@@ -3013,7 +2993,8 @@ class WorkerThread(threading.Thread):
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
-        issue_cache: IssueTreeCache | None = None,
+        *,
+        issue_cache: IssueTreeCache,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
         self.work_dir = work_dir
@@ -3026,10 +3007,11 @@ class WorkerThread(threading.Thread):
         self._stop = False
         self.crash_error: str | None = None
         self._provider_lock = threading.Lock()
-        # Per-repo issue tree cache (closes #812).  Hands the same cache
-        # to every Worker iteration so the cache survives Worker crashes
-        # — only a kennel restart wipes it (which then re-bootstraps via
-        # ``Worker._pick_from_cache``'s lazy ``find_all_open_issues`` call).
+        # Per-repo issue tree cache (closes #812).  Required — hands the
+        # same cache to every Worker iteration so it survives Worker
+        # crashes; only a kennel restart wipes it (which then
+        # re-bootstraps via ``Worker._pick_from_cache``'s lazy
+        # ``find_all_open_issues`` call).
         self._issue_cache = issue_cache
         self._provider_factory = (
             DefaultProviderFactory(session_system_file=_sub_dir() / "persona.md")
@@ -3322,13 +3304,3 @@ class WorkerThread(threading.Thread):
                     provider = self._provider
                 if provider is not None:
                     provider.agent.stop_session()
-
-
-def run(work_dir: Path, *, _GitHub: type[GitHub] = GitHub) -> int:
-    """Run one iteration of the worker loop.
-
-    Creates a :class:`Worker` with a live :class:`~kennel.github.GitHub` client
-    and delegates to :meth:`Worker.run`.  Pass ``_GitHub=MockClass`` in tests
-    instead of patching the module-level name.
-    """
-    return Worker(work_dir, _GitHub()).run()
