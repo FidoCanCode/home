@@ -348,6 +348,58 @@ let rec pp_expr state env = function
            [nat → int] whose constructors do not exist as Python patterns. *)
         pp_custom_match_expr state env (find_custom_match branches) scrutinee branches
       else
+        (* Record projection: single-branch match over a record inductive.
+           Instead of [match scrutinee: case Ctor(f0,f1): body], emit the
+           lambda-lifted attribute form:
+             (lambda f0, f1, …: body)(scrutinee.f0, scrutinee.f1, …)
+           This mirrors [MLletin]'s lambda-lift strategy and stays at
+           expression level without a [match] statement.
+           Detection: one branch whose pattern is [Pusual r] or [Pcons(r,_)]
+           where [r] is a constructor with non-empty record fields. *)
+        let record_proj_opt =
+          if Array.length branches = 1 then
+            let (_, pat, _) = branches.(0) in
+            ( match pat with
+              | Pusual r | Pcons (r, _) ->
+                  let fds = get_record_fields (State.get_table state) r in
+                  if List.is_empty fds then None else Some (r, fds)
+              | _ -> None )
+          else None
+        in
+        (match record_proj_opt with
+        | Some (r, fds) ->
+            (* [ids] is outermost-first (field-0 first); [push_vars] wants
+               innermost-first, so reverse.  The returned [names] list is in
+               the same order as the (reversed) input — i.e. innermost-first.
+               Reversing again gives field order: [name_0; …; name_{n-1}]. *)
+            let (ids, _, body) = branches.(0) in
+            let names, env' = push_vars (List.rev_map id_of_mlid ids) env in
+            let field_names = List.rev names in
+            let n = List.length field_names in
+            (* For erased binders ([dummy_name]) use a unique synthetic name
+               [_e<i>] so that multiple erased params don't collide in the
+               lambda signature (Python disallows duplicate param names). *)
+            let pp_param i id =
+              if Id.equal id dummy_name
+              then str ("_e" ^ string_of_int i)
+              else pp_pyid id
+            in
+            (* Scrutinee is evaluated once as a [pp] value; pure extraction
+               terms never have side effects so repeating it is safe, but
+               sharing the printed token avoids spurious string duplication. *)
+            let pp_scr = pp_expr state env scrutinee in
+            let pp_arg i = pp_scr ++ str "." ++ pp_field_name state r fds i in
+            str "(lambda " ++
+            prlist_with_sep (fun () -> str ", ")
+              (fun (i, id) -> pp_param i id)
+              (List.mapi (fun i id -> (i, id)) field_names) ++
+            str ": " ++
+            pp_expr state env' body ++
+            str ")(" ++
+            prlist_with_sep (fun () -> str ", ") pp_arg
+              (List.init n (fun i -> i)) ++
+            str ")"
+        | None ->
         (* General match: emit Python [match]/[case] statement.
            This is a statement in Python, so it only works correctly when the
            surrounding [Dterm] or [MLletin] emits it inside a function body.
@@ -377,7 +429,7 @@ let rec pp_expr state env = function
         in
         str "match " ++ pp_expr state env scrutinee ++ str ":" ++ fnl () ++
         prlist_with_sep fnl pp_branch (Array.to_list branches) ++
-        catch_all
+        catch_all)
   | MLfix (i, ids, defs) ->
       (* Mutual fixpoint: push all n names into the env (reversed, per the
          extraction convention so [ids.(0)] becomes the outermost binder),
