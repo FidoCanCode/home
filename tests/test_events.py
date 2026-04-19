@@ -2102,6 +2102,54 @@ class TestReplyToIssueComment:
         # the reply generation call, which must survive session preemption.
         assert any(kw.get("retry_on_preempt") is True for kw in all_run_turn_kwargs)
 
+    def test_writes_durable_claim_file_after_reply(self, tmp_path: Path) -> None:
+        """After posting a reply, a .lock file is written at
+        .git/fido/comments/<comment_id>.lock so a kennel restart doesn't
+        re-pick the comment via backfill (closes #834)."""
+        cfg = self._cfg(tmp_path)
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ANSWER: it works this way"
+            return "Yes, here is why..."
+
+        reply_to_issue_comment(
+            self._action(cid=4275080243),
+            cfg,
+            self._repo_cfg(tmp_path),
+            MagicMock(),
+            agent=_client(side_effect=fake_pp),
+        )
+        claim_file = tmp_path / ".git" / "fido" / "comments" / "4275080243.lock"
+        assert claim_file.exists(), "durable claim file must be written after reply"
+
+    def test_no_comment_id_skips_claim_write(self, tmp_path: Path) -> None:
+        """When comment_id is absent, no claim file is created (no-op)."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="PR top-level comment on #7 by owner:\n\nhi",
+            comment_body="hi",
+            is_bot=False,
+            context={"pr_title": "My PR"},  # no comment_id
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return "ok"
+
+        reply_to_issue_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            MagicMock(),
+            agent=_client(side_effect=fake_pp),
+        )
+        claim_dir = tmp_path / ".git" / "fido" / "comments"
+        assert not claim_dir.exists() or not list(claim_dir.iterdir()), (
+            "no claim files should be written when comment_id is absent"
+        )
+
 
 class TestCreateTask:
     def _cfg(self, tmp_path: Path) -> Config:

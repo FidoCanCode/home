@@ -996,8 +996,15 @@ def reply_to_issue_comment(
     gh.comment_issue(repo_full, number, body)
     log.info("reply posted on PR #%s", number)
 
-    # Get comment_id from the dispatch payload (stored in context)
+    # Write durable claim file so a kennel restart doesn't re-pick this comment.
+    # Without this, backfill_missed_pr_comments re-queues comments triaged as
+    # ANSWER/DUMP/ASK because those paths create no tasks.json entry for the
+    # Tasks.add dedup to match against.  This mirrors the claim-file pattern used
+    # by reply_to_comment for review comments (closes #834).
     _cid = (action.context or {}).get("comment_id")
+    if _cid is not None:
+        _comment_lock(repo_cfg.work_dir, _cid).touch(exist_ok=True)
+        log.info("wrote durable claim for issue comment %s", _cid)
     if _cid:
         log.info(
             "reply_to_issue_comment: adding reaction on PR #%s comment %s", number, _cid
