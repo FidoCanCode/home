@@ -202,6 +202,47 @@ let rec pp_pattern state env' = function
   | Pwild ->
       str "_"
 
+(*s Record-projection detection helper.
+
+    Returns [Some (r, fds, sub_pats)] when [branches] describes a single-branch
+    match that the optimiser can convert into lambda-lifted attribute accesses:
+
+      (lambda param_0, param_1, …: body)(scrutinee.field_0, scrutinee.field_1, …)
+
+    Three conditions must hold:
+    1. Exactly one branch.
+    2. The branch pattern is [Pusual r] or [Pcons(r,_)] for a constructor [r]
+       whose parent inductive is a record ([get_record_fields] is non-empty).
+    3. Every expanded sub-pattern is [Prel k] (bound) or [Pwild] (discarded),
+       and the sub-pattern count matches the field count.
+
+    Condition 3 rules out nested constructor patterns inside a field position,
+    which require genuine case analysis rather than a plain attribute access.
+
+    Used by both [pp_expr] (expression context) and [pp_return_body] (inside
+    a [def] body), so the optimisation fires in both settings. *)
+let record_proj_info state branches =
+  if Array.length branches <> 1 then None
+  else
+    let (ids, pat, _) = branches.(0) in
+    match pat with
+    | Pusual r | Pcons (r, _) ->
+        let fds = get_record_fields (State.get_table state) r in
+        if List.is_empty fds then None
+        else
+          (* Expand [Pusual r] into [Pcons(r, pats)] for uniform treatment;
+             [Pcons] is returned unchanged by [expand_pusual]. *)
+          ( match expand_pusual (List.length ids) pat with
+            | Pcons (_, sub_pats) ->
+                if List.length sub_pats = List.length fds &&
+                   List.for_all
+                     (function Prel _ | Pwild -> true | _ -> false)
+                     sub_pats
+                then Some (r, fds, sub_pats)
+                else None
+            | _ -> None )
+    | _ -> None
+
 (*s Core expression printer.
     [env] carries de Bruijn binder names (innermost first). *)
 
@@ -354,50 +395,38 @@ let rec pp_expr state env = function
              (lambda f0, f1, …: body)(scrutinee.f0, scrutinee.f1, …)
            This mirrors [MLletin]'s lambda-lift strategy and stays at
            expression level without a [match] statement.
-           Detection: one branch whose pattern is [Pusual r] or [Pcons(r,_)]
-           where [r] is a constructor with non-empty record fields. *)
-        let record_proj_opt =
-          if Array.length branches = 1 then
-            let (_, pat, _) = branches.(0) in
-            ( match pat with
-              | Pusual r | Pcons (r, _) ->
-                  let fds = get_record_fields (State.get_table state) r in
-                  if List.is_empty fds then None else Some (r, fds)
-              | _ -> None )
-          else None
-        in
-        (match record_proj_opt with
-        | Some (r, fds) ->
-            (* [ids] is outermost-first (field-0 first); [push_vars] wants
-               innermost-first, so reverse.  The returned [names] list is in
-               the same order as the (reversed) input — i.e. innermost-first.
-               Reversing again gives field order: [name_0; …; name_{n-1}]. *)
+           [record_proj_info] handles the full detection and edge-case guarding.
+
+           Key subtlety: branch [ids] only contains BOUND binders.  Wildcard
+           sub-patterns in Rocq source compile to real variable binders (with
+           fresh generated names) rather than [Pwild] in MiniML — so in
+           practice every sub-pattern is [Prel k] and every field has a bound
+           name.  The [Pwild] arm is kept as a defence against future changes. *)
+        (match record_proj_info state branches with
+        | Some (r, fds, sub_pats) ->
             let (ids, _, body) = branches.(0) in
-            let names, env' = push_vars (List.rev_map id_of_mlid ids) env in
-            let field_names = List.rev names in
-            let n = List.length field_names in
-            (* For erased binders ([dummy_name]) use a unique synthetic name
-               [_e<i>] so that multiple erased params don't collide in the
-               lambda signature (Python disallows duplicate param names). *)
-            let pp_param i id =
-              if Id.equal id dummy_name
-              then str ("_e" ^ string_of_int i)
-              else pp_pyid id
+            let n_fds = List.length fds in
+            (* Push all binders (innermost-first for push_vars). *)
+            let _, env' = push_vars (List.rev_map id_of_mlid ids) env in
+            (* Derive the lambda parameter name for field position [i]:
+               [Prel k] → look up the name at depth [k] in [env']
+               [Pwild]  → synthetic [_e<i>] (can't repeat [_] in a lambda) *)
+            let pp_param_for_pos i =
+              match List.nth sub_pats i with
+              | Prel k -> pp_pyid (get_db_name k env')
+              | _      -> str ("_e" ^ string_of_int i)
             in
-            (* Scrutinee is evaluated once as a [pp] value; pure extraction
-               terms never have side effects so repeating it is safe, but
-               sharing the printed token avoids spurious string duplication. *)
+            (* Scrutinee is pure; sharing the [pp] value avoids duplication. *)
             let pp_scr = pp_expr state env scrutinee in
             let pp_arg i = pp_scr ++ str "." ++ pp_field_name state r fds i in
             str "(lambda " ++
-            prlist_with_sep (fun () -> str ", ")
-              (fun (i, id) -> pp_param i id)
-              (List.mapi (fun i id -> (i, id)) field_names) ++
+            prlist_with_sep (fun () -> str ", ") pp_param_for_pos
+              (List.init n_fds (fun i -> i)) ++
             str ": " ++
             pp_expr state env' body ++
             str ")(" ++
             prlist_with_sep (fun () -> str ", ") pp_arg
-              (List.init n (fun i -> i)) ++
+              (List.init n_fds (fun i -> i)) ++
             str ")"
         | None ->
         (* General match: emit Python [match]/[case] statement.
@@ -534,29 +563,36 @@ let rec pp_return_body state env indent = function
         str "return " ++
         pp_custom_match_expr state env (find_custom_match branches) scrutinee branches
       else
-        (* General match: put [return] inside each arm so the branch is
-           a valid statement.  [case] must be indented inside the [match]
-           block; [body] must be indented inside the [case] block. *)
-        let case_pfx = String.make (indent + 4) ' ' in
-        let body_pfx = String.make (indent + 8) ' ' in
-        let pp_branch (ids, pat, body) =
-          let _ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
-          let pp_pat  = pp_pattern state env' (expand_pusual (List.length ids) pat) in
-          str case_pfx ++ str "case " ++ pp_pat ++ str ":" ++ fnl () ++
-          str body_pfx ++ pp_return_body state env' (indent + 8) body
-        in
-        (* Same catch-all logic as the expression-context path: append
-           [case _: assert_never(_)] unless the last explicit arm is already
-           a wildcard.  [_] is a valid Python variable even in [case _:],
-           so passing it to [assert_never] satisfies type checkers. *)
-        let catch_all =
-          if has_wildcard_last branches then mt ()
-          else fnl () ++ str case_pfx ++ str "case _:" ++ fnl () ++
-               str body_pfx ++ str "assert_never(_)"
-        in
-        str "match " ++ pp_expr state env scrutinee ++ str ":" ++ fnl () ++
-        prlist_with_sep fnl pp_branch (Array.to_list branches) ++
-        catch_all
+        (* Record projection — [record_proj_info] detects the single-branch
+           record match; [pp_expr] emits the lambda-lift form, which is a
+           valid expression so a single [return] suffices. *)
+        ( match record_proj_info state branches with
+          | Some _ ->
+              str "return " ++ pp_expr state env expr
+          | None ->
+              (* General match: put [return] inside each arm so the branch is
+                 a valid statement.  [case] must be indented inside the [match]
+                 block; [body] must be indented inside the [case] block. *)
+              let case_pfx = String.make (indent + 4) ' ' in
+              let body_pfx = String.make (indent + 8) ' ' in
+              let pp_branch (ids, pat, body) =
+                let _ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
+                let pp_pat  = pp_pattern state env' (expand_pusual (List.length ids) pat) in
+                str case_pfx ++ str "case " ++ pp_pat ++ str ":" ++ fnl () ++
+                str body_pfx ++ pp_return_body state env' (indent + 8) body
+              in
+              (* Same catch-all logic as the expression-context path: append
+                 [case _: assert_never(_)] unless the last explicit arm is already
+                 a wildcard.  [_] is a valid Python variable even in [case _:],
+                 so passing it to [assert_never] satisfies type checkers. *)
+              let catch_all =
+                if has_wildcard_last branches then mt ()
+                else fnl () ++ str case_pfx ++ str "case _:" ++ fnl () ++
+                     str body_pfx ++ str "assert_never(_)"
+              in
+              str "match " ++ pp_expr state env scrutinee ++ str ":" ++ fnl () ++
+              prlist_with_sep fnl pp_branch (Array.to_list branches) ++
+              catch_all )
   | MLaxiom _ | MLexn _ | MLparray _ as expr ->
       (* These emit [raise …], which is a valid Python statement but NOT a
          valid expression.  Emit bare — no [return] prefix. *)
