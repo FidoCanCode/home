@@ -2102,6 +2102,54 @@ class TestReplyToIssueComment:
         # the reply generation call, which must survive session preemption.
         assert any(kw.get("retry_on_preempt") is True for kw in all_run_turn_kwargs)
 
+    def test_writes_durable_claim_file_after_reply(self, tmp_path: Path) -> None:
+        """After posting a reply, a .lock file is written at
+        .git/fido/comments/<comment_id>.lock so a kennel restart doesn't
+        re-pick the comment via backfill (closes #834)."""
+        cfg = self._cfg(tmp_path)
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ANSWER: it works this way"
+            return "Yes, here is why..."
+
+        reply_to_issue_comment(
+            self._action(cid=4275080243),
+            cfg,
+            self._repo_cfg(tmp_path),
+            MagicMock(),
+            agent=_client(side_effect=fake_pp),
+        )
+        claim_file = tmp_path / ".git" / "fido" / "comments" / "4275080243.lock"
+        assert claim_file.exists(), "durable claim file must be written after reply"
+
+    def test_no_comment_id_skips_claim_write(self, tmp_path: Path) -> None:
+        """When comment_id is absent, no claim file is created (no-op)."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="PR top-level comment on #7 by owner:\n\nhi",
+            comment_body="hi",
+            is_bot=False,
+            context={"pr_title": "My PR"},  # no comment_id
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ACT: do it"
+            return "ok"
+
+        reply_to_issue_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            MagicMock(),
+            agent=_client(side_effect=fake_pp),
+        )
+        claim_dir = tmp_path / ".git" / "fido" / "comments"
+        assert not claim_dir.exists() or not list(claim_dir.iterdir()), (
+            "no claim files should be written when comment_id is absent"
+        )
+
 
 class TestCreateTask:
     def _cfg(self, tmp_path: Path) -> Config:
@@ -3820,6 +3868,38 @@ class TestBackfillMissedPrComments:
             )
         assert count == 0
         mock_create.assert_not_called()
+
+    def test_skips_already_claimed_comments(self, tmp_path: Path) -> None:
+        """Comments with a durable claim file are not re-queued on restart.
+
+        reply_to_issue_comment writes .git/fido/comments/<id>.lock after
+        posting; backfill must honour that file and skip re-queueing —
+        closes #834.
+        """
+        from kennel.events import _comment_lock, backfill_missed_pr_comments
+
+        mock_gh = MagicMock()
+        mock_gh.get_issue_comments.return_value = [
+            self._comment(100, body="already answered"),
+            self._comment(200, body="not yet handled"),
+        ]
+        mock_gh.is_thread_resolved_for_comment.return_value = False
+        # Pre-create the claim file for comment 100 (simulates a prior reply).
+        _comment_lock(tmp_path, 100).touch(exist_ok=True)
+
+        with patch("kennel.events.create_task") as mock_create:
+            backfill_missed_pr_comments(
+                self._cfg(tmp_path),
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                1,
+                gh_user="fidocancode",
+            )
+
+        # Only comment 200 (unclaimed) should be queued.
+        assert mock_create.call_count == 1
+        _, kwargs = mock_create.call_args
+        assert kwargs["thread"]["comment_id"] == 200
 
 
 class TestLaunchSync:
