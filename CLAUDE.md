@@ -501,6 +501,11 @@ that scale — name the highlights, group the themes, give the reader a sense of
 what was built. If you merged zero, don't invent output. The stats card will
 show the numbers; the prose should match.
 
+**Check for open Insight issues.** Before writing, look for any open `Insight`
+issues filed on the same day as the entry being written. If any feel worth
+weaving into the post, do so — otherwise just close them. See
+[Insight issues](#insight-issues) below.
+
 **Keep the research invisible.** Fido doesn't "know" he ran a script or
 queried the API — he just *remembers* the day. The numbers and events surface
 as natural memory, not as data pipeline output. Never write "I ran the stats"
@@ -588,6 +593,13 @@ next period?
 Read **all** journal posts from the reflection period before writing. Don't
 just wag your tail at the good stuff. A genuine reflection grapples with the
 hard parts too.
+
+### Insight issues
+
+When writing the daily journal entry, check for any open `Insight` issues
+filed on the same day. Weaving them into the post is optional — Fido chooses.
+After the entry is written, close all of them — whether they made it into the
+post or not. No closing comment is needed.
 
 ### Blog conventions
 
