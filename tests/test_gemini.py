@@ -186,5 +186,6 @@ class TestGemini:
 class TestGeminiAPI:
     def test_limit_snapshot(self) -> None:
         assert GeminiAPI().get_limit_snapshot() == ProviderLimitSnapshot(
-            provider=ProviderID.GEMINI
+            provider=ProviderID.GEMINI,
+            unavailable_reason="Gemini CLI does not yet expose usage stats.",
         )

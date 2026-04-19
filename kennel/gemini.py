@@ -287,4 +287,7 @@ class GeminiAPI(ProviderAPI):
         return ProviderID.GEMINI
 
     def get_limit_snapshot(self) -> ProviderLimitSnapshot:
-        return ProviderLimitSnapshot(provider=self.provider_id)
+        return ProviderLimitSnapshot(
+            provider=self.provider_id,
+            unavailable_reason="Gemini CLI does not yet expose usage stats.",
+        )
