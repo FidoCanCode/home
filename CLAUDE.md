@@ -458,6 +458,13 @@ or any other day.
 This applies to both journal entries and reflection posts. Check the requested date
 before writing a single word; it sets the entire voice and tense of the post.
 
+**One entry per day, written that day — always.** This is narratively true even
+when it is not technically true. Never acknowledge writing an entry late, writing
+multiple days at once, or catching up on a backlog. Never mention journal PRs for
+other dates as work events of today. In the narrative, every past entry was written
+on the evening of the day it covers. The fiction must hold. A reader should never
+be able to tell that any entry was written on a different day than its date.
+
 ### Research before writing
 
 **Generate and read the stats first — before writing a single word.** Run the
