@@ -1,5 +1,5 @@
 """Translate raw GitHub webhook payloads into :class:`IssueTreeCache`
-event tuples (closes #812).
+event tuples (closes #812, sub-issue half closes #817).
 
 Pure value-only helper — no I/O, no cache mutation.  Caller passes the
 result to ``cache.apply_event(*translation)`` if non-None.
@@ -7,8 +7,10 @@ result to ``cache.apply_event(*translation)`` if non-None.
 Required webhook subscriptions (verify per repo at startup):
 
 - ``issues`` — opened, closed, reopened, assigned, unassigned, edited,
-  milestoned, demilestoned, transferred, deleted, sub_issue_added,
-  sub_issue_removed
+  milestoned, demilestoned, transferred, deleted
+- ``sub_issues`` — sub_issue_added, sub_issue_removed, parent_issue_added,
+  parent_issue_removed.  Without this subscription the cache misses every
+  sub-issue link change and the picker descends a stale tree (#817).
 - ``pull_request`` — closed, reopened (used by other code paths; the
   cache itself does not currently track PRs)
 """
@@ -53,11 +55,17 @@ def translate(
     Webhook source-of-truth shape per GitHub docs:
 
     - ``issues``: payload has ``action``, ``issue`` (full issue
-      snapshot), and ``assignee`` / ``milestone`` / ``sub_issue`` /
-      ``parent_issue`` keys depending on action.
+      snapshot), and ``assignee`` / ``milestone`` keys depending on action.
+    - ``sub_issues``: payload has ``action`` plus ``parent_issue`` and
+      ``sub_issue`` (full issue snapshots for both ends of the link).
+      Both ``sub_issue_added`` / ``parent_issue_added`` and the
+      corresponding ``_removed`` actions describe the same logical
+      mutation from opposite ends — both map to the same cache event.
     - ``pull_request``: not currently translated (PRs aren't in the
       tree cache).
     """
+    if event_type == "sub_issues":
+        return _translate_sub_issues(payload)
     if event_type != "issues":
         return None
     action = payload.get("action", "")
@@ -122,6 +130,47 @@ def translate(
             if child is None:
                 return None
             return ("sub_issue_removed", {**base, "child": child})
+        case _:
+            return None
+
+
+def _translate_sub_issues(
+    payload: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    """Translate a ``sub_issues`` webhook payload (closes #817).
+
+    GitHub fires this event from both sides of the link:
+
+    - ``sub_issue_added`` / ``sub_issue_removed`` — fired on the parent
+    - ``parent_issue_added`` / ``parent_issue_removed`` — fired on the child
+
+    Both shapes carry the same ``parent_issue`` + ``sub_issue`` snapshots,
+    so we map all four actions to the existing
+    ``sub_issue_added`` / ``sub_issue_removed`` cache events keyed by the
+    parent's number.  ``IssueTreeCache._handle_sub_issue_added`` already
+    updates *both* nodes (parent.sub_issues and child.parent), so handling
+    either side once is enough — and idempotent if both sides arrive.
+    """
+    action = payload.get("action", "")
+    parent = payload.get("parent_issue") or {}
+    sub = payload.get("sub_issue") or {}
+    parent_number = parent.get("number")
+    child_number = sub.get("number")
+    if parent_number is None or child_number is None:
+        return None
+    timestamp = _parse_ts(
+        parent.get("updated_at") or sub.get("updated_at") or parent.get("created_at")
+    )
+    base = {
+        "issue_number": parent_number,
+        "child": child_number,
+        "timestamp": timestamp,
+    }
+    match action:
+        case "sub_issue_added" | "parent_issue_added":
+            return ("sub_issue_added", base)
+        case "sub_issue_removed" | "parent_issue_removed":
+            return ("sub_issue_removed", base)
         case _:
             return None
 
