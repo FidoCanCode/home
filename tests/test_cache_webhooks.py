@@ -1,10 +1,38 @@
-"""Tests for kennel.cache_webhooks.translate (closes #812)."""
+"""Tests for kennel.cache_webhooks.translate (closes #812, #817)."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 from kennel.cache_webhooks import translate
+
+
+def _sub_issues_payload(
+    action: str,
+    *,
+    parent_number: int = 195,
+    sub_number: int = 222,
+    parent_updated_at: str = "2026-04-19T01:00:00Z",
+    sub_updated_at: str = "2026-04-19T01:00:00Z",
+    parent_created_at: str = "2026-04-15T00:00:00Z",
+    sub_created_at: str = "2026-04-15T00:00:00Z",
+    parent_present: bool = True,
+    sub_present: bool = True,
+) -> dict[str, object]:
+    payload: dict[str, object] = {"action": action}
+    if parent_present:
+        payload["parent_issue"] = {
+            "number": parent_number,
+            "updated_at": parent_updated_at,
+            "created_at": parent_created_at,
+        }
+    if sub_present:
+        payload["sub_issue"] = {
+            "number": sub_number,
+            "updated_at": sub_updated_at,
+            "created_at": sub_created_at,
+        }
+    return payload
 
 
 def _issue(
@@ -270,3 +298,103 @@ class TestEdgeCases:
         )
         assert result is not None
         assert result[1]["milestone"] is None
+
+
+# ── sub_issues event family (closes #817) ────────────────────────────────────
+
+
+class TestSubIssuesEvent:
+    """Translate the dedicated ``sub_issues`` webhook event."""
+
+    def test_sub_issue_added_maps_to_cache_event(self) -> None:
+        result = translate(
+            "sub_issues",
+            _sub_issues_payload("sub_issue_added", parent_number=195, sub_number=222),
+        )
+        assert result is not None
+        cache_event, payload = result
+        assert cache_event == "sub_issue_added"
+        assert payload["issue_number"] == 195
+        assert payload["child"] == 222
+
+    def test_sub_issue_removed_maps_to_cache_event(self) -> None:
+        result = translate(
+            "sub_issues",
+            _sub_issues_payload("sub_issue_removed", parent_number=195, sub_number=222),
+        )
+        assert result is not None
+        assert result[0] == "sub_issue_removed"
+        assert result[1]["issue_number"] == 195
+        assert result[1]["child"] == 222
+
+    def test_parent_issue_added_maps_to_sub_issue_added_keyed_by_parent(self) -> None:
+        """Child-side notification maps to the same parent-keyed cache event."""
+        result = translate(
+            "sub_issues",
+            _sub_issues_payload(
+                "parent_issue_added", parent_number=195, sub_number=222
+            ),
+        )
+        assert result is not None
+        assert result[0] == "sub_issue_added"
+        assert result[1]["issue_number"] == 195
+        assert result[1]["child"] == 222
+
+    def test_parent_issue_removed_maps_to_sub_issue_removed(self) -> None:
+        result = translate(
+            "sub_issues",
+            _sub_issues_payload(
+                "parent_issue_removed", parent_number=195, sub_number=222
+            ),
+        )
+        assert result is not None
+        assert result[0] == "sub_issue_removed"
+        assert result[1]["issue_number"] == 195
+        assert result[1]["child"] == 222
+
+    def test_returns_none_when_parent_missing(self) -> None:
+        assert (
+            translate(
+                "sub_issues",
+                _sub_issues_payload("sub_issue_added", parent_present=False),
+            )
+            is None
+        )
+
+    def test_returns_none_when_sub_missing(self) -> None:
+        assert (
+            translate(
+                "sub_issues",
+                _sub_issues_payload("sub_issue_added", sub_present=False),
+            )
+            is None
+        )
+
+    def test_returns_none_for_unknown_action(self) -> None:
+        assert translate("sub_issues", _sub_issues_payload("nonsense")) is None
+
+    def test_falls_back_through_timestamp_sources(self) -> None:
+        """When parent.updated_at is absent the translator falls back to
+        sub.updated_at, then parent.created_at."""
+        payload: dict[str, object] = {
+            "action": "sub_issue_added",
+            "parent_issue": {"number": 1, "created_at": "2026-04-15T00:00:00Z"},
+            "sub_issue": {"number": 2, "updated_at": "2026-04-19T01:00:00Z"},
+        }
+        result = translate("sub_issues", payload)
+        assert result is not None
+        assert result[1]["timestamp"] == datetime(
+            2026, 4, 19, 1, 0, 0, tzinfo=timezone.utc
+        )
+
+    def test_falls_back_to_parent_created_at_when_no_updated_at(self) -> None:
+        payload: dict[str, object] = {
+            "action": "sub_issue_added",
+            "parent_issue": {"number": 1, "created_at": "2026-04-15T00:00:00Z"},
+            "sub_issue": {"number": 2, "created_at": "2026-04-15T00:00:00Z"},
+        }
+        result = translate("sub_issues", payload)
+        assert result is not None
+        assert result[1]["timestamp"] == datetime(
+            2026, 4, 15, 0, 0, 0, tzinfo=timezone.utc
+        )
