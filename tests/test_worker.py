@@ -6248,7 +6248,7 @@ class TestHandleCi:
             patch("kennel.tasks.sync_tasks") as mock_sync,
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
-        mock_sync.assert_called_once_with(tmp_path, gh)
+        mock_sync.assert_called_once_with(tmp_path, gh, blocking=True)
 
     def test_picks_first_failing_check(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -8422,7 +8422,7 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks") as mock_sync,
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_sync.assert_called_once_with(tmp_path, gh)
+        mock_sync.assert_called_once_with(tmp_path, gh, blocking=True)
 
     def test_syncs_work_queue_after_completion(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -8439,7 +8439,7 @@ class TestExecuteTask:
             patch("kennel.tasks.sync_tasks") as mock_sync,
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
-        mock_sync.assert_called_once_with(tmp_path, gh)
+        mock_sync.assert_called_once_with(tmp_path, gh, blocking=True)
 
     def test_logs_task_name(self, tmp_path: Path, caplog) -> None:
         import logging
