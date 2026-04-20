@@ -32,5 +32,4 @@ docker-build:
 # read-only at /src; the container copies it to a writable /tmp/work so dune
 # can write build artifacts without touching the source tree.
 docker-test: docker-build
-	docker run --rm -v "$(CURDIR)/..:/src:ro" rocq-python-extraction:ci \
-	  sh -c "cp -r /src /tmp/work && cd /tmp/work/rocq-python-extraction && opam exec -- make test"
+	./run_in_docker.sh . opam exec -- make test

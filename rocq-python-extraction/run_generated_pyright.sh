@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: $0 <generated-python-dir>" >&2
+  exit 2
+fi
+
+OUT_DIR=$1
+
+cat >"$OUT_DIR/pyrightconfig.json" <<'EOF'
+{
+  "include": [
+    "myopt_flatten.py",
+    "mylist_is_empty.py",
+    "roseforest_is_empty.py",
+    "list_map.py",
+    "pyright_list_map_check.py"
+  ],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["."]
+    }
+  ]
+}
+EOF
+
+cp rocq-python-extraction/test/pyright_list_map_check.py \
+  "$OUT_DIR/pyright_list_map_check.py"
+
+uv run pyright -p "$OUT_DIR/pyrightconfig.json"
