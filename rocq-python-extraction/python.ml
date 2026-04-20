@@ -86,13 +86,13 @@ let preamble _state _name comment _used_modules _safe =
   str "        return StateT(run_bound, self.state)" ++ fnl () ++
   str "    @classmethod" ++ fnl () ++
   str "    def pure(cls, value: _StateTValue) -> StateT[_StateTState, _StateTValue]:" ++ fnl () ++
-  str "        return cls(lambda state: (value, state))" ++ fnl () ++
+  str "        return StateT(lambda state: (value, state))" ++ fnl () ++
   str "    @classmethod" ++ fnl () ++
   str "    def get_state(cls) -> StateT[_StateTState, _StateTState]:" ++ fnl () ++
-  str "        return cls(lambda state: (state, state))" ++ fnl () ++
+  str "        return StateT(lambda state: (state, state))" ++ fnl () ++
   str "    @classmethod" ++ fnl () ++
   str "    def put_state(cls, new_state: _StateTState) -> StateT[_StateTState, None]:" ++ fnl () ++
-  str "        return cls(lambda _state: (None, new_state))" ++ fnl () ++
+  str "        return StateT(lambda _state: (None, new_state))" ++ fnl () ++
   str "class IO(Generic[_IOValue]):" ++ fnl () ++
   str "    def __init__(self, thunk: Callable[[], Awaitable[_IOValue]]) -> None:" ++ fnl () ++
   str "        self._thunk = thunk" ++ fnl () ++
@@ -107,7 +107,7 @@ let preamble _state _name comment _used_modules _safe =
   str "    def pure(cls, value: _IOValue) -> IO[_IOValue]:" ++ fnl () ++
   str "        async def run_pure() -> _IOValue:" ++ fnl () ++
   str "            return value" ++ fnl () ++
-  str "        return cls(run_pure)" ++ fnl () ++
+  str "        return IO(run_pure)" ++ fnl () ++
   str "def coforce(value: Callable[[], _CoForceT]) -> _CoForceT:" ++ fnl () ++
   str "    return value()" ++ fnl () ++
   str "def coprefix_eq(n: int, left: Iterable[object], right: Iterable[object]) -> bool:" ++ fnl () ++
