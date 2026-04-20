@@ -84,9 +84,23 @@ jobs:
 
       - name: Build and test extraction plugin
         if: steps.changes.outputs.relevant == 'true'
+        run: ./rocq-python-extraction/run_in_docker.sh rocq-python-extraction opam exec -- make test
+
+      - name: Set up host Python tooling
+        if: steps.changes.outputs.relevant == 'true'
+        uses: ./.github/actions/setup
+
+      - name: Export generated Python
+        if: steps.changes.outputs.relevant == 'true'
         run: |
-          docker run --rm -v "$PWD:/src:ro" rocq-python-extraction:ci \
-            sh -c "cp -r /src /tmp/work && rm -f /tmp/work/dune-workspace && cd /tmp/work/rocq-python-extraction && opam exec -- make test"
+          OUT="$RUNNER_TEMP/rocq-python-generated"
+          ./rocq-python-extraction/export_generated_python.sh "$OUT"
+
+      - name: Type-check generated Python
+        if: steps.changes.outputs.relevant == 'true'
+        run: |
+          OUT="$RUNNER_TEMP/rocq-python-generated"
+          ./rocq-python-extraction/run_generated_pyright.sh "$OUT"
 
       # Build the models/ theory using the unified dune workspace.  dune
       # resolves the plugin → theory dependency within the workspace so no
@@ -94,11 +108,4 @@ jobs:
       # extracts successfully whenever models/ or the plugin changes.
       - name: Build models
         if: steps.changes.outputs.relevant == 'true'
-        run: |
-          docker run --rm -v "$PWD:/src:ro" rocq-python-extraction:ci \
-            bash -euo pipefail -c '
-              cp -r /src /tmp/work
-              chmod -R u+w /tmp/work
-              cd /tmp/work
-              opam exec -- dune build models/
-            '
+        run: ./rocq-python-extraction/run_in_docker.sh --keep-workspace . opam exec -- dune build models/

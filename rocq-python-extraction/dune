@@ -107,3 +107,11 @@
  (deps test/phase7.vo
        test/check_wf_countdown.py)
  (action (run python3 %{dep:test/check_wf_countdown.py})))
+
+; Phase 8 round-trip test: rank-1 polymorphic list_map should extract with
+; real TypeVars and pass pyright in the Docker-backed CI image (issue #722).
+(rule
+ (alias runtest)
+ (deps test/phase8.vo
+       test/check_list_map.py)
+ (action (run python3 %{dep:test/check_list_map.py})))
