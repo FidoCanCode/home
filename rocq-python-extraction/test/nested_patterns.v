@@ -1,4 +1,4 @@
-(** Phase 5 acceptance tests: nested patterns.
+(** Nested-pattern acceptance tests.
 
     These tests exercise [pp_pattern] at more than one level of nesting and
     across a mutual inductive group:

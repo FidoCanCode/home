@@ -1,23 +1,18 @@
 # ruff: noqa: E402
-import os
-import sys
+from check_support import add_build_default_to_syspath, run_as_script
 
-# The extracted .py files always land in the dune workspace build root (_build/default/).
-# Walk up from __file__ to find it — works whether or not dune-workspace is present.
-_d = os.path.dirname(os.path.abspath(__file__))
-while not (
-    os.path.basename(_d) == "default"
-    and os.path.basename(os.path.dirname(_d)) == "_build"
-):
-    _d = os.path.dirname(_d)
-sys.path.insert(0, _d)
-del _d
+add_build_default_to_syspath()
 
 from list_add_one import list_add_one
 
-assert list_add_one([]) == [], "list_add_one([]): got " + repr(list_add_one([]))
-assert list_add_one([0, 1, 2]) == [1, 2, 3], "list_add_one([0,1,2]): got " + repr(
-    list_add_one([0, 1, 2])
-)
-assert list_add_one([5]) == [6], "list_add_one([5]): got " + repr(list_add_one([5]))
-print("Phase 3 list round-trip: OK")
+
+def test_list_add_one_round_trip() -> None:
+    assert list_add_one([]) == [], "list_add_one([]): got " + repr(list_add_one([]))
+    assert list_add_one([0, 1, 2]) == [1, 2, 3], "list_add_one([0,1,2]): got " + repr(
+        list_add_one([0, 1, 2])
+    )
+    assert list_add_one([5]) == [6], "list_add_one([5]): got " + repr(list_add_one([5]))
+
+
+if __name__ == "__main__":
+    run_as_script(test_list_add_one_round_trip, "list round-trip: OK")

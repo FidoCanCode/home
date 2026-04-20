@@ -1,6 +1,17 @@
 (rocq.theory
  (name PyExtractTest)
- (synopsis "Phase 2–10 acceptance tests — core terms, primitive remapping, datatypes, nested patterns, records, Acc-erasure, polymorphism, coinductives, and modules")
+ (synopsis "Python extraction acceptance tests — core terms, primitive remapping, datatypes, nested patterns, records, Acc-erasure, polymorphism, coinductives, and modules")
  (plugins rocq-python-extraction)
  (theories Stdlib)
- (modules acceptance phase2 phase3 phase4 phase5 phase6 phase7 phase8 phase9 phase10))
+ (modules
+  acceptance
+  python
+  core_terms
+  primitives
+  datatypes
+  nested_patterns
+  records
+  wf_recursion
+  polymorphism
+  coinductives
+  modules))

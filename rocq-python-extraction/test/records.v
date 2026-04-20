@@ -1,4 +1,4 @@
-(** Phase 6 acceptance tests: record projections (issue #720).
+(** Record-projection acceptance tests (issue #720).
 
     Exercises [MLcase] on a record inductive, which the new optimisation
     converts to a lambda-lifted attribute-access form instead of a

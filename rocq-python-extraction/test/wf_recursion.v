@@ -1,4 +1,4 @@
-(** Phase 7 acceptance tests: well-founded recursion / Program Fixpoint
+(** Well-founded recursion / Program Fixpoint acceptance tests
     accessibility erasure (issue #721).
 
     A function defined through [Program Fixpoint] with a termination proof must

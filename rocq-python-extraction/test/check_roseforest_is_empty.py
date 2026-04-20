@@ -1,25 +1,20 @@
 # ruff: noqa: E402
-import os
-import sys
+from check_support import add_build_default_to_syspath, run_as_script
 
-# The extracted .py files always land in the dune workspace build root (_build/default/).
-# Walk up from __file__ to find it — works whether or not dune-workspace is present.
-_d = os.path.dirname(os.path.abspath(__file__))
-while not (
-    os.path.basename(_d) == "default"
-    and os.path.basename(os.path.dirname(_d)) == "_build"
-):
-    _d = os.path.dirname(_d)
-sys.path.insert(0, _d)
-del _d
+add_build_default_to_syspath()
 
 from roseforest_is_empty import RFCons, RFNil, RNode, roseforest_is_empty
 
-assert roseforest_is_empty(RFNil()) is True, (
-    "roseforest_is_empty(RFNil()): got " + repr(roseforest_is_empty(RFNil()))
-)
-assert roseforest_is_empty(RFCons(RNode(1, RFNil()), RFNil())) is False, (
-    "roseforest_is_empty(RFCons(...)): got "
-    + repr(roseforest_is_empty(RFCons(RNode(1, RFNil()), RFNil())))
-)
-print("Phase 4 RoseForest round-trip: OK")
+
+def test_roseforest_is_empty_round_trip() -> None:
+    assert roseforest_is_empty(RFNil()) is True, (
+        "roseforest_is_empty(RFNil()): got " + repr(roseforest_is_empty(RFNil()))
+    )
+    assert roseforest_is_empty(RFCons(RNode(1, RFNil()), RFNil())) is False, (
+        "roseforest_is_empty(RFCons(...)): got "
+        + repr(roseforest_is_empty(RFCons(RNode(1, RFNil()), RFNil())))
+    )
+
+
+if __name__ == "__main__":
+    run_as_script(test_roseforest_is_empty_round_trip, "RoseForest round-trip: OK")

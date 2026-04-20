@@ -1,4 +1,4 @@
-(** Phase 8 acceptance tests: rank-1 polymorphism with typed Python output.
+(** Polymorphism acceptance tests: rank-1 polymorphism with typed Python output.
 
     Acceptance: a polymorphic list-map function extracts with real TypeVars
     that pyright verifies. *)

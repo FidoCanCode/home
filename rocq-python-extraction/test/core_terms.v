@@ -1,4 +1,4 @@
-(** Phase 2 acceptance test: core term node coverage.
+(** Core-terms acceptance test.
 
     Exercises each [ml_ast] node through Python extraction and verifies
     (via [Makefile]) that the output is syntactically valid Python.
