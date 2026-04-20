@@ -145,7 +145,7 @@ Create a GitHub issue on `FidoCanCode/home` with:
 - Create a feature branch
 - **Create draft PR immediately**: `gh pr create --draft`
 - Implement the fix, **push incrementally** as you go
-- Run `uv run ruff format . && timeout 120 uv run pytest --cov --cov-report=term-missing --cov-fail-under=100`
+- Run `uv run ruff format . && timeout 120 uv run tests`
 - 100% coverage required, all tests must pass, no hangs (timeout 120s)
 - Commit with descriptive message (NO Co-Authored-By trailers)
 
