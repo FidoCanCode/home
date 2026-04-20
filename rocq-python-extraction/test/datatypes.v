@@ -1,4 +1,4 @@
-(** Phase 4 acceptance tests: inductive datatype emission.
+(** Datatype acceptance tests: inductive datatype emission.
 
     Non-remapped inductives emit Python [@dataclass(frozen=True)] hierarchies.
     Each section defines a Rocq inductive and extracts a function that

@@ -17,6 +17,7 @@ build-backend = "hatchling.build"
 
 [project.scripts]
 kennel = "kennel.main:main"
+tests = "kennel.tests_main:main"
 
 [tool.ruff]
 target-version = "py314"
@@ -30,15 +31,21 @@ select = ["E", "F", "I", "W"]
 ignore = ["E501"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "rocq-python-extraction/test"]
 addopts = "-n auto"
+python_files = ["test_*.py", "check_*.py"]
 
 [tool.coverage.run]
-source = ["kennel"]
+source = ["kennel", "rocq-python-extraction/test"]
 # Exclude generated Rocq extraction output — tested indirectly via the
 # Docker-backed CI build, not by the Python test suite.
-omit = ["kennel/models_generated/*"]
+omit = [
+    "kennel/models_generated/*",
+    "rocq-python-extraction/test/check_support.py",
+    "rocq-python-extraction/test/conftest.py",
+    "rocq-python-extraction/test/pyright_*.py",
+]
 
 [tool.coverage.report]
+exclude_also = ["if __name__ == .__main__.:"]
 fail_under = 100
-

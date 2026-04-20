@@ -1,25 +1,20 @@
 # ruff: noqa: E402
-import os
-import sys
+from check_support import add_build_default_to_syspath, run_as_script
 
-# The extracted .py files always land in the dune workspace build root (_build/default/).
-# Walk up from __file__ to find it — works whether or not dune-workspace is present.
-_d = os.path.dirname(os.path.abspath(__file__))
-while not (
-    os.path.basename(_d) == "default"
-    and os.path.basename(os.path.dirname(_d)) == "_build"
-):
-    _d = os.path.dirname(_d)
-sys.path.insert(0, _d)
-del _d
+add_build_default_to_syspath()
 
 from mforest_is_empty import FCons, FNil, MLeaf, mforest_is_empty
 
-assert mforest_is_empty(FNil()) is True, "mforest_is_empty(FNil()): got " + repr(
-    mforest_is_empty(FNil())
-)
-assert mforest_is_empty(FCons(MLeaf(1), FNil())) is False, (
-    "mforest_is_empty(FCons(...)): got "
-    + repr(mforest_is_empty(FCons(MLeaf(1), FNil())))
-)
-print("Phase 4 MForest round-trip: OK")
+
+def test_mforest_is_empty_round_trip() -> None:
+    assert mforest_is_empty(FNil()) is True, "mforest_is_empty(FNil()): got " + repr(
+        mforest_is_empty(FNil())
+    )
+    assert mforest_is_empty(FCons(MLeaf(1), FNil())) is False, (
+        "mforest_is_empty(FCons(...)): got "
+        + repr(mforest_is_empty(FCons(MLeaf(1), FNil())))
+    )
+
+
+if __name__ == "__main__":
+    run_as_script(test_mforest_is_empty_round_trip, "MForest round-trip: OK")

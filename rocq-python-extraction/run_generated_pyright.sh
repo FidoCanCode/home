@@ -19,8 +19,10 @@ cat >"$OUT_DIR/pyrightconfig.json" <<'EOF'
     "zeros_pair.py",
     "repeat_tree.py",
     "tree_root_of_repeat.py",
+    "Phase10Mod.py",
     "pyright_list_map_check.py",
-    "pyright_coinductive_check.py"
+    "pyright_coinductive_check.py",
+    "pyright_modules_check.py"
   ],
   "executionEnvironments": [
     {
@@ -35,5 +37,7 @@ cp rocq-python-extraction/test/pyright_list_map_check.py \
   "$OUT_DIR/pyright_list_map_check.py"
 cp rocq-python-extraction/test/pyright_coinductive_check.py \
   "$OUT_DIR/pyright_coinductive_check.py"
+cp rocq-python-extraction/test/pyright_modules_check.py \
+  "$OUT_DIR/pyright_modules_check.py"
 
 uv run pyright -p "$OUT_DIR/pyrightconfig.json"

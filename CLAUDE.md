@@ -42,7 +42,7 @@ cd /home/rhencke/home-runner && uv run kennel --port 9000 --secret-file ~/.kenne
 ## Testing
 
 ```bash
-uv run pytest --cov --cov-report=term-missing --cov-fail-under=100
+uv run tests
 ```
 
 100% coverage is enforced by CI and pre-commit hook.
@@ -633,16 +633,15 @@ add a fallback to a system Python.
 ### Testing
 
 ```bash
-make test          # build + check extracted .py syntax + run round-trip assertions
+make test          # build the umbrella Rocq acceptance theory / extraction artifacts
 make docker-test   # run the full suite inside the CI Docker image
 ```
 
 `make docker-build` rebuilds the Docker image locally (needed after Dockerfile changes).
 
-100% of round-trip assertions must pass.  Adding a new extraction function
-requires a corresponding round-trip test in `dune` (the canonical home) — see
-the existing `runtest` rules for the pattern.  The Makefile `test` target must
-stay in sync but the assertions themselves live in `dune`.
+100% of round-trip assertions must pass.  Add new extraction checks as pytest
+tests under `rocq-python-extraction/test/check_*.py`; `uv run tests` is the
+canonical assertion path.  `make test` is only the Rocq-side build.
 
 ### Building
 
@@ -661,6 +660,6 @@ style of `python.ml` and `g_python_extraction.mlg`).
 |------|---------|
 | `python.ml` | The extraction backend — MiniML → Python pretty-printer |
 | `g_python_extraction.mlg` | Vernacular registration (`Python Extraction`) |
-| `test/phase*.v` | Acceptance tests; each phase covers one IR feature |
+| `test/python.v` + `test/*.v` feature files | Acceptance tests; `python.v` is the umbrella entrypoint over feature-scoped theories |
 | `Dockerfile` | CI image — OCaml + Rocq + Python 3.14t via uv |
 | `DESIGN.md` | Full MiniML → Python mapping contract |

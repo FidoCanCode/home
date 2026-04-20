@@ -8,10 +8,56 @@ open Libnames
 open Stdarg
 open Miniml
 open Common
+open Modutil
 open Python
 
 (** [python_mode] is set to [true] by [Extraction Language Python.] *)
 let python_mode = ref false
+
+(** Python-specific file emission copied from Rocq's extraction driver, but
+    bound directly to [Python.python_descr] so we do not depend on Rocq's
+    closed built-in extraction language enum. *)
+let python_formatter file =
+  let ft =
+    match file with
+    | Some f -> Topfmt.with_output_to f
+    | None -> Format.std_formatter
+  in
+  Format.pp_set_max_boxes ft max_int;
+  (match Topfmt.get_margin () with
+   | None -> ()
+   | Some i ->
+       Format.pp_set_margin ft i;
+       Format.pp_set_max_indent ft (i - 10));
+  ft
+
+let python_print_structure_to_file state (fname, mo) struc =
+  let d = Python.python_descr in
+  let unsafe_needs = {
+    mldummy = struct_ast_search Mlutil.isMLdummy struc;
+    tdummy = struct_type_search Mlutil.isTdummy struc;
+    tunknown = struct_type_search ((==) Tunknown) struc;
+    magic = false;
+  } in
+  State.reset state;
+  let state = State.set_phase state Pre in
+  ignore (d.pp_struct state struc);
+  let opened = opened_libraries state in
+  let cout = open_out fname in
+  let ft = python_formatter (Some cout) in
+  begin
+    try
+      let state = State.set_phase state Impl in
+      pp_with ft (d.preamble state mo None opened unsafe_needs);
+      pp_with ft (d.pp_struct state struc);
+      Format.pp_print_flush ft ();
+      close_out cout
+    with reraise ->
+      Format.pp_print_flush ft ();
+      close_out cout;
+      raise reraise
+  end;
+  Feedback.msg_notice (str "Extracted to " ++ str fname)
 
 (** Build a monolithic .py file for the given global reference. *)
 let python_extract ~opaque_access qid =
@@ -42,6 +88,27 @@ let python_extract ~opaque_access qid =
   close_out oc;
   Feedback.msg_notice (str "Extracted to " ++ str fname)
 
+(** Build a monolithic .py file for the given module reference. *)
+let python_extract_module ~opaque_access qid =
+  let mp = Nametab.locate_module qid in
+  let state =
+    State.make ~modular:false ~library:false
+      ~keywords:Python.python_descr.keywords ()
+  in
+  let struc =
+    optimize_struct state ([], [mp])
+      (Extract_env.mono_environment state ~opaque_access [] [mp])
+  in
+  let base =
+    match mp with
+    | MPdot (_, l) -> Id.to_string l
+    | MPfile dp ->
+        DirPath.repr dp |> List.rev |> List.hd |> Id.to_string
+    | MPbound mbid -> Id.to_string (MBId.to_id mbid)
+  in
+  let fname = base ^ ".py" in
+  python_print_structure_to_file state (fname, Id.of_string base) struc
+
 }
 
 (** [Extraction Language Python.] — activate Python mode. *)
@@ -54,4 +121,10 @@ END
 VERNAC COMMAND EXTEND PythonExtraction CLASSIFIED AS QUERY STATE opaque_access
 | [ "Python" "Extraction" global(x) ]
   -> { python_extract x }
+END
+
+(** [Python Module Extraction M.] — extract module [M] to [M.py]. *)
+VERNAC COMMAND EXTEND PythonModuleExtraction CLASSIFIED AS QUERY STATE opaque_access
+| [ "Python" "Module" "Extraction" identref(m) ]
+  -> { python_extract_module (qualid_of_ident m.CAst.v) }
 END

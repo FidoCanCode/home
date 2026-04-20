@@ -82,7 +82,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=rocq-python-extraction
           tags: rocq-python-extraction:ci
 
-      - name: Build and test extraction plugin
+      - name: Build extraction acceptance theory
         if: steps.changes.outputs.relevant == 'true'
         run: ./rocq-python-extraction/run_in_docker.sh rocq-python-extraction opam exec -- make test
 

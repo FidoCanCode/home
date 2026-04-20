@@ -1,4 +1,4 @@
-(** Phase 3 acceptance tests: primitive type remapping round-trips.
+(** Primitive-remapping acceptance tests.
 
     Each section extracts a Rocq function via an [Extract Inductive] pragma
     that maps a Rocq primitive to the matching Python builtin, then verifies

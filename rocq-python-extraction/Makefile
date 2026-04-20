@@ -3,11 +3,11 @@
 build:
 	dune build
 
-# Round-trip assertions and syntax checks live in the dune runtest rules
-# (see the dune file) so that each test is defined in exactly one place.
-# This target delegates entirely to dune — do NOT add assertions here.
+# Build the umbrella acceptance theory. This exercises plugin loading,
+# Rocq compilation, and extraction side-effects in the CI container.
+# Python assertions live under pytest via `uv run tests`.
 test:
-	dune runtest
+	dune build test/python.vo
 
 clean:
 	dune clean

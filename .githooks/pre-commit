@@ -11,7 +11,7 @@ echo "==> checking types"
 uv run pyright
 
 echo "==> running tests"
-uv run python -m pytest --cov --cov-report=term-missing --cov-fail-under=100
+uv run tests
 
 # Enforce fresh model mirrors.  When any models/*.v file is staged, the
 # working-tree copy of kennel/models_generated/ must match the index — a
