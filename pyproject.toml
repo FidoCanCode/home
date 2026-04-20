@@ -17,6 +17,7 @@ build-backend = "hatchling.build"
 
 [project.scripts]
 kennel = "kennel.main:main"
+tests = "kennel.tests_main:main"
 
 [tool.ruff]
 target-version = "py314"
@@ -41,4 +42,3 @@ omit = ["kennel/models_generated/*"]
 
 [tool.coverage.report]
 fail_under = 100
-

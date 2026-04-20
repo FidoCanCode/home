@@ -26,4 +26,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
-      - run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=100
+      - run: uv run tests

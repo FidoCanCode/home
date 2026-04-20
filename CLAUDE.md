@@ -42,7 +42,7 @@ cd /home/rhencke/home-runner && uv run kennel --port 9000 --secret-file ~/.kenne
 ## Testing
 
 ```bash
-uv run pytest --cov --cov-report=term-missing --cov-fail-under=100
+uv run tests
 ```
 
 100% coverage is enforced by CI and pre-commit hook.
