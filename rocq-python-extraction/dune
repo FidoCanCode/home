@@ -123,3 +123,11 @@
  (deps test/phase9.vo
        test/check_phase9.py)
  (action (run python3 %{dep:test/check_phase9.py})))
+
+; Phase 10 round-trip test: modules, module types, and functor application
+; should extract to typed Python namespace objects (issue #724).
+(rule
+ (alias runtest)
+ (deps test/phase10.vo
+       test/check_phase10.py)
+ (action (run python3 %{dep:test/check_phase10.py})))
