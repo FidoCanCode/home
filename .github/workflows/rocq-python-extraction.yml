@@ -6,7 +6,11 @@ on:
     paths:
       - 'rocq-python-extraction/**'
       - 'models/**'
+      - 'build'
       - 'dune-workspace'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.dockerignore'
       - '.github/workflows/rocq-python-extraction.yml'
   pull_request:
     # No path filter — this is a required check that must report on every PR.
@@ -34,7 +38,7 @@ jobs:
             BASE="${{ github.event.pull_request.base.sha }}"
             HEAD="${{ github.event.pull_request.head.sha }}"
             CHANGED=$(git diff --name-only "$BASE" "$HEAD")
-            if echo "$CHANGED" | grep -qE '^(rocq-python-extraction/|models/|dune-workspace$|\.github/workflows/rocq-python-extraction\.yml$)'; then
+            if echo "$CHANGED" | grep -qE '^(rocq-python-extraction/|models/|build$|dune-workspace$|pyproject\.toml$|uv\.lock$|\.dockerignore$|\.github/workflows/rocq-python-extraction\.yml$)'; then
               echo "relevant=true"  >> "$GITHUB_OUTPUT"
             else
               echo "relevant=false" >> "$GITHUB_OUTPUT"
@@ -60,10 +64,9 @@ jobs:
           docker pull ghcr.io/fidocancode/rocq-python-extraction:latest
           docker tag ghcr.io/fidocancode/rocq-python-extraction:latest rocq-python-extraction:ci
 
-      # Set up buildx so we can use the GitHub Actions layer cache.
-      # Only needed when the Dockerfile itself changed and we must rebuild.
+      # Set up buildx for both image builds and model extraction builds.
       - name: Set up Docker Buildx
-        if: steps.changes.outputs.relevant == 'true' && steps.changes.outputs.dockerfile_changed == 'true'
+        if: steps.changes.outputs.relevant == 'true'
         uses: docker/setup-buildx-action@v3
 
       # Build from the local Dockerfile with layer caching.  Only runs when
@@ -102,10 +105,25 @@ jobs:
           OUT="$RUNNER_TEMP/rocq-python-generated"
           ./rocq-python-extraction/run_generated_pyright.sh "$OUT"
 
+      - name: Compute model cache bucket
+        if: steps.changes.outputs.relevant == 'true'
+        id: model-cache
+        run: echo "bucket=$(( $(date +%s) / 518400 ))" >> "$GITHUB_OUTPUT"
+
+      - name: Restore model build cache
+        if: steps.changes.outputs.relevant == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .cache/rocq-models/context
+          key: rocq-models-${{ runner.os }}-${{ steps.model-cache.outputs.bucket }}-${{ hashFiles('models/**', 'rocq-python-extraction/**', 'dune-workspace', 'pyproject.toml', 'uv.lock', 'build', '.dockerignore') }}
+          restore-keys: |
+            rocq-models-${{ runner.os }}-${{ steps.model-cache.outputs.bucket }}-
+            rocq-models-${{ runner.os }}-
+
       # Build the models/ theory using the unified dune workspace.  dune
       # resolves the plugin → theory dependency within the workspace so no
       # separate install step is needed.  This verifies that every .v model
       # extracts successfully whenever models/ or the plugin changes.
       - name: Build models
         if: steps.changes.outputs.relevant == 'true'
-        run: ./rocq-python-extraction/run_in_docker.sh --keep-workspace . opam exec -- dune build models/
+        run: ./build

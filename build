@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+usage:
+  ./build [docker buildx build args...]
+  ./build --smart-output DIR -- <command> [args...]
+
+With no mode flag, builds Rocq models through buildx and writes generated
+Python to kennel/models_generated/.
+
+With --smart-output, runs the command and removes stale files from DIR only
+after the command produces a fresh output manifest or fresh files.
+EOF
+}
+
+hash_paths() {
+  local existing=()
+  local path
+  for path in "$@"; do
+    if [ -f "$path" ]; then
+      existing+=("$path")
+    fi
+  done
+  if [ "${#existing[@]}" -eq 0 ]; then
+    printf 'empty\n'
+    return
+  fi
+  sha256sum "${existing[@]}" | LC_ALL=C sort -k 2 | sha256sum | awk '{print $1}'
+}
+
+input_hash() {
+  mapfile -t paths < <(
+    git ls-files --cached --others --exclude-standard \
+      build \
+      .dockerignore \
+      dune-workspace \
+      pyproject.toml \
+      uv.lock \
+      models \
+      rocq-python-extraction \
+      | LC_ALL=C sort
+  )
+  hash_paths "${paths[@]}"
+}
+
+generated_hash() {
+  mapfile -t paths < <(
+    find kennel/models_generated \
+      -type f \
+      ! -name ".build-files" \
+      ! -name "*.pyc" \
+      ! -path "*/__pycache__/*" \
+      -print \
+      | LC_ALL=C sort
+  )
+  hash_paths "${paths[@]}"
+}
+
+fingerprint() {
+  printf 'inputs %s\n' "$(input_hash)"
+  printf 'generated %s\n' "$(generated_hash)"
+}
+
+run_models_build() {
+  local cache_context=.cache/rocq-models/context
+  local manifest=.cache/rocq-models/manifest.sha
+  mkdir -p "$cache_context/_build"
+
+  local current
+  current=$(fingerprint)
+  if [ -f "$manifest" ] && [ "$(cat "$manifest")" = "$current" ]; then
+    echo "models build cache hit"
+    return
+  fi
+
+  ./build \
+    --smart-output kennel/models_generated \
+    -- \
+    docker buildx build \
+      --file models/Dockerfile \
+      --build-context "rocq_models_cache=$cache_context" \
+      --output type=local,dest=. \
+      "$@" \
+      .
+
+  fingerprint > "$manifest"
+}
+
+if [ "${1:-}" != "--smart-output" ]; then
+  run_models_build "$@"
+  exit 0
+fi
+
+SMART_OUTPUT=
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --smart-output)
+      if [ "$#" -lt 2 ]; then
+        usage
+        exit 2
+      fi
+      SMART_OUTPUT=$2
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+if [ -z "$SMART_OUTPUT" ] || [ "$#" -eq 0 ]; then
+  usage
+  exit 2
+fi
+
+MARKER=$(mktemp)
+cleanup() {
+  rm -f "$MARKER"
+}
+trap cleanup EXIT HUP INT TERM
+
+"$@"
+
+if [ ! -d "$SMART_OUTPUT" ]; then
+  echo "smart output directory was not produced: $SMART_OUTPUT" >&2
+  exit 1
+fi
+
+MANIFEST="$SMART_OUTPUT/.build-files"
+if [ -f "$MANIFEST" ]; then
+  if [ ! -s "$MANIFEST" ]; then
+    echo "smart output manifest is empty: $MANIFEST" >&2
+    exit 1
+  fi
+
+  while IFS= read -r -d '' file; do
+    rel=${file#"$SMART_OUTPUT"/}
+    if [ "$rel" = ".build-files" ]; then
+      continue
+    fi
+    if ! grep -Fxq "$rel" "$MANIFEST"; then
+      rm -f "$file"
+    fi
+  done < <(find "$SMART_OUTPUT" -type f -print0)
+
+  rm -f "$MANIFEST"
+  find "$SMART_OUTPUT" -depth -type d -empty -delete
+  exit 0
+fi
+
+if ! find "$SMART_OUTPUT" -type f -cnewer "$MARKER" -print -quit | grep -q .; then
+  echo "smart output directory has no newly produced files: $SMART_OUTPUT" >&2
+  exit 1
+fi
+
+find "$SMART_OUTPUT" -type f ! -cnewer "$MARKER" -delete
+rm -f "$MANIFEST"
+find "$SMART_OUTPUT" -depth -type d -empty -delete

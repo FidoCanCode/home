@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, Protocol, TypeAlias
+from typing import Literal, Protocol, TypeAlias, cast
 
 from kennel.models_generated.transition import Free as _FsmFree
 from kennel.models_generated.transition import HandlerAcquire as _FsmHandlerAcquire
@@ -601,7 +601,7 @@ class OwnedSession:
                 f"{type(ev).__name__} rejected in state "
                 f"{type(self._oracle_state).__name__}"
             )
-        self._oracle_state = new_state
+        self._oracle_state = cast(_FsmState, new_state)
 
     def _oracle_on_release(self) -> None:
         """Assert the session-lock FSM oracle accepts the outermost release.
@@ -631,7 +631,7 @@ class OwnedSession:
                 f"{type(ev).__name__} rejected in state "
                 f"{type(self._oracle_state).__name__}"
             )
-        self._oracle_state = new_state
+        self._oracle_state = cast(_FsmState, new_state)
 
     def _fire_worker_cancel(self) -> None:
         """Abort the current lock-holder's turn.  Subclasses override
