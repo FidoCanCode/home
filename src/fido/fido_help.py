@@ -12,6 +12,7 @@ Commands:
   up                Run and supervise the fido server in the foreground.
   down              Stop the named fido server container.
   warm              Warm buildx CI and runtime image targets.
+  gen-workflows     Regenerate GitHub Actions workflows from buildx.
   make-rocq         Generate Rocq-extracted Python through buildx.
   status            Print fido status.
   task              Manage repo task files.

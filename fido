@@ -621,6 +621,9 @@ case "$command" in
   warm)
     warm_images "${@:2}"
     ;;
+  gen-workflows)
+    python3 "$repo_root/tools/gen_workflows.py"
+    ;;
   make-rocq)
     shift
     if [ "${1:-}" = "--smart-output" ]; then

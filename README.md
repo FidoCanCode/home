@@ -11,6 +11,7 @@ Use the root launcher to run project commands inside the buildx uv image:
 ./fido up
 ./fido down
 ./fido warm
+./fido gen-workflows
 ./fido status
 ./fido tests  # focused pytest convenience; use ./fido warm before commits
 ./fido ruff format .
@@ -30,6 +31,8 @@ lets Docker remove it after the stop.
 production runtime image cache, so local and CI runs populate those cache
 families through one command. The `fido-test` image is built on demand for ad hoc local
 commands.
+`./fido gen-workflows` regenerates `.github/workflows/ci.yml` from the buildx
+bake graph and Dockerfile input graph.
 
 Project commands such as `./fido status`, `./fido task`, and `./fido
 sync-tasks` map to dedicated `pyproject.toml` scripts in the production image.

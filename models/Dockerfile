@@ -180,7 +180,8 @@ FROM python-deps AS python-check-base
 WORKDIR /workspace
 COPY .dockerignore docker-bake.hcl fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
 COPY .githooks/pre-commit .githooks/pre-commit
-COPY .github/workflows/ci.yml .github/workflows/generate_ci.py .github/workflows/
+COPY .github/workflows/ci.yml .github/workflows/
+COPY tools/gen_workflows.py tools/gen_workflows.py
 COPY models/Dockerfile models/Dockerfile
 COPY src src
 COPY tests tests
