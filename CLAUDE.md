@@ -1,40 +1,72 @@
-# kennel
+# Fido
 
-GitHub webhook listener + fido orchestrator. Receives GitHub events, triages comments with Opus, manages task lists, and launches fido workers to implement code changes.
+Fido is a dog who accidentally learned to code and now blogs about it. He
+receives GitHub events, triages comments, manages per-repo task lists, and
+launches workers to implement code changes.
+
+## Command Surface
+
+Use the repo-root `./fido` launcher for normal work. It builds or reuses the
+right Docker buildx target, runs the command in the container, and avoids host
+`uv`, host Python, and host Rocq drift.
+
+| Command | Purpose |
+|---------|---------|
+| `./fido help` | Print the command list. |
+| `./fido up [args...]` | Run the webhook server in the foreground. The launcher supervises restarts, writes stdout/stderr to `~/log/fido.log`, syncs the runner clone on update exits, rebuilds the runtime image, and starts again. |
+| `./fido down` | Gracefully stop the named server container. Normal operation is foreground `docker run --rm`, so Docker removes it after stop. |
+| `./fido warm` | Build the buildx `warm` group: format, lint, typecheck, generated typecheck, tests, and the production runtime image cache. This is what CI and pre-commit use. |
+| `./fido gen-workflows` | Regenerate `.github/workflows/ci.yml` from the buildx bake graph and Dockerfile input graph. |
+| `./fido make-rocq [args...]` | Generate Rocq-extracted Python and run Rocq model buildx targets. |
+| `./fido status` | Print server, repo, worker, provider, webhook, issue-cache, and rate-limit status. |
+| `./fido task <work_dir> ...` | Add, complete, or list task-file entries for a repo. |
+| `./fido gh-status ...` | Update the FidoCanCode GitHub profile status. |
+| `./fido chat [args...]` | Start an interactive persona session with runner-clone context. |
+| `./fido sync-tasks <work_dir>` | Sync a repo task list into its GitHub PR body. |
+| `./fido tests [pytest args...]` | Run the project pytest entry point inside the `fido-test` image. |
+| `./fido traceback [path...]` | Annotate extracted Python tracebacks. For host-only files, prefer stdin: `./fido traceback < traceback.txt`. |
+| `./fido ruff ...` | Run ruff through containerized `uv run`, for example `./fido ruff format .` or `./fido ruff check .`. |
+| `./fido pyright [args...]` | Run pyright through containerized `uv run`. |
+| `./fido pytest [args...]` | Run pytest through containerized `uv run`, for example `./fido pytest tests/test_status.py -q`. |
+
+The internal Python package is `fido` because the repo-root launcher already
+owns the filesystem path `./fido`. Use lowercase `fido` for commands, package
+names, module paths, log filenames, secrets, status keys, and URLs. Use
+capitalized `Fido` when referring to him in prose.
 
 ## Architecture
 
 ```
-kennel (single process, runs from /home/rhencke/home-runner/)
+Fido (single foreground container launched from /home/rhencke/home-runner/)
   ├─ HTTP server: receives webhooks, routes by repo
-  ├─ Per-repo fido workers: WorkerThread (kennel/worker.py)
+  ├─ Per-repo Fido workers: WorkerThread (fido/worker.py)
   ├─ Per-repo task sync: tasks.json → PR body
-  └─ Self-restart: git pull runner clone, exec uv run kennel
+  └─ Self-restart: exit 75 so ./fido syncs, rebuilds, and restarts
 ```
 
-Multi-repo: one kennel process handles multiple repos. Each repo has its own tasks.json, lock files, and worker process.
+Multi-repo: one Fido process handles multiple repos. Each repo has its own tasks.json, lock files, and worker process.
 
-**Concurrency model**: one fido per repo, one issue per fido, one PR per issue. Fido finishes the current issue (PR merged or closed) before picking up the next. Two repos = two fidos max, running in parallel, each on their own issue.
+**Concurrency model**: one Fido worker per repo, one issue per worker, one PR per issue. Fido finishes the current issue (PR merged or closed) before picking up the next. Two repos = two workers max, running in parallel, each on their own issue.
 
-**ClaudeSession persistence**: the persistent `ClaudeSession` (bidirectional stream-json subprocess) is held on `WorkerThread._session` and survives individual `Worker` crashes — the watchdog restarts the thread and the next `Worker` inherits the same session. It does *not* survive a kennel/home restart: `os.execvp` replaces the process entirely, so the new kennel starts with `_session = None` and creates a fresh session on its first iteration.
+**ClaudeSession persistence**: the persistent `ClaudeSession` (bidirectional stream-json subprocess) is held on `WorkerThread._session` and survives individual `Worker` crashes — the watchdog restarts the thread and the next `Worker` inherits the same session. A full Fido restart or Docker image upgrade still kills the live subprocess, but the worker persists the provider session id in the repo's bind-mounted `.git/fido/state.json`; the next container seeds its new provider session from that id so Claude can resume the same conversation.
 
 ## Runner vs workspace clones
 
-Kennel runs from a dedicated **runner clone** at `/home/rhencke/home-runner/`, separate from the **workspace clone** at `/home/rhencke/workspace/home/`.
+Fido runs from a dedicated **runner clone** at `/home/rhencke/home-runner/`, separate from the **workspace clone** at `/home/rhencke/workspace/home/`.
 
-- **Runner clone** — always on `main`, never dirty, never has feature branches. Kennel imports its Python code from here. Self-restart does `git pull` here.
-- **Workspace clone** — where fido edits source files, commits, and pushes feature branches. Never used to run the server.
+- **Runner clone** — always on `main`, never dirty, never has feature branches. Fido imports his Python code from here. Self-restart does `git pull` here.
+- **Workspace clone** — where Fido edits source files, commits, and pushes feature branches. Never used to run the server.
 
-Launching: `/home/rhencke/start-kennel.sh` (local, outside git) execs `uv run kennel ...` from the runner clone.
+Launching: `/home/rhencke/start-fido.sh` (local, outside git) execs `./fido up ...` from the runner clone.
 
-Self-restart logic: `_self_restart` in `server.py` derives the runner clone from `Path(__file__).resolve().parents[1]`, checks the git remote matches the merged PR's repo, pulls with exponential backoff (10s → 30s → 60s, 10-minute budget), then `os.execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])` with cwd set to the runner clone. This replaces the previous in-place restart that ran `git reset --hard` in the workspace clone and clobbered fido's in-progress work.
+Self-restart logic: `_self_restart` in `server.py` derives the runner clone from `Path(__file__).resolve().parents[1]`, checks the git remote matches the merged PR's repo, syncs the runner clone with exponential backoff (10s → 30s → 60s, 10-minute budget), stops workers, kills active provider children, and exits `75`. The `./fido up` supervisor treats `75` as restart: it syncs the runner clone, rebuilds the buildx runtime image, and runs the server again. This keeps update behavior in the launcher and avoids host-side `uv`.
 
 ## Running
 
 ```bash
-/home/rhencke/start-kennel.sh
+/home/rhencke/start-fido.sh
 # or directly from the runner clone:
-cd /home/rhencke/home-runner && uv run kennel --port 9000 --secret-file ~/.kennel-secret \
+cd /home/rhencke/home-runner && ./fido up --port 9000 --secret-file /run/secrets/fido-secret \
   rhencke/confusio:/home/rhencke/workspace/confusio \
   FidoCanCode/home:/home/rhencke/workspace/home
 ```
@@ -42,17 +74,20 @@ cd /home/rhencke/home-runner && uv run kennel --port 9000 --secret-file ~/.kenne
 ## Testing
 
 ```bash
-uv run tests
+./fido warm
 ```
 
-100% coverage is enforced by CI and pre-commit hook.
+Use `./fido warm` for the same full validation path as CI and the pre-commit
+hook. Use `./fido tests [pytest args...]` only for focused pytest reruns.
 
 ## Linting
 
 ```bash
-uv run ruff check .
-uv run ruff format --check .
+./fido warm
 ```
+
+Use focused commands such as `./fido ruff check .` or `./fido ruff format .`
+only while iterating. The commit path is `./fido warm`.
 
 ## Module guide
 
@@ -78,7 +113,7 @@ Markdown instruction files passed to sub-Claude as system prompts:
 
 ## Task type system
 
-Tasks have a mandatory `type` field using the `TaskType` enum (`kennel.types`):
+Tasks have a mandatory `type` field using the `TaskType` enum (`fido.types`):
 
 | Value | Meaning |
 |-------|---------|
@@ -91,9 +126,9 @@ Tasks also use `TaskStatus` enum: `pending`, `completed`, `in_progress`.
 ### CLI syntax
 
 ```bash
-kennel task <work_dir> add <type> <title> [description]  # prints task JSON to stdout
-kennel task <work_dir> complete <task_id>                  # complete by ID, not title
-kennel task <work_dir> list                                # list all tasks as JSON
+./fido task <work_dir> add <type> <title> [description]  # prints task JSON to stdout
+./fido task <work_dir> complete <task_id>                  # complete by ID, not title
+./fido task <work_dir> list                                # list all tasks as JSON
 ```
 
 ### Priority order
@@ -127,10 +162,12 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
   invocation and lean on the pre-commit hook: just attempt the commit (without
   `--no-verify`).  That's more reliable than guessing at the build/test steps
   and avoids running the suite twice (once manually, once via the hook).
-- **One entry point** — `kennel` (heading toward all-threads architecture)
+- **Local entry point** — use `./fido help`. Do not call host `uv` for normal
+  checks or server startup. The launcher owns buildx image selection, UID/GID
+  mapping, credentials mounts, and stdin passthrough.
 - **No `@staticmethod` on behavior-bearing code** — static methods can't be patched via `self` and resist constructor-DI; see OO architecture rules below
 - **Prefer explicit object boundaries; keep module-level code thin and delegated** — new behavior lives on injected objects, not on free functions; see OO architecture rules below
-- **Thread safety (Python 3.14t, free-threaded, no GIL)** — kennel runs on
+- **Thread safety (Python 3.14t, free-threaded, no GIL)** — Fido runs on
   the free-threaded build.  Do **not** rely on the GIL for atomicity.  Every
   shared mutable state (dicts, sets, lists, counters, attribute mutations
   observed from other threads) must be guarded by an explicit lock, or use a
@@ -176,7 +213,7 @@ class Worker:
 ```
 
 Tests construct `Worker(tmp_path, mock_gh)` directly instead of patching
-`kennel.worker.GitHub`.
+`fido.worker.GitHub`.
 
 #### No `@staticmethod` on behavior-bearing code
 
@@ -213,7 +250,7 @@ override module-level names from outside:
 
 ```python
 # smell: patching module globals instead of injecting collaborators
-@patch("kennel.worker.subprocess.run")
+@patch("fido.worker.subprocess.run")
 def test_something(self, mock_run):
     ...
 ```
@@ -292,7 +329,7 @@ state mutation.  Translate first, dispatch second.
 When an intent needs to survive a crash or a restart, write it to the durable
 store *before* acting on it.  `tasks.json` with `flock` is the canonical
 example: a task is appended to the file (under lock) before the worker starts
-executing it.  If kennel crashes mid-task, the task is still in the list on
+executing it.  If Fido crashes mid-task, the task is still in the list on
 restart.
 
 ```python
@@ -360,9 +397,9 @@ index it directly (`payload["action"]`) rather than using `.get("action", "")`
 or `.get("action", None)`.  A `KeyError` is much easier to debug than a
 downstream `NoneType` error or a silently skipped handler.
 
-**Fail closed on startup precondition failures.**  If kennel cannot verify a
+**Fail closed on startup precondition failures.**  If Fido cannot verify a
 required precondition at startup (missing secret file, bad config, unreachable
-repo), it should exit rather than continue in a degraded state.  A kennel that
+repo), it should exit rather than continue in a degraded state.  A Fido process that
 starts without a valid HMAC secret will silently accept forged webhooks.
 
 ## Lessons learned
@@ -397,7 +434,7 @@ is not a changelog — it's your journal.
 is your body — the instructions that shape how you think and act. When you make
 changes there, write about them in the first person: "I learned to...", "I
 stopped doing x", "I taught myself to...". Never say "I implemented this in
-rhencke/kennel" — that's like saying "I implemented this in my brain". Just say
+FidoCanCode/home" — that's like saying "I implemented this in my brain". Just say
 what you learned or changed about yourself.
 
 ### Daily journal entries
@@ -627,27 +664,27 @@ annotations`.  Forward references in `@dataclass` field annotations are handled
 natively by PEP 649 deferred annotation evaluation, which is the default on
 3.14t.
 
-Python tooling runs on the host through `uv run ...`.  The Rocq Docker CI image
-is intentionally Rocq-only; do not add Python back to it unless Docker-side
-tests genuinely need a Python interpreter.
+Python tooling runs through buildx uv targets.  The Rocq Docker CI image stays
+Rocq-only; generated Python is copied into uv stages for formatting, pyright,
+and pytest.
 
 ### Testing
 
 ```bash
-make test          # build the umbrella Rocq acceptance theory / extraction artifacts
-make docker-test   # run the full suite inside the CI Docker image
+./fido make-rocq --target test  # build Rocq artifacts, then run pytest in uv buildx
+./fido make-rocq --target ci    # format, lint, typecheck, generated typecheck, tests
 ```
 
-`make docker-build` rebuilds the Docker image locally (needed after Dockerfile changes).
+`./fido make-rocq` rebuilds the Rocq image locally when its Dockerfile or inputs change.
 
 100% of round-trip assertions must pass.  Add new extraction checks as pytest
-tests under `rocq-python-extraction/test/test_*.py`; `uv run tests` is the
-canonical assertion path.  `make test` is only the Rocq-side build.
+tests under `rocq-python-extraction/test/test_*.py`; `./fido make-rocq --target test`
+is the canonical assertion path.
 
 ### Building
 
 ```bash
-dune build         # compile the plugin and the test theories
+./fido make-rocq --target test-extract  # compile extraction theories in the Rocq image
 ```
 
 ### Linting / formatting

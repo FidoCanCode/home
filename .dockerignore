@@ -1,0 +1,12 @@
+.cache/
+.codex
+.coverage
+.git/
+.hypothesis/
+.pytest_cache/
+.ruff_cache/
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+_build/

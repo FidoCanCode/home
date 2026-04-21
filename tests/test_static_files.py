@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from email.utils import format_datetime
 from pathlib import Path
 
-from kennel.static_files import StaticFiles
+from fido.static_files import StaticFiles
 
 
 class TestServeBasic:

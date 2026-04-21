@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from kennel.github import (
+from fido.github import (
     _HTTP_TIMEOUT,  # noqa: PLC2701
     GitHub,
     GraphQLError,
@@ -1051,7 +1051,7 @@ class TestGitHubClass:
         assert result == "fido"
 
     def test_get_authenticated_identity_builds_noreply_email(self) -> None:
-        from kennel.types import GitIdentity
+        from fido.types import GitIdentity
 
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
@@ -1069,7 +1069,7 @@ class TestGitHubClass:
     def test_get_authenticated_identity_falls_back_to_login_when_name_missing(
         self,
     ) -> None:
-        from kennel.types import GitIdentity
+        from fido.types import GitIdentity
 
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
@@ -1749,14 +1749,14 @@ class TestGitHubClass:
     def test_pr_merge_auto_non_dict_error_entries_skipped(self) -> None:
         """#643 helper ignores non-dict entries in GraphQLError.errors (GitHub's
         error list occasionally contains bare strings)."""
-        from kennel.github import GraphQLError, _auto_merge_unavailable
+        from fido.github import GraphQLError, _auto_merge_unavailable
 
         exc = GraphQLError(["string-error", {"type": "OTHER"}])
         assert _auto_merge_unavailable(exc) is False
 
     def test_pr_merge_auto_reraises_other_graphql_errors(self) -> None:
         """Non-\"auto-merge disabled\" GraphQL errors must not be swallowed."""
-        from kennel.github import GraphQLError
+        from fido.github import GraphQLError
 
         gh, mock_s = self._gh()
         pr_resp = MagicMock()

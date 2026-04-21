@@ -1,4 +1,4 @@
-"""Tests for kennel.worker — WorkerContext, lock acquisition, git context."""
+"""Tests for fido.worker — WorkerContext, lock acquisition, git context."""
 
 from __future__ import annotations
 
@@ -12,24 +12,24 @@ from unittest.mock import ANY, MagicMock, PropertyMock, call, patch
 
 import pytest
 
-import kennel.worker as worker_module
-from kennel import provider
-from kennel.claude import ClaudeClient
-from kennel.config import RepoConfig, RepoMembership
-from kennel.issue_cache import IssueNode, IssueTreeCache
-from kennel.prompts import Prompts
-from kennel.provider import (
+import fido.worker as worker_module
+from fido import provider
+from fido.claude import ClaudeClient
+from fido.config import RepoConfig, RepoMembership
+from fido.issue_cache import IssueNode, IssueTreeCache
+from fido.prompts import Prompts
+from fido.provider import (
     ProviderID,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
     ProviderModel,
     TurnSessionMode,
 )
-from kennel.state import (
+from fido.state import (
     State,
     _resolve_git_dir,
 )
-from kennel.tasks import (
+from fido.tasks import (
     _apply_queue_to_body,
     _auto_complete_ask_tasks,
     _format_work_queue,
@@ -37,8 +37,8 @@ from kennel.tasks import (
     sync_tasks,
     sync_tasks_background,
 )
-from kennel.types import GitIdentity
-from kennel.worker import (
+from fido.types import GitIdentity
+from fido.worker import (
     _RETRY_COMMENT_MARKER,
     GitIdentityError,
     LockHeld,
@@ -62,10 +62,10 @@ from kennel.worker import (
     provider_start,
     should_rerequest_review,
 )
-from kennel.worker import (
+from fido.worker import (
     Worker as _WorkerBase,
 )
-from kennel.worker import (
+from fido.worker import (
     WorkerThread as _WorkerThreadBase,
 )
 
@@ -138,7 +138,7 @@ def _no_claude_session_spawn(monkeypatch):
     subprocess.  The mock is a MagicMock so all attribute and method accesses
     (stop, send, iter_events, …) work without raising AttributeError.
     """
-    from kennel import claude
+    from fido import claude
 
     monkeypatch.setattr(claude, "ClaudeSession", MagicMock(return_value=MagicMock()))
 
@@ -203,19 +203,19 @@ class TestRepoNameFilter:
         return record
 
     def test_passes_matching_repo(self) -> None:
-        f = RepoNameFilter("kennel")
-        assert f.filter(self._record_with_repo("kennel")) is True
+        f = RepoNameFilter("fido")
+        assert f.filter(self._record_with_repo("fido")) is True
 
     def test_blocks_other_repo(self) -> None:
-        f = RepoNameFilter("kennel")
+        f = RepoNameFilter("fido")
         assert f.filter(self._record_with_repo("confusio")) is False
 
     def test_blocks_default_dash(self) -> None:
-        f = RepoNameFilter("kennel")
+        f = RepoNameFilter("fido")
         assert f.filter(self._record_with_repo("-")) is False
 
     def test_blocks_record_without_repo_name(self) -> None:
-        f = RepoNameFilter("kennel")
+        f = RepoNameFilter("fido")
         record = logging.LogRecord("", logging.INFO, "", 0, "", (), None)
         assert f.filter(record) is False
 
@@ -400,7 +400,7 @@ class TestWorker:
     # --- constructor / config injection ---
 
     def test_config_stored_when_passed(self, tmp_path: Path) -> None:
-        from kennel.config import Config, RepoConfig
+        from fido.config import Config, RepoConfig
 
         cfg = RepoConfig(
             name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
@@ -417,7 +417,7 @@ class TestWorker:
         assert worker._config is config
 
     def test_repo_cfg_stored_when_passed(self, tmp_path: Path) -> None:
-        from kennel.config import RepoConfig
+        from fido.config import RepoConfig
 
         cfg = RepoConfig(
             name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
@@ -426,7 +426,7 @@ class TestWorker:
         assert worker._repo_cfg is cfg
 
     def test_repo_cfg_provider_selects_copilot_provider(self, tmp_path: Path) -> None:
-        from kennel.config import RepoConfig
+        from fido.config import RepoConfig
 
         worker = Worker(
             tmp_path,
@@ -579,7 +579,7 @@ class TestWorker:
 
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             Worker(tmp_path, gh, session=None).set_status(
                 "idle", _sub_dir_fn=lambda: tmp_path
             )
@@ -593,7 +593,7 @@ class TestWorker:
 
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
-        with caplog.at_level(logging.WARNING, logger="kennel"):
+        with caplog.at_level(logging.WARNING, logger="fido"):
             Worker(
                 tmp_path, gh, session=self._session(status="", emoji=":dog:")
             ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
@@ -604,7 +604,7 @@ class TestWorker:
 
         gh = self._make_gh()
         (tmp_path / "persona.md").write_text("I am Fido.")
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             Worker(tmp_path, gh, session=self._session(status="fetching")).set_status(
                 "fetching", _sub_dir_fn=lambda: tmp_path
             )
@@ -694,7 +694,7 @@ class TestWorker:
         self, tmp_path: Path
     ) -> None:
         """Concurrent set_status calls on different workers sharing a registry serialize."""
-        from kennel.registry import WorkerRegistry
+        from fido.registry import WorkerRegistry
 
         registry = WorkerRegistry(MagicMock())
         inside_count = 0
@@ -808,7 +808,7 @@ class TestWorker:
         fido_dir.mkdir()
         State(fido_dir).save({"issue": 9})
         gh = self._make_issue_gh(state="CLOSED")
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             Worker(tmp_path, gh).get_current_issue(fido_dir, "owner/repo")
         assert "advancing" in caplog.text
 
@@ -839,14 +839,14 @@ class TestWorker:
     # --- create_session / stop_session ---
 
     def test_create_session_instantiates_claude_session(self, tmp_path: Path) -> None:
-        from kennel import claude
+        from fido import claude
 
         worker = Worker(tmp_path, MagicMock())
         worker.create_session()
         claude.ClaudeSession.assert_called_once()
 
     def test_create_session_passes_work_dir(self, tmp_path: Path) -> None:
-        from kennel import claude
+        from fido import claude
 
         worker = Worker(tmp_path, MagicMock())
         worker.create_session()
@@ -854,7 +854,7 @@ class TestWorker:
         assert kwargs.get("work_dir") == tmp_path
 
     def test_create_session_switches_to_opus(self, tmp_path: Path) -> None:
-        from kennel import claude
+        from fido import claude
 
         mock_session = MagicMock()
         claude.ClaudeSession.return_value = mock_session
@@ -865,7 +865,7 @@ class TestWorker:
         mock_session.switch_model.assert_not_called()
 
     def test_create_session_stores_on_self(self, tmp_path: Path) -> None:
-        from kennel import claude
+        from fido import claude
 
         mock_session = MagicMock()
         claude.ClaudeSession.return_value = mock_session
@@ -982,7 +982,7 @@ class TestWorker:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("kennel.events.recover_reply_promises", side_effect=mark_recover),
+            patch("fido.events.recover_reply_promises", side_effect=mark_recover),
             patch.object(worker, "handle_ci", side_effect=mark_ci),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=False),
@@ -1149,7 +1149,7 @@ class TestWorker:
         gh = self._make_gh()
         worker = Worker(tmp_path, gh)
         with patch.object(worker, "create_context", side_effect=LockHeld("held")):
-            with caplog.at_level(logging.WARNING, logger="kennel"):
+            with caplog.at_level(logging.WARNING, logger="fido"):
                 worker.run()
         assert "another fido" in caplog.text
 
@@ -1171,7 +1171,7 @@ class TestWorker:
             patch.object(worker, "get_current_issue", return_value=None),
             patch.object(worker, "find_next_issue", return_value=None),
         ):
-            with caplog.at_level(logging.INFO, logger="kennel"):
+            with caplog.at_level(logging.INFO, logger="fido"):
                 worker.run()
         assert "worker started" in caplog.text
 
@@ -1193,7 +1193,7 @@ class TestWorker:
             patch.object(worker, "get_current_issue", return_value=None),
             patch.object(worker, "find_next_issue", return_value=None),
         ):
-            with caplog.at_level(logging.INFO, logger="kennel"):
+            with caplog.at_level(logging.INFO, logger="fido"):
                 worker.run()
         assert "owner/repo" in caplog.text
 
@@ -1576,7 +1576,7 @@ class TestWorkerFindNextIssue:
     def _load_issues(self, worker: "Worker", issues: list) -> None:
         """Pre-populate the worker's issue cache (replaces the old lazy bootstrap).
 
-        The cache is now seeded eagerly at kennel startup (#837); tests must
+        The cache is now seeded eagerly at fido startup (#837); tests must
         do the same rather than relying on _pick_from_cache to fetch.
         """
         from datetime import datetime, timezone
@@ -1861,7 +1861,7 @@ class TestWorkerFindNextIssue:
         with (
             patch.object(worker, "set_status"),
             patch.object(worker, "post_pickup_comment"),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert "9" in caplog.text
@@ -1874,7 +1874,7 @@ class TestWorkerFindNextIssue:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert "no eligible" in caplog.text
@@ -2209,30 +2209,30 @@ class TestAssertGitIdentity:
 
 class TestNoCommitNudge:
     def test_early_attempt_is_gentle_and_includes_complete_command(self) -> None:
-        from kennel.worker import _no_commit_nudge
+        from fido.worker import _no_commit_nudge
 
         msg = _no_commit_nudge(1, "Fix widget", "task-7", "/repo/work", 42)
         assert "Fix widget" in msg
         assert "commit" in msg.lower()
         # Even early nudges include the exact mark-complete command so
         # claude can use it without guessing the task id.
-        assert "kennel task complete /repo/work task-7" in msg
+        assert "fido task complete /repo/work task-7" in msg
         # Early nudges don't threaten or list numbered actions.
         assert "attempt 1" not in msg.lower()
         assert "blocked" not in msg.lower()
 
     def test_late_attempt_offers_three_concrete_actions(self) -> None:
-        from kennel.worker import _no_commit_nudge
+        from fido.worker import _no_commit_nudge
 
         msg = _no_commit_nudge(3, "Fix widget", "task-7", "/repo/work", 42)
         assert "attempt 3" in msg.lower()
         # All three actions are concrete commands with real arguments.
         assert "git add" in msg.lower()
-        assert "kennel task complete /repo/work task-7" in msg
+        assert "fido task complete /repo/work task-7" in msg
         assert "gh pr comment 42 --body 'BLOCKED:" in msg
 
     def test_late_attempt_without_pr_uses_placeholder(self) -> None:
-        from kennel.worker import _no_commit_nudge
+        from fido.worker import _no_commit_nudge
 
         msg = _no_commit_nudge(3, "Fix widget", "task-7", "/repo/work", None)
         assert "gh pr comment <pr>" in msg
@@ -2240,7 +2240,7 @@ class TestNoCommitNudge:
 
 class TestFreshSessionNudge:
     def test_includes_context_reset_and_task_details(self) -> None:
-        from kennel.worker import _fresh_session_nudge
+        from fido.worker import _fresh_session_nudge
 
         msg = _fresh_session_nudge("Fix widget", "task-7", "/repo/work", 42, "br-7")
         assert "session context was intentionally wiped" in msg
@@ -2248,7 +2248,7 @@ class TestFreshSessionNudge:
         assert "Task id: task-7" in msg
         assert "Branch: br-7" in msg
         assert "PR: 42" in msg
-        assert "kennel task complete /repo/work task-7" in msg
+        assert "fido task complete /repo/work task-7" in msg
         assert "gh pr comment 42 --body 'BLOCKED:" in msg
 
 
@@ -2265,7 +2265,7 @@ class TestPickNextIssue:
     """
 
     def test_single_assigned_issue_no_children_is_picked(self) -> None:
-        from kennel.worker import _pick_next_issue
+        from fido.worker import _pick_next_issue
 
         issue = _issue(5, "Ready", assignees=["fido"], sub_issues=[])
         choice = _pick_next_issue(
@@ -2276,7 +2276,7 @@ class TestPickNextIssue:
         assert choice is not None and choice.number == 5
 
     def test_milestone_beats_no_milestone(self) -> None:
-        from kennel.worker import _pick_next_issue
+        from fido.worker import _pick_next_issue
 
         older = _issue(1, assignees=["fido"], sub_issues=[])
         newer_with_ms = _issue(99, assignees=["fido"], milestone="v1", sub_issues=[])
@@ -2295,7 +2295,7 @@ class TestPickNextIssue:
         child is #200 (owned), descend into #200, it is a leaf, owned on
         trail → return #200.  Strict first-priority picks earliest sibling.
         """
-        from kennel.worker import _pick_next_issue
+        from fido.worker import _pick_next_issue
 
         i200 = _issue(200, state="OPEN", assignees=["fido"], parent=100)
         i201 = _issue(201, state="OPEN", assignees=["fido"], parent=100)
@@ -2319,7 +2319,7 @@ class TestPickNextIssue:
         tree.  Descent abandons immediately (return None); Fido has no
         other candidate, so no leaf is picked.
         """
-        from kennel.worker import _pick_next_issue
+        from fido.worker import _pick_next_issue
 
         i200 = _issue(200, state="OPEN", assignees=["alice"], parent=100)
         i201 = _issue(201, state="OPEN", assignees=["fido"], parent=100)
@@ -2333,7 +2333,7 @@ class TestPickNextIssue:
         assert choice is None
 
     def test_returns_none_when_only_open_children_are_others(self) -> None:
-        from kennel.worker import _pick_next_issue
+        from fido.worker import _pick_next_issue
 
         i200 = _issue(200, state="OPEN", assignees=["alice"], parent=100)
         i201 = _issue(201, state="OPEN", assignees=["bob"], parent=100)
@@ -2355,7 +2355,7 @@ class TestPickNextIssue:
         Descent walks 100 → 200 → 300 without calling any claim hook.
         The leaf is returned because #100 is owned on the trail.
         """
-        from kennel.worker import _pick_next_issue
+        from fido.worker import _pick_next_issue
 
         i300 = _issue(300, state="OPEN", assignees=[], parent=200, sub_issues=[])
         i200 = _issue(200, state="OPEN", assignees=[], parent=100, sub_issues=[i300])
@@ -2390,7 +2390,7 @@ class TestPickNextIssue:
         issue_index = {100: i100, 200: i200}
         # The candidate here is #100 itself (contrived — no actual assignment
         # but we test the descent path directly).  Use the direct call.
-        from kennel.worker import _descend_issue
+        from fido.worker import _descend_issue
 
         choice = _descend_issue(
             i100,
@@ -2404,14 +2404,14 @@ class TestPickNextIssue:
 
     def test_parent_cycle_is_broken_gracefully(self) -> None:
         """A self-referencing parent doesn't infinite-loop the walk."""
-        from kennel.worker import _walk_to_root
+        from fido.worker import _walk_to_root
 
         node = _issue(50, "A", parent=50)
         result = _walk_to_root(node, issue_index={50: node})
         assert result["number"] == 50
 
     def test_reason_includes_descent_trail(self) -> None:
-        from kennel.worker import _pick_next_issue
+        from fido.worker import _pick_next_issue
 
         leaf = _issue(20, state="OPEN", assignees=["fido"], parent=10)
         root = _issue(10, "root", assignees=["fido"], sub_issues=[leaf])
@@ -2427,7 +2427,7 @@ class TestPickNextIssue:
 
     def test_dedupes_roots_across_multiple_assigned(self) -> None:
         """Two assigned issues sharing the same root should walk once."""
-        from kennel.worker import _pick_next_issue
+        from fido.worker import _pick_next_issue
 
         child = _issue(2, state="OPEN", assignees=["fido"], parent=1)
         root = _issue(1, "root", assignees=["fido"], sub_issues=[child])
@@ -2443,7 +2443,7 @@ class TestPickNextIssue:
         assert choice is not None and choice.number == 2
 
     def test_milestone_inherited_via_parent_note_in_reason(self) -> None:
-        from kennel.worker import _pick_next_issue
+        from fido.worker import _pick_next_issue
 
         child = _issue(20, state="OPEN", assignees=["fido"], parent=10)
         parent = _issue(
@@ -2463,7 +2463,7 @@ class TestPickNextIssue:
     def test_missing_parent_in_index_treats_current_as_root(self) -> None:
         """When a candidate's parent is absent from the index (closed/blocked),
         the walk stops and treats the current node as the root."""
-        from kennel.worker import _walk_to_root
+        from fido.worker import _walk_to_root
 
         child = _issue(200, state="OPEN", assignees=["fido"], parent=100)
         result = _walk_to_root(child, issue_index={200: child})
@@ -2480,7 +2480,7 @@ class TestPickNextIssue:
         rules, the picker would have wandered into some sibling leaf
         and claimed it.
         """
-        from kennel.worker import _pick_next_issue
+        from fido.worker import _pick_next_issue
 
         # Tree: #40 → [#39 → #33 (leaf, unassigned), #41 → #396 → #710 (Fido)]
         i33 = _issue(33, state="OPEN", assignees=[], parent=39, sub_issues=[])
@@ -2510,7 +2510,7 @@ class TestPickNextIssue:
         Descent 40 → 41 → 710 → 711.  #710 is owned on trail → leaf #711
         is returned.
         """
-        from kennel.worker import _pick_next_issue
+        from fido.worker import _pick_next_issue
 
         i711 = _issue(711, state="OPEN", assignees=["fido"], parent=710, sub_issues=[])
         i710 = _issue(
@@ -2913,7 +2913,7 @@ class TestWorkerPostPickupComment:
                 "created_at": "2024-02-01T00:00:00Z",
             }
         ]
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.post_pickup_comment("owner/repo", 7, "Title", "fido-bot")
         assert "already exists" in caplog.text
 
@@ -2969,7 +2969,7 @@ class TestCreateCompactScript:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         script = create_compact_script(fido_dir)
-        from kennel.worker import _sub_dir
+        from fido.worker import _sub_dir
 
         assert str(_sub_dir()) in script.read_text()
 
@@ -3007,7 +3007,8 @@ class TestSetupHooks:
         fido_dir.mkdir()
         (tmp_path / ".git" / "info").mkdir(parents=True)
         _, sync_cmd = Worker(tmp_path, MagicMock()).setup_hooks(fido_dir)
-        assert "kennel sync-tasks" in sync_cmd
+        assert "fido-sync-tasks" in sync_cmd
+        assert "uv run" not in sync_cmd
 
     def test_sync_cmd_includes_work_dir(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
@@ -3193,7 +3194,7 @@ class TestBuildPrompt:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
-        with patch("kennel.worker._sub_dir", return_value=sub):
+        with patch("fido.worker._sub_dir", return_value=sub):
             sys_file, prompt_file = build_prompt(fido_dir, "task", "context")
         assert sys_file == fido_dir / "system"
         assert prompt_file == fido_dir / "prompt"
@@ -3202,7 +3203,7 @@ class TestBuildPrompt:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
-        with patch("kennel.worker._sub_dir", return_value=sub):
+        with patch("fido.worker._sub_dir", return_value=sub):
             sys_file, _ = build_prompt(fido_dir, "task", "context")
         assert "I am Fido" in sys_file.read_text()
 
@@ -3210,7 +3211,7 @@ class TestBuildPrompt:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
-        with patch("kennel.worker._sub_dir", return_value=sub):
+        with patch("fido.worker._sub_dir", return_value=sub):
             sys_file, _ = build_prompt(fido_dir, "task", "context")
         assert "Implement the task carefully." in sys_file.read_text()
 
@@ -3218,7 +3219,7 @@ class TestBuildPrompt:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
-        with patch("kennel.worker._sub_dir", return_value=sub):
+        with patch("fido.worker._sub_dir", return_value=sub):
             sys_file, _ = build_prompt(fido_dir, "task", "context")
         content = sys_file.read_text()
         assert "I am Fido, a very good dog.\n\nImplement the task carefully." in content
@@ -3227,7 +3228,7 @@ class TestBuildPrompt:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
-        with patch("kennel.worker._sub_dir", return_value=sub):
+        with patch("fido.worker._sub_dir", return_value=sub):
             _, prompt_file = build_prompt(fido_dir, "task", "do the work")
         assert "do the work" in prompt_file.read_text()
 
@@ -3235,7 +3236,7 @@ class TestBuildPrompt:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
-        with patch("kennel.worker._sub_dir", return_value=sub):
+        with patch("fido.worker._sub_dir", return_value=sub):
             sys_file, _ = build_prompt(fido_dir, "task", "ctx")
         assert sys_file.read_text().endswith("\n")
 
@@ -3243,7 +3244,7 @@ class TestBuildPrompt:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
-        with patch("kennel.worker._sub_dir", return_value=sub):
+        with patch("fido.worker._sub_dir", return_value=sub):
             _, prompt_file = build_prompt(fido_dir, "task", "ctx")
         assert prompt_file.read_text().endswith("\n")
 
@@ -3252,7 +3253,7 @@ class TestBuildPrompt:
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
         (sub / "ci.md").write_text("Fix the CI failure.")
-        with patch("kennel.worker._sub_dir", return_value=sub):
+        with patch("fido.worker._sub_dir", return_value=sub):
             sys_file, _ = build_prompt(fido_dir, "ci", "ctx")
         assert "Fix the CI failure." in sys_file.read_text()
         assert "Implement the task carefully." not in sys_file.read_text()
@@ -3262,7 +3263,7 @@ class TestBuildPrompt:
         fido_dir.mkdir()
         sub = self._setup_sub_dir(tmp_path)
         (sub / "persona.md").write_text("Persona text\n\n\n")
-        with patch("kennel.worker._sub_dir", return_value=sub):
+        with patch("fido.worker._sub_dir", return_value=sub):
             sys_file, _ = build_prompt(fido_dir, "task", "ctx")
         content = sys_file.read_text()
         assert content.startswith("Persona text\n\n")
@@ -3690,12 +3691,12 @@ class TestParseStatusNudge:
     """Tests for _parse_status_nudge."""
 
     def test_empty_raw_returns_empty_tuple(self) -> None:
-        from kennel.worker import _parse_status_nudge
+        from fido.worker import _parse_status_nudge
 
         assert _parse_status_nudge("") == ("", "")
 
     def test_valid_json_returns_both_fields(self) -> None:
-        from kennel.worker import _parse_status_nudge
+        from fido.worker import _parse_status_nudge
 
         assert _parse_status_nudge('{"status": "chasing bugs", "emoji": ":dog:"}') == (
             "chasing bugs",
@@ -3703,19 +3704,19 @@ class TestParseStatusNudge:
         )
 
     def test_json_with_preamble_still_parsed(self) -> None:
-        from kennel.worker import _parse_status_nudge
+        from fido.worker import _parse_status_nudge
 
         assert _parse_status_nudge(
             'Here you go: {"status": "ok", "emoji": ":wrench:"} thanks!'
         ) == ("ok", ":wrench:")
 
     def test_malformed_json_returns_empty_tuple(self) -> None:
-        from kennel.worker import _parse_status_nudge
+        from fido.worker import _parse_status_nudge
 
         assert _parse_status_nudge("{not json at all}") == ("", "")
 
     def test_missing_fields_returns_empty_tuple(self) -> None:
-        from kennel.worker import _parse_status_nudge
+        from fido.worker import _parse_status_nudge
 
         # Valid JSON but wrong shape — no status/emoji string fields
         assert _parse_status_nudge('{"other": "value"}') == ("", "")
@@ -3826,37 +3827,37 @@ class TestStaleIndexLockHelpers:
     """Module-level helpers for #827 self-heal."""
 
     def test_stderr_matches_standard_message(self) -> None:
-        from kennel.worker import _stderr_is_index_lock_error
+        from fido.worker import _stderr_is_index_lock_error
 
         assert _stderr_is_index_lock_error(
             "fatal: Unable to create '/repo/.git/index.lock': File exists."
         )
 
     def test_stderr_matches_on_both_tokens(self) -> None:
-        from kennel.worker import _stderr_is_index_lock_error
+        from fido.worker import _stderr_is_index_lock_error
 
         assert _stderr_is_index_lock_error("Unable to create 'x/index.lock'")
 
     def test_stderr_rejects_unrelated(self) -> None:
-        from kennel.worker import _stderr_is_index_lock_error
+        from fido.worker import _stderr_is_index_lock_error
 
         assert not _stderr_is_index_lock_error("fatal: not a git repository")
         assert not _stderr_is_index_lock_error("")
 
     def test_stderr_rejects_partial(self) -> None:
-        from kennel.worker import _stderr_is_index_lock_error
+        from fido.worker import _stderr_is_index_lock_error
 
         assert not _stderr_is_index_lock_error("Unable to create 'foo'")
         assert not _stderr_is_index_lock_error("index.lock missing")
 
     def test_remove_returns_false_when_missing(self, tmp_path: Path) -> None:
-        from kennel.worker import _remove_stale_index_lock
+        from fido.worker import _remove_stale_index_lock
 
         (tmp_path / ".git").mkdir()
         assert _remove_stale_index_lock(tmp_path) is False
 
     def test_remove_returns_false_when_fresh(self, tmp_path: Path) -> None:
-        from kennel.worker import _remove_stale_index_lock
+        from fido.worker import _remove_stale_index_lock
 
         (tmp_path / ".git").mkdir()
         lock = tmp_path / ".git" / "index.lock"
@@ -3867,7 +3868,7 @@ class TestStaleIndexLockHelpers:
     def test_remove_returns_true_when_stale(self, tmp_path: Path) -> None:
         import os as _os
 
-        from kennel.worker import _remove_stale_index_lock
+        from fido.worker import _remove_stale_index_lock
 
         (tmp_path / ".git").mkdir()
         lock = tmp_path / ".git" / "index.lock"
@@ -3878,7 +3879,7 @@ class TestStaleIndexLockHelpers:
         assert not lock.exists()
 
     def test_respects_custom_staleness_window(self, tmp_path: Path) -> None:
-        from kennel.worker import _remove_stale_index_lock
+        from fido.worker import _remove_stale_index_lock
 
         (tmp_path / ".git").mkdir()
         lock = tmp_path / ".git" / "index.lock"
@@ -4018,44 +4019,44 @@ class TestExtractBody:
     """Tests for the module-level _extract_body helper."""
 
     def test_extracts_between_tags(self) -> None:
-        from kennel.worker import _extract_body
+        from fido.worker import _extract_body
 
         assert _extract_body("<body>hello</body>") == "hello"
 
     def test_strips_surrounding_whitespace(self) -> None:
-        from kennel.worker import _extract_body
+        from fido.worker import _extract_body
 
         assert _extract_body("<body>\n  hello  \n</body>") == "hello"
 
     def test_returns_empty_when_no_tags(self) -> None:
-        from kennel.worker import _extract_body
+        from fido.worker import _extract_body
 
         assert _extract_body("no tags here") == ""
 
     def test_returns_empty_for_none(self) -> None:
-        from kennel.worker import _extract_body
+        from fido.worker import _extract_body
 
         assert _extract_body(None) == ""
 
     def test_returns_empty_for_empty_string(self) -> None:
-        from kennel.worker import _extract_body
+        from fido.worker import _extract_body
 
         assert _extract_body("") == ""
 
     def test_handles_preamble_and_trailing_chatter(self) -> None:
-        from kennel.worker import _extract_body
+        from fido.worker import _extract_body
 
         raw = "Here's my take:\n<body>the real content</body>\nHope that helps!"
         assert _extract_body(raw) == "the real content"
 
     def test_handles_multiline_body(self) -> None:
-        from kennel.worker import _extract_body
+        from fido.worker import _extract_body
 
         raw = "<body>line 1\n\nline 2\n\nFixes #5.</body>"
         assert _extract_body(raw) == "line 1\n\nline 2\n\nFixes #5."
 
     def test_case_insensitive(self) -> None:
-        from kennel.worker import _extract_body
+        from fido.worker import _extract_body
 
         assert _extract_body("<BODY>upper</BODY>") == "upper"
 
@@ -4079,7 +4080,7 @@ class TestWritePrDescription:
         from contextlib import nullcontext
 
         mock_cc = _client(print_return)
-        with patch("kennel.tasks.pr_body_lock", return_value=nullcontext()):
+        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
             result = _write_pr_description(
                 work_dir or Path("/tmp"),
                 gh,
@@ -4101,9 +4102,7 @@ class TestWritePrDescription:
         from contextlib import nullcontext
 
         gh = MagicMock()
-        with patch(
-            "kennel.tasks.pr_body_lock", return_value=nullcontext()
-        ) as mock_lock:
+        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()) as mock_lock:
             _write_pr_description(
                 Path("/tmp"),
                 gh,
@@ -4289,7 +4288,7 @@ class TestFindOrCreatePr:
         gh_user: str = "fido-bot",
         default_branch: str = "main",
     ) -> "RepoContext":
-        from kennel.worker import RepoContext
+        from fido.worker import RepoContext
 
         return RepoContext(
             repo=repo,
@@ -4316,7 +4315,7 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
-            patch("kennel.tasks.Tasks.list", return_value=["a task"]),
+            patch("fido.tasks.Tasks.list", return_value=["a task"]),
         ):
             result = worker.find_or_create_pr(
                 fido_dir, self._make_repo_ctx(), 5, "title"
@@ -4331,8 +4330,8 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
-            patch("kennel.tasks.Tasks.list", return_value=["a task"]),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=["a task"]),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "resuming" in caplog.text
@@ -4346,10 +4345,10 @@ class TestFindOrCreatePr:
         mock_start = MagicMock(return_value="sess-1")
         with (
             patch.object(worker, "_git"),
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("kennel.worker.build_prompt", mock_build),
-            patch("kennel.worker.provider_start", mock_start),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", mock_start),
             pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -4370,10 +4369,10 @@ class TestFindOrCreatePr:
         mock_build = MagicMock()
         with (
             patch.object(worker, "_git"),
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("kennel.worker.build_prompt", mock_build),
-            patch("kennel.worker.provider_start", return_value="sess"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value="sess"),
             pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -4386,10 +4385,10 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_start", return_value="sess"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value="sess"),
             pytest.raises(RuntimeError, match="setup produced no tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
@@ -4409,10 +4408,10 @@ class TestFindOrCreatePr:
 
         with (
             patch.object(worker, "_git"),
-            patch("kennel.tasks.Tasks.list", side_effect=list_tasks_side_effect),
+            patch("fido.tasks.Tasks.list", side_effect=list_tasks_side_effect),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_start", return_value=""),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value=""),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
 
@@ -4425,7 +4424,7 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch(
-                "kennel.tasks.Tasks.list",
+                "fido.tasks.Tasks.list",
                 side_effect=[[], [{"id": "1", "title": "t", "status": "pending"}]],
             ),
             patch.object(
@@ -4434,10 +4433,10 @@ class TestFindOrCreatePr:
                 side_effect=lambda *a: call_order.append("seed"),
             ),
             patch(
-                "kennel.worker.build_prompt",
+                "fido.worker.build_prompt",
                 side_effect=lambda *a: call_order.append("setup"),
             ),
-            patch("kennel.worker.provider_start", return_value="sess"),
+            patch("fido.worker.provider_start", return_value="sess"),
         ):
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result == (20, "my-br", False)
@@ -4458,9 +4457,9 @@ class TestFindOrCreatePr:
 
         with (
             patch.object(worker, "_git"),
-            patch("kennel.tasks.Tasks.list", side_effect=list_tasks_side_effect),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_start", return_value="sess"),
+            patch("fido.tasks.Tasks.list", side_effect=list_tasks_side_effect),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value="sess"),
         ):
             result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result == (20, "my-br", False)
@@ -4473,10 +4472,10 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch(
-                "kennel.tasks.Tasks.list",
+                "fido.tasks.Tasks.list",
                 return_value=[{"title": "t", "status": "pending"}],
             ),
-            patch("kennel.worker.build_prompt", mock_build),
+            patch("fido.worker.build_prompt", mock_build),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_not_called()
@@ -4498,7 +4497,7 @@ class TestFindOrCreatePr:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch("kennel.tasks.Tasks.list", return_value=["t"]),
+            patch("fido.tasks.Tasks.list", return_value=["t"]),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert ["checkout", "-b", "br", "--track", "origin/br"] in git_calls
@@ -4521,7 +4520,7 @@ class TestFindOrCreatePr:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch("kennel.tasks.Tasks.list", return_value=["t"]),
+            patch("fido.tasks.Tasks.list", return_value=["t"]),
             pytest.raises(subprocess.CalledProcessError) as excinfo,
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -4540,7 +4539,7 @@ class TestFindOrCreatePr:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch("kennel.tasks.Tasks.list", return_value=["t"]),
+            patch("fido.tasks.Tasks.list", return_value=["t"]),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert git_calls[0] == ["fetch", "origin"]
@@ -4556,11 +4555,11 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_start", return_value="sess"),
-            patch("kennel.worker._write_pr_description"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value="sess"),
+            patch("fido.worker._write_pr_description"),
             patch(
-                "kennel.tasks.Tasks.list",
+                "fido.tasks.Tasks.list",
                 return_value=[{"title": "Do thing", "status": "pending"}],
             ),
         ):
@@ -4584,11 +4583,11 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_start", return_value=""),
-            patch("kennel.worker._write_pr_description"),
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker._write_pr_description"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            caplog.at_level(logging.INFO, logger="fido"),
             pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -4605,10 +4604,10 @@ class TestFindOrCreatePr:
         mock_start = MagicMock(return_value="s")
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.build_prompt", mock_build),
-            patch("kennel.worker.provider_start", mock_start),
-            patch("kennel.worker._write_pr_description"),
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", mock_start),
+            patch("fido.worker._write_pr_description"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -4632,10 +4631,10 @@ class TestFindOrCreatePr:
         mock_build = MagicMock()
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.build_prompt", mock_build),
-            patch("kennel.worker.provider_start", return_value="s"),
-            patch("kennel.worker._write_pr_description"),
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value="s"),
+            patch("fido.worker._write_pr_description"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -4652,11 +4651,11 @@ class TestFindOrCreatePr:
         repo_ctx = self._make_repo_ctx(repo="owner/proj", default_branch="main")
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_start", return_value=""),
-            patch("kennel.worker._write_pr_description"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker._write_pr_description"),
             patch(
-                "kennel.tasks.Tasks.list",
+                "fido.tasks.Tasks.list",
                 return_value=[{"title": "t", "status": "pending"}],
             ),
         ):
@@ -4687,10 +4686,10 @@ class TestFindOrCreatePr:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_start", return_value=""),
-            patch("kennel.worker._write_pr_description"),
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker._write_pr_description"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -4727,10 +4726,10 @@ class TestFindOrCreatePr:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_start", return_value=""),
-            patch("kennel.worker._write_pr_description"),
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker._write_pr_description"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             pytest.raises(RuntimeError),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -4752,11 +4751,11 @@ class TestFindOrCreatePr:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_start", return_value=""),
-            patch("kennel.worker._write_pr_description"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker._write_pr_description"),
             patch(
-                "kennel.tasks.Tasks.list",
+                "fido.tasks.Tasks.list",
                 return_value=[{"title": "t", "status": "pending"}],
             ),
         ):
@@ -4776,9 +4775,9 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_start", return_value="sess"),
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value="sess"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             pytest.raises(RuntimeError, match="setup produced no tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
@@ -4795,14 +4794,14 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "_git"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_start", return_value=""),
-            patch("kennel.worker._write_pr_description"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker._write_pr_description"),
             patch(
-                "kennel.tasks.Tasks.list",
+                "fido.tasks.Tasks.list",
                 return_value=[{"title": "t", "status": "pending"}],
             ),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "42" in caplog.text
@@ -4821,11 +4820,11 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch.object(worker, "_post_retry_acknowledgement", mock_retry),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_start", return_value=""),
-            patch("kennel.worker._write_pr_description"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value=""),
+            patch("fido.worker._write_pr_description"),
             patch(
-                "kennel.tasks.Tasks.list",
+                "fido.tasks.Tasks.list",
                 return_value=[{"title": "t", "status": "pending"}],
             ),
         ):
@@ -4875,7 +4874,7 @@ class TestResetLocalWorkspaceAndRetryAck:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch("kennel.tasks.Tasks.modify") as mock_modify,
+            patch("fido.tasks.Tasks.modify") as mock_modify,
         ):
             mock_modify.return_value.__enter__.return_value = []
             worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
@@ -4903,7 +4902,7 @@ class TestResetLocalWorkspaceAndRetryAck:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch("kennel.tasks.Tasks.modify") as mock_modify,
+            patch("fido.tasks.Tasks.modify") as mock_modify,
         ):
             mock_modify.return_value.__enter__.return_value = []
             worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
@@ -4930,8 +4929,8 @@ class TestResetLocalWorkspaceAndRetryAck:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch("kennel.tasks.Tasks.modify") as mock_modify,
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.modify") as mock_modify,
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             mock_modify.return_value.__enter__.return_value = []
             worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
@@ -4990,7 +4989,7 @@ class TestResetLocalWorkspaceAndRetryAck:
 
         with (
             patch.object(worker, "_git", side_effect=side_effect),
-            patch("kennel.tasks.Tasks.modify") as mock_modify,
+            patch("fido.tasks.Tasks.modify") as mock_modify,
         ):
             mock_modify.return_value.__enter__.return_value = []
             worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
@@ -5091,14 +5090,14 @@ class TestSeedTasksFromPrBody:
 
     def test_noop_when_tasks_exist(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        with patch("kennel.tasks.Tasks.list", return_value=[{"title": "t"}]):
+        with patch("fido.tasks.Tasks.list", return_value=[{"title": "t"}]):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         gh.get_pr.assert_not_called()
 
     def test_fetches_pr_body_when_no_tasks(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {"body": ""}
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.seed_tasks_from_pr_body("owner/repo", 42)
         gh.get_pr.assert_called_once_with("owner/repo", 42)
 
@@ -5106,8 +5105,8 @@ class TestSeedTasksFromPrBody:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {"body": "No markers here."}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            patch("kennel.tasks.Tasks.add") as mock_add,
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.add") as mock_add,
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         mock_add.assert_not_called()
@@ -5122,20 +5121,20 @@ class TestSeedTasksFromPrBody:
             )
         }
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            patch("kennel.tasks.Tasks.add") as mock_add,
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.add") as mock_add,
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         mock_add.assert_not_called()
 
     def test_adds_single_task_from_body(self, tmp_path: Path) -> None:
-        from kennel.types import TaskStatus, TaskType
+        from fido.types import TaskStatus, TaskType
 
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = self._pr_with_queue("Fix the bug")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            patch("kennel.tasks.Tasks.add") as mock_add,
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.add") as mock_add,
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         mock_add.assert_called_once_with(
@@ -5148,8 +5147,8 @@ class TestSeedTasksFromPrBody:
             "Task one", "Task two", "Task three"
         )
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            patch("kennel.tasks.Tasks.add") as mock_add,
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.add") as mock_add,
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert mock_add.call_count == 3
@@ -5157,7 +5156,7 @@ class TestSeedTasksFromPrBody:
     def test_seeds_completed_tasks_as_completed(self, tmp_path: Path) -> None:
         """#646: completed tasks are seeded with status=COMPLETED so the
         downstream 'all tasks done → promote' logic can see them."""
-        from kennel.types import TaskStatus
+        from fido.types import TaskStatus
 
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {
@@ -5170,8 +5169,8 @@ class TestSeedTasksFromPrBody:
             )
         }
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            patch("kennel.tasks.Tasks.add") as mock_add,
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.add") as mock_add,
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert mock_add.call_count == 3
@@ -5185,7 +5184,7 @@ class TestSeedTasksFromPrBody:
     def test_seeds_all_completed_queue(self, tmp_path: Path) -> None:
         """#646: a PR whose work queue is fully completed seeds the completed
         tasks so the worker can recognize it as ready to promote."""
-        from kennel.types import TaskStatus
+        from fido.types import TaskStatus
 
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {
@@ -5197,8 +5196,8 @@ class TestSeedTasksFromPrBody:
             )
         }
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            patch("kennel.tasks.Tasks.add") as mock_add,
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.add") as mock_add,
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert mock_add.call_count == 2
@@ -5216,8 +5215,8 @@ class TestSeedTasksFromPrBody:
             )
         }
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            patch("kennel.tasks.Tasks.add") as mock_add,
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.add") as mock_add,
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         titles = [call.args[0] for call in mock_add.call_args_list]
@@ -5229,9 +5228,9 @@ class TestSeedTasksFromPrBody:
         gh.get_pr.return_value = self._pr_with_queue("Write the tests", "Fix the lint")
         received: list[str] = []
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch(
-                "kennel.tasks.Tasks.add",
+                "fido.tasks.Tasks.add",
                 side_effect=lambda t, tt, **kw: received.append(t),
             ),
         ):
@@ -5242,8 +5241,8 @@ class TestSeedTasksFromPrBody:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {"body": None}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            patch("kennel.tasks.Tasks.add") as mock_add,
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.add") as mock_add,
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         mock_add.assert_not_called()
@@ -5261,9 +5260,9 @@ class TestSeedTasksFromPrBody:
             )
         }
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            patch("kennel.tasks.Tasks.add") as mock_add,
-            caplog.at_level(logging.WARNING, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.add") as mock_add,
+            caplog.at_level(logging.WARNING, logger="fido"),
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert mock_add.call_count == 1
@@ -5275,9 +5274,9 @@ class TestSeedTasksFromPrBody:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = self._pr_with_queue("T1", "T2")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            patch("kennel.tasks.Tasks.add"),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.add"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert "seeded" in caplog.text
@@ -5291,8 +5290,8 @@ class TestSeedTasksFromPrBody:
             "body": "<!-- WORK_QUEUE_START -->\n<!-- WORK_QUEUE_END -->"
         }
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert "seeded" not in caplog.text
@@ -5308,8 +5307,8 @@ class TestSeedTasksFromPrBody:
             )
         }
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            patch("kennel.tasks.Tasks.add") as mock_add,
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.add") as mock_add,
         ):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert mock_add.call_count == 1
@@ -5394,9 +5393,7 @@ class TestRunSeedTasksIntegration:
                 patch.object(worker, "seed_tasks_from_pr_body"),
                 patch.object(worker, "handle_ci", return_value=False),
                 patch.object(worker, "handle_threads", return_value=False),
-                patch(
-                    "kennel.events.backfill_missed_pr_comments", side_effect=_backfill
-                ),
+                patch("fido.events.backfill_missed_pr_comments", side_effect=_backfill),
             ):
                 worker.run()
 
@@ -5424,7 +5421,7 @@ class TestRunSeedTasksIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", True)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("kennel.events.backfill_missed_pr_comments") as mock_backfill,
+            patch("fido.events.backfill_missed_pr_comments") as mock_backfill,
         ):
             worker.run()
         mock_backfill.assert_not_called()
@@ -5790,8 +5787,8 @@ class TestHandleMergeConflict:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sid", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
         ):
             result = worker.handle_merge_conflict(
                 fido_dir, self._repo_ctx(), 1, "branch"
@@ -5803,8 +5800,8 @@ class TestHandleMergeConflict:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status") as mock_status,
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
         ):
             worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 42, "my-branch")
         mock_status.assert_called_once_with("Resolving merge conflicts on PR #42")
@@ -5814,8 +5811,8 @@ class TestHandleMergeConflict:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt") as mock_bp,
+            patch("fido.worker.provider_run", return_value=("", "")),
         ):
             worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 5, "fix-branch")
         mock_bp.assert_called_once()
@@ -5830,8 +5827,8 @@ class TestHandleMergeConflict:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sess-1", "")) as mock_cr,
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sess-1", "")) as mock_cr,
         ):
             worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 1, "branch")
         mock_cr.assert_called_once_with(
@@ -5847,7 +5844,7 @@ class TestHandleMergeConflict:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         fido_dir = self._fido_dir(tmp_path)
-        with patch("kennel.worker.provider_run") as mock_cr:
+        with patch("fido.worker.provider_run") as mock_cr:
             worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 1, "branch")
         mock_cr.assert_not_called()
 
@@ -5856,8 +5853,8 @@ class TestHandleMergeConflict:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
         ):
             worker.handle_merge_conflict(fido_dir, self._repo_ctx(), 7, "branch")
         gh.get_pr.assert_called_once_with("owner/repo", 7)
@@ -6039,10 +6036,10 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sid", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
@@ -6057,10 +6054,10 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sid", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
@@ -6075,10 +6072,10 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status") as mock_status,
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 7, "branch")
         mock_status.assert_called_once_with("Fixing CI: unit-tests on PR #7")
@@ -6097,10 +6094,10 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         gh.get_run_log.assert_called_once_with("owner/repo", "55555")
@@ -6114,10 +6111,10 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         gh.get_run_log.assert_not_called()
@@ -6135,12 +6132,12 @@ class TestHandleCi:
         with (
             patch.object(worker, "set_status"),
             patch(
-                "kennel.worker.build_prompt",
+                "fido.worker.build_prompt",
                 side_effect=lambda fd, sk, ctx: captured_context.update({"ctx": ctx}),
             ),
-            patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.worker.provider_run", return_value=("", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         log_section = captured_context["ctx"].split("Failure log")[1]
@@ -6157,10 +6154,10 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 42, "branch")
         gh.get_review_threads.assert_called_once_with("owner", "repo", 42)
@@ -6175,10 +6172,10 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.worker.build_prompt") as mock_bp,
+            patch("fido.worker.provider_run", return_value=("", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 5, "fix-branch")
         mock_bp.assert_called_once()
@@ -6198,10 +6195,10 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sess-1", "")) as mock_cr,
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sess-1", "")) as mock_cr,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         mock_cr.assert_called_once_with(
@@ -6224,10 +6221,10 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         mock_complete.assert_not_called()
@@ -6242,10 +6239,10 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks") as mock_sync,
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks") as mock_sync,
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         mock_sync.assert_called_once_with(tmp_path, gh, blocking=True)
@@ -6262,10 +6259,10 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status") as mock_status,
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         # First failing check is "fail-check"
@@ -6283,11 +6280,11 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         assert "flaky" in caplog.text
@@ -6319,10 +6316,10 @@ class TestHandleCi:
         fido_dir = self._fido_dir(tmp_path)
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sid", "")),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
@@ -6657,7 +6654,7 @@ class TestFilterThreads:
         when the webhook's reply is still in flight and not yet visible via the
         GitHub API (which the last_author == gh_user guard cannot catch).
         """
-        import kennel.claimed as kc
+        import fido.claimed as kc
 
         w = self._make_worker(tmp_path)
         node = self._make_node(first_db_id=700)
@@ -6670,7 +6667,7 @@ class TestFilterThreads:
 
     def test_includes_unclaimed_thread(self, tmp_path: Path) -> None:
         """Threads whose first comment ID is not in the webhook-claimed set are included."""
-        import kennel.claimed as kc
+        import fido.claimed as kc
 
         w = self._make_worker(tmp_path)
         kc.replied_comments.discard(800)  # ensure clean state
@@ -6796,7 +6793,7 @@ class TestResolveAddressedThreads:
     def test_skips_resolve_when_pending_sibling_tasks_remain(
         self, tmp_path: Path
     ) -> None:
-        from kennel import tasks as tasks_mod
+        from fido import tasks as tasks_mod
 
         worker, gh = self._make_worker(tmp_path)
         # node whose originating comment has databaseId=55
@@ -6811,7 +6808,7 @@ class TestResolveAddressedThreads:
             },
         }
         gh.get_review_threads.return_value = [node]
-        from kennel.types import TaskType
+        from fido.types import TaskType
 
         tasks_mod.add_task(
             tmp_path,
@@ -6827,8 +6824,8 @@ class TestResolveAddressedThreads:
         self, tmp_path: Path
     ) -> None:
         """Task comment_id matches a non-root comment — must still block resolution."""
-        from kennel import tasks as tasks_mod
-        from kennel.types import TaskType
+        from fido import tasks as tasks_mod
+        from fido.types import TaskType
 
         worker, gh = self._make_worker(tmp_path)
         # Thread with root comment databaseId=10, reply databaseId=11
@@ -6856,7 +6853,7 @@ class TestResolveAddressedThreads:
         gh.resolve_thread.assert_not_called()
 
     def test_resolves_when_all_sibling_tasks_complete(self, tmp_path: Path) -> None:
-        from kennel import tasks as tasks_mod
+        from fido import tasks as tasks_mod
 
         worker, gh = self._make_worker(tmp_path)
         node = {
@@ -6870,7 +6867,7 @@ class TestResolveAddressedThreads:
             },
         }
         gh.get_review_threads.return_value = [node]
-        from kennel.types import TaskType
+        from fido.types import TaskType
 
         task = tasks_mod.add_task(
             tmp_path,
@@ -6890,7 +6887,7 @@ class TestHandleThreads:
     @pytest.fixture(autouse=True)
     def _clean_claimed(self):  # type: ignore[override]
         """Discard the databaseId=1 that _open_thread_node puts in claimed after each test."""
-        import kennel.claimed as kc
+        import fido.claimed as kc
 
         yield
         # _open_thread_node() uses databaseId=1 for its first comment; handle_threads now
@@ -6952,9 +6949,9 @@ class TestHandleThreads:
         gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sid", "")),
-            patch("kennel.tasks.sync_tasks_background"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch("fido.tasks.sync_tasks_background"),
         ):
             result = worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
@@ -6972,9 +6969,9 @@ class TestHandleThreads:
         gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
-            patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.provider_run", return_value=("sid", "")),
-            patch("kennel.tasks.sync_tasks_background"),
+            patch("fido.worker.build_prompt") as mock_bp,
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch("fido.tasks.sync_tasks_background"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 5, "my-branch")
         mock_bp.assert_called_once()
@@ -6989,9 +6986,9 @@ class TestHandleThreads:
         gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sess-1", "")) as mock_cr,
-            patch("kennel.tasks.sync_tasks_background"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sess-1", "")) as mock_cr,
+            patch("fido.tasks.sync_tasks_background"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
         mock_cr.assert_called_once_with(
@@ -7009,9 +7006,9 @@ class TestHandleThreads:
         gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.sync_tasks_background") as mock_sync,
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
+            patch("fido.tasks.sync_tasks_background") as mock_sync,
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
         mock_sync.assert_called_once_with(tmp_path, gh)
@@ -7024,26 +7021,26 @@ class TestHandleThreads:
         gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
-            patch("kennel.tasks.sync_tasks_background"),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
+            patch("fido.tasks.sync_tasks_background"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
         assert "unresolved threads" in caplog.text
 
     def test_claims_thread_first_db_id_before_sub_agent(self, tmp_path: Path) -> None:
         """handle_threads claims each thread's first_db_id in _webhook_claimed before the sub-agent runs."""
-        import kennel.claimed as kc
+        import fido.claimed as kc
 
         w, gh = self._make_worker(tmp_path)
         node = self._open_thread_node()  # first comment databaseId=1
         gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sid", "")),
-            patch("kennel.tasks.sync_tasks_background"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch("fido.tasks.sync_tasks_background"),
         ):
             result = w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
@@ -7059,7 +7056,7 @@ class TestHandleThreads:
         with a pre-claimed first_db_id — simulating the narrow race window between
         _filter_threads returning and handle_threads reaching the claim step.
         """
-        import kennel.claimed as kc
+        import fido.claimed as kc
 
         w, gh = self._make_worker(tmp_path)
         gh.get_review_threads.return_value = []  # not used; _filter_threads is patched
@@ -7079,11 +7076,9 @@ class TestHandleThreads:
         try:
             with (
                 patch.object(w, "_filter_threads", return_value=[race_thread]),
-                patch("kennel.worker.build_prompt") as mock_bp,
-                patch(
-                    "kennel.worker.provider_run", return_value=("sid", "")
-                ) as mock_pr,
-                patch("kennel.tasks.sync_tasks_background"),
+                patch("fido.worker.build_prompt") as mock_bp,
+                patch("fido.worker.provider_run", return_value=("sid", "")) as mock_pr,
+                patch("fido.tasks.sync_tasks_background"),
             ):
                 result = w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
             assert result is False
@@ -7096,7 +7091,7 @@ class TestHandleThreads:
         self, tmp_path: Path
     ) -> None:
         """Returns False when every filtered thread is claimed before handle_threads claims them."""
-        import kennel.claimed as kc
+        import fido.claimed as kc
 
         w, gh = self._make_worker(tmp_path)
         gh.get_review_threads.return_value = []
@@ -7130,9 +7125,7 @@ class TestHandleThreads:
                 patch.object(
                     w, "_filter_threads", return_value=[race_thread_a, race_thread_b]
                 ),
-                patch(
-                    "kennel.worker.provider_run", return_value=("sid", "")
-                ) as mock_pr,
+                patch("fido.worker.provider_run", return_value=("sid", "")) as mock_pr,
             ):
                 result = w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
             assert result is False
@@ -7143,16 +7136,16 @@ class TestHandleThreads:
 
     def test_releases_claims_on_provider_run_failure(self, tmp_path: Path) -> None:
         """If provider_run raises, claimed thread IDs are released so the next attempt can retry."""
-        import kennel.claimed as kc
+        import fido.claimed as kc
 
         w, gh = self._make_worker(tmp_path)
         node = self._open_thread_node()  # first comment databaseId=1
         gh.get_review_threads.return_value = [node]
         fido_dir = self._fido_dir(tmp_path)
         with (
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", side_effect=RuntimeError("boom")),
-            patch("kennel.tasks.sync_tasks_background"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", side_effect=RuntimeError("boom")),
+            patch("fido.tasks.sync_tasks_background"),
         ):
             with pytest.raises(RuntimeError, match="boom"):
                 w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
@@ -7166,7 +7159,7 @@ class TestHandleThreads:
         """Threads dropped in the race window produce an info-level log with the claimed ID."""
         import logging
 
-        import kennel.claimed as kc
+        import fido.claimed as kc
 
         w, gh = self._make_worker(tmp_path)
         gh.get_review_threads.return_value = []
@@ -7186,10 +7179,10 @@ class TestHandleThreads:
         try:
             with (
                 patch.object(w, "_filter_threads", return_value=[race_thread]),
-                patch("kennel.worker.build_prompt"),
-                patch("kennel.worker.provider_run", return_value=("sid", "")),
-                patch("kennel.tasks.sync_tasks_background"),
-                caplog.at_level(logging.INFO, logger="kennel"),
+                patch("fido.worker.build_prompt"),
+                patch("fido.worker.provider_run", return_value=("sid", "")),
+                patch("fido.tasks.sync_tasks_background"),
+                caplog.at_level(logging.INFO, logger="fido"),
             ):
                 w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
             assert "claimed by webhook" in caplog.text
@@ -7200,7 +7193,7 @@ class TestHandleThreads:
         self, tmp_path: Path
     ) -> None:
         """Only unclaimed threads are included in the context JSON passed to the sub-agent."""
-        import kennel.claimed as kc
+        import fido.claimed as kc
 
         w, gh = self._make_worker(tmp_path)
         gh.get_review_threads.return_value = []
@@ -7236,9 +7229,9 @@ class TestHandleThreads:
                 patch.object(
                     w, "_filter_threads", return_value=[claimed_thread, free_thread]
                 ),
-                patch("kennel.worker.build_prompt") as mock_bp,
-                patch("kennel.worker.provider_run", return_value=("sid", "")),
-                patch("kennel.tasks.sync_tasks_background"),
+                patch("fido.worker.build_prompt") as mock_bp,
+                patch("fido.worker.provider_run", return_value=("sid", "")),
+                patch("fido.tasks.sync_tasks_background"),
             ):
                 w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
             _, _, context = mock_bp.call_args[0]
@@ -7446,7 +7439,7 @@ class TestRescopeBeforePick:
         return {"id": "t2", "title": title, "status": "completed", "type": "spec"}
 
     def _make_worker(self, tmp_path: Path, *, with_config: bool = True) -> Worker:
-        from kennel.config import Config, RepoConfig
+        from fido.config import Config, RepoConfig
 
         cfg = RepoConfig(
             name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
@@ -7468,12 +7461,12 @@ class TestRescopeBeforePick:
         mock_tasks = MagicMock()
         mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
         worker._tasks = mock_tasks
-        with patch("kennel.tasks.reorder_tasks") as mock_reorder:
+        with patch("fido.tasks.reorder_tasks") as mock_reorder:
             worker.rescope_before_pick()
         mock_reorder.assert_not_called()
 
     def test_skips_when_repo_cfg_is_none(self, tmp_path: Path) -> None:
-        from kennel.config import Config
+        from fido.config import Config
 
         config = Config(
             port=9000,
@@ -7487,7 +7480,7 @@ class TestRescopeBeforePick:
         mock_tasks = MagicMock()
         mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
         worker._tasks = mock_tasks
-        with patch("kennel.tasks.reorder_tasks") as mock_reorder:
+        with patch("fido.tasks.reorder_tasks") as mock_reorder:
             worker.rescope_before_pick()
         mock_reorder.assert_not_called()
 
@@ -7496,7 +7489,7 @@ class TestRescopeBeforePick:
         mock_tasks = MagicMock()
         mock_tasks.list.return_value = []
         worker._tasks = mock_tasks
-        with patch("kennel.tasks.reorder_tasks") as mock_reorder:
+        with patch("fido.tasks.reorder_tasks") as mock_reorder:
             worker.rescope_before_pick()
         mock_reorder.assert_not_called()
 
@@ -7505,7 +7498,7 @@ class TestRescopeBeforePick:
         mock_tasks = MagicMock()
         mock_tasks.list.return_value = [self._pending()]
         worker._tasks = mock_tasks
-        with patch("kennel.tasks.reorder_tasks") as mock_reorder:
+        with patch("fido.tasks.reorder_tasks") as mock_reorder:
             worker.rescope_before_pick()
         mock_reorder.assert_not_called()
 
@@ -7515,7 +7508,7 @@ class TestRescopeBeforePick:
         # one pending, one completed — should skip
         mock_tasks.list.return_value = [self._pending(), self._completed()]
         worker._tasks = mock_tasks
-        with patch("kennel.tasks.reorder_tasks") as mock_reorder:
+        with patch("fido.tasks.reorder_tasks") as mock_reorder:
             worker.rescope_before_pick()
         mock_reorder.assert_not_called()
 
@@ -7525,9 +7518,9 @@ class TestRescopeBeforePick:
         mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
         worker._tasks = mock_tasks
         with (
-            patch("kennel.tasks.reorder_tasks") as mock_reorder,
-            patch("kennel.events._get_commit_summary", return_value="abc def"),
-            patch("kennel.events._make_reorder_kwargs", return_value={}),
+            patch("fido.tasks.reorder_tasks") as mock_reorder,
+            patch("fido.events._get_commit_summary", return_value="abc def"),
+            patch("fido.events._make_reorder_kwargs", return_value={}),
         ):
             worker.rescope_before_pick()
         mock_reorder.assert_called_once()
@@ -7538,9 +7531,9 @@ class TestRescopeBeforePick:
         mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
         worker._tasks = mock_tasks
         with (
-            patch("kennel.tasks.reorder_tasks") as mock_reorder,
-            patch("kennel.events._get_commit_summary", return_value=""),
-            patch("kennel.events._make_reorder_kwargs", return_value={}),
+            patch("fido.tasks.reorder_tasks") as mock_reorder,
+            patch("fido.events._get_commit_summary", return_value=""),
+            patch("fido.events._make_reorder_kwargs", return_value={}),
         ):
             worker.rescope_before_pick()
         assert mock_reorder.call_args[0][0] == tmp_path
@@ -7551,11 +7544,12 @@ class TestRescopeBeforePick:
         mock_tasks.list.return_value = [self._pending(), self._pending("task2")]
         worker._tasks = mock_tasks
         with (
-            patch("kennel.tasks.reorder_tasks") as mock_reorder,
+            patch("fido.tasks.reorder_tasks") as mock_reorder,
             patch(
-                "kennel.events._get_commit_summary", return_value="abc123 first commit"
+                "fido.events._get_commit_summary",
+                return_value="abc123 first commit",
             ),
-            patch("kennel.events._make_reorder_kwargs", return_value={}),
+            patch("fido.events._make_reorder_kwargs", return_value={}),
         ):
             worker.rescope_before_pick()
         assert mock_reorder.call_args[0][1] == "abc123 first commit"
@@ -7568,10 +7562,10 @@ class TestRescopeBeforePick:
         worker._tasks = mock_tasks
         captured_registry: list = []
         with (
-            patch("kennel.tasks.reorder_tasks"),
-            patch("kennel.events._get_commit_summary", return_value=""),
+            patch("fido.tasks.reorder_tasks"),
+            patch("fido.events._get_commit_summary", return_value=""),
             patch(
-                "kennel.events._make_reorder_kwargs",
+                "fido.events._make_reorder_kwargs",
                 side_effect=lambda wd, cfg, repo_cfg, reg, *a, **kw: (
                     captured_registry.append(reg) or {}
                 ),
@@ -7592,9 +7586,9 @@ class TestRescopeBeforePick:
         ]
         worker._tasks = mock_tasks
         with (
-            patch("kennel.tasks.reorder_tasks") as mock_reorder,
-            patch("kennel.events._get_commit_summary", return_value=""),
-            patch("kennel.events._make_reorder_kwargs", return_value={}),
+            patch("fido.tasks.reorder_tasks") as mock_reorder,
+            patch("fido.events._get_commit_summary", return_value=""),
+            patch("fido.events._make_reorder_kwargs", return_value={}),
         ):
             worker.rescope_before_pick()
         mock_reorder.assert_called_once()
@@ -7776,7 +7770,7 @@ class TestEnsurePushed:
                     self._git_result(returncode=1, stderr="push rejected"),
                 ],
             ),
-            caplog.at_level(logging.WARNING, logger="kennel"),
+            caplog.at_level(logging.WARNING, logger="fido"),
         ):
             worker.ensure_pushed("origin", "br")
         assert "push failed" in caplog.text
@@ -7943,7 +7937,7 @@ class TestSquashWipCommit:
                     self._fail(stderr="conflict error"),
                 ],
             ),
-            caplog.at_level(logging.WARNING, logger="kennel"),
+            caplog.at_level(logging.WARNING, logger="fido"),
         ):
             worker._squash_wip_commit("origin", "my-branch", "main")
         assert "rebase failed" in caplog.text
@@ -7982,7 +7976,7 @@ class TestSquashWipCommit:
                     self._fail(stderr="push rejected"),
                 ],
             ),
-            caplog.at_level(logging.WARNING, logger="kennel"),
+            caplog.at_level(logging.WARNING, logger="fido"),
         ):
             worker._squash_wip_commit("origin", "my-branch", "main")
         assert "force-push failed" in caplog.text
@@ -7995,7 +7989,7 @@ class TestSquashWipCommit:
         worker = self._make_worker(tmp_path)
         with (
             patch.object(worker, "_git", side_effect=self._wip_git_side_effects()),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker._squash_wip_commit("origin", "my-branch", "main")
         assert "squashed wip: start" in caplog.text
@@ -8078,7 +8072,7 @@ class TestExecuteTask:
     def test_returns_false_when_no_tasks(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is False
 
@@ -8087,14 +8081,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Implement feature")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sid", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
@@ -8104,14 +8098,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Write the tests")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status") as mock_status,
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "my-branch")
         mock_status.assert_called_once_with("Working on: Write the tests")
@@ -8137,21 +8131,21 @@ class TestExecuteTask:
                     "user": {"login": "fido-bot"},
                     "body": (
                         "BLOCKED: This task is already complete in pushed "
-                        "commit abc123 but I cannot run `kennel task complete`."
+                        "commit abc123 but I cannot run `fido task complete`."
                     ),
                 },
             ],
         ]
 
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sid", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             assert worker.execute_task(fido_dir, self._repo_ctx(), 7, "branch") is True
 
@@ -8163,14 +8157,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Fix the bug")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt") as mock_bp,
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 7, "fix-branch")
         _, skill, _ = mock_bp.call_args[0]
@@ -8181,14 +8175,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Do work")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt") as mock_bp,
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "my-slug")
         _, _, context = mock_bp.call_args[0]
@@ -8202,14 +8196,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("The special task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt") as mock_bp,
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         _, _, context = mock_bp.call_args[0]
@@ -8230,14 +8224,14 @@ class TestExecuteTask:
             },
         }
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt") as mock_bp,
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "br")
         _, _, context = mock_bp.call_args[0]
@@ -8250,14 +8244,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Plain task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt") as mock_bp,
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt") as mock_bp,
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         _, _, context = mock_bp.call_args[0]
@@ -8269,14 +8263,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sess", "")) as mock_run,
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sess", "")) as mock_run,
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_run.assert_called_once_with(
@@ -8293,14 +8287,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True) as mock_push,
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "my-slug")
         mock_push.assert_called_once_with("origin", "my-slug")
@@ -8310,14 +8304,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("My task title")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_called_once_with(task["id"], gh)
@@ -8327,14 +8321,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
-            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_not_called()
@@ -8344,14 +8338,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert result is True
@@ -8361,14 +8355,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks") as mock_sync,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks") as mock_sync,
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_not_called()
@@ -8378,14 +8372,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=None),
-            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_called_once_with(task["id"], gh)
@@ -8395,14 +8389,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=None),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert result is True
@@ -8412,14 +8406,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=None),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks") as mock_sync,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks") as mock_sync,
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_called_once_with(tmp_path, gh, blocking=True)
@@ -8429,14 +8423,14 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks") as mock_sync,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks") as mock_sync,
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_sync.assert_called_once_with(tmp_path, gh, blocking=True)
@@ -8448,15 +8442,15 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Log me please")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert "Log me please" in caplog.text
@@ -8468,15 +8462,15 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("A task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("my-session", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("my-session", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert "my-session" in caplog.text
@@ -8495,17 +8489,17 @@ class TestExecuteTask:
             )
         )
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
+            patch("fido.worker.build_prompt"),
             patch(
-                "kennel.worker.provider_run",
+                "fido.worker.provider_run",
                 side_effect=[("sess-1", "output1"), ("sess-1", "output2")],
             ) as mock_run,
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert mock_run.call_count == 2
@@ -8525,17 +8519,17 @@ class TestExecuteTask:
             )
         )
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt") as mock_bp,
+            patch("fido.worker.build_prompt") as mock_bp,
             patch(
-                "kennel.worker.provider_run",
+                "fido.worker.provider_run",
                 side_effect=[("", "output"), ("sess-2", "output2")],
             ) as mock_run,
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         # build_prompt only called for initial setup now — retries nudge
@@ -8559,11 +8553,11 @@ class TestExecuteTask:
             )
         )
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
+            patch("fido.worker.build_prompt"),
             patch(
-                "kennel.worker.provider_run",
+                "fido.worker.provider_run",
                 side_effect=[
                     ("sess-1", "o1"),
                     ("sess-1", "o2"),
@@ -8573,8 +8567,8 @@ class TestExecuteTask:
             ) as mock_run,
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert mock_run.call_count == 4
@@ -8601,18 +8595,18 @@ class TestExecuteTask:
         list_tasks_calls = iter([[task], [completed_task]])
         with (
             patch(
-                "kennel.tasks.Tasks.list",
+                "fido.tasks.Tasks.list",
                 side_effect=lambda *a, **kw: next(list_tasks_calls),
             ),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
+            patch("fido.worker.build_prompt"),
             patch(
-                "kennel.worker.provider_run", return_value=("sess-1", "output")
+                "fido.worker.provider_run", return_value=("sess-1", "output")
             ) as mock_run,
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         # provider_run called exactly once (initial dispatch), not again after break
@@ -8646,14 +8640,14 @@ class TestExecuteTask:
             return ("sess", "")
 
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", side_effect=fake_run) as mock_run,
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", side_effect=fake_run) as mock_run,
             patch.object(worker, "_git", git_mock),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 42, "br-42")
 
@@ -8686,14 +8680,14 @@ class TestExecuteTask:
             return ("sess", "")
 
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", side_effect=capture),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", side_effect=capture),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert captured.get("current_task_id") == "task-99"
@@ -8704,14 +8698,14 @@ class TestExecuteTask:
         State(fido_dir).save({"issue": 1})
         task = {"id": "task-77", "title": "Complete me", "status": "pending"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sess", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sess", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert "current_task_id" not in State(fido_dir).load()
@@ -8730,14 +8724,14 @@ class TestExecuteTask:
             return ("sess", "")
 
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", side_effect=capture),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", side_effect=capture),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "br")
         assert captured.get("issue") == 5
@@ -8749,14 +8743,14 @@ class TestExecuteTask:
         State(fido_dir).save({"issue": 1})
         task = {"id": "task-push-fail", "title": "Push me", "status": "pending"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sess", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sess", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=False),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert State(fido_dir).load().get("current_task_id") == "task-push-fail"
@@ -8785,14 +8779,14 @@ class TestExecuteTask:
         task = {"id": "t-abort", "title": "Abort me", "status": "pending"}
         worker._abort_task.set()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sid", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean") as mock_clean,
-            patch("kennel.tasks.Tasks.remove") as mock_remove,
-            patch("kennel.tasks.sync_tasks") as mock_sync,
+            patch("fido.tasks.Tasks.remove") as mock_remove,
+            patch("fido.tasks.sync_tasks") as mock_sync,
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert result is True
@@ -8819,14 +8813,14 @@ class TestExecuteTask:
             return ("sid", "")
 
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", side_effect=set_abort_on_second),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", side_effect=set_abort_on_second),
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean") as mock_clean,
-            patch("kennel.tasks.Tasks.remove") as mock_remove,
-            patch("kennel.tasks.sync_tasks") as mock_sync,
+            patch("fido.tasks.Tasks.remove") as mock_remove,
+            patch("fido.tasks.sync_tasks") as mock_sync,
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert result is True
@@ -8843,15 +8837,15 @@ class TestExecuteTask:
         task = {"id": "t-no-complete", "title": "No complete", "status": "pending"}
         worker._abort_task.set()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sid", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_same_sha()),
             patch.object(worker, "git_clean"),
-            patch("kennel.tasks.Tasks.remove"),
-            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.remove"),
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         mock_complete.assert_not_called()
@@ -8861,17 +8855,17 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("Do work")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(
                 worker, "_squash_wip_commit", return_value=False
             ) as mock_squash,
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 7, "feat-branch")
         mock_squash.assert_called_once_with("origin", "feat-branch", "main")
@@ -8884,10 +8878,10 @@ class TestExecuteTask:
         task = self._pending_task("Do work")
         call_order: list[str] = []
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(
                 worker,
@@ -8899,8 +8893,8 @@ class TestExecuteTask:
                 "ensure_pushed",
                 side_effect=lambda *a: call_order.append("push") or True,
             ),
-            patch("kennel.tasks.Tasks.complete_with_resolve"),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert call_order == ["squash", "push"]
@@ -8910,15 +8904,15 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         task = self._pending_task("First task")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "_squash_wip_commit", return_value=True),
             patch.object(worker, "ensure_pushed", return_value=None),
-            patch("kennel.tasks.Tasks.complete_with_resolve") as mock_complete,
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.sync_tasks"),
         ):
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
         assert result is True
@@ -8933,8 +8927,8 @@ class TestExecuteTask:
         complete_with_resolve is NOT mocked here — the full resolution path runs
         end-to-end so gh.resolve_thread is what we assert on.
         """
-        from kennel.tasks import Tasks
-        from kennel.types import TaskType
+        from fido.tasks import Tasks
+        from fido.types import TaskType
 
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
@@ -8970,11 +8964,11 @@ class TestExecuteTask:
 
         with (
             patch.object(worker, "set_status"),
-            patch("kennel.worker.build_prompt"),
-            patch("kennel.worker.provider_run", return_value=("sid", "")),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
             patch.object(worker, "_git", self._git_with_new_commits()),
             patch.object(worker, "ensure_pushed", return_value=True),
-            patch("kennel.tasks.sync_tasks"),
+            patch("fido.tasks.sync_tasks"),
         ):
             worker.execute_task(fido_dir, self._repo_ctx(), 5, "branch")
 
@@ -9301,7 +9295,7 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "set_status"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 7, "my-branch", 3)
@@ -9315,7 +9309,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -9328,7 +9322,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -9345,7 +9339,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -9359,7 +9353,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -9375,7 +9369,7 @@ class TestHandlePromoteMerge:
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git", mock_git),
             patch.object(worker, "set_status"),
         ):
@@ -9392,7 +9386,7 @@ class TestHandlePromoteMerge:
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git", mock_git),
             patch.object(worker, "set_status"),
         ):
@@ -9409,7 +9403,7 @@ class TestHandlePromoteMerge:
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git", mock_git),
             patch.object(worker, "set_status"),
         ):
@@ -9426,7 +9420,7 @@ class TestHandlePromoteMerge:
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git", mock_git),
             patch.object(worker, "set_status"),
         ):
@@ -9443,7 +9437,7 @@ class TestHandlePromoteMerge:
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_status = MagicMock()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status", mock_status),
         ):
@@ -9459,7 +9453,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -9475,7 +9469,7 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_called_once_with("rhencke/myrepo", 9, squash=True, auto=True)
 
@@ -9486,7 +9480,7 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -9498,7 +9492,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         pending = [{"id": "t1", "title": "Do work", "status": "pending"}]
         with (
-            patch("kennel.tasks.Tasks.list", return_value=pending),
+            patch("fido.tasks.Tasks.list", return_value=pending),
             patch.object(worker, "set_status"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
@@ -9510,7 +9504,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=True)
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
         with (
-            patch("kennel.tasks.Tasks.list", return_value=completed),
+            patch("fido.tasks.Tasks.list", return_value=completed),
             patch.object(worker, "set_status"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
@@ -9521,7 +9515,7 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._reviews(state="COMMENTED", is_draft=False)
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "set_status"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
@@ -9537,7 +9531,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
@@ -9550,7 +9544,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = [{"name": "ci", "state": "FAILURE"}]
         gh.get_required_checks.return_value = ["ci"]
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
@@ -9563,7 +9557,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = [{"name": "ci", "state": "FAILURE"}]
         gh.get_required_checks.return_value = ["ci"]
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -9577,7 +9571,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -9593,7 +9587,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -9617,7 +9611,7 @@ class TestHandlePromoteMerge:
         }
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -9633,7 +9627,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_not_called()
 
@@ -9651,7 +9645,7 @@ class TestHandlePromoteMerge:
         }
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -9679,7 +9673,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -9692,7 +9686,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -9707,7 +9701,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -9721,7 +9715,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -9737,7 +9731,7 @@ class TestHandlePromoteMerge:
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git", mock_git),
             patch.object(worker, "set_status"),
         ):
@@ -9752,7 +9746,7 @@ class TestHandlePromoteMerge:
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git", mock_git),
             patch.object(worker, "set_status"),
         ):
@@ -9767,7 +9761,7 @@ class TestHandlePromoteMerge:
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git", mock_git),
             patch.object(worker, "set_status"),
         ):
@@ -9784,7 +9778,7 @@ class TestHandlePromoteMerge:
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_git = MagicMock()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git", mock_git),
             patch.object(worker, "set_status"),
         ):
@@ -9799,7 +9793,7 @@ class TestHandlePromoteMerge:
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         mock_status = MagicMock()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status", mock_status),
         ):
@@ -9815,7 +9809,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -9831,7 +9825,7 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_called_once_with("rhencke/myrepo", 9, squash=True, auto=True)
 
@@ -9840,7 +9834,7 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = self._changes_requested_then_approved_reviews()
         gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -9868,7 +9862,7 @@ class TestHandlePromoteMerge:
             "commits": [{"committedDate": "2024-01-01T08:00:00Z"}],
             "isDraft": False,
         }
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         # CHANGES_REQUESTED is latest — must not merge
         gh.pr_merge.assert_not_called()
@@ -9890,7 +9884,7 @@ class TestHandlePromoteMerge:
             "commits": [{"committedDate": "2024-01-01T10:00:00Z"}],
             "isDraft": False,
         }
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
@@ -9910,7 +9904,7 @@ class TestHandlePromoteMerge:
             "commits": [{"committedDate": "2024-01-01T10:00:00Z"}],
             "isDraft": False,
         }
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -9935,7 +9929,7 @@ class TestHandlePromoteMerge:
         }
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
@@ -9959,7 +9953,7 @@ class TestHandlePromoteMerge:
         }
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -9976,7 +9970,7 @@ class TestHandlePromoteMerge:
         )
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once()
 
@@ -9997,7 +9991,7 @@ class TestHandlePromoteMerge:
         }
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once()
 
@@ -10020,8 +10014,8 @@ class TestHandlePromoteMerge:
             "isDraft": False,
         }
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "skipping re-request" in caplog.text
@@ -10044,7 +10038,7 @@ class TestHandlePromoteMerge:
             "isDraft": False,
             "requestedReviewers": ["rhencke"],
         }
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
@@ -10064,7 +10058,7 @@ class TestHandlePromoteMerge:
         }
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -10085,7 +10079,7 @@ class TestHandlePromoteMerge:
         }
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
         ):
@@ -10107,7 +10101,7 @@ class TestHandlePromoteMerge:
         }
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
@@ -10125,7 +10119,7 @@ class TestHandlePromoteMerge:
             "commits": [],
             "isDraft": False,
         }
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_merge.assert_not_called()
 
@@ -10135,7 +10129,7 @@ class TestHandlePromoteMerge:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -10145,7 +10139,7 @@ class TestHandlePromoteMerge:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_not_called()
 
@@ -10157,7 +10151,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with patch("kennel.tasks.Tasks.list", return_value=completed):
+        with patch("fido.tasks.Tasks.list", return_value=completed):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_called_once_with("rhencke/myrepo", 9)
 
@@ -10169,7 +10163,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with patch("kennel.tasks.Tasks.list", return_value=completed):
+        with patch("fido.tasks.Tasks.list", return_value=completed):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
@@ -10181,7 +10175,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with patch("kennel.tasks.Tasks.list", return_value=completed):
+        with patch("fido.tasks.Tasks.list", return_value=completed):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -10201,7 +10195,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
-        with patch("kennel.tasks.Tasks.list", return_value=completed):
+        with patch("fido.tasks.Tasks.list", return_value=completed):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
@@ -10214,7 +10208,7 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed", "type": "spec"},
             {"id": "t2", "title": "Next", "status": "pending", "type": "spec"},
         ]
-        with patch("kennel.tasks.Tasks.list", return_value=tasks_list):
+        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -10238,7 +10232,7 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed", "type": "spec"},
             {"id": "t2", "title": "Next", "status": "pending", "type": "spec"},
         ]
-        with patch("kennel.tasks.Tasks.list", return_value=tasks_list):
+        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -10262,7 +10256,7 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed", "type": "spec"},
             {"id": "t2", "title": "Next", "status": "pending", "type": "spec"},
         ]
-        with patch("kennel.tasks.Tasks.list", return_value=tasks_list):
+        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
@@ -10332,7 +10326,7 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = self._passing_checks()
         gh.get_required_checks.return_value = ["ci / test"]
         gh.get_review_threads.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=self._completed_tasks()):
+        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
@@ -10344,7 +10338,7 @@ class TestHandlePromoteMerge:
             {"name": "ci / test", "state": "IN_PROGRESS", "link": "http://..."}
         ]
         gh.get_required_checks.return_value = ["ci / test"]
-        with patch("kennel.tasks.Tasks.list", return_value=self._completed_tasks()):
+        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
@@ -10358,7 +10352,7 @@ class TestHandlePromoteMerge:
             {"name": "ci / test", "state": "FAILURE", "link": "http://..."}
         ]
         gh.get_required_checks.return_value = ["ci / test"]
-        with patch("kennel.tasks.Tasks.list", return_value=self._completed_tasks()):
+        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_not_called()
 
@@ -10370,7 +10364,7 @@ class TestHandlePromoteMerge:
             {"name": "ci / test", "state": "IN_PROGRESS", "link": "http://..."}
         ]
         gh.get_required_checks.return_value = ["ci / test"]
-        with patch("kennel.tasks.Tasks.list", return_value=self._completed_tasks()):
+        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -10385,7 +10379,7 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=self._completed_tasks()):
+        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
@@ -10398,7 +10392,7 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=self._completed_tasks()):
+        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.get_required_checks.assert_called_once_with("rhencke/myrepo", "main")
 
@@ -10419,7 +10413,7 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = [self._unresolved_thread()]
-        with patch("kennel.tasks.Tasks.list", return_value=self._completed_tasks()):
+        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -10433,7 +10427,7 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = [self._resolved_thread()]
-        with patch("kennel.tasks.Tasks.list", return_value=self._completed_tasks()):
+        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_called_once_with("rhencke/myrepo", 9)
 
@@ -10450,10 +10444,10 @@ class TestHandlePromoteMerge:
         gh.get_review_threads.return_value = [self._unresolved_thread()]
         with (
             patch(
-                "kennel.tasks.Tasks.list",
+                "fido.tasks.Tasks.list",
                 return_value=self._completed_tasks(),
             ),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "unresolved review threads" in caplog.text
@@ -10465,7 +10459,7 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
-        with patch("kennel.tasks.Tasks.list", return_value=self._completed_tasks()):
+        with patch("fido.tasks.Tasks.list", return_value=self._completed_tasks()):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.get_review_threads.assert_called_once_with("rhencke", "myrepo", 9)
 
@@ -10479,7 +10473,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
         gh.pr_checks.return_value = self._passing_checks()
         gh.get_required_checks.return_value = ["ci / test"]
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_called_once_with("rhencke/myrepo", 9, ["rhencke"])
 
@@ -10493,7 +10487,7 @@ class TestHandlePromoteMerge:
             {"name": "ci / test", "state": "IN_PROGRESS", "link": "http://..."}
         ]
         gh.get_required_checks.return_value = ["ci / test"]
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
@@ -10503,7 +10497,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
         gh.pr_checks.return_value = self._passing_checks()
         gh.get_required_checks.return_value = ["ci / test"]
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -10522,7 +10516,7 @@ class TestHandlePromoteMerge:
             "requestedReviewers": ["rhencke"],
         }
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "set_status"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
@@ -10537,7 +10531,7 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "set_status"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
@@ -10557,7 +10551,7 @@ class TestHandlePromoteMerge:
         }
         mock_status = MagicMock()
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "set_status", mock_status),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
@@ -10574,7 +10568,7 @@ class TestHandlePromoteMerge:
             "requestedReviewers": ["rhencke"],
         }
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "set_status"),
         ):
             result = worker.handle_promote_merge(
@@ -10591,9 +10585,9 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "set_status"),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "review status" in caplog.text
@@ -10606,10 +10600,10 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "CLEAN"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_git"),
             patch.object(worker, "set_status"),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "merging" in caplog.text
@@ -10622,8 +10616,8 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=False)
         gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "auto-merge" in caplog.text
@@ -10637,8 +10631,8 @@ class TestHandlePromoteMerge:
             state="CHANGES_REQUESTED", is_draft=False
         )
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "changes requested" in caplog.text
@@ -10650,8 +10644,8 @@ class TestHandlePromoteMerge:
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "not promoting" in caplog.text
@@ -10667,8 +10661,8 @@ class TestHandlePromoteMerge:
         gh.get_review_threads.return_value = []
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
         with (
-            patch("kennel.tasks.Tasks.list", return_value=completed),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=completed),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "marking ready" in caplog.text
@@ -10685,9 +10679,9 @@ class TestHandlePromoteMerge:
             "requestedReviewers": ["rhencke"],
         }
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "set_status"),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "no work" in caplog.text
@@ -10709,7 +10703,7 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed"},
             self._ask_task(),
         ]
-        with patch("kennel.tasks.Tasks.list", return_value=tasks_list):
+        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_not_called()
 
@@ -10721,7 +10715,7 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed"},
             self._ask_task(),
         ]
-        with patch("kennel.tasks.Tasks.list", return_value=tasks_list):
+        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
@@ -10729,7 +10723,7 @@ class TestHandlePromoteMerge:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": False}
-        with patch("kennel.tasks.Tasks.list", return_value=[self._ask_task()]):
+        with patch("fido.tasks.Tasks.list", return_value=[self._ask_task()]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
@@ -10741,7 +10735,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(
             state="CHANGES_REQUESTED", is_draft=False
         )
-        with patch("kennel.tasks.Tasks.list", return_value=[self._ask_task()]):
+        with patch("fido.tasks.Tasks.list", return_value=[self._ask_task()]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.add_pr_reviewers.assert_not_called()
 
@@ -10753,7 +10747,7 @@ class TestHandlePromoteMerge:
             {"id": "t1", "title": "Done", "status": "completed"},
             self._ask_task(),
         ]
-        with patch("kennel.tasks.Tasks.list", return_value=tasks_list):
+        with patch("fido.tasks.Tasks.list", return_value=tasks_list):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
@@ -10770,8 +10764,8 @@ class TestHandlePromoteMerge:
             self._ask_task(),
         ]
         with (
-            patch("kennel.tasks.Tasks.list", return_value=tasks_list),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=tasks_list),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         assert "open questions" in caplog.text
@@ -10784,7 +10778,7 @@ class TestHandlePromoteMerge:
         gh.get_reviews.return_value = self._reviews(is_draft=True, state="NONE")
         completed = {"id": "t1", "title": "Done", "status": "completed", "type": "spec"}
         pending = {"id": "t2", "title": "Not done", "status": "pending", "type": "spec"}
-        with patch("kennel.tasks.Tasks.list", return_value=[completed, pending]):
+        with patch("fido.tasks.Tasks.list", return_value=[completed, pending]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 1, "branch", 1
             )
@@ -10799,7 +10793,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
         completed = {"id": "t1", "title": "Done", "status": "completed", "type": "spec"}
-        with patch("kennel.tasks.Tasks.list", return_value=[completed]):
+        with patch("fido.tasks.Tasks.list", return_value=[completed]):
             result = worker.handle_promote_merge(
                 fido_dir, self._repo_ctx(), 1, "branch", 1
             )
@@ -10819,7 +10813,7 @@ class TestHandlePromoteMerge:
         gh.get_review_threads.return_value = []
         gh.try_enable_auto_merge.return_value = True
         completed = {"id": "t1", "title": "x", "status": "completed", "type": "spec"}
-        with patch("kennel.tasks.Tasks.list", return_value=[completed]):
+        with patch("fido.tasks.Tasks.list", return_value=[completed]):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
         gh.try_enable_auto_merge.assert_called_once_with(
             "rhencke/myrepo", 9, squash=True
@@ -10840,7 +10834,7 @@ class TestHandlePromoteMerge:
         gh.get_required_checks.return_value = []
         gh.try_enable_auto_merge.return_value = True
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "set_status"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 11, "b", 1)
@@ -10862,8 +10856,8 @@ class TestHandlePromoteMerge:
         gh.try_enable_auto_merge.return_value = False
         completed = {"id": "t1", "title": "x", "status": "completed", "type": "spec"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[completed]),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=[completed]),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
         assert "auto-merge not available" in caplog.text
@@ -10880,8 +10874,8 @@ class TestHandlePromoteMerge:
         gh.try_enable_auto_merge.return_value = True
         completed = {"id": "t1", "title": "x", "status": "completed", "type": "spec"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[completed]),
-            caplog.at_level(logging.INFO, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=[completed]),
+            caplog.at_level(logging.INFO, logger="fido"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
         assert "auto-merge enabled" in caplog.text
@@ -10902,8 +10896,8 @@ class TestHandlePromoteMerge:
         gh.try_enable_auto_merge.side_effect = RuntimeError("boom")
         completed = {"id": "t1", "title": "x", "status": "completed", "type": "spec"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[completed]),
-            caplog.at_level(logging.WARNING, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=[completed]),
+            caplog.at_level(logging.WARNING, logger="fido"),
         ):
             result = worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "b", 1)
         assert result == 1  # mark-ready still happened
@@ -10923,7 +10917,7 @@ class TestHandlePromoteMerge:
         gh.pr_checks.return_value = [{"name": "ci", "state": "FAILURE"}]
         gh.get_required_checks.return_value = ["ci"]
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[]),
+            patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "set_status"),
         ):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 11, "b", 1)
@@ -11177,7 +11171,7 @@ class TestPrBodyLock:
     def test_acquires_and_releases_lock(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True, exist_ok=True)
-        with patch("kennel.tasks._resolve_git_dir", return_value=tmp_path / ".git"):
+        with patch("fido.tasks._resolve_git_dir", return_value=tmp_path / ".git"):
             with pr_body_lock(tmp_path):
                 assert (fido_dir / "sync.lock").exists()
 
@@ -11187,7 +11181,7 @@ class TestPrBodyLock:
         fido_dir.mkdir(parents=True, exist_ok=True)
         (fido_dir / "state.json").write_text('{"issue": 1}')
         gh = MagicMock()
-        with patch("kennel.tasks._resolve_git_dir", return_value=tmp_path / ".git"):
+        with patch("fido.tasks._resolve_git_dir", return_value=tmp_path / ".git"):
             with pr_body_lock(tmp_path):
                 sync_tasks(
                     tmp_path,
@@ -11246,7 +11240,7 @@ class TestAutoCompleteAskTasks:
 
     def test_no_ask_tasks_does_nothing(self, tmp_path: Path) -> None:
         gh = MagicMock()
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         gh.get_review_threads.assert_not_called()
 
@@ -11255,8 +11249,8 @@ class TestAutoCompleteAskTasks:
         task = self._ask_task(42)
         gh.get_review_threads.return_value = [self._resolved_node(42)]
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.complete_by_id") as mock_complete,
         ):
             _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         mock_complete.assert_called_once_with("ask-1")
@@ -11270,8 +11264,8 @@ class TestAutoCompleteAskTasks:
             {"isResolved": False, "comments": {"nodes": [{"databaseId": 42}]}}
         ]
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.complete_by_id") as mock_complete,
         ):
             _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         mock_complete.assert_not_called()
@@ -11281,8 +11275,8 @@ class TestAutoCompleteAskTasks:
         task = self._ask_task(1)
         gh.get_review_threads.side_effect = RuntimeError("api fail")
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.complete_by_id") as mock_complete,
             pytest.raises(RuntimeError, match="api fail"),
         ):
             _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
@@ -11297,8 +11291,8 @@ class TestAutoCompleteAskTasks:
         }
         gh.get_review_threads.return_value = [self._resolved_node(1)]
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.complete_by_id") as mock_complete,
         ):
             _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         mock_complete.assert_not_called()
@@ -11307,8 +11301,8 @@ class TestAutoCompleteAskTasks:
         gh = MagicMock()
         task = {"title": "ASK: question", "status": "pending"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.complete_by_id") as mock_complete,
         ):
             _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         mock_complete.assert_not_called()
@@ -11321,8 +11315,8 @@ class TestAutoCompleteAskTasks:
             {"isResolved": True, "comments": {"nodes": [{}]}}
         ]
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
-            patch("kennel.tasks.Tasks.complete_by_id") as mock_complete,
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.complete_by_id") as mock_complete,
         ):
             _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         mock_complete.assert_not_called()
@@ -11348,7 +11342,7 @@ class TestSyncTasks:
         import logging
 
         gh = MagicMock()
-        with caplog.at_level(logging.WARNING, logger="kennel"):
+        with caplog.at_level(logging.WARNING, logger="fido"):
             sync_tasks(
                 tmp_path,
                 gh,
@@ -11406,7 +11400,7 @@ class TestSyncTasks:
         sync_started.wait(timeout=5)
 
         task = {"title": "Fresh task", "status": "pending", "type": "spec"}
-        with patch("kennel.tasks.Tasks.list", return_value=[task]):
+        with patch("fido.tasks.Tasks.list", return_value=[task]):
             # Release the lock just after blocking sync starts waiting
             release_timer = threading.Timer(0.1, lock_released.set)
             release_timer.start()
@@ -11445,7 +11439,7 @@ class TestSyncTasks:
         gh.get_repo_info.return_value = "owner/repo"
         gh.get_user.return_value = "fido-bot"
         gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
-        with patch("kennel.tasks.Tasks.list", return_value=[]):
+        with patch("fido.tasks.Tasks.list", return_value=[]):
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.get_pr_body.assert_not_called()
 
@@ -11459,7 +11453,7 @@ class TestSyncTasks:
         body = "desc\n<!-- WORK_QUEUE_START -->\nold\n<!-- WORK_QUEUE_END -->\nfooter"
         gh.get_pr_body.return_value = body
         task = {"title": "Do it", "status": "pending"}
-        with patch("kennel.tasks.Tasks.list", return_value=[task]):
+        with patch("fido.tasks.Tasks.list", return_value=[task]):
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_called_once()
         new_body = gh.edit_pr_body.call_args[0][2]
@@ -11480,7 +11474,7 @@ class TestSyncTasks:
         )
         gh.get_pr_body.return_value = body
         task = {"title": "Do it", "status": "pending", "type": "spec"}
-        with patch("kennel.tasks.Tasks.list", return_value=[task]):
+        with patch("fido.tasks.Tasks.list", return_value=[task]):
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_called_once()
         new_body = gh.edit_pr_body.call_args[0][2]
@@ -11496,7 +11490,7 @@ class TestSyncTasks:
         gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
         gh.get_pr_body.return_value = "no markers here"
         task = {"title": "Do it", "status": "pending"}
-        with patch("kennel.tasks.Tasks.list", return_value=[task]):
+        with patch("fido.tasks.Tasks.list", return_value=[task]):
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_not_called()
 
@@ -11514,8 +11508,8 @@ class TestSyncTasks:
         gh.get_pr_body.return_value = "<!-- WORK_QUEUE_START -->\nno end marker"
         task = {"title": "Do it", "status": "pending"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
-            caplog.at_level(logging.WARNING, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            caplog.at_level(logging.WARNING, logger="fido"),
         ):
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_not_called()
@@ -11535,8 +11529,8 @@ class TestSyncTasks:
         gh.get_pr_body.return_value = "no start marker\n<!-- WORK_QUEUE_END -->"
         task = {"title": "Do it", "status": "pending"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
-            caplog.at_level(logging.WARNING, logger="kennel"),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            caplog.at_level(logging.WARNING, logger="fido"),
         ):
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_not_called()
@@ -11551,19 +11545,19 @@ class TestSyncTasks:
         gh.find_pr.return_value = {"number": 5, "state": "OPEN"}
         # Build a body whose queue already matches the single pending task
         task = {"title": "Do it", "status": "pending", "type": "spec"}
-        from kennel.tasks import _format_work_queue
+        from fido.tasks import _format_work_queue
 
         queue = _format_work_queue([task])
         body = f"desc\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
         gh.get_pr_body.return_value = body
-        with patch("kennel.tasks.Tasks.list", return_value=[task]):
+        with patch("fido.tasks.Tasks.list", return_value=[task]):
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
         gh.edit_pr_body.assert_not_called()
 
     def test_completed_task_appears_in_pr_body_after_sync(self, tmp_path: Path) -> None:
         """End-to-end: add a task, complete it, sync — PR body must show it done."""
-        from kennel.tasks import Tasks
-        from kennel.types import TaskType
+        from fido.tasks import Tasks
+        from fido.types import TaskType
 
         fido_dir = self._fido_dir(tmp_path)
         self._state_with_issue(fido_dir)
@@ -11608,8 +11602,8 @@ class TestSyncTasks:
         import fcntl
         import threading
 
-        from kennel.tasks import Tasks
-        from kennel.types import TaskType
+        from fido.tasks import Tasks
+        from fido.types import TaskType
 
         fido_dir = self._fido_dir(tmp_path)
         self._state_with_issue(fido_dir)
@@ -11680,7 +11674,7 @@ class TestSyncTasks:
         gh.get_pr_body.side_effect = RuntimeError("api down")
         task = {"title": "Do it", "status": "pending"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             pytest.raises(RuntimeError, match="api down"),
         ):
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
@@ -11698,7 +11692,7 @@ class TestSyncTasks:
         gh.edit_pr_body.side_effect = RuntimeError("api down")
         task = {"title": "Do it", "status": "pending"}
         with (
-            patch("kennel.tasks.Tasks.list", return_value=[task]),
+            patch("fido.tasks.Tasks.list", return_value=[task]),
             pytest.raises(RuntimeError, match="api down"),
         ):
             sync_tasks(tmp_path, gh, **self._sync_kwargs(fido_dir))
@@ -11787,7 +11781,7 @@ class TestWorkerThread:
 
     def test_return_0_waits_with_idle_timeout(self, tmp_path: Path) -> None:
         """Return 0 (no work) should call _wake.wait with _IDLE_TIMEOUT."""
-        import kennel.worker as wmod
+        import fido.worker as wmod
 
         wt = self._make_thread(tmp_path)
         mock_wake = MagicMock()
@@ -11804,7 +11798,7 @@ class TestWorkerThread:
 
     def test_return_2_waits_with_retry_timeout(self, tmp_path: Path) -> None:
         """Return 2 (lock contended) should call _wake.wait with _RETRY_TIMEOUT."""
-        import kennel.worker as wmod
+        import fido.worker as wmod
 
         wt = self._make_thread(tmp_path)
         mock_wake = MagicMock()
@@ -11872,7 +11866,7 @@ class TestWorkerThread:
             raise RuntimeError("boom")
 
         with patch.object(Worker, "run", fake_worker_run):
-            with patch("kennel.worker.log") as mock_log:
+            with patch("fido.worker.log") as mock_log:
                 wt.start()
                 wt.join(timeout=5.0)
 
@@ -11927,7 +11921,7 @@ class TestWorkerThread:
         captured: list[str] = []
 
         def fake_worker_run(self_w):
-            import kennel.worker as wmod
+            import fido.worker as wmod
 
             captured.append(getattr(wmod._thread_repo, "repo_name", None))
             wt._stop = True
@@ -12339,7 +12333,7 @@ class TestWorkerThread:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """SessionLeakError in the worker loop calls os._exit(3)."""
-        from kennel import worker as worker_module
+        from fido import worker as worker_module
 
         wt = self._make_thread(tmp_path)
         exits: list[int] = []
@@ -12353,7 +12347,7 @@ class TestWorkerThread:
     # ── config / repo_cfg injection ───────────────────────────────────────
 
     def test_config_stored_when_passed(self, tmp_path: Path) -> None:
-        from kennel.config import Config, RepoConfig
+        from fido.config import Config, RepoConfig
 
         cfg = RepoConfig(
             name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
@@ -12370,7 +12364,7 @@ class TestWorkerThread:
         assert wt._config is config
 
     def test_repo_cfg_stored_when_passed(self, tmp_path: Path) -> None:
-        from kennel.config import RepoConfig
+        from fido.config import RepoConfig
 
         cfg = RepoConfig(
             name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
@@ -12379,7 +12373,7 @@ class TestWorkerThread:
         assert wt._repo_cfg is cfg
 
     def test_repo_cfg_provider_selects_copilot_provider(self, tmp_path: Path) -> None:
-        from kennel.config import RepoConfig
+        from fido.config import RepoConfig
 
         wt = WorkerThread(
             tmp_path,
@@ -12439,7 +12433,7 @@ class TestWorkerThread:
 
     def test_config_and_repo_cfg_passed_to_worker(self, tmp_path: Path) -> None:
         """WorkerThread.run() forwards config and repo_cfg to every Worker."""
-        from kennel.config import Config, RepoConfig
+        from fido.config import Config, RepoConfig
 
         cfg = RepoConfig(
             name="owner/repo", work_dir=tmp_path, provider=ProviderID.CLAUDE_CODE
@@ -12504,18 +12498,18 @@ class TestIsLeakedTaskComment:
     def test_matches_blocked_prefix(self) -> None:
         body = (
             "BLOCKED: This task is already complete in pushed commit 3382c67 "
-            "on `render-demo-level-browser`, but I cannot run `kennel task "
+            "on `render-demo-level-browser`, but I cannot run `fido task "
             "complete /home/rhencke/workspace/orly 1776437985163-0702` because "
-            "this task invocation explicitly forbids using `kennel task`."
+            "this task invocation explicitly forbids using `fido task`."
         )
         assert _is_leaked_task_comment(body)
 
-    def test_matches_cannot_run_kennel_task(self) -> None:
-        body = "Hey, quick update: I cannot run `kennel task complete ...` per the constraint."
+    def test_matches_cannot_run_fido_task(self) -> None:
+        body = "Hey, quick update: I cannot run `fido task complete ...` per the constraint."
         assert _is_leaked_task_comment(body)
 
     def test_matches_explicitly_forbids(self) -> None:
-        body = "Something something explicitly forbids using `kennel task complete`."
+        body = "Something something explicitly forbids using `fido task complete`."
         assert _is_leaked_task_comment(body)
 
     def test_rejects_empty(self) -> None:
@@ -12575,7 +12569,7 @@ class TestLeakedCommentCleanup:
             {
                 "id": 12,
                 "user": {"login": "fido-bot"},
-                "body": "BLOCKED: cannot run `kennel task complete`",
+                "body": "BLOCKED: cannot run `fido task complete`",
             },
             {
                 "id": 13,

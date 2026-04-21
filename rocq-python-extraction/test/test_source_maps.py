@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kennel.rocq_traceback import TracebackAnnotator
+from fido.rocq_traceback import TracebackAnnotator
 
 
 def test_generated_python_lines_carry_source_comments(build_default: Path) -> None:

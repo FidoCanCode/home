@@ -1,4 +1,4 @@
-"""Tests for kennel.registry — WorkerRegistry lifecycle management."""
+"""Tests for fido.registry — WorkerRegistry lifecycle management."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from kennel.config import RepoConfig as _RepoConfig
-from kennel.provider import ProviderID
-from kennel.registry import (
+from fido.config import RepoConfig as _RepoConfig
+from fido.provider import ProviderID
+from fido.registry import (
     WorkerCrash,
     WorkerRegistry,
     _make_thread,
@@ -242,7 +242,7 @@ class TestWorkerRegistry:
     # ── issue tree cache (fix #812) ──────────────────────────────────────
 
     def test_get_issue_cache_creates_lazily(self) -> None:
-        from kennel.issue_cache import IssueTreeCache
+        from fido.issue_cache import IssueTreeCache
 
         reg, _ = self._make_registry()
         cache = reg.get_issue_cache("foo/bar")
@@ -564,7 +564,7 @@ class TestMakeThread:
         mock_gh = MagicMock()
         mock_wt_cls = MagicMock()
         result = _make_thread(cfg, mock_registry, gh=mock_gh, _WorkerThread=mock_wt_cls)
-        from kennel.config import RepoMembership
+        from fido.config import RepoMembership
 
         mock_wt_cls.assert_called_once_with(
             tmp_path,
@@ -590,7 +590,7 @@ class TestMakeThread:
         assert mock_wt_cls.call_args[0][0] == work_dir
 
     def test_config_forwarded_to_worker_thread(self, tmp_path: Path) -> None:
-        from kennel.config import Config
+        from fido.config import Config
 
         cfg = _repo("foo/bar", tmp_path)
         config = Config(
@@ -655,7 +655,7 @@ class TestMakeRegistry:
         assert reg.is_alive("foo/bar") is True
 
     def test_config_forwarded_to_thread_factory(self, tmp_path: Path) -> None:
-        from kennel.config import Config
+        from fido.config import Config
 
         cfg = _repo("foo/bar", tmp_path)
         config = Config(

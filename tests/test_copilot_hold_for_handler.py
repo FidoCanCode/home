@@ -6,14 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from kennel import provider
-from kennel.copilotcli import CopilotCLIClient, CopilotCLISession
-from kennel.provider import ProviderID
+from fido import provider
+from fido.copilotcli import CopilotCLIClient, CopilotCLISession
 
 
 class FakeRuntime:
     def __init__(self) -> None:
-        self.provider_id = ProviderID.COPILOT_CLI
         self._session_id = "sess-created"
         self.cancel_calls: list[str] = []
         self.dropped_session_count = 0

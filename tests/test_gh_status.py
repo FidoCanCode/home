@@ -1,4 +1,4 @@
-"""Tests for kennel.gh_status — GitHub profile status CLI."""
+"""Tests for fido.gh_status — GitHub profile status CLI."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kennel.claude import ClaudeClient
-from kennel.config import RepoConfig
-from kennel.gh_status import (
+from fido.claude import ClaudeClient
+from fido.config import RepoConfig
+from fido.gh_status import (
     _candidate_providers,
     _default_provider_factories,
     generate_persona_emoji,
@@ -17,7 +17,7 @@ from kennel.gh_status import (
     main,
     set_gh_status,
 )
-from kennel.provider import ProviderID
+from fido.provider import ProviderID
 
 
 def _client(**overrides: object) -> MagicMock:
@@ -56,7 +56,7 @@ class TestGeneratePersonaStatus:
 
     def test_creates_default_client_when_none(self) -> None:
         with patch(
-            "kennel.gh_status.ClaudeClient",
+            "fido.gh_status.ClaudeClient",
             return_value=_client(),
         ) as mock_cls:
             mock_cls.return_value.run_turn.return_value = "woof"
@@ -89,7 +89,7 @@ class TestGeneratePersonaEmoji:
 
     def test_creates_default_client_when_none(self) -> None:
         with patch(
-            "kennel.gh_status.ClaudeClient",
+            "fido.gh_status.ClaudeClient",
             return_value=_client(),
         ) as mock_cls:
             mock_cls.return_value.generate_status_emoji.return_value = ":dog:"
@@ -143,7 +143,7 @@ class TestSetGhStatus:
         mock_client.run_turn.return_value = "woof"
         mock_client.generate_status_emoji.return_value = ":dog:"
         with patch(
-            "kennel.gh_status._default_provider_factories",
+            "fido.gh_status._default_provider_factories",
             return_value=(lambda: mock_client,),
         ):
             set_gh_status("test", persona_path=persona_file, _gh=mock_gh)
@@ -203,21 +203,21 @@ class TestCandidateProviders:
 
 
 class TestDefaultProviderFactories:
-    def test_raises_when_no_live_kennel(self) -> None:
-        with pytest.raises(RuntimeError, match="No running kennel repo configs found"):
+    def test_raises_when_no_live_fido(self) -> None:
+        with pytest.raises(RuntimeError, match="No running fido repo configs found"):
             _default_provider_factories(_running_repo_configs_fn=lambda: [])
 
-    def test_set_gh_status_propagates_when_no_live_kennel(self, tmp_path: Path) -> None:
+    def test_set_gh_status_propagates_when_no_live_fido(self, tmp_path: Path) -> None:
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("persona")
         mock_gh = MagicMock()
 
         with (
             patch(
-                "kennel.gh_status._default_provider_factories",
-                side_effect=RuntimeError("No running kennel repo configs found"),
+                "fido.gh_status._default_provider_factories",
+                side_effect=RuntimeError("No running fido repo configs found"),
             ),
-            pytest.raises(RuntimeError, match="No running kennel repo configs found"),
+            pytest.raises(RuntimeError, match="No running fido repo configs found"),
         ):
             set_gh_status(
                 "test",
@@ -250,7 +250,7 @@ class TestDefaultProviderFactories:
         second = _client()
         factory.create_agent.side_effect = [first, second]
         with (
-            patch("kennel.gh_status.DefaultProviderFactory", return_value=factory),
+            patch("fido.gh_status.DefaultProviderFactory", return_value=factory),
         ):
             factories = _default_provider_factories(
                 _running_repo_configs_fn=lambda: [
@@ -280,14 +280,14 @@ class TestMain:
         def fake_set(msg: str, **kw: object) -> None:
             calls.append(msg)
 
-        import kennel.gh_status
+        import fido.gh_status
 
-        orig = kennel.gh_status.set_gh_status
-        kennel.gh_status.set_gh_status = fake_set
+        orig = fido.gh_status.set_gh_status
+        fido.gh_status.set_gh_status = fake_set
         try:
             main(["set", "hello", "world"], _GitHub=MagicMock)
         finally:
-            kennel.gh_status.set_gh_status = orig
+            fido.gh_status.set_gh_status = orig
         assert calls == ["hello world"]
 
     def test_no_args(self) -> None:
@@ -301,3 +301,17 @@ class TestMain:
     def test_unknown_subcommand(self) -> None:
         with pytest.raises(SystemExit, match="1"):
             main(["get"])
+
+    def test_argv_none_uses_sys_argv(self) -> None:
+        calls: list[str] = []
+
+        def fake_set(msg: str, **kw: object) -> None:
+            calls.append(msg)
+
+        with (
+            patch("sys.argv", ["fido-gh-status", "set", "from", "argv"]),
+            patch("fido.gh_status.set_gh_status", fake_set),
+        ):
+            main(_GitHub=MagicMock)
+
+        assert calls == ["from argv"]

@@ -1,4 +1,4 @@
 (lang dune 3.21)
-(name kennel-models)
+(name fido-models)
 
 (using rocq 0.11)

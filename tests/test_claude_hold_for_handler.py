@@ -8,9 +8,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from kennel import provider
-from kennel.claude import ClaudeSession
-from kennel.provider import SessionTalker, talker_now
+from fido import provider
+from fido.claude import ClaudeSession
+from fido.provider import SessionTalker, talker_now
 
 
 def _make_session_proc(lines: list[str]) -> MagicMock:

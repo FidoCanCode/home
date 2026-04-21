@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from kennel.reply_promises import (
+from fido.reply_promises import (
     ReplyPromise,
     add_reply_promise,
     list_reply_promises,

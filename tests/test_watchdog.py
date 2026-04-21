@@ -1,4 +1,4 @@
-"""Tests for kennel.watchdog — Watchdog class and run() entry point."""
+"""Tests for fido.watchdog — Watchdog class and run() entry point."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from kennel.config import RepoConfig as _RepoConfig
-from kennel.provider import ProviderID
-from kennel.watchdog import (
+from fido.config import RepoConfig as _RepoConfig
+from fido.provider import ProviderID
+from fido.watchdog import (
     _RECONCILE_INTERVAL,  # noqa: PLC2701
     _STALE_THRESHOLD,  # noqa: PLC2701
     ReconcileWatchdog,

@@ -15,14 +15,14 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
-from kennel import provider
-from kennel.claimed import RepliedComments
-from kennel.config import Config
-from kennel.config import RepoConfig as _RepoConfig
-from kennel.events import Action, recover_reply_promises
-from kennel.infra import Infra
-from kennel.provider import ProviderID
-from kennel.server import PreflightError, WebhookHandler, _repo_status
+from fido import provider
+from fido.claimed import RepliedComments
+from fido.config import Config
+from fido.config import RepoConfig as _RepoConfig
+from fido.events import Action, recover_reply_promises
+from fido.infra import Infra
+from fido.provider import ProviderID
+from fido.server import PreflightError, WebhookHandler, _repo_status
 
 
 class RepoConfig(_RepoConfig):
@@ -63,7 +63,7 @@ def _signal_post_done() -> None:
 
 
 def _config(tmp_path: Path) -> Config:
-    from kennel.config import RepoMembership
+    from fido.config import RepoMembership
 
     return Config(
         port=0,  # will bind to random port
@@ -101,7 +101,7 @@ def _restore_handler_fns():
         "_fn_runner_dir": WebhookHandler._fn_runner_dir,
         "infra": WebhookHandler.infra,
         "static_files": WebhookHandler.static_files,
-        "kennel_started_at": WebhookHandler.kennel_started_at,
+        "fido_started_at": WebhookHandler.fido_started_at,
     }
     # Override _fn_after_do_post for all tests so _post_webhook can wait for
     # do_POST to complete without sleeping (see module-level comment above).
@@ -118,7 +118,7 @@ def _restore_handler_fns():
 
 @pytest.fixture(autouse=True)
 def _stub_provider_statuses():
-    with patch("kennel.server.provider_statuses_for_repo_configs", return_value={}):
+    with patch("fido.server.provider_statuses_for_repo_configs", return_value={}):
         yield
 
 
@@ -198,12 +198,12 @@ class TestGetEndpoint:
         url, _ = server
         resp = urllib.request.urlopen(url)
         assert resp.status == 200
-        assert b"kennel is running" in resp.read()
+        assert b"fido is running" in resp.read()
 
     def test_status_endpoint_returns_activities(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -242,7 +242,7 @@ class TestGetEndpoint:
     def test_status_endpoint_includes_session_owner(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -270,7 +270,7 @@ class TestGetEndpoint:
     def test_status_endpoint_includes_session_alive(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -297,7 +297,7 @@ class TestGetEndpoint:
     def test_status_endpoint_includes_crash_info(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity, WorkerCrash
+        from fido.registry import WorkerActivity, WorkerCrash
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -333,7 +333,7 @@ class TestGetEndpoint:
         assert json.loads(resp.read()) == {
             "activities": [],
             "rate_limit": None,
-            "kennel_uptime_seconds": None,
+            "fido_uptime_seconds": None,
         }
 
     def test_status_endpoint_content_type_json(self, server: tuple) -> None:
@@ -345,7 +345,7 @@ class TestGetEndpoint:
     def test_status_endpoint_is_stuck_true_when_stale(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -371,7 +371,7 @@ class TestGetEndpoint:
     def test_status_endpoint_includes_rescoping_flag(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -402,8 +402,8 @@ class TestGetEndpoint:
         (closes #812 follow-up)."""
         from datetime import datetime, timezone
 
-        from kennel.rate_limit import RateLimitMonitor
-        from kennel.registry import WorkerActivity
+        from fido.rate_limit import RateLimitMonitor
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -449,7 +449,7 @@ class TestGetEndpoint:
         """No monitor instance attached → ``rate_limit`` is ``None``."""
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -480,8 +480,8 @@ class TestGetEndpoint:
         """Monitor present but ``latest()`` returns None → rate_limit None."""
         from datetime import datetime, timezone
 
-        from kennel.rate_limit import RateLimitMonitor
-        from kennel.registry import WorkerActivity
+        from fido.rate_limit import RateLimitMonitor
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -517,8 +517,8 @@ class TestGetEndpoint:
         """
         from datetime import datetime, timezone
 
-        from kennel.issue_cache import IssueTreeCache
-        from kennel.registry import WorkerActivity
+        from fido.issue_cache import IssueTreeCache
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -573,7 +573,7 @@ class TestGetEndpoint:
         """
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -601,7 +601,7 @@ class TestGetEndpoint:
     def test_status_endpoint_includes_provider_status(self, server: tuple) -> None:
         from datetime import UTC, datetime
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -621,7 +621,7 @@ class TestGetEndpoint:
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         with patch(
-            "kennel.server.provider_statuses_for_repo_configs",
+            "fido.server.provider_statuses_for_repo_configs",
             return_value={
                 ProviderID.CLAUDE_CODE: MagicMock(
                     provider=ProviderID.CLAUDE_CODE,
@@ -645,7 +645,7 @@ class TestGetEndpoint:
     def test_status_endpoint_rescoping_false_by_default(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -674,7 +674,7 @@ class TestGetEndpoint:
         """With no state.json or tasks.json on disk, fido_state fields default."""
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -715,7 +715,7 @@ class TestGetEndpoint:
         """state.json and tasks.json on disk are surfaced in the activity entry."""
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         # Write state.json
         fido_dir = tmp_path / ".git" / "fido"
@@ -795,7 +795,7 @@ class TestGetEndpoint:
         """When a repo has no config entry, fido_state fields are all defaults."""
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         # Report an activity for a repo not in config
@@ -834,7 +834,7 @@ class TestCollectFidoState:
         return datetime(2026, 4, 19, 12, 0, 0, tzinfo=timezone.utc)
 
     def test_defaults_when_no_files(self, tmp_path: Path) -> None:
-        from kennel.server import (
+        from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
         )
 
@@ -853,7 +853,7 @@ class TestCollectFidoState:
 
     def test_lock_file_exists_not_held(self, tmp_path: Path) -> None:
         """Lock file exists but is not held by another process → fido_running=False."""
-        from kennel.server import (
+        from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
         )
 
@@ -868,7 +868,7 @@ class TestCollectFidoState:
         import fcntl
         import threading
 
-        from kennel.server import (
+        from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
         )
 
@@ -899,7 +899,7 @@ class TestCollectFidoState:
 
     def test_lock_file_oserror(self, tmp_path: Path) -> None:
         """If opening the lock file raises OSError, fido_running stays False."""
-        from kennel.server import (
+        from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
         )
 
@@ -914,11 +914,11 @@ class TestCollectFidoState:
         """If State.load() raises, state fields default gracefully."""
         from unittest.mock import patch
 
-        from kennel.server import (
+        from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
         )
 
-        with patch("kennel.server.State") as mock_state_cls:
+        with patch("fido.server.State") as mock_state_cls:
             mock_state_cls.return_value.load.side_effect = RuntimeError("disk error")
             result = _collect_fido_state(tmp_path, self._now())
         assert result["issue"] is None
@@ -927,7 +927,7 @@ class TestCollectFidoState:
 
     def test_invalid_issue_started_at(self, tmp_path: Path) -> None:
         """Malformed issue_started_at is silently ignored."""
-        from kennel.server import (
+        from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
         )
 
@@ -944,11 +944,11 @@ class TestCollectFidoState:
         """If Tasks.list() raises, task fields default gracefully."""
         from unittest.mock import patch
 
-        from kennel.server import (
+        from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
         )
 
-        with patch("kennel.server.Tasks") as mock_tasks_cls:
+        with patch("fido.server.Tasks") as mock_tasks_cls:
             mock_tasks_cls.return_value.list.side_effect = RuntimeError("disk error")
             result = _collect_fido_state(tmp_path, self._now())
         assert result["pending"] == 0
@@ -959,7 +959,7 @@ class TestCollectFidoState:
         self, tmp_path: Path
     ) -> None:
         """current_task comes from the first pending task when none are in_progress."""
-        from kennel.server import (
+        from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
         )
 
@@ -989,7 +989,7 @@ class TestCollectFidoState:
 
     def test_task_number_from_in_progress(self, tmp_path: Path) -> None:
         """task_number correctly reflects the in_progress task's position."""
-        from kennel.server import (
+        from fido.server import (
             _collect_fido_state,  # pyright: ignore[reportPrivateUsage]
         )
 
@@ -1091,13 +1091,13 @@ class TestStatusXml:
         assert resp.headers.get("Content-Type") == "application/xml; charset=utf-8"
         assert '<?xml version="1.0" encoding="UTF-8"?>' in body
         assert '<?xml-stylesheet type="text/xsl" href="/static/status.xsl"?>' in body
-        assert "<kennel" in body
-        assert 'xmlns="https://fidocancode.dog/kennel"' in body
+        assert "<fido" in body
+        assert 'xmlns="https://fidocancode.dog/fido"' in body
 
     def test_status_xml_contains_repo_data_with_namespaces(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -1123,20 +1123,20 @@ class TestStatusXml:
         assert "<busy>true</busy>" in body
         assert 'dog:status="busy"' in body
 
-    def test_status_xml_empty_kennel(self, server: tuple) -> None:
+    def test_status_xml_empty_fido(self, server: tuple) -> None:
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = []
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
-        assert 'xmlns="https://fidocancode.dog/kennel"' in body
-        # Empty kennel — self-closing root element (with namespace attrs)
+        assert 'xmlns="https://fidocancode.dog/fido"' in body
+        # Empty fido — self-closing root element (with namespace attrs)
         assert "/>" in body
 
     def test_status_xml_includes_claude_talker(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
-        from kennel.provider import SessionTalker
-        from kennel.registry import WorkerActivity
+        from fido.provider import SessionTalker
+        from fido.registry import WorkerActivity
 
         url, _ = server
         talker = SessionTalker(
@@ -1163,7 +1163,7 @@ class TestStatusXml:
         WebhookHandler.registry.get_session_alive.return_value = False
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
-        with patch("kennel.provider.get_talker", return_value=talker):
+        with patch("fido.provider.get_talker", return_value=talker):
             resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
         assert "<kind>worker</kind>" in body
@@ -1172,7 +1172,7 @@ class TestStatusXml:
     def test_status_xml_includes_provider_status(self, server: tuple) -> None:
         from datetime import UTC, datetime
 
-        from kennel.registry import WorkerActivity
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -1192,7 +1192,7 @@ class TestStatusXml:
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
         with patch(
-            "kennel.server.provider_statuses_for_repo_configs",
+            "fido.server.provider_statuses_for_repo_configs",
             return_value={
                 ProviderID.CLAUDE_CODE: MagicMock(
                     provider=ProviderID.CLAUDE_CODE,
@@ -1216,7 +1216,7 @@ class TestStatusXml:
     def test_status_xml_includes_webhooks(self, server: tuple) -> None:
         from datetime import datetime, timezone
 
-        from kennel.registry import WebhookActivity, WorkerActivity
+        from fido.registry import WebhookActivity, WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -1247,33 +1247,33 @@ class TestStatusXml:
         assert "<description>replying to review</description>" in body
         assert "<thread_id>789</thread_id>" in body
 
-    def test_status_xml_includes_kennel_uptime(self, server: tuple) -> None:
-        """<kennel_uptime_seconds> appears in the root element when kennel_started_at is set."""
+    def test_status_xml_includes_fido_uptime(self, server: tuple) -> None:
+        """<fido_uptime_seconds> appears in the root element when fido_started_at is set."""
         from datetime import datetime, timezone
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = []
-        WebhookHandler.kennel_started_at = datetime(
+        WebhookHandler.fido_started_at = datetime(
             2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc
         )
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
-        assert "<kennel_uptime_seconds>" in body
+        assert "<fido_uptime_seconds>" in body
 
-    def test_status_xml_no_kennel_uptime_when_not_started(self, server: tuple) -> None:
-        """<kennel_uptime_seconds> is absent when kennel_started_at is None (default)."""
+    def test_status_xml_no_fido_uptime_when_not_started(self, server: tuple) -> None:
+        """<fido_uptime_seconds> is absent when fido_started_at is None (default)."""
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = []
-        assert WebhookHandler.kennel_started_at is None
+        assert WebhookHandler.fido_started_at is None
         resp = urllib.request.urlopen(f"{url}/status")
         body = resp.read().decode()
-        assert "<kennel_uptime_seconds>" not in body
+        assert "<fido_uptime_seconds>" not in body
 
     def test_status_xml_includes_rate_limit(self, server: tuple) -> None:
         """<rate_limit> with nested windows appears in the root element when available."""
         from datetime import UTC, datetime
 
-        from kennel.rate_limit import (
+        from fido.rate_limit import (
             RateLimitMonitor,
             RateLimitSnapshot,
             RateLimitWindow,
@@ -1307,30 +1307,28 @@ class TestStatusXml:
         assert "<graphql>" in body
         assert "<used>5</used>" in body
 
-    def test_status_json_includes_kennel_uptime(self, server: tuple) -> None:
-        """kennel_uptime_seconds appears in /status.json when kennel_started_at is set."""
+    def test_status_json_includes_fido_uptime(self, server: tuple) -> None:
+        """fido_uptime_seconds appears in /status.json when fido_started_at is set."""
         from datetime import datetime, timezone
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = []
-        WebhookHandler.kennel_started_at = datetime(
+        WebhookHandler.fido_started_at = datetime(
             2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc
         )
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data["kennel_uptime_seconds"] is not None
-        assert data["kennel_uptime_seconds"] >= 0
+        assert data["fido_uptime_seconds"] is not None
+        assert data["fido_uptime_seconds"] >= 0
 
-    def test_status_json_kennel_uptime_null_when_not_started(
-        self, server: tuple
-    ) -> None:
-        """kennel_uptime_seconds is null in /status.json when kennel_started_at is None."""
+    def test_status_json_fido_uptime_null_when_not_started(self, server: tuple) -> None:
+        """fido_uptime_seconds is null in /status.json when fido_started_at is None."""
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = []
-        assert WebhookHandler.kennel_started_at is None
+        assert WebhookHandler.fido_started_at is None
         resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
-        assert data["kennel_uptime_seconds"] is None
+        assert data["fido_uptime_seconds"] is None
 
     def test_status_xml_includes_issue_cache_as_nested_elements(
         self, server: tuple
@@ -1338,8 +1336,8 @@ class TestStatusXml:
         """issue_cache dict is emitted as nested XML children, not as str(dict)."""
         from datetime import datetime, timezone
 
-        from kennel.issue_cache import IssueTreeCache
-        from kennel.registry import WorkerActivity
+        from fido.issue_cache import IssueTreeCache
+        from fido.registry import WorkerActivity
 
         url, _ = server
         WebhookHandler.registry.get_all_activities.return_value = [
@@ -1388,7 +1386,7 @@ class TestStaticFileServing:
         static_dir.mkdir()
         (static_dir / "style.css").write_text("body { color: red; }")
 
-        from kennel.static_files import StaticFiles
+        from fido.static_files import StaticFiles
 
         WebhookHandler.static_files = StaticFiles(static_dir)
         resp = urllib.request.urlopen(f"{url}/static/style.css")
@@ -1404,7 +1402,7 @@ class TestStaticFileServing:
         static_dir.mkdir()
         (static_dir / "style.css").write_text("x")
 
-        from kennel.static_files import StaticFiles
+        from fido.static_files import StaticFiles
 
         WebhookHandler.static_files = StaticFiles(static_dir)
         resp = urllib.request.urlopen(f"{url}/static/style.css")
@@ -1421,7 +1419,7 @@ class TestStaticFileServing:
 
         import hashlib
 
-        from kennel.static_files import StaticFiles
+        from fido.static_files import StaticFiles
 
         WebhookHandler.static_files = StaticFiles(static_dir)
         etag = '"' + hashlib.sha256(content).hexdigest()[:16] + '"'
@@ -1445,7 +1443,7 @@ class TestStaticFileServing:
         static_dir = tmp_path / "static"
         static_dir.mkdir()
 
-        from kennel.static_files import StaticFiles
+        from fido.static_files import StaticFiles
 
         WebhookHandler.static_files = StaticFiles(static_dir)
         with pytest.raises(urllib.error.HTTPError) as exc_info:
@@ -1875,7 +1873,7 @@ class TestProcessAction:
         self, server: tuple
     ) -> None:
         url, cfg = server
-        import kennel.server as ks
+        import fido.server as ks
 
         payload = {
             **self._payload(),
@@ -1982,10 +1980,8 @@ class TestProcessAction:
             return ("DO", ["task from recovery"])
 
         with (
-            patch(
-                "kennel.events.reply_to_comment", side_effect=fake_reply
-            ) as mock_reply,
-            patch("kennel.events.create_task") as mock_create_task,
+            patch("fido.events.reply_to_comment", side_effect=fake_reply) as mock_reply,
+            patch("fido.events.create_task") as mock_create_task,
         ):
             assert recover_reply_promises(
                 cfg.repos["owner/repo"].work_dir / ".git" / "fido",
@@ -2052,7 +2048,7 @@ class TestProcessAction:
 
     def test_already_replied_comment_skipped(self, server: tuple) -> None:
         url, cfg = server
-        import kennel.server as ks
+        import fido.server as ks
 
         ks._replied_comments.add(203)
         try:
@@ -2087,7 +2083,7 @@ class TestProcessAction:
         contention (preempted reply), _process_action_inner must not enqueue any
         tasks — the process that holds the lock is responsible for reply and task
         creation."""
-        import kennel.server as ks
+        import fido.server as ks
 
         url, cfg = server
         payload = {
@@ -2125,7 +2121,7 @@ class TestProcessAction:
         swallowed — consumed by the webhook handler without any visible trace."""
         import logging
 
-        import kennel.server as ks
+        import fido.server as ks
 
         url, cfg = server
         payload = {
@@ -2150,7 +2146,7 @@ class TestProcessAction:
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         try:
-            with caplog.at_level(logging.INFO, logger="kennel.server"):
+            with caplog.at_level(logging.INFO, logger="fido.server"):
                 status = _post_webhook(url, cfg, "issue_comment", payload)
             assert status == 200
             assert "action outcome:" in caplog.text
@@ -2161,7 +2157,7 @@ class TestProcessAction:
         self, server: tuple
     ) -> None:
         url, cfg = server
-        import kennel.server as ks
+        import fido.server as ks
 
         payload = {
             **self._payload(),
@@ -2357,7 +2353,7 @@ class TestProcessAction:
         self, server: tuple
     ) -> None:
         url, cfg = server
-        import kennel.server as ks
+        import fido.server as ks
 
         payload = {
             **self._payload(),
@@ -2460,9 +2456,9 @@ class TestProcessAction:
 
         with (
             patch(
-                "kennel.events.reply_to_issue_comment", side_effect=fake_reply
+                "fido.events.reply_to_issue_comment", side_effect=fake_reply
             ) as mock_reply,
-            patch("kennel.events.create_task") as mock_create_task,
+            patch("fido.events.create_task") as mock_create_task,
         ):
             assert recover_reply_promises(
                 cfg.repos["owner/repo"].work_dir / ".git" / "fido",
@@ -2519,8 +2515,8 @@ class TestProcessAction:
         """Active SessionTalker appears in /status as a structured object."""
         from datetime import datetime, timezone
 
-        from kennel.provider import SessionTalker
-        from kennel.registry import WorkerActivity
+        from fido.provider import SessionTalker
+        from fido.registry import WorkerActivity
 
         url, _ = server
         talker = SessionTalker(
@@ -2547,7 +2543,7 @@ class TestProcessAction:
         WebhookHandler.registry.get_session_alive.return_value = True
         WebhookHandler.registry.get_session_pid.return_value = None
         WebhookHandler.registry.is_rescoping.return_value = False
-        with patch("kennel.provider.get_talker", return_value=talker):
+        with patch("fido.provider.get_talker", return_value=talker):
             resp = urllib.request.urlopen(f"{url}/status.json")
         data = json.loads(resp.read())
         talker_data = data["activities"][0]["claude_talker"]
@@ -2562,7 +2558,7 @@ class TestProcessAction:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """SessionLeakError from a webhook handler calls os._exit(3)."""
-        from kennel import server as server_module
+        from fido import server as server_module
 
         url, cfg = server
         payload = {
@@ -2693,7 +2689,7 @@ class TestProcessAction:
         self, server: tuple
     ) -> None:
         """No reaction when thread dict exists but has no comment_id key."""
-        from kennel.events import Action
+        from fido.events import Action
 
         url, cfg = server
         handler = WebhookHandler.__new__(WebhookHandler)
@@ -2737,9 +2733,9 @@ class TestProcessAction:
         mock_gh.add_reaction.assert_called_once()
 
     def test_issue_comment_webhook_activity_tracks_phase(self, tmp_path: Path) -> None:
-        from kennel.events import Action
-        from kennel.registry import WorkerRegistry
-        from kennel.server import _replied_comments
+        from fido.events import Action
+        from fido.registry import WorkerRegistry
+        from fido.server import _replied_comments
 
         cfg = _config(tmp_path)
         handler = WebhookHandler.__new__(WebhookHandler)
@@ -2904,8 +2900,8 @@ class TestProcessAction:
 
 class TestPopulateMemberships:
     def test_populates_from_get_collaborators(self, tmp_path: Path) -> None:
-        from kennel.config import RepoMembership
-        from kennel.server import populate_memberships
+        from fido.config import RepoMembership
+        from fido.server import populate_memberships
 
         cfg = Config(
             port=0,
@@ -2926,7 +2922,7 @@ class TestPopulateMemberships:
         )
 
     def test_filters_bot_user_from_collaborators(self, tmp_path: Path) -> None:
-        from kennel.server import populate_memberships
+        from fido.server import populate_memberships
 
         cfg = Config(
             port=0,
@@ -2947,7 +2943,7 @@ class TestPopulateMemberships:
         assert "fido-bot" not in result
 
     def test_iterates_all_repos(self, tmp_path: Path) -> None:
-        from kennel.server import populate_memberships
+        from fido.server import populate_memberships
 
         cfg = Config(
             port=0,
@@ -2980,7 +2976,7 @@ class TestBootstrapIssueCaches:
     def test_calls_find_all_open_issues_with_owner_and_repo_name(
         self, tmp_path: Path
     ) -> None:
-        from kennel.server import bootstrap_issue_caches
+        from fido.server import bootstrap_issue_caches
 
         repos = self._make_repos(tmp_path)
         mock_gh = MagicMock()
@@ -2995,7 +2991,7 @@ class TestBootstrapIssueCaches:
     def test_calls_load_inventory_on_cache_with_returned_issues(
         self, tmp_path: Path
     ) -> None:
-        from kennel.server import bootstrap_issue_caches
+        from fido.server import bootstrap_issue_caches
 
         repos = self._make_repos(tmp_path)
         mock_gh = MagicMock()
@@ -3013,7 +3009,7 @@ class TestBootstrapIssueCaches:
         )
 
     def test_bootstraps_all_repos(self, tmp_path: Path) -> None:
-        from kennel.server import bootstrap_issue_caches
+        from fido.server import bootstrap_issue_caches
 
         repos = {
             "a/r1": RepoConfig(name="a/r1", work_dir=tmp_path),
@@ -3030,8 +3026,8 @@ class TestBootstrapIssueCaches:
         mock_gh.find_all_open_issues.assert_any_call("b", "r2")
 
     def test_per_repo_failure_is_swallowed(self, tmp_path: Path) -> None:
-        """A single GitHub API error must not prevent kennel from starting."""
-        from kennel.server import bootstrap_issue_caches
+        """A single GitHub API error must not prevent fido from starting."""
+        from fido.server import bootstrap_issue_caches
 
         repos = {
             "a/r1": RepoConfig(name="a/r1", work_dir=tmp_path),
@@ -3066,7 +3062,7 @@ class TestRun:
         )
 
     def test_run_starts_server(self, tmp_path: Path) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3091,7 +3087,7 @@ class TestRun:
         mock_server.server_close.assert_called_once()
 
     def test_run_keyboard_interrupt_kills_children(self, tmp_path: Path) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3119,7 +3115,7 @@ class TestRun:
     def test_run_installs_sigterm_and_sigint_handlers(self, tmp_path: Path) -> None:
         import signal as _sig
 
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3149,7 +3145,7 @@ class TestRun:
         assert _sig.SIGINT in installed
 
     def test_shutdown_handler_kills_children_and_exits(self, tmp_path: Path) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3190,7 +3186,7 @@ class TestRun:
         mock_server.server_close.assert_called_once()
 
     def test_run_format_includes_repo_name(self, tmp_path: Path) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3220,8 +3216,8 @@ class TestRun:
         assert "%(repo_name)s" in captured_kwargs[0]["format"]
 
     def test_run_adds_repo_context_filter_to_handlers(self, tmp_path: Path) -> None:
-        from kennel.server import run
-        from kennel.worker import RepoContextFilter
+        from fido.server import run
+        from fido.worker import RepoContextFilter
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3252,7 +3248,7 @@ class TestRun:
             assert any(isinstance(f, RepoContextFilter) for f in handler.filters)
 
     def test_run_stderr_tty_adds_stream_handler(self, tmp_path: Path) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3278,9 +3274,9 @@ class TestRun:
 
         mock_server.serve_forever.assert_called_once()
 
-    def test_run_creates_per_repo_log_handlers(self, tmp_path: Path) -> None:
-        from kennel.server import run
-        from kennel.worker import RepoContextFilter, RepoNameFilter
+    def test_run_logs_to_stderr_stream_only(self, tmp_path: Path) -> None:
+        from fido.server import run
+        from fido.worker import RepoContextFilter
 
         fake_cfg = Config(
             port=0,
@@ -3298,6 +3294,7 @@ class TestRun:
         mock_server.serve_forever.side_effect = KeyboardInterrupt
 
         captured_handlers: list = []
+        fake_stderr = MagicMock()
 
         def fake_basic_config(**kwargs):
             captured_handlers.extend(kwargs.get("handlers", []))
@@ -3315,29 +3312,20 @@ class TestRun:
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
+            _stderr=fake_stderr,
         )
 
-        # Two shared handlers (file + no tty stderr) + two per-repo handlers
-        assert len(captured_handlers) == 3  # shared file + 2 per-repo (no tty)
-        repo_handlers = [
-            h
-            for h in captured_handlers
-            if any(isinstance(f, RepoNameFilter) for f in h.filters)
-        ]
-        assert len(repo_handlers) == 2
-        short_names = {
-            f.short_name
-            for h in repo_handlers
-            for f in h.filters
-            if isinstance(f, RepoNameFilter)
-        }
-        assert short_names == {"myrepo", "other"}
-        for handler in repo_handlers:
-            assert any(isinstance(f, RepoContextFilter) for f in handler.filters)
+        import logging
 
-    def test_run_per_repo_log_file_path(self, tmp_path: Path) -> None:
-        from kennel.server import run
-        from kennel.worker import RepoNameFilter
+        assert len(captured_handlers) == 1
+        assert isinstance(captured_handlers[0], logging.StreamHandler)
+        assert captured_handlers[0].stream is fake_stderr
+        assert any(
+            isinstance(f, RepoContextFilter) for f in captured_handlers[0].filters
+        )
+
+    def test_run_does_not_create_file_log_handlers(self, tmp_path: Path) -> None:
+        from fido.server import run
 
         fake_cfg = Config(
             port=0,
@@ -3371,18 +3359,12 @@ class TestRun:
             _GitHub=MagicMock,
         )
 
-        repo_handler = next(
-            h
-            for h in captured_handlers
-            if any(isinstance(f, RepoNameFilter) for f in h.filters)
-        )
         import logging
 
-        assert isinstance(repo_handler, logging.FileHandler)
-        assert repo_handler.baseFilename.endswith("kennel-myrepo.log")
+        assert not any(isinstance(h, logging.FileHandler) for h in captured_handlers)
 
     def test_run_starts_watchdog_with_registry_and_repos(self, tmp_path: Path) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3412,7 +3394,7 @@ class TestRun:
         mock_watchdog_cls.return_value.start_thread.assert_called_once()
 
     def test_run_starts_rate_limit_monitor_with_gh(self, tmp_path: Path) -> None:
-        from kennel.server import WebhookHandler, run
+        from fido.server import WebhookHandler, run
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3446,7 +3428,7 @@ class TestRun:
     def test_run_starts_reconcile_watchdog_with_registry_repos_and_gh(
         self, tmp_path: Path
     ) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3480,11 +3462,11 @@ class TestRun:
 
     def test_run_installs_excepthooks(self, tmp_path: Path) -> None:
         """Uncaught exceptions (main thread and worker threads) should route
-        through the logger so tracebacks land in kennel.log, not just stderr."""
+        through the logger so tracebacks land in fido.log, not just stderr."""
         import sys as _sys
         import threading as _threading
 
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3512,7 +3494,7 @@ class TestRun:
             assert _threading.excepthook is not saved_thr
 
             # Call the hooks to confirm they don't raise and they go through logging.
-            import kennel.server as srv_mod
+            import fido.server as srv_mod
 
             with patch.object(srv_mod, "log") as mock_log:
                 try:
@@ -3546,7 +3528,7 @@ class TestRun:
     def test_run_calls_bootstrap_issue_caches_with_repos_gh_and_registry(
         self, tmp_path: Path
     ) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
@@ -3583,7 +3565,7 @@ def _self_restart_cfg(tmp_path: Path) -> Config:
     return Config(
         port=0,
         secret=b"test-secret",
-        repos={"owner/kennel": RepoConfig(name="owner/kennel", work_dir=tmp_path)},
+        repos={"owner/fido": RepoConfig(name="owner/fido", work_dir=tmp_path)},
         allowed_bots=frozenset(),
         log_level="WARNING",
         sub_dir=tmp_path / "sub",
@@ -3592,7 +3574,7 @@ def _self_restart_cfg(tmp_path: Path) -> Config:
 
 _MERGE_PAYLOAD = {
     "repository": {
-        "full_name": "owner/kennel",
+        "full_name": "owner/fido",
         "owner": {"login": "owner"},
         "default_branch": "main",
     },
@@ -3602,7 +3584,7 @@ _MERGE_PAYLOAD = {
 
 _PUSH_PAYLOAD = {
     "repository": {
-        "full_name": "owner/kennel",
+        "full_name": "owner/fido",
         "owner": {"login": "owner"},
         "default_branch": "main",
     },
@@ -3612,29 +3594,29 @@ _PUSH_PAYLOAD = {
 
 class TestNoop:
     def test_noop_after_post_is_callable_and_silent(self) -> None:
-        from kennel.server import _noop_after_post
+        from fido.server import _noop_after_post
 
         _noop_after_post()  # default hook — must not raise
 
 
 class TestParseRepoFromUrl:
     def test_parses_ssh_url(self) -> None:
-        from kennel.server import _parse_repo_from_url
+        from fido.server import _parse_repo_from_url
 
         assert _parse_repo_from_url("git@github.com:owner/repo.git") == "owner/repo"
 
     def test_parses_https_url(self) -> None:
-        from kennel.server import _parse_repo_from_url
+        from fido.server import _parse_repo_from_url
 
         assert _parse_repo_from_url("https://github.com/owner/repo.git") == "owner/repo"
 
     def test_parses_url_without_git_suffix(self) -> None:
-        from kennel.server import _parse_repo_from_url
+        from fido.server import _parse_repo_from_url
 
         assert _parse_repo_from_url("https://github.com/owner/repo") == "owner/repo"
 
     def test_returns_none_for_garbage(self) -> None:
-        from kennel.server import _parse_repo_from_url
+        from fido.server import _parse_repo_from_url
 
         assert _parse_repo_from_url("garbage") is None
 
@@ -3684,14 +3666,18 @@ class _FakeClock:
 
 
 class _FakeOsProcess:
-    """Minimal OsProcess fake: captures execvp and chdir calls."""
+    """Minimal OsProcess fake: captures execvp, exit, and chdir calls."""
 
     def __init__(self) -> None:
         self.execvp_calls: list[tuple[str, list[str]]] = []
+        self.exit_calls: list[int] = []
         self.chdir_calls: list[Any] = []
 
     def execvp(self, file: str, args: list[str]) -> None:
         self.execvp_calls.append((file, args))
+
+    def exit(self, code: int) -> None:
+        self.exit_calls.append(code)
 
     def chdir(self, path: Any) -> None:
         self.chdir_calls.append(path)
@@ -3702,14 +3688,14 @@ class _FakeOsProcess:
 
 class TestPreflightRepoIdentity:
     def test_succeeds_when_remote_matches(self, tmp_path: Path) -> None:
-        from kennel.server import preflight_repo_identity
+        from fido.server import preflight_repo_identity
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
         fake = _FakeProcessRunner([MagicMock(stdout="git@github.com:owner/repo.git\n")])
         preflight_repo_identity(repos, fake)  # no exception
 
     def test_raises_on_remote_mismatch(self, tmp_path: Path) -> None:
-        from kennel.server import preflight_repo_identity
+        from fido.server import preflight_repo_identity
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
         fake = _FakeProcessRunner(
@@ -3719,7 +3705,7 @@ class TestPreflightRepoIdentity:
             preflight_repo_identity(repos, fake)
 
     def test_raises_on_subprocess_error(self, tmp_path: Path) -> None:
-        from kennel.server import preflight_repo_identity
+        from fido.server import preflight_repo_identity
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
         fake = _FakeProcessRunner(error=subprocess.CalledProcessError(128, []))
@@ -3727,7 +3713,7 @@ class TestPreflightRepoIdentity:
             preflight_repo_identity(repos, fake)
 
     def test_raises_when_git_not_found(self, tmp_path: Path) -> None:
-        from kennel.server import preflight_repo_identity
+        from fido.server import preflight_repo_identity
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
         fake = _FakeProcessRunner(error=FileNotFoundError())
@@ -3735,7 +3721,7 @@ class TestPreflightRepoIdentity:
             preflight_repo_identity(repos, fake)
 
     def test_raises_on_unparseable_url(self, tmp_path: Path) -> None:
-        from kennel.server import preflight_repo_identity
+        from fido.server import preflight_repo_identity
 
         repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
         fake = _FakeProcessRunner([MagicMock(stdout="garbage\n")])
@@ -3743,7 +3729,7 @@ class TestPreflightRepoIdentity:
             preflight_repo_identity(repos, fake)
 
     def test_checks_all_repos(self, tmp_path: Path) -> None:
-        from kennel.server import preflight_repo_identity
+        from fido.server import preflight_repo_identity
 
         repos = {
             "owner/repo1": RepoConfig(name="owner/repo1", work_dir=tmp_path),
@@ -3759,7 +3745,7 @@ class TestPreflightRepoIdentity:
         assert fake.call_count == 2
 
     def test_raises_on_second_repo_mismatch(self, tmp_path: Path) -> None:
-        from kennel.server import preflight_repo_identity
+        from fido.server import preflight_repo_identity
 
         repos = {
             "owner/repo1": RepoConfig(name="owner/repo1", work_dir=tmp_path),
@@ -3775,7 +3761,7 @@ class TestPreflightRepoIdentity:
             preflight_repo_identity(repos, fake)
 
     def test_run_calls_preflight_repo_identity(self, tmp_path: Path) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = Config(
             port=0,
@@ -3807,7 +3793,7 @@ class TestPreflightRepoIdentity:
         mock_preflight.assert_called_once_with(fake_cfg.repos, ANY)
 
     def test_run_calls_preflight_tools(self, tmp_path: Path) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = Config(
             port=0,
@@ -3839,7 +3825,7 @@ class TestPreflightRepoIdentity:
         mock_preflight.assert_called_once_with(ANY)
 
     def test_run_calls_preflight_gh_auth(self, tmp_path: Path) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = Config(
             port=0,
@@ -3871,7 +3857,7 @@ class TestPreflightRepoIdentity:
         mock_preflight.assert_called_once()
 
     def test_run_calls_preflight_sub_dir(self, tmp_path: Path) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = Config(
             port=0,
@@ -3903,7 +3889,7 @@ class TestPreflightRepoIdentity:
         mock_preflight.assert_called_once_with(fake_cfg, ANY)
 
     def test_run_converts_preflight_error_to_system_exit(self, tmp_path: Path) -> None:
-        from kennel.server import run
+        from fido.server import run
 
         fake_cfg = Config(
             port=0,
@@ -3952,40 +3938,47 @@ class _FakeFilesystem:
 
 class TestPreflightTools:
     def test_succeeds_when_all_tools_found(self) -> None:
-        from kennel.server import preflight_tools
+        from fido.server import preflight_tools
 
         preflight_tools(_FakeFilesystem())  # no exception
 
     def test_raises_when_git_missing(self) -> None:
-        from kennel.server import preflight_tools
+        from fido.server import preflight_tools
 
         missing = "git"
         with pytest.raises(PreflightError, match=repr(missing)):
             preflight_tools(_FakeFilesystem(missing={missing}))
 
     def test_raises_when_gh_missing(self) -> None:
-        from kennel.server import preflight_tools
+        from fido.server import preflight_tools
 
         missing = "gh"
         with pytest.raises(PreflightError, match=repr(missing)):
             preflight_tools(_FakeFilesystem(missing={missing}))
 
     def test_raises_when_claude_missing(self) -> None:
-        from kennel.server import preflight_tools
+        from fido.server import preflight_tools
 
         missing = "claude"
         with pytest.raises(PreflightError, match=repr(missing)):
             preflight_tools(_FakeFilesystem(missing={missing}))
 
-    def test_required_tools_constant(self) -> None:
-        from kennel.server import _REQUIRED_TOOLS
+    def test_raises_when_copilot_missing(self) -> None:
+        from fido.server import preflight_tools
 
-        assert set(_REQUIRED_TOOLS) == {"git", "gh", "claude"}
+        missing = "copilot"
+        with pytest.raises(PreflightError, match=repr(missing)):
+            preflight_tools(_FakeFilesystem(missing={missing}))
+
+    def test_required_tools_constant(self) -> None:
+        from fido.server import _REQUIRED_TOOLS
+
+        assert set(_REQUIRED_TOOLS) == {"git", "gh", "claude", "copilot"}
 
 
 class TestPreflightSubDir:
     def test_succeeds_when_sub_dir_exists(self, tmp_path: Path) -> None:
-        from kennel.server import preflight_sub_dir
+        from fido.server import preflight_sub_dir
 
         sub = tmp_path / "sub"
         cfg = Config(
@@ -3999,7 +3992,7 @@ class TestPreflightSubDir:
         preflight_sub_dir(cfg, _FakeFilesystem(dirs={sub}))  # no exception
 
     def test_raises_when_sub_dir_missing(self, tmp_path: Path) -> None:
-        from kennel.server import preflight_sub_dir
+        from fido.server import preflight_sub_dir
 
         cfg = Config(
             port=0,
@@ -4013,7 +4006,7 @@ class TestPreflightSubDir:
             preflight_sub_dir(cfg, _FakeFilesystem())
 
     def test_error_message_includes_path(self, tmp_path: Path) -> None:
-        from kennel.server import preflight_sub_dir
+        from fido.server import preflight_sub_dir
 
         sub = tmp_path / "my-sub"
         cfg = Config(
@@ -4030,14 +4023,14 @@ class TestPreflightSubDir:
 
 class TestPreflightGhAuth:
     def test_succeeds_when_get_user_works(self) -> None:
-        from kennel.server import preflight_gh_auth
+        from fido.server import preflight_gh_auth
 
         mock_gh = MagicMock()
         mock_gh.get_user.return_value = "fido-bot"
         preflight_gh_auth(mock_gh)  # no exception
 
     def test_raises_when_get_user_raises_runtime_error(self) -> None:
-        from kennel.server import preflight_gh_auth
+        from fido.server import preflight_gh_auth
 
         mock_gh = MagicMock()
         mock_gh.get_user.side_effect = RuntimeError("not logged in")
@@ -4045,7 +4038,7 @@ class TestPreflightGhAuth:
             preflight_gh_auth(mock_gh)
 
     def test_raises_when_get_user_raises_any_exception(self) -> None:
-        from kennel.server import preflight_gh_auth
+        from fido.server import preflight_gh_auth
 
         mock_gh = MagicMock()
         mock_gh.get_user.side_effect = Exception("network error")
@@ -4055,43 +4048,39 @@ class TestPreflightGhAuth:
 
 class TestGetSelfRepo:
     def test_parses_ssh_remote(self, tmp_path: Path) -> None:
-        from kennel.server import _get_self_repo
+        from fido.server import _get_self_repo
 
-        proc = _FakeProcessRunner(
-            [MagicMock(stdout="git@github.com:owner/kennel.git\n")]
-        )
-        assert _get_self_repo(tmp_path, proc) == "owner/kennel"
+        proc = _FakeProcessRunner([MagicMock(stdout="git@github.com:owner/fido.git\n")])
+        assert _get_self_repo(tmp_path, proc) == "owner/fido"
 
     def test_parses_https_remote(self, tmp_path: Path) -> None:
-        from kennel.server import _get_self_repo
+        from fido.server import _get_self_repo
 
         proc = _FakeProcessRunner(
-            [MagicMock(stdout="https://github.com/owner/kennel.git\n")]
+            [MagicMock(stdout="https://github.com/owner/fido.git\n")]
         )
-        assert _get_self_repo(tmp_path, proc) == "owner/kennel"
+        assert _get_self_repo(tmp_path, proc) == "owner/fido"
 
     def test_parses_remote_without_git_suffix(self, tmp_path: Path) -> None:
-        from kennel.server import _get_self_repo
+        from fido.server import _get_self_repo
 
-        proc = _FakeProcessRunner(
-            [MagicMock(stdout="https://github.com/owner/kennel\n")]
-        )
-        assert _get_self_repo(tmp_path, proc) == "owner/kennel"
+        proc = _FakeProcessRunner([MagicMock(stdout="https://github.com/owner/fido\n")])
+        assert _get_self_repo(tmp_path, proc) == "owner/fido"
 
     def test_returns_none_on_subprocess_error(self, tmp_path: Path) -> None:
-        from kennel.server import _get_self_repo
+        from fido.server import _get_self_repo
 
         proc = _FakeProcessRunner([subprocess.CalledProcessError(128, [])])
         assert _get_self_repo(tmp_path, proc) is None
 
     def test_returns_none_on_file_not_found(self, tmp_path: Path) -> None:
-        from kennel.server import _get_self_repo
+        from fido.server import _get_self_repo
 
         proc = _FakeProcessRunner([FileNotFoundError()])
         assert _get_self_repo(tmp_path, proc) is None
 
     def test_returns_none_on_unparseable_url(self, tmp_path: Path) -> None:
-        from kennel.server import _get_self_repo
+        from fido.server import _get_self_repo
 
         proc = _FakeProcessRunner([MagicMock(stdout="garbage\n")])
         assert _get_self_repo(tmp_path, proc) is None
@@ -4099,19 +4088,19 @@ class TestGetSelfRepo:
 
 class TestGetHead:
     def test_returns_sha(self, tmp_path: Path) -> None:
-        from kennel.server import _get_head
+        from fido.server import _get_head
 
         proc = _FakeProcessRunner([MagicMock(stdout="abc123def456\n")])
         assert _get_head(tmp_path, proc) == "abc123def456"
 
     def test_returns_none_on_subprocess_error(self, tmp_path: Path) -> None:
-        from kennel.server import _get_head
+        from fido.server import _get_head
 
         proc = _FakeProcessRunner([subprocess.CalledProcessError(128, [])])
         assert _get_head(tmp_path, proc) is None
 
     def test_returns_none_on_file_not_found(self, tmp_path: Path) -> None:
-        from kennel.server import _get_head
+        from fido.server import _get_head
 
         proc = _FakeProcessRunner([FileNotFoundError()])
         assert _get_head(tmp_path, proc) is None
@@ -4119,15 +4108,15 @@ class TestGetHead:
 
 class TestRunnerDir:
     def test_returns_package_parent(self) -> None:
-        from kennel.server import _runner_dir
+        from fido.server import _runner_dir
 
         result = _runner_dir()
-        assert (result / "kennel" / "server.py").exists()
+        assert (result / "fido" / "server.py").exists()
 
 
 class TestPullWithBackoff:
     def test_success_on_first_try(self, tmp_path: Path) -> None:
-        from kennel.server import _pull_with_backoff
+        from fido.server import _pull_with_backoff
 
         proc = _FakeProcessRunner([MagicMock(), MagicMock()])  # fetch + reset
         clock = _FakeClock(times=[0.0, 0.0])  # start + success log
@@ -4140,7 +4129,7 @@ class TestPullWithBackoff:
         assert clock.slept == []
 
     def test_success_after_retry(self, tmp_path: Path) -> None:
-        from kennel.server import _pull_with_backoff
+        from fido.server import _pull_with_backoff
 
         # First attempt: fetch fails.  Second attempt: fetch + reset both succeed.
         proc = _FakeProcessRunner(
@@ -4159,7 +4148,7 @@ class TestPullWithBackoff:
         reset --hard the local state is forcibly replaced, so the worker
         catches up regardless of how the runner clone got into a weird state.
         """
-        from kennel.server import _pull_with_backoff
+        from fido.server import _pull_with_backoff
 
         proc = _FakeProcessRunner([MagicMock(), MagicMock()])  # fetch + reset
         clock = _FakeClock(times=[0.0, 0.0])
@@ -4168,7 +4157,7 @@ class TestPullWithBackoff:
         assert clock.slept == []
 
     def test_gives_up_after_all_retries_fail(self, tmp_path: Path) -> None:
-        from kennel.server import _pull_with_backoff
+        from fido.server import _pull_with_backoff
 
         # Fetch fails on every attempt — 4 attempts total.
         proc = _FakeProcessRunner(error=subprocess.CalledProcessError(1, []))
@@ -4182,7 +4171,7 @@ class TestPullWithBackoff:
 
     def test_reset_failure_retries(self, tmp_path: Path) -> None:
         """Fetch succeeds but reset fails — both commands matter for the result."""
-        from kennel.server import _pull_with_backoff
+        from fido.server import _pull_with_backoff
 
         proc = _FakeProcessRunner(
             [
@@ -4198,7 +4187,7 @@ class TestPullWithBackoff:
         assert clock.slept == [10]
 
     def test_gives_up_when_budget_exhausted(self, tmp_path: Path) -> None:
-        from kennel.server import _pull_with_backoff
+        from fido.server import _pull_with_backoff
 
         proc = _FakeProcessRunner(error=subprocess.CalledProcessError(1, []))
         # First attempt at t=0, elapsed=595; next delay of 10s would exceed 600s budget.
@@ -4208,7 +4197,7 @@ class TestPullWithBackoff:
         assert clock.slept == []
 
     def test_returns_false_on_file_not_found(self, tmp_path: Path) -> None:
-        from kennel.server import _pull_with_backoff
+        from fido.server import _pull_with_backoff
 
         proc = _FakeProcessRunner(error=FileNotFoundError())
         clock = _FakeClock(times=[0.0, 1.0, 12.0, 43.0, 104.0])
@@ -4216,8 +4205,8 @@ class TestPullWithBackoff:
 
 
 class TestStartupPull:
-    def test_reexecs_when_head_changes(self) -> None:
-        from kennel.server import _startup_pull
+    def test_exits_for_supervisor_when_head_changes(self) -> None:
+        from fido.server import _startup_pull
 
         # rev-parse before, fetch, reset, rev-parse after — different SHAs
         proc = _FakeProcessRunner(
@@ -4231,11 +4220,10 @@ class TestStartupPull:
         clock = _FakeClock(times=[0.0, 0.0])  # start + success log
         os_proc = _FakeOsProcess()
         _startup_pull(proc, clock, os_proc)
-        assert len(os_proc.execvp_calls) == 1
-        assert os_proc.execvp_calls[0][0] == "uv"
+        assert os_proc.exit_calls == [75]
 
-    def test_skips_exec_when_head_unchanged(self) -> None:
-        from kennel.server import _startup_pull
+    def test_skips_exit_when_head_unchanged(self) -> None:
+        from fido.server import _startup_pull
 
         proc = _FakeProcessRunner(
             [
@@ -4248,10 +4236,10 @@ class TestStartupPull:
         clock = _FakeClock(times=[0.0, 0.0])
         os_proc = _FakeOsProcess()
         _startup_pull(proc, clock, os_proc)
-        assert os_proc.execvp_calls == []
+        assert os_proc.exit_calls == []
 
     def test_continues_on_pull_failure(self) -> None:
-        from kennel.server import _startup_pull
+        from fido.server import _startup_pull
 
         # get_head fails → None; fetch fails with budget exhausted immediately
         proc = _FakeProcessRunner(
@@ -4260,10 +4248,10 @@ class TestStartupPull:
         clock = _FakeClock(times=[0.0, 601.0])  # budget exhausted on first attempt
         os_proc = _FakeOsProcess()
         _startup_pull(proc, clock, os_proc)
-        assert os_proc.execvp_calls == []
+        assert os_proc.exit_calls == []
 
-    def test_execs_when_head_unknown(self) -> None:
-        from kennel.server import _startup_pull
+    def test_does_not_exit_when_head_unknown(self) -> None:
+        from fido.server import _startup_pull
 
         # Both rev-parse calls fail → head_before and head_after are None
         proc = _FakeProcessRunner(
@@ -4272,8 +4260,8 @@ class TestStartupPull:
         clock = _FakeClock(times=[0.0, 0.0])
         os_proc = _FakeOsProcess()
         _startup_pull(proc, clock, os_proc)
-        # Can't compare HEAD — pull succeeded, log and continue without exec
-        assert os_proc.execvp_calls == []
+        # Can't compare HEAD — pull succeeded, log and continue without exit
+        assert os_proc.exit_calls == []
 
 
 class TestSelfRestart:
@@ -4292,7 +4280,7 @@ class TestSelfRestart:
         t.start()
         return srv, f"http://127.0.0.1:{port}", cfg, mock_registry
 
-    def test_triggers_exec_on_matching_repo(self, tmp_path: Path) -> None:
+    def test_triggers_restart_exit_on_matching_repo(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
@@ -4300,7 +4288,7 @@ class TestSelfRestart:
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner(
                     [
-                        MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                        MagicMock(stdout="git@github.com:owner/fido.git\n"),
                         MagicMock(),  # fetch
                         MagicMock(),  # reset
                     ]
@@ -4311,19 +4299,15 @@ class TestSelfRestart:
             )
             status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             assert status == 200
-            mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
+            mock_registry.stop_and_join.assert_called_once_with("owner/fido")
             assert os_proc.chdir_calls == [tmp_path]
-            assert len(os_proc.execvp_calls) == 1
-            assert os_proc.execvp_calls[0][0] == "uv"
-            assert os_proc.execvp_calls[0][1][:3] == ["uv", "run", "kennel"]
+            assert os_proc.exit_calls == [75]
         finally:
             srv.shutdown()
 
-    def test_kills_active_children_before_exec(self, tmp_path: Path) -> None:
-        """execvp replaces the process image; any claude subprocess not
-        killed first gets reparented to init and keeps writing to the
-        workspace (closes #829).  Self-restart must stop every worker
-        and SIGTERM every tracked child BEFORE the exec."""
+    def test_kills_active_children_before_restart_exit(self, tmp_path: Path) -> None:
+        """Self-restart must stop every worker and SIGTERM every tracked child
+        BEFORE exiting for the host supervisor."""
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
@@ -4341,19 +4325,16 @@ class TestSelfRestart:
             WebhookHandler._fn_kill_active_children = staticmethod(_kill)  # type: ignore[assignment]
 
             os_proc = _FakeOsProcess()
-            # Wrap execvp so we can observe ordering.
-            original_execvp = os_proc.execvp
-            orig_execvp_calls = os_proc.execvp_calls
 
-            def _tracking_execvp(cmd, args):  # type: ignore[no-untyped-def]
-                call_log.append("execvp")
-                orig_execvp_calls.append((cmd, args))
+            def _tracking_exit(code):  # type: ignore[no-untyped-def]
+                call_log.append(f"exit:{code}")
+                os_proc.exit_calls.append(code)
 
-            os_proc.execvp = _tracking_execvp  # type: ignore[method-assign]
+            os_proc.exit = _tracking_exit  # type: ignore[method-assign]
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner(
                     [
-                        MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                        MagicMock(stdout="git@github.com:owner/fido.git\n"),
                         MagicMock(),  # fetch
                         MagicMock(),  # reset
                     ]
@@ -4365,16 +4346,14 @@ class TestSelfRestart:
             status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             assert status == 200
             # stop_and_join + stop_all + kill_active_children MUST all run
-            # before execvp.
-            execvp_idx = call_log.index("execvp")
-            assert "stop_and_join:owner/kennel" in call_log[:execvp_idx]
-            assert "stop_all" in call_log[:execvp_idx]
-            assert "kill_active_children" in call_log[:execvp_idx]
+            # before host-supervised restart exit.
+            exit_idx = call_log.index("exit:75")
+            assert "stop_and_join:owner/fido" in call_log[:exit_idx]
+            assert "stop_all" in call_log[:exit_idx]
+            assert "kill_active_children" in call_log[:exit_idx]
             # Defensive: kill_active_children should be the last thing
-            # before execvp so it's the most recent TERM.
-            assert call_log[execvp_idx - 1] == "kill_active_children"
-            # Silence the cleanup-path noise.
-            del original_execvp
+            # before exit so it's the most recent TERM.
+            assert call_log[exit_idx - 1] == "kill_active_children"
         finally:
             srv.shutdown()
 
@@ -4395,7 +4374,7 @@ class TestSelfRestart:
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             mock_registry.stop_and_join.assert_not_called()
             assert proc.call_count == 1  # only the get-url call; no pull attempted
-            assert os_proc.execvp_calls == []
+            assert os_proc.exit_calls == []
         finally:
             srv.shutdown()
 
@@ -4412,7 +4391,7 @@ class TestSelfRestart:
             )
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             mock_registry.stop_and_join.assert_not_called()
-            assert os_proc.execvp_calls == []
+            assert os_proc.exit_calls == []
         finally:
             srv.shutdown()
 
@@ -4421,7 +4400,7 @@ class TestSelfRestart:
 
         Previously the worker for the merged repo was stopped before the
         pull, and stayed stopped after pull failure — silently leaving
-        kennel without a fido worker on its own repo.  Now the pull runs
+        fido without a fido worker on its own repo.  Now the pull runs
         first and the worker is only torn down on success.
         """
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
@@ -4431,7 +4410,7 @@ class TestSelfRestart:
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner(
                     [
-                        MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                        MagicMock(stdout="git@github.com:owner/fido.git\n"),
                         subprocess.CalledProcessError(
                             1, []
                         ),  # fetch fails; budget exhausted
@@ -4443,7 +4422,7 @@ class TestSelfRestart:
             )
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             mock_registry.stop_and_join.assert_not_called()
-            assert os_proc.execvp_calls == []
+            assert os_proc.exit_calls == []
         finally:
             srv.shutdown()
 
@@ -4455,7 +4434,7 @@ class TestSelfRestart:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
             proc = _FakeProcessRunner(
                 [
-                    MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                    MagicMock(stdout="git@github.com:owner/fido.git\n"),
                     MagicMock(),  # fetch
                     MagicMock(),  # reset
                 ]
@@ -4470,7 +4449,7 @@ class TestSelfRestart:
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             # All 3 proc calls (get-url + fetch + reset) happened before stop_and_join.
             assert proc.call_count == 3
-            mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
+            mock_registry.stop_and_join.assert_called_once_with("owner/fido")
         finally:
             srv.shutdown()
 
@@ -4482,7 +4461,7 @@ class TestSelfRestart:
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner(
                     [
-                        MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                        MagicMock(stdout="git@github.com:owner/fido.git\n"),
                         MagicMock(),  # fetch
                         MagicMock(),  # reset
                     ]
@@ -4492,8 +4471,8 @@ class TestSelfRestart:
                 os_proc=os_proc,
             )
             _post_webhook(url, cfg, "push", _PUSH_PAYLOAD)
-            mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
-            assert len(os_proc.execvp_calls) == 1
+            mock_registry.stop_and_join.assert_called_once_with("owner/fido")
+            assert os_proc.exit_calls == [75]
         finally:
             srv.shutdown()
 
@@ -4512,13 +4491,13 @@ class TestSelfRestart:
             payload = {**_PUSH_PAYLOAD, "ref": "refs/heads/feature-branch"}
             _post_webhook(url, cfg, "push", payload)
             assert proc.calls == []
-            assert os_proc.execvp_calls == []
+            assert os_proc.exit_calls == []
         finally:
             srv.shutdown()
 
     def _make_unregistered_server(self, tmp_path: Path):
-        """Server whose config does NOT include the kennel repo."""
-        from kennel.config import RepoMembership
+        """Server whose config does NOT include the fido repo."""
+        from fido.config import RepoMembership
 
         cfg = Config(
             port=0,
@@ -4556,7 +4535,7 @@ class TestSelfRestart:
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner(
                     [
-                        MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                        MagicMock(stdout="git@github.com:owner/fido.git\n"),
                         MagicMock(),  # fetch
                         MagicMock(),  # reset
                     ]
@@ -4567,7 +4546,7 @@ class TestSelfRestart:
             )
             status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             assert status == 200
-            assert len(os_proc.execvp_calls) == 1
+            assert os_proc.exit_calls == [75]
         finally:
             srv.shutdown()
 
@@ -4582,7 +4561,7 @@ class TestSelfRestart:
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner(
                     [
-                        MagicMock(stdout="git@github.com:owner/kennel.git\n"),
+                        MagicMock(stdout="git@github.com:owner/fido.git\n"),
                         MagicMock(),  # fetch
                         MagicMock(),  # reset
                     ]
@@ -4593,6 +4572,6 @@ class TestSelfRestart:
             )
             status = _post_webhook(url, cfg, "push", _PUSH_PAYLOAD)
             assert status == 200
-            assert len(os_proc.execvp_calls) == 1
+            assert os_proc.exit_calls == [75]
         finally:
             srv.shutdown()

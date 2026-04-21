@@ -39,5 +39,5 @@ Merge complete, no conflict markers remain, committed and pushed.
 ## Constraints
 - **Never** rebase, amend, or force-push. New commits only.
 - **Never** mark the PR as ready for review (`gh pr ready`). It must stay draft.
-- **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, TodoRead, or `kennel task`.
+- **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, TodoRead, or `./fido task`.
 - **Never** edit the PR body directly.

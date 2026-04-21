@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from kennel.provider import (
+from fido.provider import (
     ProviderID,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
@@ -51,7 +51,7 @@ class TestProviderLimitSnapshot:
         assert snapshot.closest_to_exhaustion() is first
 
     def test_closest_to_exhaustion_returns_none_for_empty_snapshot(self) -> None:
-        snapshot = ProviderLimitSnapshot(provider=ProviderID.GEMINI)
+        snapshot = ProviderLimitSnapshot(provider=ProviderID.CODEX)
         assert snapshot.closest_to_exhaustion() is None
 
 
@@ -139,7 +139,7 @@ class TestProviderPalette:
     """Provider-specific color palette + palette_for lookup + contrast audit."""
 
     def test_palette_for_claude_code(self) -> None:
-        from kennel.provider import ProviderID, palette_for
+        from fido.provider import ProviderID, palette_for
 
         palette = palette_for(ProviderID.CLAUDE_CODE)
         assert palette is not None
@@ -147,7 +147,7 @@ class TestProviderPalette:
         assert palette.bright_fg == (255, 160, 60)
 
     def test_palette_for_copilot_cli(self) -> None:
-        from kennel.provider import ProviderID, palette_for
+        from fido.provider import ProviderID, palette_for
 
         palette = palette_for(ProviderID.COPILOT_CLI)
         assert palette is not None
@@ -157,7 +157,7 @@ class TestProviderPalette:
     def test_palette_for_codex_returns_none(self) -> None:
         # CODEX has no palette registered today — callers must
         # handle None as "render without provider color", not as an error.
-        from kennel.provider import ProviderID, palette_for
+        from fido.provider import ProviderID, palette_for
 
         assert palette_for(ProviderID.CODEX) is None
 
@@ -186,7 +186,7 @@ class TestProviderPalette:
         tweaks colors: the tint's dim_bg must preserve contrast with the
         most common fg color used in status lines (white-ish).
         """
-        from kennel.provider import PROVIDER_PALETTES
+        from fido.provider import PROVIDER_PALETTES
 
         white = (255, 255, 255)
         failures: list[str] = []
@@ -204,7 +204,7 @@ class TestProviderPalette:
         Light-terminal users get worse contrast — they should opt out
         with NO_COLOR.  This test guards the dark-terminal happy path.
         """
-        from kennel.provider import PROVIDER_PALETTES
+        from fido.provider import PROVIDER_PALETTES
 
         black = (0, 0, 0)
         failures: list[str] = []

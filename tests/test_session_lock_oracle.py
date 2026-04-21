@@ -1,7 +1,7 @@
 """Tests for the session-lock FSM oracle wired into OwnedSession.
 
 The oracle runs the Rocq-extracted ``transition`` function from
-``kennel/models_generated/transition.py`` on every outermost lock
+``src/fido/rocq/transition.py`` on every outermost lock
 acquire and release.  Divergence from the proved model raises a
 ``RuntimeError`` naming the violated theorem so bugs are immediately
 identifiable from the traceback.
@@ -15,12 +15,12 @@ from __future__ import annotations
 
 import pytest
 
-from kennel.models_generated.transition import (
+from fido.provider import OwnedSession
+from fido.rocq.transition import (
     Free,
     OwnedByHandler,
     OwnedByWorker,
 )
-from kennel.provider import OwnedSession
 
 
 class _FakeSession(OwnedSession):

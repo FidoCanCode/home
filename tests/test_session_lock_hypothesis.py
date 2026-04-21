@@ -1,7 +1,7 @@
 """Hypothesis property tests for the session-lock FSM.
 
 The extracted ``transition`` function in
-``kennel/models_generated/transition.py`` is the runtime oracle for
+``src/fido/rocq/transition.py`` is the runtime oracle for
 ``OwnedSession``.  These tests drive it with randomly generated event
 sequences to confirm that the proved invariants hold in the extracted
 Python — not just for the specific cases enumerated in the unit tests,
@@ -20,7 +20,7 @@ from __future__ import annotations
 from hypothesis import given
 from hypothesis import strategies as st
 
-from kennel.models_generated.transition import (
+from fido.rocq.transition import (
     Free,
     HandlerAcquire,
     HandlerRelease,
@@ -31,7 +31,7 @@ from kennel.models_generated.transition import (
     WorkerRelease,
     transition,
 )
-from kennel.models_generated.transition import (
+from fido.rocq.transition import (
     State as FsmState,
 )
 

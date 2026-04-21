@@ -14,11 +14,11 @@ A CI check is failing. All context (PR, repo, branch, check name, failure log) i
 
 ### 2. Mark complete
 ```bash
-uv run --project /home/rhencke/workspace/kennel kennel task <work_dir> complete "CI failure: <check-name>"
+cd /home/rhencke/home-runner && ./fido task <work_dir> complete "CI failure: <check-name>"
 ```
 
-Do NOT use TaskCreate, TaskUpdate, TodoWrite, or any other task tools. Only `kennel task`.
-Do NOT edit the PR body directly. The kennel server owns PR body sync.
+Do NOT use TaskCreate, TaskUpdate, TodoWrite, or any other task tools. Only `./fido task`.
+Do NOT edit the PR body directly. The Fido server owns PR body sync.
 
 ## Done when
 Fix committed and pushed, task marked complete.
@@ -26,5 +26,5 @@ Fix committed and pushed, task marked complete.
 ## Constraints
 - **Never** mark the PR as ready for review (`gh pr ready`). It must stay draft.
 - **Never** rebase, amend, or force-push. New commits only.
-- **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, or TodoRead. Only `kennel task`.
+- **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, or TodoRead. Only `./fido task`.
 - **Never** edit the PR body directly.

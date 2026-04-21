@@ -1,4 +1,4 @@
-"""Tests for kennel.cli — add/complete/list subcommands."""
+"""Tests for fido.cli — add/complete/list subcommands."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from kennel.cli import Cmd, build_parser, main
-from kennel.types import TaskType
+from fido.cli import Cmd, build_parser, main
+from fido.types import TaskType
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -94,7 +94,7 @@ class TestCmdAdd:
             tmp_path, TaskType.SPEC, "my task", "some description"
         )
         capsys.readouterr()  # consume add output
-        from kennel.tasks import list_tasks
+        from fido.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert len(tasks) == 1
@@ -106,7 +106,7 @@ class TestCmdAdd:
         _task_file(tmp_path)
         Cmd(github=MagicMock()).add(tmp_path, TaskType.CI, "bare task", "")
         capsys.readouterr()
-        from kennel.tasks import list_tasks
+        from fido.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert tasks[0]["description"] == ""
@@ -120,7 +120,7 @@ class TestCmdAdd:
             tmp_path, TaskType.THREAD, "threaded", "", comment_id=42, repo="a/b", pr=7
         )
         capsys.readouterr()
-        from kennel.tasks import list_tasks
+        from fido.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert tasks[0]["thread"] == {"comment_id": 42, "repo": "a/b", "pr": 7}
@@ -132,7 +132,7 @@ class TestCmdAdd:
             tmp_path, TaskType.THREAD, "threaded", "", comment_id=99
         )
         capsys.readouterr()
-        from kennel.tasks import list_tasks
+        from fido.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert tasks[0]["thread"] == {"comment_id": 99}
@@ -159,7 +159,7 @@ class TestCmdAdd:
             pr=7,
         )
         capsys.readouterr()
-        from kennel.tasks import list_tasks
+        from fido.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert len(tasks) == 1
@@ -184,7 +184,7 @@ class TestCmdComplete:
         task = cmd.add(tmp_path, TaskType.SPEC, "task to finish", "")
         capsys.readouterr()
         cmd.complete(tmp_path, task["id"])
-        from kennel.tasks import list_tasks
+        from fido.tasks import list_tasks
 
         assert list_tasks(tmp_path)[0]["status"] == "completed"
 
@@ -192,7 +192,7 @@ class TestCmdComplete:
         self, tmp_path: Path, capsys, caplog
     ) -> None:
         _task_file(tmp_path)
-        from kennel.tasks import add_task
+        from fido.tasks import add_task
 
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
         task = add_task(
@@ -223,7 +223,7 @@ class TestCmdComplete:
             }
         ]
 
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             Cmd(github=mock_github).complete(tmp_path, task["id"])
 
         mock_github.resolve_thread.assert_called_once_with("thread_node_abc")
@@ -233,7 +233,7 @@ class TestCmdComplete:
         self, tmp_path: Path, capsys, caplog
     ) -> None:
         _task_file(tmp_path)
-        from kennel.tasks import add_task
+        from fido.tasks import add_task
 
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
         task = add_task(
@@ -257,7 +257,7 @@ class TestCmdComplete:
             },
         ]
 
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             Cmd(github=mock_github).complete(tmp_path, task["id"])
 
         mock_github.resolve_thread.assert_not_called()
@@ -267,7 +267,7 @@ class TestCmdComplete:
         self, tmp_path: Path
     ) -> None:
         _task_file(tmp_path)
-        from kennel.tasks import add_task
+        from fido.tasks import add_task
 
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
         task = add_task(
@@ -286,7 +286,7 @@ class TestCmdComplete:
         self, tmp_path: Path, caplog
     ) -> None:
         _task_file(tmp_path)
-        from kennel.tasks import add_task
+        from fido.tasks import add_task
 
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
         task = add_task(
@@ -297,13 +297,13 @@ class TestCmdComplete:
         mock_github.get_user.side_effect = RuntimeError("network error")
 
         # Should not raise; exception is swallowed and logged
-        with caplog.at_level(logging.WARNING, logger="kennel"):
+        with caplog.at_level(logging.WARNING, logger="fido"):
             Cmd(github=mock_github).complete(tmp_path, task["id"])
         assert "thread resolution skipped" in caplog.text
 
     def test_completes_task_with_thread_already_resolved(self, tmp_path: Path) -> None:
         _task_file(tmp_path)
-        from kennel.tasks import add_task
+        from fido.tasks import add_task
 
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
         task = add_task(
@@ -335,7 +335,7 @@ class TestCmdComplete:
     def test_thread_missing_fields_skips(self, tmp_path: Path) -> None:
         """Thread dict with missing fields should silently skip resolution."""
         _task_file(tmp_path)
-        from kennel.tasks import add_task
+        from fido.tasks import add_task
 
         # thread missing 'pr' and 'comment_id'
         task = add_task(
@@ -386,7 +386,7 @@ class TestMain:
         _task_file(tmp_path)
         main([str(tmp_path), "add", "spec", "task title"], _GitHub=MagicMock)
         capsys.readouterr()
-        from kennel.tasks import list_tasks
+        from fido.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert tasks[0]["title"] == "task title"
@@ -409,7 +409,7 @@ class TestMain:
             _GitHub=MagicMock,
         )
         capsys.readouterr()
-        from kennel.tasks import list_tasks
+        from fido.tasks import list_tasks
 
         tasks = list_tasks(tmp_path)
         assert tasks[0]["thread"] == {"comment_id": 55, "repo": "r/r", "pr": 3}
@@ -420,7 +420,7 @@ class TestMain:
         out = capsys.readouterr().out
         task_id = json.loads(out)["id"]
         main([str(tmp_path), "complete", task_id], _GitHub=MagicMock)
-        from kennel.tasks import list_tasks
+        from fido.tasks import list_tasks
 
         assert list_tasks(tmp_path)[0]["status"] == "completed"
 
@@ -441,7 +441,7 @@ class TestMain:
         """Fallback case in match statement raises AssertionError."""
         from unittest.mock import MagicMock
 
-        import kennel.cli as cli_mod
+        import fido.cli as cli_mod
 
         fake_args = MagicMock()
         fake_args.command = "bogus"

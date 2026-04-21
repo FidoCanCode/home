@@ -6,9 +6,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from kennel.claude import ClaudeClient
-from kennel.prompts import Prompts
-from kennel.tasks import (
+from fido.claude import ClaudeClient
+from fido.prompts import Prompts
+from fido.tasks import (
     Tasks,
     _apply_reorder,
     _compute_thread_changes,
@@ -22,7 +22,7 @@ from kennel.tasks import (
     unblock_tasks,
     update_task,
 )
-from kennel.types import TaskStatus, TaskType
+from fido.types import TaskStatus, TaskType
 
 
 def _client(run_turn_return: str = "") -> MagicMock:
@@ -554,7 +554,7 @@ class TestReorderTasks:
 
         self._add(tmp_path, "Task A")
         with patch(
-            "kennel.tasks.ClaudeClient",
+            "fido.tasks.ClaudeClient",
             return_value=_client(""),
         ) as mock_cls:
             reorder_tasks(tmp_path, "")
@@ -960,7 +960,7 @@ class TestComputeThreadChanges:
 
 class TestTasks:
     def test_list_returns_all_tasks(self, tmp_path: Path) -> None:
-        from kennel.types import TaskType
+        from fido.types import TaskType
 
         work_dir = tmp_path / "work"
         work_dir.mkdir()
@@ -970,7 +970,7 @@ class TestTasks:
         assert result[0]["title"] == "Task A"
 
     def test_add_creates_task(self, tmp_path: Path) -> None:
-        from kennel.types import TaskType
+        from fido.types import TaskType
 
         work_dir = tmp_path / "work"
         work_dir.mkdir()
@@ -979,7 +979,7 @@ class TestTasks:
         assert task["type"] == "ci"
 
     def test_complete_by_id_marks_task_completed(self, tmp_path: Path) -> None:
-        from kennel.types import TaskType
+        from fido.types import TaskType
 
         work_dir = tmp_path / "work"
         work_dir.mkdir()
@@ -988,7 +988,7 @@ class TestTasks:
         assert list_tasks(work_dir)[0]["status"] == "completed"
 
     def test_has_pending_for_comment_returns_bool(self, tmp_path: Path) -> None:
-        from kennel.types import TaskType
+        from fido.types import TaskType
 
         work_dir = tmp_path / "work"
         work_dir.mkdir()
@@ -997,7 +997,7 @@ class TestTasks:
         assert Tasks(work_dir).has_pending_for_comment(99) is False
 
     def test_remove_deletes_task(self, tmp_path: Path) -> None:
-        from kennel.types import TaskType
+        from fido.types import TaskType
 
         work_dir = tmp_path / "work"
         work_dir.mkdir()
@@ -1006,7 +1006,7 @@ class TestTasks:
         assert list_tasks(work_dir) == []
 
     def test_update_changes_status(self, tmp_path: Path) -> None:
-        from kennel.types import TaskStatus, TaskType
+        from fido.types import TaskStatus, TaskType
 
         work_dir = tmp_path / "work"
         work_dir.mkdir()
@@ -1021,7 +1021,7 @@ class TestTasks:
             assert tasks == []
 
     def test_modify_persists_changes(self, tmp_path: Path) -> None:
-        from kennel.types import TaskType
+        from fido.types import TaskType
 
         work_dir = tmp_path / "work"
         work_dir.mkdir()
@@ -1114,7 +1114,7 @@ class TestTasksCompleteWithResolve:
             }
         ]
 
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             Tasks(work_dir).complete_with_resolve(task["id"], gh)
 
         gh.resolve_thread.assert_called_once_with("thread_node_abc")
@@ -1146,7 +1146,7 @@ class TestTasksCompleteWithResolve:
             },
         ]
 
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             Tasks(work_dir).complete_with_resolve(task["id"], gh)
 
         gh.resolve_thread.assert_not_called()
@@ -1202,6 +1202,6 @@ class TestTasksCompleteWithResolve:
         gh = MagicMock()
         gh.get_user.side_effect = RuntimeError("network error")
 
-        with caplog.at_level(logging.WARNING, logger="kennel"):
+        with caplog.at_level(logging.WARNING, logger="fido"):
             Tasks(work_dir).complete_with_resolve(task["id"], gh)
         assert "thread resolution skipped" in caplog.text

@@ -1,4 +1,4 @@
-"""Tests for kennel.chat — interactive claude session launcher."""
+"""Tests for fido.chat — interactive claude session launcher."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kennel.chat import run
+from fido.chat import main as chat_main
+from fido.chat import run
 
 
 class TestChat:
@@ -19,7 +20,7 @@ class TestChat:
         tmp_path: Path,
         extra_kw: dict | None = None,
     ) -> tuple[MagicMock, MagicMock]:
-        """Run kennel.chat.run with a real persona file and mocked side-effects.
+        """Run fido.chat.run with a real persona file and mocked side-effects.
 
         Returns (chdir_mock, execvp_mock).
         """
@@ -165,25 +166,30 @@ class TestChat:
             )
             assert mock_env["CLAUDE_CODE_NO_FLICKER"] == "1"
 
+    def test_main_passes_argv_to_run(self) -> None:
+        with patch("fido.chat.run") as mock_run:
+            chat_main(["hello"])
+        mock_run.assert_called_once_with(["hello"])
+
 
 class TestChatViaMain:
     def test_chat_subcommand_dispatches(self, tmp_path: Path) -> None:
-        """'kennel chat' should delegate to kennel.chat.run."""
+        """'fido chat' should delegate to fido.chat.run."""
         persona_file = tmp_path / "persona.md"
         persona_file.write_text("woof")
 
-        with patch("kennel.chat.run") as mock_run:
-            from kennel.main import main
+        with patch("fido.chat.main") as mock_main:
+            from fido.main import main
 
             main(["chat", "hello"])
 
-        mock_run.assert_called_once_with(["hello"])
+        mock_main.assert_called_once_with(["hello"])
 
     def test_chat_subcommand_no_extra_args(self, tmp_path: Path) -> None:
-        """'kennel chat' with no extra args passes empty list."""
-        with patch("kennel.chat.run") as mock_run:
-            from kennel.main import main
+        """'fido chat' with no extra args passes empty list."""
+        with patch("fido.chat.main") as mock_main:
+            from fido.main import main
 
             main(["chat"])
 
-        mock_run.assert_called_once_with([])
+        mock_main.assert_called_once_with([])

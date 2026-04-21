@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from kennel.config import Config
-from kennel.provider import ProviderID
+from fido.config import Config
+from fido.provider import ProviderID
 
 
 class TestFromArgs:

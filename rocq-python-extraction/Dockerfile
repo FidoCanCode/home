@@ -11,6 +11,9 @@ RUN sudo apt-get update \
         linux-libc-dev \
     && sudo rm -rf /var/lib/apt/lists/*
 
+WORKDIR /workspace
+COPY --chown=opam:opam rocq-python-extraction.opam dune-project ./
+
 # Add the rocq-prover opam repository, which carries rocq-stdlib.9.1.0 (not
 # yet in the default opam repository).  Then install Rocq 9.2.0, rocq-stdlib
 # 9.1.0, and a pinned dune, and clean up the opam cache.  rocq-stdlib.9.1.0
