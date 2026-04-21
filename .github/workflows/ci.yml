@@ -18,7 +18,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/rocq-models
-          key: buildx-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-${{ hashFiles('rocq-python-extraction/**', 'models/**', 'dune-workspace', '.python-version', 'pyproject.toml', 'uv.lock', 'build', '.dockerignore', '.githooks/pre-commit') }}
+          key: buildx-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-${{ hashFiles('rocq-python-extraction/**', 'models/**', 'dune-workspace', '.python-version', 'pyproject.toml', 'uv.lock', 'package.json', 'package-lock.json', 'build', 'fido', 'docker-bake.hcl', '.dockerignore', '.githooks/pre-commit') }}
           restore-keys: |
             buildx-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-
             buildx-${{ runner.os }}-

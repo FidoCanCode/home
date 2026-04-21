@@ -18,7 +18,7 @@ import subprocess
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol
 
 # ---------------------------------------------------------------------------
 # Process execution
@@ -122,13 +122,18 @@ class RealFilesystem:
 class OsProcess(Protocol):
     """OS-level process control.
 
-    Wraps :func:`os.execvp`, :func:`os.chdir`, and :func:`signal.signal`
+    Wraps :func:`os.execvp`, :func:`os.chdir`, :func:`os._exit`, and
+    :func:`signal.signal`
     so callers can be tested without replacing the running process or
     mutating global OS state.
     """
 
     def execvp(self, file: str, args: list[str]) -> None:
         """Replace the running process image — equivalent to :func:`os.execvp`."""
+        ...
+
+    def exit(self, code: int) -> NoReturn:
+        """Exit the current process immediately — equivalent to :func:`os._exit`."""
         ...
 
     def chdir(self, path: Path | str) -> None:
@@ -148,6 +153,9 @@ class RealOsProcess:
 
     def execvp(self, file: str, args: list[str]) -> None:
         os.execvp(file, args)
+
+    def exit(self, code: int) -> NoReturn:
+        os._exit(code)
 
     def chdir(self, path: Path | str) -> None:
         os.chdir(path)

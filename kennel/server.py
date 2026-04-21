@@ -53,7 +53,7 @@ from kennel.watchdog import (  # noqa: PLC2701
     ReconcileWatchdog,
     Watchdog,
 )
-from kennel.worker import RepoContextFilter, RepoNameFilter
+from kennel.worker import RepoContextFilter
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +62,7 @@ log = logging.getLogger(__name__)
 # exceeds _PULL_BUDGET_SECONDS, even if a retry window remains.
 _PULL_BACKOFF_DELAYS: tuple[int, ...] = (10, 30, 60)
 _PULL_BUDGET_SECONDS: float = 600.0
+_RESTART_EXIT_CODE = 75
 
 # XML namespace URIs for the /status endpoint structural XML.
 _NS_KENNEL = "https://fidocancode.dog/kennel"
@@ -454,7 +455,7 @@ def preflight_repo_identity(
         log.info("preflight: %s: work_dir identity confirmed", name)
 
 
-_REQUIRED_TOOLS = ("git", "gh", "claude")
+_REQUIRED_TOOLS = ("git", "gh", "claude", "copilot")
 
 
 def preflight_tools(fs: Filesystem) -> None:
@@ -1018,21 +1019,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
             log.error("self-restart: gave up — running old version (%s)", reason)
             return
         log.info(
-            "self-restart: runner synced — stopping workers and re-execing (%s)", reason
+            "self-restart: runner synced — stopping workers and exiting %d (%s)",
+            _RESTART_EXIT_CODE,
+            reason,
         )
         # Stop the merged repo's worker cleanly.
         self.registry.stop_and_join(repo_name)
         # Tear down every remaining worker and SIGTERM all tracked claude
-        # subprocesses before execvp (closes #829).  execvp replaces the
-        # process image immediately; any subprocess not explicitly killed
-        # here gets reparented to init and keeps running after restart —
-        # accepting its still-open stdin, still writing to the workspace.
+        # subprocesses before asking the host supervisor to restart (closes
+        # #829). Any subprocess not explicitly killed here gets reparented to
+        # init and keeps running after restart: accepting its still-open stdin,
+        # still writing to the workspace.
         # We've seen this orphan a session that then committed + reset
         # over an in-progress human edit hours after kennel was "stopped".
         self.registry.stop_all()
         type(self)._fn_kill_active_children()
         self.infra.os_proc.chdir(runner_dir)
-        self.infra.os_proc.execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
+        self.infra.os_proc.exit(_RESTART_EXIT_CODE)
 
     def do_GET(self) -> None:
         if self.path == "/status":
@@ -1233,7 +1236,7 @@ def bootstrap_issue_caches(
 
 
 def _startup_pull(proc: ProcessRunner, clock: Clock, os_proc: OsProcess) -> None:
-    """Sync the runner clone on startup and re-exec if HEAD changed."""
+    """Sync the runner clone on startup and exit for host rebuild if HEAD changed."""
     runner_dir = _runner_dir()
     head_before = _get_head(runner_dir, proc)
     if not _pull_with_backoff(runner_dir, proc, clock):
@@ -1242,11 +1245,12 @@ def _startup_pull(proc: ProcessRunner, clock: Clock, os_proc: OsProcess) -> None
     head_after = _get_head(runner_dir, proc)
     if head_before and head_after and head_before != head_after:
         log.info(
-            "startup: runner updated %s → %s — re-execing",
+            "startup: runner updated %s → %s — exiting %d for host rebuild",
             head_before[:12],
             head_after[:12],
+            _RESTART_EXIT_CODE,
         )
-        os_proc.execvp("uv", ["uv", "run", "kennel", *sys.argv[1:]])
+        os_proc.exit(_RESTART_EXIT_CODE)
     elif head_before and head_after:
         log.info("startup: runner already up to date at %s", head_before[:12])
     else:
@@ -1277,23 +1281,10 @@ def run(
 ) -> None:
     config = _from_args()
 
-    log_file = _path_home() / "log" / "kennel.log"
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-
     repo_filter = RepoContextFilter()
-    handlers: list[logging.Handler] = [logging.FileHandler(log_file)]
-    if _stderr.isatty():
-        handlers.append(logging.StreamHandler(_stderr))
+    handlers: list[logging.Handler] = [logging.StreamHandler(_stderr)]
     for handler in handlers:
         handler.addFilter(repo_filter)
-
-    for repo_full_name in config.repos:
-        short_name = repo_full_name.split("/")[-1]
-        repo_log = log_file.parent / f"kennel-{short_name}.log"
-        repo_handler = logging.FileHandler(repo_log)
-        repo_handler.addFilter(repo_filter)
-        repo_handler.addFilter(RepoNameFilter(short_name))
-        handlers.append(repo_handler)
 
     _basic_config(
         level=getattr(logging, config.log_level, logging.INFO),
@@ -1302,10 +1293,8 @@ def run(
         handlers=handlers,
     )
 
-    # Route uncaught exceptions through the logger so tracebacks land in
-    # kennel.log, not just ~/log/kennel-crash.log (where start-kennel.sh
-    # redirects stderr).  Before this, RCA on crashes required reading two
-    # different log files.
+    # Route uncaught exceptions through the logger so Docker/stdout captures
+    # tracebacks through the same stream as normal runtime logs.
     def _log_uncaught(
         exc_type: type[BaseException], exc_value: BaseException, exc_tb: Any
     ) -> None:

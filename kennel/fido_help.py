@@ -9,8 +9,9 @@ def main() -> None:
 
 Commands:
   help              Show this help.
-  up [--detach]    Run the kennel server.
-  down              Stop the detached kennel server container.
+  up                Run and supervise the kennel server in the foreground.
+  down              Remove any named kennel server container.
+  warm              Warm buildx CI and runtime image targets.
   status            Print kennel status.
   task              Manage repo task files.
   gh-status         Set FidoCanCode's GitHub profile status.

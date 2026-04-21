@@ -3,104 +3,412 @@ set -euo pipefail
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 image=${FIDO_IMAGE:-fido:local}
+dev_image=${FIDO_DEV_IMAGE:-fido-dev:local}
+run_image=$image
 container=${FIDO_CONTAINER:-fido}
 secret=${FIDO_SECRET:-$HOME/.kennel-secret}
-cache_dir="$repo_root/.cache/rocq-models/fido"
-cache_next="$repo_root/.cache/rocq-models/fido-next"
+auto_update=${FIDO_AUTO_UPDATE:-1}
+builder=${FIDO_BUILDX_BUILDER:-fido}
+need_secret=0
+named_run=0
+restart_codes=" 3 75 "
+stop_codes=" 0 130 137 143 "
+
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --no-auto-update)
+      auto_update=0
+      ;;
+    --auto-update)
+      auto_update=1
+      ;;
+    *)
+      args+=("$1")
+      ;;
+  esac
+  shift
+done
+set -- "${args[@]}"
 command=${1:-help}
-daemon=
+
+log() {
+  printf '%(%H:%M:%S)T %-5s [supervisor] %s\n' -1 "$1" "$2" >&2
+}
+
+buildx_driver() {
+  local inspect_output
+  if ! inspect_output=$(docker buildx inspect 2>&1); then
+    echo "warning: docker buildx inspect failed; assuming docker driver" >&2
+    echo "$inspect_output" >&2
+    printf 'docker\n'
+    return
+  fi
+  awk -F': *' '/^Driver:/{print $2; exit}' <<<"$inspect_output"
+}
+
+warm_targets=(rocq-image format lint typecheck generated-typecheck test fido fido-dev)
+
+ensure_buildx_builder() {
+  local driver
+  driver=$(buildx_driver)
+  if [ "$driver" != "docker" ]; then
+    return
+  fi
+
+  log INFO "switching buildx to docker-container builder=$builder"
+  if docker buildx inspect "$builder" >/dev/null 2>&1; then
+    docker buildx use "$builder" >/dev/null
+  else
+    docker buildx create --name "$builder" --driver docker-container --use >/dev/null
+  fi
+  docker buildx inspect --bootstrap >/dev/null
+}
+
+warm_input_hash() {
+  local paths=(
+    build
+    .dockerignore
+    .githooks
+    .github
+    .python-version
+    dune-workspace
+    docker-bake.hcl
+    fido
+    package-lock.json
+    package.json
+    pyproject.toml
+    pyrightconfig.json
+    uv.lock
+    README.md
+    models
+    kennel
+    tests
+    rocq-python-extraction
+  )
+  local files=()
+  mapfile -t files < <(
+    git -C "$repo_root" ls-files --cached --others --exclude-standard -- "${paths[@]}" \
+      | LC_ALL=C sort
+  )
+  if [ "${#files[@]}" -eq 0 ]; then
+    printf 'empty\n'
+    return
+  fi
+  (
+    cd "$repo_root"
+    sha256sum "${files[@]}" | sha256sum | awk '{print $1}'
+  )
+}
+
+image_input_hash() {
+  local target=$1
+  local paths=(
+    .dockerignore
+    .python-version
+    docker-bake.hcl
+    models/Dockerfile
+    pyproject.toml
+    uv.lock
+  )
+  if [ "$target" = "fido" ]; then
+    paths+=(package-lock.json package.json)
+  fi
+  local files=()
+  mapfile -t files < <(
+    git -C "$repo_root" ls-files --cached --others --exclude-standard -- "${paths[@]}" \
+      | LC_ALL=C sort
+  )
+  (
+    cd "$repo_root"
+    {
+      if [ "${#files[@]}" -gt 0 ]; then
+        sha256sum "${files[@]}"
+      else
+        printf 'empty\n'
+      fi
+      printf 'target %s\n' "$target"
+      printf 'uid %s\n' "$(id -u)"
+      printf 'gid %s\n' "$(id -g)"
+      printf 'user %s\n' "$(id -un)"
+      printf 'home %s\n' "$HOME"
+    } | sha256sum | awk '{print $1}'
+  )
+}
+
+image_cache_ready() {
+  local target=$1
+  local tag=$2
+  local driver=$3
+  docker image inspect "$tag" >/dev/null 2>&1 || return 1
+  if [ "$driver" = "docker" ]; then
+    return 0
+  fi
+  [ -d "$repo_root/.cache/rocq-models/$target" ]
+}
+
+warm_cache_ready() {
+  local driver=$1
+  local target
+  docker image inspect "$image" "$dev_image" >/dev/null 2>&1 || return 1
+  if [ "$driver" = "docker" ]; then
+    return 0
+  fi
+  for target in "${warm_targets[@]}"; do
+    [ -d "$repo_root/.cache/rocq-models/$target" ] || return 1
+  done
+}
+
+sync_runner() {
+  if [ "$auto_update" = "0" ]; then
+    log INFO "auto-update disabled; using dirty runner clone as-is"
+    return
+  fi
+
+  log INFO "cleaning runner clone before sync"
+  git -C "$repo_root" reset --hard
+  git -C "$repo_root" clean -fd -e .cache/
+  log INFO "syncing runner clone from origin/main"
+  git -C "$repo_root" fetch origin main
+  git -C "$repo_root" reset --hard origin/main
+}
+
+build_image() {
+  local target=$1
+  local tag=$2
+  local driver
+  ensure_buildx_builder
+  driver=$(buildx_driver)
+  local manifest="$repo_root/.cache/rocq-models/$target.sha"
+  local current
+  current=$(image_input_hash "$target")
+  local cache_dir="$repo_root/.cache/rocq-models/$target"
+  local cache_next="$repo_root/.cache/rocq-models/$target-next"
+  local bake_args=()
+  mkdir -p "$repo_root/.cache/rocq-models"
+
+  if [ -f "$manifest" ] \
+    && [ "$(cat "$manifest")" = "$current" ] \
+    && image_cache_ready "$target" "$tag" "$driver"; then
+    log INFO "$target image cache hit $tag"
+    run_image=$tag
+    return
+  fi
+
+  if [ "$driver" != "docker" ] && [ -d "$cache_dir" ]; then
+    bake_args+=(--set "$target.cache-from=type=local,src=$cache_dir")
+  fi
+  if [ "$driver" != "docker" ]; then
+    rm -rf "$cache_next"
+    bake_args+=(--set "$target.cache-to=type=local,dest=$cache_next,mode=max")
+  fi
+
+  log INFO "building $target image $tag"
+  (
+    cd "$repo_root"
+    FIDO_IMAGE="$image" \
+      FIDO_DEV_IMAGE="$dev_image" \
+      FIDO_UID="$(id -u)" \
+      FIDO_GID="$(id -g)" \
+      FIDO_USER="$(id -un)" \
+      FIDO_HOME="$HOME" \
+      docker buildx bake \
+        "${bake_args[@]}" \
+        "$target"
+  )
+
+  if [ "$driver" != "docker" ]; then
+    rm -rf "$cache_dir"
+    mv "$cache_next" "$cache_dir"
+  fi
+  printf '%s\n' "$current" > "$manifest"
+  run_image=$tag
+}
+
+warm_images() {
+  local passthrough=("$@")
+  local driver
+  local manifest="$repo_root/.cache/rocq-models/warm.sha"
+  local current
+  current=$(warm_input_hash)
+  ensure_buildx_builder
+  driver=$(buildx_driver)
+  local bake_args=()
+  local target
+  mkdir -p "$repo_root/.cache/rocq-models/context/_build"
+
+  if [ "${#passthrough[@]}" -eq 0 ] \
+    && [ -f "$manifest" ] \
+    && [ "$(cat "$manifest")" = "$current" ] \
+    && warm_cache_ready "$driver"; then
+    log INFO "warm cache hit"
+    return
+  fi
+
+  for target in "${warm_targets[@]}"; do
+    local cache_dir="$repo_root/.cache/rocq-models/$target"
+    if [ "$driver" != "docker" ] && [ -d "$cache_dir" ]; then
+      bake_args+=(--set "$target.cache-from=type=local,src=$cache_dir")
+    fi
+  done
+
+  log INFO "warming ci, runtime, and dev images"
+  (
+    cd "$repo_root"
+    FIDO_IMAGE="$image" \
+      FIDO_DEV_IMAGE="$dev_image" \
+      FIDO_UID="$(id -u)" \
+      FIDO_GID="$(id -g)" \
+      FIDO_USER="$(id -un)" \
+      FIDO_HOME="$HOME" \
+      docker buildx bake \
+        "${bake_args[@]}" \
+        "${passthrough[@]}" \
+        warm
+  )
+
+  if [ "$driver" != "docker" ]; then
+    for target in "${warm_targets[@]}"; do
+      local cache_dir="$repo_root/.cache/rocq-models/$target"
+      local cache_next="$repo_root/.cache/rocq-models/$target-next"
+      local export_args=()
+      if [ -d "$cache_dir" ]; then
+        export_args+=(--set "$target.cache-from=type=local,src=$cache_dir")
+      fi
+      rm -rf "$cache_next"
+      log INFO "exporting buildx cache target=$target"
+      (
+        cd "$repo_root"
+        FIDO_IMAGE="$image" \
+          FIDO_DEV_IMAGE="$dev_image" \
+          FIDO_UID="$(id -u)" \
+          FIDO_GID="$(id -g)" \
+          FIDO_USER="$(id -un)" \
+          FIDO_HOME="$HOME" \
+          docker buildx bake \
+            "${export_args[@]}" \
+            --set "$target.cache-to=type=local,dest=$cache_next,mode=max" \
+            "${passthrough[@]}" \
+            "$target"
+      )
+      rm -rf "$cache_dir"
+      mv "$cache_next" "$cache_dir"
+    done
+  fi
+
+  printf '%s\n' "$current" > "$manifest"
+}
+
+add_mount_if_exists() {
+  local path=$1
+  if [ -e "$path" ]; then
+    run_args+=(--volume "$path:$path")
+  fi
+}
+
+run_container() {
+  mkdir -p "$HOME/workspace" "$HOME/.cache/copilot"
+  secret_args=()
+  if [ -f "$secret" ]; then
+    chmod 600 "$secret"
+    secret_args=(--volume "$secret:/run/secrets/kennel-secret:ro")
+  elif [ "$need_secret" = "1" ]; then
+    echo "secret file not found: $secret" >&2
+    return 2
+  fi
+
+  run_args=(
+    --rm
+    --user "$(id -u):$(id -g)"
+    --env "HOME=$HOME"
+    --network host
+    --volume "$repo_root:/workspace"
+    --volume "$HOME/workspace:$HOME/workspace"
+    "${secret_args[@]}"
+    --workdir /workspace
+  )
+  if [ "$named_run" = "1" ]; then
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    run_args=(--name "$container" "${run_args[@]}")
+  fi
+  add_mount_if_exists "$HOME/.claude"
+  add_mount_if_exists "$HOME/.claude.json"
+  add_mount_if_exists "$HOME/.config/gh"
+  add_mount_if_exists "$HOME/.cache/copilot"
+
+  log INFO "starting container image=$run_image"
+  docker run "${run_args[@]}" "$run_image" "$@"
+}
+
+supervise_up() {
+  while true; do
+    sync_runner
+    build_image fido "$image"
+    set +e
+    run_container "$@"
+    status=$?
+    set -e
+    if [[ "$restart_codes" == *" $status "* ]]; then
+      log INFO "container exited code=$status action=restart"
+      continue
+    fi
+    if [[ "$stop_codes" == *" $status "* ]]; then
+      log INFO "container exited code=$status action=stop"
+      exit 0
+    fi
+    log ERROR "container exited code=$status action=fail"
+    exit "$status"
+  done
+}
 
 case "$command" in
   help)
-    set -- fido-help "${@:2}"
+    build_image fido "$image"
+    run_container fido-help "${@:2}"
     ;;
   up)
-    daemon=1
     shift
-    detach=
-    if [ "${1:-}" = "--detach" ]; then
-      detach=1
-      shift
-    fi
-    set -- kennel "$@"
+    need_secret=1
+    named_run=1
+    supervise_up kennel --secret-file /run/secrets/kennel-secret "$@"
     ;;
   down)
     docker rm -f "$container" 2>/dev/null || true
     exit 0
     ;;
+  warm)
+    warm_images "${@:2}"
+    ;;
   status)
-    set -- kennel-status "${@:2}"
+    build_image fido "$image"
+    run_container kennel-status "${@:2}"
     ;;
   task)
-    set -- kennel-task "${@:2}"
+    build_image fido "$image"
+    run_container kennel-task "${@:2}"
     ;;
   gh-status)
-    set -- kennel-gh-status "${@:2}"
+    build_image fido "$image"
+    run_container kennel-gh-status "${@:2}"
     ;;
   chat)
-    set -- kennel-chat "${@:2}"
+    build_image fido "$image"
+    run_container kennel-chat "${@:2}"
     ;;
   sync-tasks)
-    set -- kennel-sync-tasks "${@:2}"
+    build_image fido "$image"
+    run_container kennel-sync-tasks "${@:2}"
     ;;
   tests)
-    set -- tests "${@:2}"
+    build_image fido-dev "$dev_image"
+    run_container tests "${@:2}"
     ;;
   traceback)
-    set -- traceback "${@:2}"
+    build_image fido "$image"
+    run_container traceback "${@:2}"
+    ;;
+  *)
+    build_image fido-dev "$dev_image"
+    run_container "$@"
     ;;
 esac
-
-driver=$(docker buildx inspect 2>/dev/null | awk -F': *' '/^Driver:/{print $2; exit}')
-cache_args=()
-cache_export_args=()
-
-if [ "$driver" != "docker" ] && [ -d "$cache_dir" ]; then
-  cache_args+=(--cache-from "type=local,src=$cache_dir")
-fi
-if [ "$driver" != "docker" ]; then
-  rm -rf "$cache_next"
-  cache_export_args+=(--cache-to "type=local,dest=$cache_next,mode=max")
-fi
-
-docker buildx build \
-  --file "$repo_root/models/Dockerfile" \
-  --target fido \
-  --load \
-  --tag "$image" \
-  "${cache_args[@]}" \
-  "${cache_export_args[@]}" \
-  "$repo_root"
-
-if [ "$driver" != "docker" ]; then
-  rm -rf "$cache_dir"
-  mv "$cache_next" "$cache_dir"
-fi
-
-mkdir -p "$HOME/log" "$HOME/workspace"
-run_args=(
-  --user "$(id -u):$(id -g)"
-  --env "HOME=$HOME"
-  --network host
-  --volume "$repo_root:/workspace"
-  --volume "$HOME/log:$HOME/log"
-  --volume "$HOME/workspace:$HOME/workspace"
-  --workdir /workspace
-)
-if [ "$daemon" = 1 ]; then
-  if [ ! -f "$secret" ]; then
-    echo "secret file not found: $secret" >&2
-    exit 1
-  fi
-  chmod 600 "$secret"
-  run_args+=(
-    --volume "$secret:/run/secrets/kennel-secret:ro"
-  )
-fi
-if [ "${detach:-}" = 1 ]; then
-  run_args+=(--detach --name "$container")
-else
-  run_args+=(--rm)
-fi
-
-docker run "${run_args[@]}" "$image" "$@"

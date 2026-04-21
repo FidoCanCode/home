@@ -94,6 +94,11 @@ class TestRealOsProcess:
             RealOsProcess().execvp("uv", ["uv", "run", "kennel"])
         mock_execvp.assert_called_once_with("uv", ["uv", "run", "kennel"])
 
+    def test_exit_delegates_to_os_exit(self) -> None:
+        with patch("kennel.infra.os._exit") as mock_exit:
+            RealOsProcess().exit(75)
+        mock_exit.assert_called_once_with(75)
+
     def test_chdir_delegates_to_os_chdir(self, tmp_path: Path) -> None:
         with patch("kennel.infra.os.chdir") as mock_chdir:
             RealOsProcess().chdir(tmp_path)

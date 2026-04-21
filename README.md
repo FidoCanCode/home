@@ -9,30 +9,53 @@ Use the root launcher to run project commands inside the buildx uv image:
 ```bash
 ./fido help
 ./fido up
-./fido up --detach
 ./fido down
+./fido warm
 ./fido status
 ./fido tests
+./fido ruff format .
 ./fido pytest tests/test_build_wrapper.py -q
 ```
 
-`./fido` builds the `fido` target from `models/Dockerfile` with `docker buildx
-build`, loads it as `fido:local`, then runs it with Docker.
+`./fido` builds the `fido` bake target from `docker-bake.hcl` with `docker
+buildx bake`, loads it as `fido:local`, then runs it with Docker.
 `./fido help` lists the project commands. `./fido up` runs the kennel server,
-`./fido up --detach` runs it as a named Docker container, and `./fido down`
-stops that detached container. Other friendly commands such as `./fido status`,
-`./fido task`, and `./fido sync-tasks` map to dedicated `pyproject.toml`
-scripts. Unknown commands are passed to `uv run` unchanged. The repository is
-bind-mounted at `/workspace`, and the container runs with the caller's UID/GID
-so files written through bind mounts keep the host user's ownership. `./fido
-up` also bind-mounts the 0600 secret file read-only at
-`/run/secrets/kennel-secret`, plus the host workspace and log directories. Runs
-use host networking so `./fido up` exposes the webhook server normally and
+then supervises it in the foreground with `docker run --rm`. On update exits
+from the app, `./fido up` syncs the runner clone, rebuilds the image, and
+starts again. It exits normally on ordinary shutdown signals. `./fido down`
+still removes any named container left behind by a previous run.
+`./fido warm` builds the `warm` bake group, which depends on full CI, the
+production runtime image, and the dev check image, so local and CI runs
+populate those cache families through one command.
+
+Friendly commands such as `./fido status`, `./fido task`, and `./fido
+sync-tasks` map to dedicated `pyproject.toml` scripts in the production image.
+Unknown commands, such as `./fido ruff format .`, run through the dev image and
+are passed to containerized `uv run` unchanged; do not use host `uv` for normal
+project checks. The production runtime image installs only production Python
+dependencies, plus pinned Node CLI tools from
+`package-lock.json` (`claude` and
+`copilot`) and the GitHub CLI. Node dependencies are built in their own Docker
+stage with an npm cache mount, so changing application code does not rerun
+`npm ci`.
+
+The repository is bind-mounted at `/workspace`, and the container runs with the
+caller's UID/GID so files written through bind mounts keep the host user's
+ownership. `./fido up` bind-mounts the 0600 secret file read-only at
+`/run/secrets/kennel-secret`. All runs also mount the host workspace and, when
+present, `.claude`, `.claude.json`, `.config/gh`, and `.cache/copilot` at the
+same absolute paths. Logs go to stdout/stderr for Docker or systemd to capture.
+Runs use host networking so `./fido up` exposes the webhook server normally and
 `./fido status` can reach it from the same network namespace.
 
-Set `FIDO_IMAGE=...` to override the local image tag, and
-`FIDO_CONTAINER=...` to override the detached container name. Set
-`FIDO_SECRET=...` to override the host secret file used by `./fido up`.
+The bake target hides the Dockerfile path and stage selection, so the launcher
+only supplies runtime variables such as the image tag and host UID/GID. Set
+`FIDO_IMAGE=...` to override the local image tag,
+`FIDO_CONTAINER=...` to override the container name, and `FIDO_SECRET=...` to
+override the host secret file used by `./fido up`. Use `FIDO_AUTO_UPDATE=0` or
+`./fido --no-auto-update up ...` for dirty local testing; production startup
+cleans the runner clone with `git reset --hard` and `git clean -fd -e .cache/`
+before syncing `origin/main`.
 
 ## Rocq model builds
 
@@ -73,17 +96,16 @@ context argument:
 ./build --target typecheck
 ./build --target generated-typecheck
 ./build --target test
-./build --target ci
 ```
 
-All Python checks run inside buildx targets. Rocq test artifacts are produced
-by a Rocq stage, then ruff format, ruff lint, pyright, generated pyright, and
-pytest run as separate uv stages. The aggregate `ci` target is a scratch
-meta-target that depends on marker files from those stages, so BuildKit can run
-independent checks in parallel. The uv dependency layer follows Astral's Docker
-pattern: `pyproject.toml`, `uv.lock`, and `.python-version` are bind-mounted
-into a `uv sync --frozen --no-install-project` layer before the source tree is
-copied. The pre-commit hook and CI both call `./build --target ci`.
+All Python checks run inside buildx bake targets. Rocq test artifacts are
+produced by a Rocq stage, then ruff format, ruff lint, pyright, generated
+pyright, and pytest run as separate uv stages. The `ci` and `warm` bake groups
+are meta groups over those real targets, so BuildKit can run independent checks
+in parallel without scratch sentinel targets. The uv dependency layers follow
+Astral's Docker pattern: `pyproject.toml`, `uv.lock`, and `.python-version` are
+copied into `uv sync --frozen --no-install-project` layers before application
+inputs are copied. The pre-commit hook and CI both call `./fido warm`.
 
 The internal smart-output mode is available for buildx artifact producers:
 

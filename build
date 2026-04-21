@@ -49,7 +49,10 @@ input_hash() {
       .githooks/pre-commit \
       .python-version \
       dune-workspace \
+      docker-bake.hcl \
       fido \
+      package-lock.json \
+      package.json \
       pyproject.toml \
       uv.lock \
       models \

@@ -3278,9 +3278,9 @@ class TestRun:
 
         mock_server.serve_forever.assert_called_once()
 
-    def test_run_creates_per_repo_log_handlers(self, tmp_path: Path) -> None:
+    def test_run_logs_to_stderr_stream_only(self, tmp_path: Path) -> None:
         from kennel.server import run
-        from kennel.worker import RepoContextFilter, RepoNameFilter
+        from kennel.worker import RepoContextFilter
 
         fake_cfg = Config(
             port=0,
@@ -3298,6 +3298,7 @@ class TestRun:
         mock_server.serve_forever.side_effect = KeyboardInterrupt
 
         captured_handlers: list = []
+        fake_stderr = MagicMock()
 
         def fake_basic_config(**kwargs):
             captured_handlers.extend(kwargs.get("handlers", []))
@@ -3315,29 +3316,20 @@ class TestRun:
             _preflight_sub_dir=MagicMock(),
             _preflight_gh_auth=MagicMock(),
             _GitHub=MagicMock,
+            _stderr=fake_stderr,
         )
 
-        # Two shared handlers (file + no tty stderr) + two per-repo handlers
-        assert len(captured_handlers) == 3  # shared file + 2 per-repo (no tty)
-        repo_handlers = [
-            h
-            for h in captured_handlers
-            if any(isinstance(f, RepoNameFilter) for f in h.filters)
-        ]
-        assert len(repo_handlers) == 2
-        short_names = {
-            f.short_name
-            for h in repo_handlers
-            for f in h.filters
-            if isinstance(f, RepoNameFilter)
-        }
-        assert short_names == {"myrepo", "other"}
-        for handler in repo_handlers:
-            assert any(isinstance(f, RepoContextFilter) for f in handler.filters)
+        import logging
 
-    def test_run_per_repo_log_file_path(self, tmp_path: Path) -> None:
+        assert len(captured_handlers) == 1
+        assert isinstance(captured_handlers[0], logging.StreamHandler)
+        assert captured_handlers[0].stream is fake_stderr
+        assert any(
+            isinstance(f, RepoContextFilter) for f in captured_handlers[0].filters
+        )
+
+    def test_run_does_not_create_file_log_handlers(self, tmp_path: Path) -> None:
         from kennel.server import run
-        from kennel.worker import RepoNameFilter
 
         fake_cfg = Config(
             port=0,
@@ -3371,15 +3363,9 @@ class TestRun:
             _GitHub=MagicMock,
         )
 
-        repo_handler = next(
-            h
-            for h in captured_handlers
-            if any(isinstance(f, RepoNameFilter) for f in h.filters)
-        )
         import logging
 
-        assert isinstance(repo_handler, logging.FileHandler)
-        assert repo_handler.baseFilename.endswith("kennel-myrepo.log")
+        assert not any(isinstance(h, logging.FileHandler) for h in captured_handlers)
 
     def test_run_starts_watchdog_with_registry_and_repos(self, tmp_path: Path) -> None:
         from kennel.server import run
@@ -3684,14 +3670,18 @@ class _FakeClock:
 
 
 class _FakeOsProcess:
-    """Minimal OsProcess fake: captures execvp and chdir calls."""
+    """Minimal OsProcess fake: captures execvp, exit, and chdir calls."""
 
     def __init__(self) -> None:
         self.execvp_calls: list[tuple[str, list[str]]] = []
+        self.exit_calls: list[int] = []
         self.chdir_calls: list[Any] = []
 
     def execvp(self, file: str, args: list[str]) -> None:
         self.execvp_calls.append((file, args))
+
+    def exit(self, code: int) -> None:
+        self.exit_calls.append(code)
 
     def chdir(self, path: Any) -> None:
         self.chdir_calls.append(path)
@@ -3977,10 +3967,17 @@ class TestPreflightTools:
         with pytest.raises(PreflightError, match=repr(missing)):
             preflight_tools(_FakeFilesystem(missing={missing}))
 
+    def test_raises_when_copilot_missing(self) -> None:
+        from kennel.server import preflight_tools
+
+        missing = "copilot"
+        with pytest.raises(PreflightError, match=repr(missing)):
+            preflight_tools(_FakeFilesystem(missing={missing}))
+
     def test_required_tools_constant(self) -> None:
         from kennel.server import _REQUIRED_TOOLS
 
-        assert set(_REQUIRED_TOOLS) == {"git", "gh", "claude"}
+        assert set(_REQUIRED_TOOLS) == {"git", "gh", "claude", "copilot"}
 
 
 class TestPreflightSubDir:
@@ -4216,7 +4213,7 @@ class TestPullWithBackoff:
 
 
 class TestStartupPull:
-    def test_reexecs_when_head_changes(self) -> None:
+    def test_exits_for_supervisor_when_head_changes(self) -> None:
         from kennel.server import _startup_pull
 
         # rev-parse before, fetch, reset, rev-parse after — different SHAs
@@ -4231,10 +4228,9 @@ class TestStartupPull:
         clock = _FakeClock(times=[0.0, 0.0])  # start + success log
         os_proc = _FakeOsProcess()
         _startup_pull(proc, clock, os_proc)
-        assert len(os_proc.execvp_calls) == 1
-        assert os_proc.execvp_calls[0][0] == "uv"
+        assert os_proc.exit_calls == [75]
 
-    def test_skips_exec_when_head_unchanged(self) -> None:
+    def test_skips_exit_when_head_unchanged(self) -> None:
         from kennel.server import _startup_pull
 
         proc = _FakeProcessRunner(
@@ -4248,7 +4244,7 @@ class TestStartupPull:
         clock = _FakeClock(times=[0.0, 0.0])
         os_proc = _FakeOsProcess()
         _startup_pull(proc, clock, os_proc)
-        assert os_proc.execvp_calls == []
+        assert os_proc.exit_calls == []
 
     def test_continues_on_pull_failure(self) -> None:
         from kennel.server import _startup_pull
@@ -4260,9 +4256,9 @@ class TestStartupPull:
         clock = _FakeClock(times=[0.0, 601.0])  # budget exhausted on first attempt
         os_proc = _FakeOsProcess()
         _startup_pull(proc, clock, os_proc)
-        assert os_proc.execvp_calls == []
+        assert os_proc.exit_calls == []
 
-    def test_execs_when_head_unknown(self) -> None:
+    def test_does_not_exit_when_head_unknown(self) -> None:
         from kennel.server import _startup_pull
 
         # Both rev-parse calls fail → head_before and head_after are None
@@ -4272,8 +4268,8 @@ class TestStartupPull:
         clock = _FakeClock(times=[0.0, 0.0])
         os_proc = _FakeOsProcess()
         _startup_pull(proc, clock, os_proc)
-        # Can't compare HEAD — pull succeeded, log and continue without exec
-        assert os_proc.execvp_calls == []
+        # Can't compare HEAD — pull succeeded, log and continue without exit
+        assert os_proc.exit_calls == []
 
 
 class TestSelfRestart:
@@ -4292,7 +4288,7 @@ class TestSelfRestart:
         t.start()
         return srv, f"http://127.0.0.1:{port}", cfg, mock_registry
 
-    def test_triggers_exec_on_matching_repo(self, tmp_path: Path) -> None:
+    def test_triggers_restart_exit_on_matching_repo(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
@@ -4313,17 +4309,13 @@ class TestSelfRestart:
             assert status == 200
             mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
             assert os_proc.chdir_calls == [tmp_path]
-            assert len(os_proc.execvp_calls) == 1
-            assert os_proc.execvp_calls[0][0] == "uv"
-            assert os_proc.execvp_calls[0][1][:3] == ["uv", "run", "kennel"]
+            assert os_proc.exit_calls == [75]
         finally:
             srv.shutdown()
 
-    def test_kills_active_children_before_exec(self, tmp_path: Path) -> None:
-        """execvp replaces the process image; any claude subprocess not
-        killed first gets reparented to init and keeps writing to the
-        workspace (closes #829).  Self-restart must stop every worker
-        and SIGTERM every tracked child BEFORE the exec."""
+    def test_kills_active_children_before_restart_exit(self, tmp_path: Path) -> None:
+        """Self-restart must stop every worker and SIGTERM every tracked child
+        BEFORE exiting for the host supervisor."""
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
             WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
@@ -4341,15 +4333,12 @@ class TestSelfRestart:
             WebhookHandler._fn_kill_active_children = staticmethod(_kill)  # type: ignore[assignment]
 
             os_proc = _FakeOsProcess()
-            # Wrap execvp so we can observe ordering.
-            original_execvp = os_proc.execvp
-            orig_execvp_calls = os_proc.execvp_calls
 
-            def _tracking_execvp(cmd, args):  # type: ignore[no-untyped-def]
-                call_log.append("execvp")
-                orig_execvp_calls.append((cmd, args))
+            def _tracking_exit(code):  # type: ignore[no-untyped-def]
+                call_log.append(f"exit:{code}")
+                os_proc.exit_calls.append(code)
 
-            os_proc.execvp = _tracking_execvp  # type: ignore[method-assign]
+            os_proc.exit = _tracking_exit  # type: ignore[method-assign]
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner(
                     [
@@ -4365,16 +4354,14 @@ class TestSelfRestart:
             status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             assert status == 200
             # stop_and_join + stop_all + kill_active_children MUST all run
-            # before execvp.
-            execvp_idx = call_log.index("execvp")
-            assert "stop_and_join:owner/kennel" in call_log[:execvp_idx]
-            assert "stop_all" in call_log[:execvp_idx]
-            assert "kill_active_children" in call_log[:execvp_idx]
+            # before host-supervised restart exit.
+            exit_idx = call_log.index("exit:75")
+            assert "stop_and_join:owner/kennel" in call_log[:exit_idx]
+            assert "stop_all" in call_log[:exit_idx]
+            assert "kill_active_children" in call_log[:exit_idx]
             # Defensive: kill_active_children should be the last thing
-            # before execvp so it's the most recent TERM.
-            assert call_log[execvp_idx - 1] == "kill_active_children"
-            # Silence the cleanup-path noise.
-            del original_execvp
+            # before exit so it's the most recent TERM.
+            assert call_log[exit_idx - 1] == "kill_active_children"
         finally:
             srv.shutdown()
 
@@ -4395,7 +4382,7 @@ class TestSelfRestart:
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             mock_registry.stop_and_join.assert_not_called()
             assert proc.call_count == 1  # only the get-url call; no pull attempted
-            assert os_proc.execvp_calls == []
+            assert os_proc.exit_calls == []
         finally:
             srv.shutdown()
 
@@ -4412,7 +4399,7 @@ class TestSelfRestart:
             )
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             mock_registry.stop_and_join.assert_not_called()
-            assert os_proc.execvp_calls == []
+            assert os_proc.exit_calls == []
         finally:
             srv.shutdown()
 
@@ -4443,7 +4430,7 @@ class TestSelfRestart:
             )
             _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             mock_registry.stop_and_join.assert_not_called()
-            assert os_proc.execvp_calls == []
+            assert os_proc.exit_calls == []
         finally:
             srv.shutdown()
 
@@ -4493,7 +4480,7 @@ class TestSelfRestart:
             )
             _post_webhook(url, cfg, "push", _PUSH_PAYLOAD)
             mock_registry.stop_and_join.assert_called_once_with("owner/kennel")
-            assert len(os_proc.execvp_calls) == 1
+            assert os_proc.exit_calls == [75]
         finally:
             srv.shutdown()
 
@@ -4512,7 +4499,7 @@ class TestSelfRestart:
             payload = {**_PUSH_PAYLOAD, "ref": "refs/heads/feature-branch"}
             _post_webhook(url, cfg, "push", payload)
             assert proc.calls == []
-            assert os_proc.execvp_calls == []
+            assert os_proc.exit_calls == []
         finally:
             srv.shutdown()
 
@@ -4567,7 +4554,7 @@ class TestSelfRestart:
             )
             status = _post_webhook(url, cfg, "pull_request", _MERGE_PAYLOAD)
             assert status == 200
-            assert len(os_proc.execvp_calls) == 1
+            assert os_proc.exit_calls == [75]
         finally:
             srv.shutdown()
 
@@ -4593,6 +4580,6 @@ class TestSelfRestart:
             )
             status = _post_webhook(url, cfg, "push", _PUSH_PAYLOAD)
             assert status == 200
-            assert len(os_proc.execvp_calls) == 1
+            assert os_proc.exit_calls == [75]
         finally:
             srv.shutdown()
