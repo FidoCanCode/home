@@ -119,13 +119,16 @@ Update GitHub status: `./fido gh-status set "fix implemented — running tests a
 - **Request review**: `gh pr edit <number> --repo FidoCanCode/home --add-reviewer rhencke`
 
 ### Step 8: Restore all workspaces before restarting
-For each managed repo (`fido`, `confusio`, `home`):
+For each managed repo (`confusio`, `home`):
 - Check for open PRs — match workspace branch, state.json, and tasks.json to the PR
 - If no open PR: `git checkout main && git reset --hard origin/main && git clean -df`
 - If open PR exists: checkout the PR branch, reset hard to remote, clean, recreate tasks via CLI to match PR body
 - Wipe tasks.json with `echo '[]'` then recreate via `./fido task add` — NEVER write tasks.json directly
 - Set state.json to match the current issue
 - Verify: branch matches PR, tasks match PR body, workspace is clean
+
+Fido's own code lives in the `home` repo; there is no separate managed `fido`
+workspace.
 
 ### Step 9: Restart Fido
 Fido runs from the **runner clone** at `/home/rhencke/home-runner/`, not the workspace clone. The runner is always on `main`, never on a feature branch. Launch via the local launcher:
