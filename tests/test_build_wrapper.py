@@ -192,7 +192,7 @@ class TestFidoLauncher:
         assert "named_run=0" in script
         assert "named_run=1" in script
         assert 'if [ "$named_run" = "1" ]; then' in script
-        assert 'docker rm -f "$container"' in script
+        assert 'docker rm -f "$container"' not in script
         assert 'docker stop "$container"' in script
         assert 'run_args=(--name "$container" "${run_args[@]}")' in script
         assert 'restart_codes=" 3 75 "' in script

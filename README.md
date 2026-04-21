@@ -24,8 +24,8 @@ then supervises it in the foreground with `docker run --rm`. `./fido up`
 appends supervisor and container stdout/stderr to `~/log/fido.log`; override
 with `FIDO_LOG=...`. On update exits from the app, `./fido up` syncs the runner
 clone, rebuilds the image, and starts again. It exits normally on ordinary
-shutdown signals. `./fido down` stops the named container gracefully, falling
-back to forced removal only for leftovers.
+shutdown signals. `./fido down` stops the named container gracefully; `--rm`
+lets Docker remove it after the stop.
 `./fido warm` builds the `warm` bake group, which depends on full CI, the
 production runtime image, and the dev check image, so local and CI runs
 populate those cache families through one command.

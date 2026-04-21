@@ -337,7 +337,6 @@ run_container() {
     --workdir /workspace
   )
   if [ "$named_run" = "1" ]; then
-    docker rm -f "$container" >/dev/null 2>&1 || true
     run_args=(--name "$container" "${run_args[@]}")
   fi
   add_mount_if_exists "$HOME/.claude"
@@ -383,7 +382,7 @@ case "$command" in
     supervise_up fido --secret-file /run/secrets/fido-secret "$@"
     ;;
   down)
-    docker stop "$container" 2>/dev/null || docker rm -f "$container" 2>/dev/null || true
+    docker stop "$container" 2>/dev/null || true
     exit 0
     ;;
   warm)
