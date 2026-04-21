@@ -500,6 +500,15 @@ prune_restart_buildkit_async() {
   log INFO "pruning buildkit cache action=async pid=$! keep_storage=$prune_keep_storage"
 }
 
+prune_buildkit() {
+  ensure_buildx_builder
+  log INFO "pruning buildkit cache action=manual keep_storage=$prune_keep_storage"
+  docker buildx prune \
+    --builder "$builder" \
+    --force \
+    --keep-storage "$prune_keep_storage"
+}
+
 supervise_up() {
   while true; do
     sync_runner
@@ -547,7 +556,10 @@ case "$command" in
       cd "$repo_root"
       run_with_bake_env docker buildx bake --print ci fido-test make-rocq > .cache/bake-plan.json
     )
-    run_fido_cli_image python3 tools/gen_workflows.py --plan .cache/bake-plan.json
+    python3 "$repo_root/tools/gen_workflows.py" --plan .cache/bake-plan.json
+    ;;
+  prune)
+    prune_buildkit
     ;;
   make-rocq)
     shift

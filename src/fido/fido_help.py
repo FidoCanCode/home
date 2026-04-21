@@ -13,6 +13,7 @@ Commands:
   down              Stop the named fido server container.
   ci                Build CI checks and runtime image cache.
   gen-workflows     Regenerate GitHub Actions workflows from buildx.
+  prune             Prune BuildKit cache, bounded by FIDO_BUILDKIT_KEEP_STORAGE.
   make-rocq         Generate Rocq-extracted Python through buildx.
   status            Print fido status.
   task              Manage repo task files.

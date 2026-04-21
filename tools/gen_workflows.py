@@ -366,9 +366,6 @@ jobs:
         run: |
           ./fido gen-workflows
           git diff --exit-code -- .github/workflows/ci.yml tools/build_graph.sh
-      - name: Prune BuildKit cache
-        if: always()
-        run: docker buildx prune --builder fido --force --keep-storage 24gb
 """
 
 

@@ -191,11 +191,8 @@ class TestModelsBuildScript:
         assert "Save rocq-model" not in workflow
         assert "Cache fido-" not in workflow
         assert "Inject fido-" not in workflow
-        assert "Prune BuildKit cache" in workflow
-        assert "if: always()" in workflow
-        assert (
-            "docker buildx prune --builder fido --force --keep-storage 24gb" in workflow
-        )
+        assert "Prune BuildKit cache" not in workflow
+        assert "docker buildx prune --builder fido" not in workflow
         assert '"rocq-model-image":' not in generator
         assert '".cache/rocq-models/image"' not in generator
         assert "docker buildx" in generator
@@ -236,9 +233,11 @@ class TestFidoLauncher:
             in script
         )
         assert (
-            "run_fido_cli_image python3 tools/gen_workflows.py --plan .cache/bake-plan.json"
+            'python3 "$repo_root/tools/gen_workflows.py" --plan .cache/bake-plan.json'
             in script
         )
+        assert "prune)" in script
+        assert "prune_buildkit" in script
         assert "status)" in script
         assert "run_fido_cli_image_quiet --no-sync python -m fido.status" in script
         assert "task)" in script
@@ -262,6 +261,7 @@ class TestFidoLauncher:
         assert "docker buildx prune \\" in script
         assert '--builder "$builder"' in script
         assert '--keep-storage "$prune_keep_storage"' in script
+        assert "pruning buildkit cache action=manual" in script
         assert "pruning buildkit cache action=async pid=$!" in script
         assert "pruned buildkit cache action=done" in script
         assert "named_run=0" in script

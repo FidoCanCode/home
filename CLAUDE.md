@@ -16,7 +16,8 @@ right Docker buildx target, runs the command in the container, and avoids host
 | `./fido up [args...]` | Run the webhook server in the foreground. The launcher supervises restarts, writes stdout/stderr to `~/log/fido.log`, syncs the runner clone on update exits, rebuilds the runtime image, and starts again. |
 | `./fido down` | Gracefully stop the named server container. Normal operation is foreground `docker run --rm`, so Docker removes it after stop. |
 | `./fido ci` | Build the buildx `ci` group: format, lint, typecheck, generated typecheck, tests, and the production runtime image cache. This is what CI and pre-commit use. |
-| `./fido gen-workflows` | Regenerate `.github/workflows/ci.yml` from the buildx bake graph and Dockerfile input graph. |
+| `./fido gen-workflows` | Regenerate `.github/workflows/ci.yml` from the buildx bake graph and Dockerfile input graph. Uses host `python3` only for the stdlib generator, not host `uv`. |
+| `./fido prune` | Manually prune BuildKit cache using `FIDO_BUILDKIT_KEEP_STORAGE` as the storage floor. CI does not prune automatically. |
 | `./fido make-rocq [args...]` | Generate Rocq-extracted Python and run Rocq model buildx targets. |
 | `./fido status` | Print server, repo, worker, provider, webhook, issue-cache, and rate-limit status. |
 | `./fido task <work_dir> ...` | Add, complete, or list task-file entries for a repo. |
