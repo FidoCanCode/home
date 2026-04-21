@@ -158,7 +158,7 @@ class TestModelsBuildScript:
     def test_pre_commit_runs_ci_and_runtime_smoke(self) -> None:
         script = PRE_COMMIT.read_text()
 
-        assert "./fido warm" in script
+        assert "./fido ci" in script
 
     def test_ci_workflow_is_generated_with_per_target_caches(self) -> None:
         workflow = CI_WORKFLOW.read_text()
@@ -214,7 +214,8 @@ class TestModelsBuildScript:
             "generated-typecheck",
             "lint",
             "rocq-image",
-            "test",
+            "test-rocq-generated",
+            "test-unit",
             "typecheck",
         ):
             assert target in workflow
@@ -291,12 +292,11 @@ class TestFidoLauncher:
         assert "supervise_up fido --secret-file /run/secrets/fido-secret" in script
         assert "make-rocq)" in script
         assert "make_rocq_models" in script
-        assert "warm)" in script
-        assert "warm_images" in script
+        assert "ci)" in script
+        assert "ci_images" in script
         assert "gen-workflows)" in script
         assert (
-            "docker buildx bake --print warm fido-test > .cache/bake-plan.json"
-            in script
+            "docker buildx bake --print ci fido-test > .cache/bake-plan.json" in script
         )
         assert (
             "run_fido_cli_image python3 tools/gen_workflows.py --plan .cache/bake-plan.json"
@@ -379,19 +379,19 @@ class TestFidoLauncher:
         assert "run_fido_image()" in script
         assert "run_fido_test_image()" in script
         assert "run_fido_cli_image()" in script
-        assert "warm_images()" in script
-        assert "warm_targets=(" not in script
+        assert "ci_images()" in script
+        assert "ci_targets=(" not in script
         assert "bake_target_names()" not in script
-        assert "fido_build_targets_for_group warm" in script
+        assert "fido_build_targets_for_group ci" in script
         assert "buildx_cache_backend()" in script
         assert "FIDO_BUILDX_CACHE_BACKEND:-" in script
         assert "GITHUB_ACTIONS" in script
         assert '"$target.cache-from=type=gha,scope=$target"' in script
         assert '"$target.cache-to=type=gha,scope=$target,mode=max"' in script
-        assert "warm_input_hash()" not in script
-        assert "warm_cache_ready()" in script
-        assert 'mkdir -p "$repo_root/.cache/rocq-models/warm"' in script
-        assert 'log INFO "warm cache hit"' in script
+        assert "ci_input_hash()" not in script
+        assert "ci_cache_ready()" in script
+        assert 'mkdir -p "$repo_root/.cache/rocq-models/ci"' in script
+        assert 'log INFO "ci cache hit"' in script
         assert 'mkdir -p "$repo_root/.cache/rocq-models/context/_build"' in script
         assert "target_input_files()" in script
         assert 'target_hashes+=("$target $(target_input_hash "$target")")' in script
@@ -399,7 +399,7 @@ class TestFidoLauncher:
         assert '--set "fido.output=type=cacheonly"' in script
         assert "exporting buildx cache target=" not in script
         assert "docker buildx bake" in script
-        assert "warm" in script
+        assert "ci" in script
         assert 'git -C "$repo_root" ls-files --cached --others' not in script
         assert "target_input_files make-rocq" in script
 
@@ -452,25 +452,22 @@ class TestModelDockerfile:
         assert 'target "lint"' in bake
         assert 'target "typecheck"' in bake
         assert 'target "generated-typecheck"' in bake
-        assert 'target "test"' in bake
+        assert 'target "test-unit"' in bake
+        assert 'target "test-rocq-generated"' in bake
         assert 'group "ci"' in bake
-        assert 'group "warm"' in bake
         assert 'dockerfile = "models/Dockerfile"' in bake
         assert 'dockerfile = "Dockerfile"' in bake
         assert 'target = "fido"' in bake
         assert 'target = "fido-test"' in bake
         assert 'target = "format"' in bake
-        assert 'target = "test"' in bake
+        assert 'target = "test-unit"' in bake
+        assert 'target = "test-rocq-generated"' in bake
         assert 'rocq_image = "target:rocq-image"' in bake
         assert 'rocq_models_cache = ".cache/rocq-models/context"' in bake
         assert (
-            'targets = ["format", "lint", "typecheck", "generated-typecheck", "test"]'
-            in bake
-        )
-        assert (
             'targets = ["format", "lint", "typecheck", "generated-typecheck", '
-            '"test", "fido", "rocq-repl"]'
-        ) in bake
+            '"test-unit", "test-rocq-generated", "fido", "rocq-repl"]' in bake
+        )
         assert 'output = ["type=docker"]' in bake
         assert "FIDO_TEST_IMAGE" in bake
         assert "FIDO_UID = FIDO_UID" in bake
@@ -484,15 +481,21 @@ class TestModelDockerfile:
 
         assert "FROM python-base AS fido-python-prod" in dockerfile
         assert "FROM fido-python-prod AS fido-python-dev" in dockerfile
+        assert "FROM node:24-bookworm-slim AS node-runtime" in dockerfile
         assert "FROM fido-python-prod AS fido-base" in dockerfile
         assert "COPY .python-version pyproject.toml uv.lock ./" in dockerfile
         assert "COPY . ." not in dockerfile
-        assert "FROM fido-base AS node-tools" in dockerfile
+        assert "nodejs npm" not in dockerfile
+        assert "FROM node-runtime AS node-tools" in dockerfile
         assert "FROM fido AS fido-test" in dockerfile
         assert "COPY package.json package-lock.json ./" in dockerfile
         assert "RUN --mount=type=cache,id=fido-npm,target=/root/.npm" in dockerfile
         assert "npm ci --omit=dev --ignore-scripts" in dockerfile
         assert "npm rebuild @anthropic-ai/claude-code" in dockerfile
+        assert (
+            "COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node"
+            in dockerfile
+        )
         assert (
             "COPY --from=node-tools /workspace/node_modules "
             "/opt/fido-node-tools/node_modules"
@@ -502,6 +505,14 @@ class TestModelDockerfile:
         assert "ln -sf /opt/fido-node-tools/node_modules/.bin/copilot" in dockerfile
         assert "uv sync --frozen --no-dev --no-install-project" in dockerfile
         assert "uv sync --frozen --no-install-project" in dockerfile
+        assert (
+            "chmod -R a+rwX /opt/fido-node-tools /opt/fido-venv /opt/uv-python"
+            not in dockerfile
+        )
+        assert (
+            'chown -R "$FIDO_UID:$FIDO_GID" /opt/fido-venv /opt/uv-python'
+            not in dockerfile
+        )
 
     def test_rocq_image_install_is_keyed_by_opam_inputs(self) -> None:
         dockerfile = (REPO / "rocq-python-extraction" / "Dockerfile").read_text()
@@ -538,7 +549,7 @@ class TestModelDockerfile:
 
         assert "FROM python-deps AS python-check-base" in dockerfile
         assert (
-            "COPY .dockerignore docker-bake.hcl dune-workspace fido package.json "
+            "COPY .dockerignore .python-version docker-bake.hcl dune-workspace fido package.json "
             "package-lock.json pyproject.toml pyrightconfig.json uv.lock ./"
         ) in dockerfile
         assert "COPY .githooks/pre-commit .githooks/pre-commit" in dockerfile
@@ -549,6 +560,7 @@ class TestModelDockerfile:
             "COPY rocq-python-extraction/test/*.py rocq-python-extraction/test/"
             in dockerfile
         )
+        assert "FROM python-deps AS python-test-base" in dockerfile
         assert (
             "rocq-python-extraction/META.rocq-python-extraction.template" in dockerfile
         )
@@ -569,9 +581,14 @@ class TestModelDockerfile:
         assert "FROM python-check-base AS format" in dockerfile
         assert "FROM python-check-base AS lint" in dockerfile
         assert "FROM python-check-base AS typecheck" in dockerfile
-        assert "FROM python-check-base AS generated-typecheck" in dockerfile
-        assert "FROM python-check-base AS test" in dockerfile
+        assert "FROM python-test-base AS generated-typecheck" in dockerfile
+        assert (
+            "COPY rocq-python-extraction/test/pyright_*.py rocq-python-extraction/test/"
+        ) in dockerfile
+        assert "FROM python-test-base AS test-unit" in dockerfile
+        assert "FROM python-test-base AS test-rocq-generated" in dockerfile
+        assert "uv run tests-unit" in dockerfile
+        assert "uv run tests-rocq-generated" in dockerfile
         assert "FROM scratch AS ci" not in dockerfile
-        assert "FROM scratch AS warm" not in dockerfile
         assert "touch /tmp" not in dockerfile
         assert "-ready" not in dockerfile

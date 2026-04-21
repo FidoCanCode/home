@@ -35,6 +35,8 @@ RUN --mount=type=cache,id=fido-uv-dev,target=/tmp/uv-cache \
     uv sync --frozen --no-install-project \
     && chmod -R a+rwX /opt/fido-venv /opt/uv-python /tmp/uv-cache
 
+FROM node:24-bookworm-slim AS node-runtime
+
 FROM fido-python-prod AS fido-base
 
 ARG FIDO_UID=1000
@@ -46,13 +48,15 @@ ARG GH_VERSION=2.89.0
 WORKDIR /workspace
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl nodejs npm \
+    && apt-get install -y --no-install-recommends curl \
     && curl -fsSL -o /tmp/gh.deb "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.deb" \
     && apt-get install -y --no-install-recommends /tmp/gh.deb \
     && rm -f /tmp/gh.deb \
     && rm -rf /var/lib/apt/lists/*
 
-FROM fido-base AS node-tools
+FROM node-runtime AS node-tools
+
+WORKDIR /workspace
 
 COPY package.json package-lock.json ./
 
@@ -67,6 +71,7 @@ ARG FIDO_GID=1000
 ARG FIDO_USER=fido
 ARG FIDO_HOME=/home/fido
 
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-tools /workspace/node_modules /opt/fido-node-tools/node_modules
 
 RUN groupadd --gid "$FIDO_GID" "$FIDO_USER" \
@@ -74,7 +79,7 @@ RUN groupadd --gid "$FIDO_GID" "$FIDO_USER" \
     && mkdir -p "$FIDO_HOME/.config" "$FIDO_HOME/.cache" "$FIDO_HOME/workspace" /tmp/uv-cache \
     && ln -sf /opt/fido-node-tools/node_modules/.bin/claude /usr/local/bin/claude \
     && ln -sf /opt/fido-node-tools/node_modules/.bin/copilot /usr/local/bin/copilot \
-    && chown -R "$FIDO_UID:$FIDO_GID" "$FIDO_HOME" /opt/fido-node-tools /opt/fido-venv /opt/uv-python /tmp/uv-cache
+    && chown -R "$FIDO_UID:$FIDO_GID" "$FIDO_HOME" /tmp/uv-cache
 
 ENV HOME=$FIDO_HOME
 
@@ -87,8 +92,6 @@ ARG FIDO_GID=1000
 
 COPY --from=fido-python-dev /opt/fido-venv /opt/fido-venv
 COPY --from=fido-python-dev /opt/uv-python /opt/uv-python
-
-RUN chown -R "$FIDO_UID:$FIDO_GID" /opt/fido-venv /opt/uv-python
 
 FROM ${ROCQ_IMAGE} AS rocq-plugin-source
 
@@ -201,7 +204,7 @@ RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
 FROM python-deps AS python-check-base
 
 WORKDIR /workspace
-COPY .dockerignore docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
+COPY .dockerignore .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
 COPY .githooks/pre-commit .githooks/pre-commit
 COPY .github/workflows/ci.yml .github/workflows/
 COPY tools/gen_workflows.py tools/build_graph.sh tools/
@@ -247,18 +250,57 @@ RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
     uv run pyright
 
-FROM python-check-base AS generated-typecheck
+FROM python-deps AS python-test-base
+
+WORKDIR /workspace
+COPY .dockerignore .python-version docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
+COPY .githooks/pre-commit .githooks/pre-commit
+COPY .github/workflows/ci.yml .github/workflows/
+COPY tools/gen_workflows.py tools/build_graph.sh tools/
+COPY models/Dockerfile models/Dockerfile
+COPY models/dune-project models/dune models/*.v models/
+COPY src src
+COPY rocq-python-extraction/Dockerfile \
+    rocq-python-extraction/DIAGNOSTICS.md \
+    rocq-python-extraction/META.rocq-python-extraction.template \
+    rocq-python-extraction/dune \
+    rocq-python-extraction/dune-project \
+    rocq-python-extraction/export_pytest_generated.sh \
+    rocq-python-extraction/g_python_extraction.mlg \
+    rocq-python-extraction/python.ml \
+    rocq-python-extraction/rocq-python-extraction.opam \
+    rocq-python-extraction/run_generated_pyright.sh \
+    rocq-python-extraction/run_in_docker.sh \
+    rocq-python-extraction/
+COPY --from=model-format /workspace/src/fido/rocq /workspace/src/fido/rocq
+
+ENV FIDO_ROCQ_PYTEST_ARTIFACTS=prepared
+ENV FIDO_SKIP_DOCKER_HELPER_TESTS=1
+
+RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
+    uv sync --frozen
+
+FROM python-test-base AS generated-typecheck
 
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 COPY --from=test-extract /tmp/pyright-artifacts /tmp/generated-pyright
+COPY rocq-python-extraction/test/pyright_*.py rocq-python-extraction/test/
 
 RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
     ./rocq-python-extraction/run_generated_pyright.sh /tmp/generated-pyright
 
-FROM python-check-base AS test
+FROM python-test-base AS test-unit
 
-COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
+COPY tests tests
 
 RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    uv run tests
+    uv run tests-unit
+
+FROM python-test-base AS test-rocq-generated
+
+COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
+COPY rocq-python-extraction/test/*.py rocq-python-extraction/test/
+
+RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
+    uv run tests-rocq-generated

@@ -59,7 +59,7 @@ def load_bake_plan(output: str) -> dict[str, object]:
 
 def bake_plan() -> dict[str, object]:
     output = subprocess.check_output(
-        ["docker", "buildx", "bake", "--print", "warm", "fido-test"],
+        ["docker", "buildx", "bake", "--print", "ci", "fido-test"],
         cwd=ROOT,
         text=True,
         stderr=subprocess.STDOUT,
@@ -304,14 +304,14 @@ def target_inputs(
 
 
 def cache_key_inputs(plan: dict[str, object]) -> dict[str, list[str]]:
-    warm_targets = cache_scopes(plan)
+    ci_targets = cache_scopes(plan)
     keys = {
         "rocq-image": sorted(target_inputs(plan, "rocq-image")),
         "rocq-models": sorted(
             target_inputs(plan, "format", target_stage_override="extract")
         ),
     }
-    for mount in cache_mounts_for_targets(plan, warm_targets):
+    for mount in cache_mounts_for_targets(plan, ci_targets):
         keys[f"buildkit-mount-{mount.id}"] = cache_mount_key_inputs(mount)
     return keys
 
@@ -442,7 +442,7 @@ def target_hashes(plan: dict[str, object], group: str) -> dict[str, str]:
     if not isinstance(group_targets, list):
         sys.exit(f"buildx bake group {group!r} did not include targets")
     names = sorted(set(targets) | {str(target) for target in group_targets})
-    if group == "warm":
+    if group == "ci":
         names = [name for name in names if name != "fido-test"]
     return {name: content_hash(sorted(target_inputs(plan, name))) for name in names}
 
@@ -471,7 +471,7 @@ def render_build_graph(plan: dict[str, object]) -> str:
         raw_targets = group_data.get("targets", [])
         if not isinstance(raw_targets, list):
             continue
-        if group_name == "warm":
+        if group_name == "ci":
             targets = [target for target in cache_scopes(plan) if target != "fido-test"]
         else:
             targets = sorted(raw_targets)
@@ -648,7 +648,7 @@ def main() -> None:
             print(f"{name} {digest}")
         return
     if len(args) == 2 and args[0] == "--target-hash":
-        hashes = target_hashes(plan or bake_plan(), "warm")
+        hashes = target_hashes(plan or bake_plan(), "ci")
         try:
             print(hashes[args[1]])
         except KeyError:

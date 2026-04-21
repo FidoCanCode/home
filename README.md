@@ -10,10 +10,10 @@ Use the root launcher to run project commands inside the buildx uv image:
 ./fido help
 ./fido up
 ./fido down
-./fido warm
+./fido ci
 ./fido gen-workflows
 ./fido status
-./fido tests  # focused pytest convenience; use ./fido warm before commits
+./fido tests  # focused pytest convenience; use ./fido ci before commits
 ./fido ruff format .
 ./fido pyright
 ./fido pytest tests/test_build_wrapper.py -q
@@ -28,7 +28,7 @@ with `FIDO_LOG=...`. On update exits from the app, `./fido up` syncs the runner
 clone, rebuilds the image, and starts again. It exits normally on ordinary
 shutdown signals. `./fido down` stops the named container gracefully; `--rm`
 lets Docker remove it after the stop.
-`./fido warm` builds the `warm` bake group, which depends on full CI and the
+`./fido ci` builds the `ci` bake group, which depends on full CI and the
 production runtime image cache, so local and CI runs populate those cache
 families through one command. The `fido-test` image is built on demand for ad hoc local
 commands.
@@ -103,17 +103,18 @@ context argument:
 ./fido make-rocq --target lint
 ./fido make-rocq --target typecheck
 ./fido make-rocq --target generated-typecheck
-./fido make-rocq --target test
+./fido make-rocq --target test-unit
+./fido make-rocq --target test-rocq-generated
 ```
 
 All Python checks run inside buildx bake targets. Rocq test artifacts are
 produced by a Rocq stage, then ruff format, ruff lint, pyright, generated
-pyright, and pytest run as separate uv stages. The `ci` and `warm` bake groups
-are meta groups over those real targets, so BuildKit can run independent checks
+pyright, unit pytest, and generated Rocq pytest run as separate uv stages. The
+`ci` bake group is a meta group over those real targets, so BuildKit can run independent checks
 in parallel without scratch sentinel targets. The uv dependency layers follow
 Astral's Docker pattern: `pyproject.toml`, `uv.lock`, and `.python-version` are
 copied into `uv sync --frozen --no-install-project` layers before application
-inputs are copied. The pre-commit hook and CI both call `./fido warm`.
+inputs are copied. The pre-commit hook and CI both call `./fido ci`.
 
 The internal smart-output mode is available for buildx artifact producers:
 

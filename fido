@@ -91,7 +91,7 @@ image_cache_ready() {
   docker image inspect "$tag" >/dev/null 2>&1
 }
 
-warm_cache_ready() {
+ci_cache_ready() {
   return 0
 }
 
@@ -478,7 +478,7 @@ build_image() {
   run_image=$tag
 }
 
-warm_images() {
+ci_images() {
   local passthrough=("$@")
   local driver
   local cache_backend
@@ -492,25 +492,25 @@ warm_images() {
   local line
   local digest
   local manifest
-  local warm_hit=1
+  local ci_hit=1
   mkdir -p "$repo_root/.cache/rocq-models/context/_build"
-  mkdir -p "$repo_root/.cache/rocq-models/warm"
+  mkdir -p "$repo_root/.cache/rocq-models/ci"
   while IFS= read -r target; do
     target_hashes+=("$target $(target_input_hash "$target")")
-  done < <(fido_build_targets_for_group warm)
+  done < <(fido_build_targets_for_group ci)
 
   for line in "${target_hashes[@]}"; do
     target=${line%% *}
     digest=${line#* }
     targets+=("$target")
-    manifest="$repo_root/.cache/rocq-models/warm/$target.sha"
+    manifest="$repo_root/.cache/rocq-models/ci/$target.sha"
     if [ ! -f "$manifest" ] || [ "$(cat "$manifest")" != "$digest" ]; then
-      warm_hit=0
+      ci_hit=0
     fi
   done
 
-  if [ "${#passthrough[@]}" -eq 0 ] && [ "$warm_hit" = "1" ] && warm_cache_ready "$driver"; then
-    log INFO "warm cache hit"
+  if [ "${#passthrough[@]}" -eq 0 ] && [ "$ci_hit" = "1" ] && ci_cache_ready "$driver"; then
+    log INFO "ci cache hit"
     return
   fi
 
@@ -531,19 +531,19 @@ warm_images() {
   bake_args+=(--set "fido.output=type=cacheonly")
   bake_args+=(--set "rocq-repl.output=type=cacheonly")
 
-  log INFO "warming ci checks and runtime image cache"
+  log INFO "building ci checks and runtime image cache"
   (
     cd "$repo_root"
     run_with_bake_env docker buildx bake \
       "${bake_args[@]}" \
       "${passthrough[@]}" \
-      warm
+      ci
   )
 
   for line in "${target_hashes[@]}"; do
     target=${line%% *}
     digest=${line#* }
-    printf '%s\n' "$digest" > "$repo_root/.cache/rocq-models/warm/$target.sha"
+    printf '%s\n' "$digest" > "$repo_root/.cache/rocq-models/ci/$target.sha"
   done
 }
 
@@ -668,15 +668,15 @@ case "$command" in
     docker stop "$container" 2>/dev/null || true
     exit 0
     ;;
-  warm)
-    warm_images "${@:2}"
+  ci)
+    ci_images "${@:2}"
     ;;
   gen-workflows)
     ensure_buildx_builder
     mkdir -p "$repo_root/.cache"
     (
       cd "$repo_root"
-      run_with_bake_env docker buildx bake --print warm fido-test > .cache/bake-plan.json
+      run_with_bake_env docker buildx bake --print ci fido-test > .cache/bake-plan.json
     )
     run_fido_cli_image python3 tools/gen_workflows.py --plan .cache/bake-plan.json
     ;;

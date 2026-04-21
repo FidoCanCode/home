@@ -11,7 +11,7 @@ Commands:
   help              Show this help.
   up                Run and supervise the fido server in the foreground.
   down              Stop the named fido server container.
-  warm              Warm buildx CI and runtime image targets.
+  ci                Build CI checks and runtime image cache.
   gen-workflows     Regenerate GitHub Actions workflows from buildx.
   make-rocq         Generate Rocq-extracted Python through buildx.
   status            Print fido status.
