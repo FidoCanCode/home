@@ -1,4 +1,4 @@
-# fido
+# Fido
 
 GitHub webhook listener and Fido runner. It receives GitHub events, triages
 comments, manages per-repo task lists, and launches Fido workers to implement
@@ -26,31 +26,32 @@ right Docker buildx target, runs the command in the container, and avoids host
 | `./fido <tool> [args...]` | Run any other command through containerized `uv run`, for example `./fido ruff format .`, `./fido pyright`, or `./fido pytest tests/test_status.py -q`. |
 
 The internal Python package is `fido` because the repo-root launcher already
-owns the filesystem path `./fido`. Human-facing commands, docs, logs, secrets,
-status output, and URLs should say `fido`.
+owns the filesystem path `./fido`. Use lowercase `fido` for commands, package
+names, module paths, log filenames, secrets, status keys, and URLs. Use
+capitalized `Fido` for the product/persona in prose.
 
 ## Architecture
 
 ```
-fido (single foreground container launched from /home/rhencke/home-runner/)
+Fido (single foreground container launched from /home/rhencke/home-runner/)
   ├─ HTTP server: receives webhooks, routes by repo
-  ├─ Per-repo fido workers: WorkerThread (fido/worker.py)
+  ├─ Per-repo Fido workers: WorkerThread (fido/worker.py)
   ├─ Per-repo task sync: tasks.json → PR body
   └─ Self-restart: exit 75 so ./fido syncs, rebuilds, and restarts
 ```
 
-Multi-repo: one fido process handles multiple repos. Each repo has its own tasks.json, lock files, and worker process.
+Multi-repo: one Fido process handles multiple repos. Each repo has its own tasks.json, lock files, and worker process.
 
-**Concurrency model**: one fido per repo, one issue per fido, one PR per issue. Fido finishes the current issue (PR merged or closed) before picking up the next. Two repos = two fidos max, running in parallel, each on their own issue.
+**Concurrency model**: one Fido worker per repo, one issue per worker, one PR per issue. Fido finishes the current issue (PR merged or closed) before picking up the next. Two repos = two workers max, running in parallel, each on their own issue.
 
-**ClaudeSession persistence**: the persistent `ClaudeSession` (bidirectional stream-json subprocess) is held on `WorkerThread._session` and survives individual `Worker` crashes — the watchdog restarts the thread and the next `Worker` inherits the same session. It does *not* survive a full fido restart: the foreground container exits and the launcher starts a fresh process, so the new fido starts with `_session = None` and creates a fresh session on its first iteration.
+**ClaudeSession persistence**: the persistent `ClaudeSession` (bidirectional stream-json subprocess) is held on `WorkerThread._session` and survives individual `Worker` crashes — the watchdog restarts the thread and the next `Worker` inherits the same session. It does *not* survive a full Fido restart: the foreground container exits and the launcher starts a fresh process, so the new Fido process starts with `_session = None` and creates a fresh session on its first iteration.
 
 ## Runner vs workspace clones
 
 Fido runs from a dedicated **runner clone** at `/home/rhencke/home-runner/`, separate from the **workspace clone** at `/home/rhencke/workspace/home/`.
 
 - **Runner clone** — always on `main`, never dirty, never has feature branches. Fido imports its Python code from here. Self-restart does `git pull` here.
-- **Workspace clone** — where fido edits source files, commits, and pushes feature branches. Never used to run the server.
+- **Workspace clone** — where Fido edits source files, commits, and pushes feature branches. Never used to run the server.
 
 Launching: `/home/rhencke/start-fido.sh` (local, outside git) execs `./fido up ...` from the runner clone.
 
@@ -159,7 +160,7 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
   mapping, credentials mounts, and stdin passthrough.
 - **No `@staticmethod` on behavior-bearing code** — static methods can't be patched via `self` and resist constructor-DI; see OO architecture rules below
 - **Prefer explicit object boundaries; keep module-level code thin and delegated** — new behavior lives on injected objects, not on free functions; see OO architecture rules below
-- **Thread safety (Python 3.14t, free-threaded, no GIL)** — fido runs on
+- **Thread safety (Python 3.14t, free-threaded, no GIL)** — Fido runs on
   the free-threaded build.  Do **not** rely on the GIL for atomicity.  Every
   shared mutable state (dicts, sets, lists, counters, attribute mutations
   observed from other threads) must be guarded by an explicit lock, or use a
@@ -321,7 +322,7 @@ state mutation.  Translate first, dispatch second.
 When an intent needs to survive a crash or a restart, write it to the durable
 store *before* acting on it.  `tasks.json` with `flock` is the canonical
 example: a task is appended to the file (under lock) before the worker starts
-executing it.  If fido crashes mid-task, the task is still in the list on
+executing it.  If Fido crashes mid-task, the task is still in the list on
 restart.
 
 ```python
@@ -389,9 +390,9 @@ index it directly (`payload["action"]`) rather than using `.get("action", "")`
 or `.get("action", None)`.  A `KeyError` is much easier to debug than a
 downstream `NoneType` error or a silently skipped handler.
 
-**Fail closed on startup precondition failures.**  If fido cannot verify a
+**Fail closed on startup precondition failures.**  If Fido cannot verify a
 required precondition at startup (missing secret file, bad config, unreachable
-repo), it should exit rather than continue in a degraded state.  A fido that
+repo), it should exit rather than continue in a degraded state.  A Fido process that
 starts without a valid HMAC secret will silently accept forged webhooks.
 
 ## Lessons learned

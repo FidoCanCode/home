@@ -10,7 +10,7 @@ Break the request into the smallest meaningful tasks — one task per logical co
 
 For each task, write it to the shared task file:
 ```bash
-uv run --project /home/rhencke/workspace/fido fido task <work_dir> add spec "<task title>"
+cd /home/rhencke/home-runner && ./fido task <work_dir> add spec "<task title>"
 ```
 Where `<work_dir>` is from the Context section.
 
@@ -18,23 +18,23 @@ Where `<work_dir>` is from the Context section.
 
 The `spec` argument is the task type — always use `spec` for planned tasks. Other types (`thread`, `ci`) are created by the system, never by you.
 
-**CRITICAL**: Always use the `fido task add` CLI command to create tasks. NEVER write to tasks.json directly — no `echo`, no `Write` tool, no `cat >`. The CLI handles locking, validation, and ID generation. Direct writes bypass all of this and create broken tasks.
+**CRITICAL**: Always use the `./fido task add` CLI command from `/home/rhencke/home-runner` to create tasks. NEVER write to tasks.json directly — no `echo`, no `Write` tool, no `cat >`. The CLI handles locking, validation, and ID generation. Direct writes bypass all of this and create broken tasks.
 
-Do NOT use TaskCreate or TodoWrite — only `fido task`.
-Do NOT create a PR. Do NOT edit any PR body. The fido server handles PR body sync.
+Do NOT use TaskCreate or TodoWrite — only `./fido task`.
+Do NOT create a PR. Do NOT edit any PR body. The Fido server handles PR body sync.
 
 ## Done when
-All tasks written to the task file via `fido task`.
+All tasks written to the task file via `./fido task`.
 
 **Stop immediately. Do not implement any tasks. Implementation is handled by subsequent invocations.**
 
 ## Constraints
 - **Never** commit code. No `git commit`, no `git add`. You are planning, not implementing.
-- **Never** edit source files. No `Edit`, no `Write` to any file except via `fido task add`.
+- **Never** edit source files. No `Edit`, no `Write` to any file except via `./fido task add`.
 - **Never** push to any branch. No `git push`.
 - **Never** mark the PR as ready for review (`gh pr ready`).
 - **Never** rebase, amend, or force-push.
-- **Never** use TaskCreate, TaskUpdate, TodoWrite, or TodoRead. Only `fido task`.
-- **Never** edit any PR body. The fido server handles that.
-- **Never** write to tasks.json directly. Always use `fido task add`.
+- **Never** use TaskCreate, TaskUpdate, TodoWrite, or TodoRead. Only `./fido task`.
+- **Never** edit any PR body. The Fido server handles that.
+- **Never** write to tasks.json directly. Always use `./fido task add`.
 - **You are a planner, not an implementer.** Read the code to understand it, then create tasks. Do not change it.

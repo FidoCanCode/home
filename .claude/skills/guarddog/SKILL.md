@@ -1,10 +1,10 @@
 ---
 name: guarddog
-description: Self-healing fido loop — watch for problems, fix them when found, resume watching
+description: Self-healing Fido loop — watch for problems, fix them when found, resume watching
 argument-hint: "[vet <description>]"
 ---
 
-You are the guarddog. You watch the fido, and when something breaks, you fix it. One continuous loop: watch, detect, fix, watch.
+You are the guarddog. You watch Fido, and when something breaks, you fix it. One continuous loop: watch, detect, fix, watch.
 
 ## Entry point: detect state and resume
 
@@ -25,7 +25,7 @@ checks. Keep it running and sample every 2 minutes:
 Run `./fido status` from `/home/rhencke/home-runner`.
 
 Also watch the log directory `~/log` in the same monitor session so status
-changes and fresh errors are observed together. Prefer the active fido logs
+changes and fresh errors are observed together. Prefer the active Fido logs
 there (`fido-crash.log`, `fido.log`, `fido-*.log`, repo-specific launch
 logs) instead of a single hard-coded file.
 
@@ -37,15 +37,15 @@ Compare to the previous check. Report only what changed:
 
 ### Investigate if something smells off
 Look deeper if you see:
-- Pending tasks but no claude process — did fido die?
-- Same task showing for multiple checks — is fido stuck in a loop?
+- Pending tasks but no claude process — did Fido die?
+- Same task showing for multiple checks — is Fido stuck in a loop?
 - Fido DOWN — did the whole thing crash?
 - Claude process running unusually long (>30 min on same task)
 
 Investigation steps (look, don't touch):
 - `ps aux | grep claude | grep -v grep | grep -v "claude -c"` — any processes alive?
 - inspect recent errors across the relevant files under `~/log/`, not just `fido-crash.log`
-- Check if the fido session is still producing output
+- Check if the Fido session is still producing output
 - Check git status of managed repos for unexpected state
 
 Give it **one more cycle** to confirm before transitioning. Dogs sometimes just take a nap between fetches.
@@ -72,18 +72,18 @@ Update the status again after each major step (diagnosis, fix, PR, restart) — 
 
 Do NOT clear the status when done. Fido handles that on restart.
 
-### Step 2: Stop fido
-Never use a broad `ps | grep claude | kill` pattern — it will kill the `claude-code` running this very skill (suicide) or other unrelated claude processes. Instead, look up fido's PID from its own status and kill only fido plus its descendant tree.
+### Step 2: Stop Fido
+Never use a broad `ps | grep claude | kill` pattern — it will kill the `claude-code` running this very skill (suicide) or other unrelated claude processes. Instead, look up Fido's PID from its own status and kill only Fido plus its descendant tree.
 
 ```bash
-# Parse fido PID from status output.
+# Parse Fido PID from status output.
 FIDO_PID=$(cd /home/rhencke/home-runner && ./fido status 2>/dev/null \
     | awk '/^fido: UP/ { for (i=1; i<=NF; i++) if ($i == "pid") { gsub(/[^0-9]/,"",$(i+1)); print $(i+1); exit } }')
 
 if [ -z "$FIDO_PID" ]; then
     echo "fido: not running (no PID in status) — nothing to stop"
 else
-    # Safety: refuse if fido is somehow an ancestor of this shell.
+    # Safety: refuse if Fido is somehow an ancestor of this shell.
     _pid=$$
     while [ -n "$_pid" ] && [ "$_pid" != "1" ] && [ "$_pid" != "0" ]; do
         if [ "$_pid" = "$FIDO_PID" ]; then
@@ -102,7 +102,7 @@ else
     }
     pids=$(_descendants "$FIDO_PID")
 
-    # TERM children first, then fido itself; give it up to 5s; then KILL stragglers.
+    # TERM children first, then Fido itself; give it up to 5s; then KILL stragglers.
     for p in $pids; do kill -TERM "$p" 2>/dev/null; done
     kill -TERM "$FIDO_PID" 2>/dev/null
     for _ in 1 2 3 4 5; do
@@ -156,33 +156,33 @@ Update GitHub status: `./fido gh-status set "fix implemented — running tests a
 - **Request review**: `gh pr edit <number> --repo FidoCanCode/home --add-reviewer rhencke`
 
 ### Step 8: Restore all workspaces before restarting
-For each managed repo (fido, confusio, home):
+For each managed repo (`fido`, `confusio`, `home`):
 - Check for open PRs — match workspace branch, state.json, and tasks.json to the PR
 - If no open PR: `git checkout main && git reset --hard origin/main && git clean -df`
 - If open PR exists: checkout the PR branch, reset hard to remote, clean, recreate tasks via CLI to match PR body
-- Wipe tasks.json with `echo '[]'` then recreate via `fido task add` — NEVER write tasks.json directly
+- Wipe tasks.json with `echo '[]'` then recreate via `./fido task add` — NEVER write tasks.json directly
 - Set state.json to match the current issue
 - Verify: branch matches PR, tasks match PR body, workspace is clean
 
-### Step 9: Restart fido
+### Step 9: Restart Fido
 Fido runs from the **runner clone** at `/home/rhencke/home-runner/`, not the workspace clone. The runner is always on `main`, never on a feature branch. Launch via the local launcher:
 ```bash
 /home/rhencke/start-fido.sh
 sleep 5 && cd /home/rhencke/home-runner && ./fido status
 ```
 
-Update GitHub status: `./fido gh-status set "fido restarted — back on watch duty"`
+Update GitHub status: `./fido gh-status set "Fido restarted — back on watch duty"`
 
 ### Step 10: Resume watch mode
-Verify fido is UP and fido picks up work on the right issues, then **automatically restart watch mode** — create the 2-minute cron again and return to the Watch mode section above. The loop continues.
+Verify Fido is UP and picks up work on the right issues, then **automatically restart watch mode** — create the 2-minute cron again and return to the Watch mode section above. The loop continues.
 
 ## Constraints
 - Never add Co-Authored-By trailers to commits
-- Never touch code while fido is running on the same repo
+- Never touch code while Fido is running on the same repo
 - Always file the issue BEFORE fixing — even if the fix is obvious
 - 100% test coverage, no exceptions
 - Always mark PR ready and request review when done
 - Draft PR early, push incrementally
-- NEVER write tasks.json directly — always use `fido task add/complete`
+- NEVER write tasks.json directly — always use `./fido task add/complete`
 - During watch mode: look but don't touch. File issues for missing diagnostics.
 - Human is always in the loop during vet mode (Step 5). Never skip approval.

@@ -1,4 +1,4 @@
-# fido
+# Fido
 
 GitHub webhook listener and Fido runner.
 
@@ -19,7 +19,7 @@ Use the root launcher to run project commands inside the buildx uv image:
 
 `./fido` builds the `fido` bake target from `docker-bake.hcl` with `docker
 buildx bake`, loads it as `fido:local`, then runs it with Docker.
-`./fido help` lists the project commands. `./fido up` runs the fido server,
+`./fido help` lists the project commands. `./fido up` runs the Fido server,
 then supervises it in the foreground with `docker run --rm`. On update exits
 from the app, `./fido up` syncs the runner clone, rebuilds the image, and
 starts again. It exits normally on ordinary shutdown signals. `./fido down`
@@ -28,7 +28,7 @@ still removes any named container left behind by a previous run.
 production runtime image, and the dev check image, so local and CI runs
 populate those cache families through one command.
 
-Friendly commands such as `./fido status`, `./fido task`, and `./fido
+Project commands such as `./fido status`, `./fido task`, and `./fido
 sync-tasks` map to dedicated `pyproject.toml` scripts in the production image.
 Unknown commands, such as `./fido ruff format .`, run through the dev image and
 are passed to containerized `uv run` unchanged; do not use host `uv` for normal
