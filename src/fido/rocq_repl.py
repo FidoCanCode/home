@@ -71,6 +71,111 @@ class RocqReplError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class ReferenceInvocation:
+    expression: str
+    symbol: str
+    args: tuple[object, ...]
+
+    @classmethod
+    def from_expression(
+        cls, model: LoadedModel, expression: str
+    ) -> tuple["ReferenceInvocation", object]:
+        parsed = ast.parse(expression, mode="eval")
+        call = parsed.body
+        if not isinstance(call, ast.Call):
+            raise RocqReplError("OCaml compare requires a direct Rocq symbol call")
+        if call.keywords:
+            raise RocqReplError("OCaml compare does not support keyword arguments")
+        if not isinstance(call.func, ast.Name):
+            raise RocqReplError("OCaml compare requires a direct Rocq symbol call")
+
+        symbol = call.func.id
+        cls._require_symbol(model, symbol)
+        evaluator = PythonEvaluator(model)
+        args = tuple(evaluator.evaluate(ast.unparse(arg)) for arg in call.args)
+        python_value = evaluator.evaluate(expression)
+        return cls(expression=expression, symbol=symbol, args=args), python_value
+
+    @classmethod
+    def from_call(
+        cls, model: LoadedModel, target: object, args: tuple[object, ...]
+    ) -> tuple["ReferenceInvocation", object]:
+        symbol = (
+            target if isinstance(target, str) else cls._symbol_for_value(model, target)
+        )
+        cls._require_symbol(model, symbol)
+        callable_target = model.namespace[symbol]
+        if not callable(callable_target):
+            raise RocqReplError(f"Rocq symbol is not callable: {symbol}")
+        return (
+            cls(expression=f"{symbol}(...)", symbol=symbol, args=args),
+            callable_target(*args),
+        )
+
+    def ocaml_expression(self, model: LoadedModel, module_name: str) -> str:
+        target = f"{module_name}.{self.symbol}"
+        if not self.args:
+            return target
+        args = " ".join(self._ocaml_value(model, module_name, arg) for arg in self.args)
+        return f"({target} {args})"
+
+    @classmethod
+    def _symbol_for_value(cls, model: LoadedModel, value: object) -> str:
+        for name, candidate in model.namespace.items():
+            if candidate is value:
+                return name
+        raise RocqReplError("OCaml compare target must be a bound Rocq symbol")
+
+    @staticmethod
+    def _require_symbol(model: LoadedModel, name: str) -> None:
+        if name not in model.namespace:
+            raise RocqReplError(f"name is not bound in the Rocq Python REPL: {name}")
+        if name not in model.symbols:
+            raise RocqReplError(f"name is not an extracted Rocq symbol: {name}")
+
+    @classmethod
+    def _ocaml_value(cls, model: LoadedModel, module_name: str, value: object) -> str:
+        if value is None:
+            return f"{module_name}.None"
+        if value is True:
+            return "true"
+        if value is False:
+            return "false"
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, str):
+            return json.dumps(value)
+        if isinstance(value, tuple):
+            return (
+                "("
+                + ", ".join(
+                    cls._ocaml_value(model, module_name, item) for item in value
+                )
+                + ")"
+            )
+        if isinstance(value, list):
+            return (
+                "["
+                + "; ".join(
+                    cls._ocaml_value(model, module_name, item) for item in value
+                )
+                + "]"
+            )
+
+        constructor = type(value).__name__
+        if constructor not in model.namespace:
+            raise RocqReplError(f"OCaml compare cannot render non-Rocq value {value!r}")
+        fields = getattr(value, "__dataclass_fields__", {})
+        if fields:
+            args = " ".join(
+                cls._ocaml_value(model, module_name, getattr(value, field))
+                for field in fields
+            )
+            return f"({module_name}.{constructor} {args})"
+        return f"{module_name}.{constructor}"
+
+
 class ModelLoader:
     def __init__(self, repo_root: Path, stderr: IO[str]) -> None:
         self._repo_root = repo_root
@@ -204,65 +309,6 @@ class ValueNormalizer:
         return repr(value)
 
 
-class PythonToOcaml:
-    def __init__(self, model: LoadedModel) -> None:
-        self._model = model
-
-    def translate(self, expression: str, module_name: str) -> str:
-        parsed = ast.parse(expression, mode="eval")
-        return self._expr(parsed.body, module_name)
-
-    def _expr(self, node: ast.AST, module_name: str) -> str:
-        if isinstance(node, ast.Name):
-            self._require_bound(node.id)
-            return f"{module_name}.{node.id}"
-        if isinstance(node, ast.Constant):
-            return self._constant(node.value)
-        if isinstance(node, ast.Tuple):
-            return (
-                "("
-                + ", ".join(self._expr(item, module_name) for item in node.elts)
-                + ")"
-            )
-        if isinstance(node, ast.List):
-            return (
-                "["
-                + "; ".join(self._expr(item, module_name) for item in node.elts)
-                + "]"
-            )
-        if isinstance(node, ast.Call):
-            if node.keywords:
-                raise RocqReplError("OCaml compare does not support keyword arguments")
-            if not isinstance(node.func, ast.Name):
-                raise RocqReplError("OCaml compare only supports direct name calls")
-            self._require_bound(node.func.id)
-            target = f"{module_name}.{node.func.id}"
-            if not node.args:
-                return target
-            args = " ".join(self._expr(arg, module_name) for arg in node.args)
-            return f"({target} {args})"
-        raise RocqReplError(
-            f"OCaml compare does not support {type(node).__name__} expressions"
-        )
-
-    def _constant(self, value: object) -> str:
-        if value is None:
-            return "None"
-        if value is True:
-            return "true"
-        if value is False:
-            return "false"
-        if isinstance(value, int):
-            return str(value)
-        if isinstance(value, str):
-            return json.dumps(value)
-        raise RocqReplError(f"OCaml compare does not support literal {value!r}")
-
-    def _require_bound(self, name: str) -> None:
-        if name not in self._model.namespace:
-            raise RocqReplError(f"name is not bound in the Rocq Python REPL: {name}")
-
-
 class OcamlReference:
     def __init__(
         self,
@@ -275,13 +321,12 @@ class OcamlReference:
         self._model = model
         self._stderr = stderr
         self._run = run
-        self._translator = PythonToOcaml(model)
 
-    def evaluate(self, expression: str) -> str:
+    def evaluate(self, invocation: ReferenceInvocation) -> str:
         with tempfile.TemporaryDirectory(prefix="rocq-repl-") as raw:
             work = Path(raw)
             source_name, module_name = self._prepare_reference(work)
-            ocaml_expr = self._translator.translate(expression, module_name)
+            ocaml_expr = invocation.ocaml_expression(self._model, module_name)
             self._write_eval(work, module_name, ocaml_expr)
             self._run_checked(
                 ["ocamlc", "-o", "eval", f"{source_name}.ml", "eval.ml"], work
@@ -456,47 +501,64 @@ class RocqRepl:
                 raise KeyError(name)
             return symbol.location()
 
-        def rocq_compare(expression: str) -> CompareResult:
-            return self._compare(model, expression)
+        def rocq_compare(target: object, *args: object) -> CompareResult:
+            return self._compare_call(model, target, args)
 
         model.namespace["rocq_symbols"] = rocq_symbols
         model.namespace["rocq_source"] = rocq_source
         model.namespace["rocq_compare"] = rocq_compare
 
     def _run_eval(self, model: LoadedModel, expression: str, *, compare: bool) -> None:
-        python_value = PythonEvaluator(model).evaluate(expression)
+        invocation: ReferenceInvocation | None = None
+        if compare:
+            invocation, python_value = ReferenceInvocation.from_expression(
+                model, expression
+            )
+        else:
+            python_value = PythonEvaluator(model).evaluate(expression)
         python_result = self._normalizer.normalize(python_value)
         self._stdout.write(f"python: {python_result}\n")
-        if compare:
-            result = self._compare(model, expression, python_result=python_result)
+        if invocation is not None:
+            result = self._compare(model, invocation, python_result=python_result)
             self._stdout.write(f"ocaml: {result.ocaml_result}\n")
             self._stdout.write(f"match: {'yes' if result.matches else 'no'}\n")
 
     def _compare(
         self,
         model: LoadedModel,
-        expression: str,
+        invocation: ReferenceInvocation,
         *,
         python_result: str | None = None,
     ) -> CompareResult:
         if python_result is None:
-            python_result = self._normalizer.normalize(
-                PythonEvaluator(model).evaluate(expression)
-            )
+            target = model.namespace[invocation.symbol]
+            if not callable(target):
+                raise RocqReplError(f"Rocq symbol is not callable: {invocation.symbol}")
+            python_result = self._normalizer.normalize(target(*invocation.args))
         ocaml_result = OcamlReference(self._repo_root, model, self._stderr).evaluate(
-            expression
+            invocation
         )
         return CompareResult(
-            expression=expression,
+            expression=invocation.expression,
             python_result=python_result,
             ocaml_result=ocaml_result,
+        )
+
+    def _compare_call(
+        self, model: LoadedModel, target: object, args: tuple[object, ...]
+    ) -> CompareResult:
+        invocation, python_value = ReferenceInvocation.from_call(model, target, args)
+        return self._compare(
+            model,
+            invocation,
+            python_result=self._normalizer.normalize(python_value),
         )
 
     def _interact(self, model: LoadedModel) -> None:
         banner = (
             f"Rocq Python REPL for {model.source.relative_to(self._repo_root)}\n"
             f"Bound symbols: {', '.join(sorted(model.namespace))}\n"
-            "Helpers: rocq_symbols(), rocq_source(name), rocq_compare(expr)"
+            "Helpers: rocq_symbols(), rocq_source(name), rocq_compare(symbol, *args)"
         )
         console = code.InteractiveConsole(locals=model.namespace)
         console.interact(banner=banner, exitmsg="")

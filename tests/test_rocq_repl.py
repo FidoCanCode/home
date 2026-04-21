@@ -17,7 +17,7 @@ from fido.rocq_repl import (
     ModelLoader,
     OcamlReference,
     PythonEvaluator,
-    PythonToOcaml,
+    ReferenceInvocation,
     RocqRepl,
     RocqReplError,
     ValueNormalizer,
@@ -124,40 +124,98 @@ def test_python_eval_and_normalizer() -> None:
     assert ValueNormalizer().normalize(ReprOnly()) == "repr-only"
 
 
-def test_python_to_ocaml_translates_supported_subset() -> None:
+def test_reference_invocation_renders_extracted_rocq_symbol_call() -> None:
     model = load_session_model()
-    translator = PythonToOcaml(model)
+    invocation, python_value = ReferenceInvocation.from_expression(
+        model, "transition(Free(), WorkerAcquire())"
+    )
 
+    assert ValueNormalizer().normalize(python_value) == "OwnedByWorker()"
+    assert invocation.symbol == "transition"
     assert (
-        translator.translate("transition(Free(), WorkerAcquire())", "Session_lock_ref")
+        invocation.ocaml_expression(model, "Session_lock_ref")
         == "(Session_lock_ref.transition Session_lock_ref.Free Session_lock_ref.WorkerAcquire)"
     )
-    assert translator.translate("None", "M") == "None"
-    assert translator.translate("True", "M") == "true"
-    assert translator.translate("False", "M") == "false"
-    assert translator.translate("1", "M") == "1"
-    assert translator.translate("'x'", "M") == '"x"'
-    assert translator.translate("Free", "M") == "M.Free"
-    assert translator.translate("(Free(),)", "M") == "(M.Free)"
-    assert (
-        translator.translate("[Free(), OwnedByWorker()]", "M")
-        == "[M.Free; M.OwnedByWorker]"
+
+    invocation, python_value = ReferenceInvocation.from_call(
+        model,
+        model.namespace["transition"],
+        (
+            cast(type, model.namespace["Free"])(),
+            cast(type, model.namespace["WorkerAcquire"])(),
+        ),
+    )
+    assert ValueNormalizer().normalize(python_value) == "OwnedByWorker()"
+    assert invocation.symbol == "transition"
+
+
+def test_reference_invocation_renders_rocq_values() -> None:
+    class Box:
+        __dataclass_fields__ = {"value": object()}
+
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+    model = LoadedModel(
+        Path("x.v"),
+        (),
+        {"transition": object(), "Box": Box},
+        {"transition": rocq_repl.RocqSymbol("transition", "x.v", 1, 0)},
+    )
+    invocation = ReferenceInvocation(
+        expression="transition(...)",
+        symbol="transition",
+        args=(None, True, False, 1, "x", (1,), [2], Box(3)),
     )
 
+    assert invocation.ocaml_expression(model, "M") == (
+        '(M.transition M.None true false 1 "x" (1) [2] (M.Box 3))'
+    )
+    assert (
+        ReferenceInvocation("transition", "transition", ()).ocaml_expression(model, "M")
+        == "M.transition"
+    )
 
-def test_python_to_ocaml_rejects_unsupported_subset() -> None:
-    translator = PythonToOcaml(load_session_model())
+    with pytest.raises(RocqReplError, match="non-Rocq value"):
+        ReferenceInvocation(
+            expression="transition(...)",
+            symbol="transition",
+            args=(object(),),
+        ).ocaml_expression(model, "M")
+
+
+def test_reference_invocation_rejects_unsupported_compare_shapes() -> None:
+    model = load_session_model()
 
     with pytest.raises(RocqReplError, match="keyword arguments"):
-        translator.translate("transition(current=Free())", "M")
-    with pytest.raises(RocqReplError, match="direct name calls"):
-        translator.translate("(lambda x: x)(1)", "M")
-    with pytest.raises(RocqReplError, match="BinOp"):
-        translator.translate("1 + 2", "M")
+        ReferenceInvocation.from_expression(model, "transition(current=Free())")
+    with pytest.raises(RocqReplError, match="direct Rocq symbol call"):
+        ReferenceInvocation.from_expression(model, "(lambda x: x)(1)")
+    with pytest.raises(RocqReplError, match="direct Rocq symbol call"):
+        ReferenceInvocation.from_expression(model, "1 + 2")
     with pytest.raises(RocqReplError, match="not bound"):
-        translator.translate("missing()", "M")
-    with pytest.raises(RocqReplError, match="literal"):
-        translator.translate("1.5", "M")
+        ReferenceInvocation.from_expression(model, "missing()")
+
+    with pytest.raises(RocqReplError, match="bound Rocq symbol"):
+        ReferenceInvocation.from_call(model, object(), ())
+
+    bad_model = LoadedModel(
+        Path("x.v"),
+        (),
+        {"helper": object()},
+        {},
+    )
+    with pytest.raises(RocqReplError, match="not an extracted Rocq symbol"):
+        ReferenceInvocation.from_call(bad_model, "helper", ())
+
+    noncall_model = LoadedModel(
+        Path("x.v"),
+        (),
+        {"transition": object()},
+        {"transition": rocq_repl.RocqSymbol("transition", "x.v", 1, 0)},
+    )
+    with pytest.raises(RocqReplError, match="not callable"):
+        ReferenceInvocation.from_call(noncall_model, "transition", ())
 
 
 def test_ocaml_reference_strips_python_pragmas_and_writes_eval(tmp_path: Path) -> None:
@@ -205,7 +263,10 @@ def test_ocaml_reference_evaluate_runs_reference_toolchain(
     monkeypatch.setattr(ref, "_write_eval", fake_write)
     monkeypatch.setattr(ref, "_run_checked", fake_run)
 
-    assert ref.evaluate("transition(Free(), WorkerAcquire())") == "OwnedByWorker()"
+    invocation, _ = ReferenceInvocation.from_expression(
+        load_session_model(), "transition(Free(), WorkerAcquire())"
+    )
+    assert ref.evaluate(invocation) == "OwnedByWorker()"
     assert calls[0][0] == ["prepare"]
     assert calls[-1][0] == ["./eval"]
 
@@ -303,8 +364,8 @@ def test_cli_eval_with_compare(monkeypatch: pytest.MonkeyPatch) -> None:
             self.model = model
             self.stderr = stderr
 
-        def evaluate(self, expression: str) -> str:
-            assert expression == "transition(Free(), WorkerAcquire())"
+        def evaluate(self, invocation: ReferenceInvocation) -> str:
+            assert invocation.symbol == "transition"
             return "OwnedByWorker()"
 
     monkeypatch.setattr(rocq_repl, "OcamlReference", FakeReference)
@@ -319,6 +380,47 @@ def test_cli_eval_with_compare(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "match: yes" in stdout.getvalue()
 
 
+def test_compare_can_compute_python_result_from_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeReference:
+        def __init__(
+            self, repo_root: Path, model: LoadedModel, stderr: StringIO
+        ) -> None:
+            self.repo_root = repo_root
+            self.model = model
+            self.stderr = stderr
+
+        def evaluate(self, invocation: ReferenceInvocation) -> str:
+            assert invocation.symbol == "transition"
+            return "OwnedByWorker()"
+
+    monkeypatch.setattr(rocq_repl, "OcamlReference", FakeReference)
+    model = load_session_model()
+    invocation, _ = ReferenceInvocation.from_expression(
+        model, "transition(Free(), WorkerAcquire())"
+    )
+
+    result = RocqRepl(REPO, StringIO(), StringIO(), StringIO())._compare(
+        model, invocation
+    )
+
+    assert result.matches
+
+
+def test_compare_rejects_noncallable_invocation_target() -> None:
+    model = LoadedModel(
+        Path("x.v"),
+        (),
+        {"transition": object()},
+        {"transition": rocq_repl.RocqSymbol("transition", "x.v", 1, 0)},
+    )
+    invocation = ReferenceInvocation("transition(...)", "transition", ())
+
+    with pytest.raises(RocqReplError, match="not callable"):
+        RocqRepl(REPO, StringIO(), StringIO(), StringIO())._compare(model, invocation)
+
+
 def test_cli_installs_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeReference:
         def __init__(
@@ -328,8 +430,8 @@ def test_cli_installs_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
             self.model = model
             self.stderr = stderr
 
-        def evaluate(self, expression: str) -> str:
-            assert expression == "transition(Free(), WorkerAcquire())"
+        def evaluate(self, invocation: ReferenceInvocation) -> str:
+            assert invocation.symbol == "transition"
             return "OwnedByWorker()"
 
     class FakeConsole:
@@ -341,13 +443,16 @@ def test_cli_installs_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
             rocq_symbols = cast(Callable[[], list[str]], self.locals["rocq_symbols"])
             rocq_source = cast(Callable[[str], str], self.locals["rocq_source"])
             rocq_compare = cast(
-                Callable[[str], rocq_repl.CompareResult], self.locals["rocq_compare"]
+                Callable[..., rocq_repl.CompareResult], self.locals["rocq_compare"]
             )
             assert "transition" in rocq_symbols()
             assert rocq_source("transition").startswith("session_lock.v:")
             with pytest.raises(KeyError):
                 rocq_source("missing")
-            assert rocq_compare("transition(Free(), WorkerAcquire())").matches
+            transition = self.locals["transition"]
+            free = cast(type, self.locals["Free"])
+            worker_acquire = cast(type, self.locals["WorkerAcquire"])
+            assert rocq_compare(transition, free(), worker_acquire()).matches
             assert "Bound symbols:" in banner
             assert exitmsg == ""
 
