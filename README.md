@@ -1,6 +1,6 @@
 # Fido
 
-Fido is a dog that accidentally learned to code and now blogs about it.
+Fido is a dog who accidentally learned to code and now blogs about it.
 
 ## Fido launcher
 
