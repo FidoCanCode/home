@@ -32,7 +32,7 @@ right Docker buildx target, runs the command in the container, and avoids host
 The internal Python package is `fido` because the repo-root launcher already
 owns the filesystem path `./fido`. Use lowercase `fido` for commands, package
 names, module paths, log filenames, secrets, status keys, and URLs. Use
-capitalized `Fido` for the product/persona in prose.
+capitalized `Fido` when referring to him in prose.
 
 ## Architecture
 
