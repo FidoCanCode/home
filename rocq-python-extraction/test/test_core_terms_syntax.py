@@ -12,3 +12,11 @@ def test_core_terms_syntax(build_default) -> None:
         "todo_val.py",
     ]:
         py_compile.compile(str(build_default / filename), doraise=True)
+
+
+def test_unsupported_dtype_comments_are_catalogued(build_default) -> None:
+    for filename in ["uint_val.py", "float_val.py", "str_val.py"]:
+        source = (build_default / filename).read_text()
+
+        assert "Python ExtractionDiagnostic [PYEX003]" in source
+        assert "Remediation:" in source

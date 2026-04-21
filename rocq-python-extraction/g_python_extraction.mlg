@@ -137,6 +137,35 @@ let write_python_with_source_map ~fname ~span pp =
   close_out oc;
   write_pymap ~python_file:fname ~span ~source:annotated
 
+let string_contains haystack needle =
+  let hay_len = String.length haystack in
+  let needle_len = String.length needle in
+  let rec loop i =
+    if needle_len = 0 then true
+    else if i + needle_len > hay_len then false
+    else if String.equal (String.sub haystack i needle_len) needle then true
+    else loop (i + 1)
+  in
+  loop 0
+
+let run_with_diagnostics f =
+  try f () with
+  | CErrors.UserError pp
+    when string_contains (Pp.string_of_ppcmds pp) Python.diagnostic_prefix ->
+      raise (CErrors.UserError pp)
+  | CErrors.UserError pp ->
+      Python.extraction_diagnostic_error
+        ~detail:(Pp.string_of_ppcmds pp)
+        "PYEX040"
+  | Assert_failure (file, line, column) ->
+      Python.extraction_diagnostic_error
+        ~detail:(Printf.sprintf "%s:%d:%d" file line column)
+        "PYEX040"
+  | Failure msg ->
+      Python.extraction_diagnostic_error ~detail:msg "PYEX040"
+  | Invalid_argument msg ->
+      Python.extraction_diagnostic_error ~detail:msg "PYEX040"
+
 (** Python-specific file emission copied from Rocq's extraction driver, but
     bound directly to [Python.python_descr] so we do not depend on Rocq's
     closed built-in extraction language enum. *)
@@ -245,11 +274,11 @@ END
 (** [Python Extraction foo.] — extract [foo] to [foo.py]. *)
 VERNAC COMMAND EXTEND PythonExtraction CLASSIFIED AS QUERY STATE opaque_access
 | [ "Python" "Extraction" global(x) ]
-  -> { python_extract x }
+  -> { run_with_diagnostics (fun () -> python_extract x) }
 END
 
 (** [Python Module Extraction M.] — extract module [M] to [M.py]. *)
 VERNAC COMMAND EXTEND PythonModuleExtraction CLASSIFIED AS QUERY STATE opaque_access
 | [ "Python" "Module" "Extraction" identref(m) ]
-  -> { python_extract_module (qualid_of_ident m.CAst.v) }
+  -> { run_with_diagnostics (fun () -> python_extract_module (qualid_of_ident m.CAst.v)) }
 END

@@ -244,8 +244,129 @@ let pp_impossible_expr () =
 let pp_impossible_stmt () =
   str "raise _Impossible()"
 
+type diagnostic = {
+  code : string;
+  title : string;
+  category : string;
+  remediation : string;
+  docs : string;
+}
+
+let diagnostic_catalogue = [
+  { code = "PYEX001"; title = "Persistent arrays are unsupported"; category = "miniml-expression"; remediation = "Avoid Rocq PArray in extracted terms or add an explicit Python remapping."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex001-persistent-arrays-are-unsupported" };
+  { code = "PYEX002"; title = "Prop term used for computation"; category = "prop-erasure"; remediation = "Move the proof to Prop-only positions or return data in Set/Type before extraction."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex002-prop-term-used-for-computation" };
+  { code = "PYEX003"; title = "Type alias declaration is not emitted"; category = "miniml-declaration"; remediation = "Use a concrete inductive/record or add an extraction remapping for the type."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex003-type-alias-declaration-is-not-emitted" };
+  { code = "PYEX004"; title = "Axiom has no computational realization"; category = "runtime-stub"; remediation = "Provide an Extract Constant remapping for the axiom before Python extraction."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex004-axiom-has-no-computational-realization" };
+  { code = "PYEX005"; title = "Exception term cannot be emitted as an expression"; category = "miniml-expression"; remediation = "Keep extracted exceptions at statement position or rewrite the Rocq term to return data."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex005-exception-term-cannot-be-emitted-as-an-expression" };
+  { code = "PYEX006"; title = "Erased logical value reached runtime"; category = "prop-erasure"; remediation = "Keep the logical argument proof-irrelevant or pass a computational witness in Set/Type."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex006-erased-logical-value-reached-runtime" };
+  { code = "PYEX007"; title = "Unsupported custom match encoding"; category = "custom-remap"; remediation = "Give Extract Inductive a Python match function with one thunk per constructor plus the scrutinee."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex007-unsupported-custom-match-encoding" };
+  { code = "PYEX008"; title = "Custom constructor arity mismatch"; category = "custom-remap"; remediation = "Make every custom constructor expression accept the same arguments as the Rocq constructor."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex008-custom-constructor-arity-mismatch" };
+  { code = "PYEX009"; title = "Unknown monad marker"; category = "custom-remap"; remediation = "Use one of the supported __PYMONAD_* markers or extract the operation normally."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex009-unknown-monad-marker" };
+  { code = "PYEX010"; title = "Monad marker arity mismatch"; category = "custom-remap"; remediation = "Use the marker with the expected number of computational arguments."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex010-monad-marker-arity-mismatch" };
+  { code = "PYEX011"; title = "Record projection pattern is too complex"; category = "pattern"; remediation = "Split the nested match into separate matches or bind the record before matching."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex011-record-projection-pattern-is-too-complex" };
+  { code = "PYEX012"; title = "Nested wildcard binder escaped erasure"; category = "pattern"; remediation = "Name the computational field explicitly or keep the wildcard proof-only."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex012-nested-wildcard-binder-escaped-erasure" };
+  { code = "PYEX013"; title = "Coinductive packet is not stream-shaped"; category = "coinductive"; remediation = "Expose a one-step destructor or avoid relying on Python iterator synthesis."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex013-coinductive-packet-is-not-stream-shaped" };
+  { code = "PYEX014"; title = "Coinductive constructor arity mismatch"; category = "coinductive"; remediation = "Use native coinductive constructors without custom erasure for this extraction."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex014-coinductive-constructor-arity-mismatch" };
+  { code = "PYEX015"; title = "Mutual cofixpoint shape is unsupported"; category = "coinductive"; remediation = "Extract a wrapper function around one cofixpoint or split the mutual block."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex015-mutual-cofixpoint-shape-is-unsupported" };
+  { code = "PYEX016"; title = "Higher-order module signature is unsupported"; category = "module"; remediation = "Extract the applied module result or simplify the functor signature."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex016-higher-order-module-signature-is-unsupported" };
+  { code = "PYEX017"; title = "Module alias could not be resolved"; category = "module"; remediation = "Extract the canonical module path or make the alias transparent before extraction."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex017-module-alias-could-not-be-resolved" };
+  { code = "PYEX018"; title = "Module type with constraints is unsupported"; category = "module"; remediation = "Extract the constrained module after elaboration or remove the with-constraint."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex018-module-type-with-constraints-is-unsupported" };
+  { code = "PYEX019"; title = "Applicative functor cache key is unsupported"; category = "module"; remediation = "Pass a first-class module value or extract a non-functorized wrapper."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex019-applicative-functor-cache-key-is-unsupported" };
+  { code = "PYEX020"; title = "Expected an inductive or constructor reference"; category = "backend-invariant"; remediation = "Report this backend invariant with the extracted declaration and source map."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex020-expected-an-inductive-or-constructor-reference" };
+  { code = "PYEX021"; title = "Expected an inductive reference"; category = "backend-invariant"; remediation = "Report this backend invariant with the extracted declaration and source map."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex021-expected-an-inductive-reference" };
+  { code = "PYEX022"; title = "Pattern shorthand was not expanded"; category = "backend-invariant"; remediation = "Report this backend invariant; the printer should expand Pusual before rendering."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex022-pattern-shorthand-was-not-expanded" };
+  { code = "PYEX023"; title = "Unexpected coinductive constructor payload"; category = "backend-invariant"; remediation = "Report this backend invariant with the constructor and generated source map."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex023-unexpected-coinductive-constructor-payload" };
+  { code = "PYEX024"; title = "Unsupported primitive integer type alias"; category = "primitive"; remediation = "Keep the integer literal in a computational term or remap the type explicitly."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex024-unsupported-primitive-integer-type-alias" };
+  { code = "PYEX025"; title = "Unsupported primitive float type alias"; category = "primitive"; remediation = "Keep the float literal in a computational term or remap the type explicitly."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex025-unsupported-primitive-float-type-alias" };
+  { code = "PYEX026"; title = "Unsupported primitive string type alias"; category = "primitive"; remediation = "Keep the string literal in a computational term or remap the type explicitly."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex026-unsupported-primitive-string-type-alias" };
+  { code = "PYEX027"; title = "Unknown type annotation shape"; category = "type-annotation"; remediation = "Use an explicit extracted type remapping or simplify the polymorphic type."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex027-unknown-type-annotation-shape" };
+  { code = "PYEX028"; title = "Function protocol annotation is too complex"; category = "type-annotation"; remediation = "Name the higher-order argument type or specialize the extracted function."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex028-function-protocol-annotation-is-too-complex" };
+  { code = "PYEX029"; title = "Generic constructor could not be typed"; category = "type-annotation"; remediation = "Specialize the inductive parameters or add a primitive remapping."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex029-generic-constructor-could-not-be-typed" };
+  { code = "PYEX030"; title = "Logical inductive used computationally"; category = "prop-erasure"; remediation = "Move the inductive to Set/Type or erase the use before extraction."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex030-logical-inductive-used-computationally" };
+  { code = "PYEX031"; title = "Logical record used computationally"; category = "prop-erasure"; remediation = "Separate computational fields into a Set/Type record before extraction."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex031-logical-record-used-computationally" };
+  { code = "PYEX032"; title = "Proof-carrying pair leaked into Python"; category = "prop-erasure"; remediation = "Project the computational component before extraction."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex032-proof-carrying-pair-leaked-into-python" };
+  { code = "PYEX033"; title = "Unsupported well-founded recursion shape"; category = "recursion"; remediation = "Expose the structurally recursive helper or simplify the Program Fixpoint obligation shape."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex033-unsupported-well-founded-recursion-shape" };
+  { code = "PYEX034"; title = "Local fixpoint escaped statement context"; category = "recursion"; remediation = "Eta-expand the definition so the local fixpoint appears inside a function body."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex034-local-fixpoint-escaped-statement-context" };
+  { code = "PYEX035"; title = "Mutual recursion has erased selected function"; category = "recursion"; remediation = "Extract a computational member of the mutual block or remove the proof-only member."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex035-mutual-recursion-has-erased-selected-function" };
+  { code = "PYEX036"; title = "Unsupported bytes literal encoding"; category = "primitive"; remediation = "Restrict extracted strings to byte strings or provide a Python remapping."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex036-unsupported-bytes-literal-encoding" };
+  { code = "PYEX037"; title = "Unsupported float literal"; category = "primitive"; remediation = "Avoid NaN/infinity payloads that cannot round-trip or remap the constant explicitly."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex037-unsupported-float-literal" };
+  { code = "PYEX038"; title = "Generated Python identifier is invalid"; category = "naming"; remediation = "Rename the Rocq identifier or add an extraction rename before Python extraction."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex038-generated-python-identifier-is-invalid" };
+  { code = "PYEX039"; title = "Generated Python name collision"; category = "naming"; remediation = "Rename one Rocq declaration or extract through a module namespace."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex039-generated-python-name-collision" };
+  { code = "PYEX040"; title = "Unclassified extraction failure"; category = "internal"; remediation = "Check the detail field, reduce the Rocq input, and add a catalogue entry for this failure."; docs = "rocq-python-extraction/DIAGNOSTICS.md#pyex040-unclassified-extraction-failure" };
+]
+
+let diagnostic_prefix = "PYTHON_EXTRACTION_DIAGNOSTIC_JSON: "
+
+let json_escape s =
+  let buf = Buffer.create (String.length s + 8) in
+  String.iter
+    (function
+      | '"' -> Buffer.add_string buf "\\\""
+      | '\\' -> Buffer.add_string buf "\\\\"
+      | '\b' -> Buffer.add_string buf "\\b"
+      | '\012' -> Buffer.add_string buf "\\f"
+      | '\n' -> Buffer.add_string buf "\\n"
+      | '\r' -> Buffer.add_string buf "\\r"
+      | '\t' -> Buffer.add_string buf "\\t"
+      | c ->
+          let code = Char.code c in
+          if code < 0x20 then Buffer.add_string buf (Printf.sprintf "\\u%04x" code)
+          else Buffer.add_char buf c)
+    s;
+  Buffer.contents buf
+
+let json_string s = "\"" ^ json_escape s ^ "\""
+
+let diagnostic_by_code code =
+  match List.find_opt (fun d -> String.equal d.code code) diagnostic_catalogue with
+  | Some d -> d
+  | None -> List.find (fun d -> String.equal d.code "PYEX040") diagnostic_catalogue
+
+let diagnostic_json ?symbol ?detail d =
+  let field name value = "\"" ^ name ^ "\": " ^ json_string value in
+  let optional =
+    (match symbol with None -> [] | Some s -> [field "symbol" s]) @
+    (match detail with None -> [] | Some s -> [field "detail" s])
+  in
+  "{" ^
+  String.concat ", "
+    ([
+      "\"version\": 1";
+      field "code" d.code;
+      field "title" d.title;
+      field "category" d.category;
+      field "message" d.title;
+      field "remediation" d.remediation;
+      field "docs" d.docs;
+    ] @ optional) ^
+  "}"
+
+let diagnostic_pp ?symbol ?detail code =
+  let d = diagnostic_by_code code in
+  str "Python ExtractionError [" ++ str d.code ++ str "]: " ++ str d.title ++ fnl () ++
+  str "Remediation: " ++ str d.remediation ++ fnl () ++
+  str "Docs: " ++ str d.docs ++ fnl () ++
+  (match detail with
+   | None -> mt ()
+   | Some detail -> str "Detail: " ++ str detail ++ fnl ()) ++
+  str diagnostic_prefix ++ str (diagnostic_json ?symbol ?detail d)
+
+let extraction_diagnostic_error ?symbol ?detail code =
+  user_err (diagnostic_pp ?symbol ?detail code)
+
+let diagnostic_comment ?detail code =
+  let d = diagnostic_by_code code in
+  let detail =
+    match detail with
+    | None -> ""
+    | Some detail -> " Detail: " ^ detail
+  in
+  str "# Python ExtractionDiagnostic [" ++ str d.code ++ str "]: " ++
+  str d.title ++ str " Remediation: " ++ str d.remediation ++
+  str detail ++ fnl ()
+
 let prop_extraction_error detail =
-  user_err Pp.(str "Python ExtractionError: " ++ str detail)
+  extraction_diagnostic_error ~detail "PYEX002"
 
 let marker_state_type = "__PYMONAD_STATE_TYPE__"
 let marker_state_pure = "__PYMONAD_STATE_PURE__"
@@ -374,7 +495,8 @@ let get_ind r =
   match r.glob with
   | IndRef _              -> r
   | ConstructRef (ind, _) -> { glob = IndRef ind; inst = r.inst }
-  | _                     -> assert false
+  | _                     ->
+      extraction_diagnostic_error "PYEX020"
 
 let coinductive_name state r =
   capitalize_first (pp_global state Term (get_ind r))
@@ -403,7 +525,8 @@ let kn_of_ind r =
   let open GlobRef in
   match r.glob with
   | IndRef (kn, _) -> MutInd.user kn
-  | _              -> assert false
+  | _              ->
+      extraction_diagnostic_error "PYEX021"
 
 (** Python keyword-argument name for record field at position [i].
     Uses [pp_global_with_key] for named fields, ["arg<i>"] for anonymous ones. *)
@@ -473,7 +596,7 @@ let rec pp_pattern state env' = function
       str ")"
   | Pusual _ ->
       (* Should have been expanded by [expand_pusual] before this call. *)
-      assert false
+      extraction_diagnostic_error "PYEX022"
   | Ptuple pats ->
       str "(" ++
       prlist_with_sep (fun () -> str ", ") (pp_pattern state env') pats ++
@@ -558,7 +681,7 @@ let rec pp_expr state env = function
   | MLstring s ->
       str "b\"" ++ str (py_escape_bytes (Pstring.to_string s)) ++ str "\""
   | MLparray _ ->
-      str "raise NotImplementedError(\"MLparray: persistent arrays not yet supported\")"
+      extraction_diagnostic_error "PYEX001"
   | MLapp (f, args) ->
       (* Flatten left-associative curried application:
          MLapp(MLapp(f,[a]),[b]) → f(a, b) *)
@@ -606,6 +729,11 @@ let rec pp_expr state env = function
             Some (pp_expr state env m ++ str ".bind(" ++ pp_expr state env f ++ str ")")
         | Some marker, [opt_expr; fn_expr] when String.equal marker marker_option_bind ->
             Some (pp_option_bind_expr opt_expr fn_expr)
+        | Some marker, _
+          when String.length marker >= String.length "__PYMONAD_" &&
+               String.equal "__PYMONAD_"
+                 (String.sub marker 0 (String.length "__PYMONAD_")) ->
+            extraction_diagnostic_error ~detail:marker "PYEX010"
         | _ ->
             None
       in
@@ -660,7 +788,9 @@ let rec pp_expr state env = function
         let step_expr =
           if String.equal "" cons_name then
             (* erased coinductive constructor — unusual but valid *)
-            (match args with [a] -> pp_expr state env a | _ -> assert false)
+            (match args with
+             | [a] -> pp_expr state env a
+             | _ -> extraction_diagnostic_error "PYEX023")
           else if List.is_empty args then
             str cons_name ++ str "()"
           else
@@ -1543,7 +1673,7 @@ let pp_ind_decl state (ind : ml_ind) =
 let pp_decl state = function
   | Dind  ind   -> pp_ind_decl state ind ++ fnl ()
   | Dtype (r, _, _) when is_custom r -> mt ()
-  | Dtype _     -> str "# UNIMPL Dtype" ++ fnl ()
+  | Dtype _     -> diagnostic_comment "PYEX003"
   | Dterm (r, a, typ) ->
       if is_prop_type typ then mt ()
       else if is_monad_marker_ref r then mt ()
