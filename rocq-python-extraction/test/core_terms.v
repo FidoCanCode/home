@@ -1,7 +1,7 @@
 (** Core-terms acceptance test.
 
     Exercises each [ml_ast] node through Python extraction and verifies
-    (via [Makefile]) that the output is syntactically valid Python.
+    (via [./fido make-rocq]) that the output is syntactically valid Python.
 
     Coverage:
       [MLrel]       — function body references its parameter
