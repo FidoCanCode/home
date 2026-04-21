@@ -353,6 +353,8 @@ class TestFidoLauncher:
         assert "exporting buildx cache target=" not in script
         assert "docker buildx bake" in script
         assert "warm" in script
+        assert 'git -C "$repo_root" ls-files --cached --others' not in script
+        assert "target_input_files make-rocq" in script
 
     def test_mounts_runtime_inputs_without_mounting_whole_home(self) -> None:
         script = FIDO.read_text()

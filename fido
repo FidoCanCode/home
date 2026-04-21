@@ -187,22 +187,7 @@ hash_paths() {
 
 make_rocq_input_hash() {
   local paths=()
-  mapfile -t paths < <(
-    git -C "$repo_root" ls-files --cached --others --exclude-standard \
-      .dockerignore \
-      .githooks/pre-commit \
-      .python-version \
-      dune-workspace \
-      docker-bake.hcl \
-      fido \
-      package-lock.json \
-      package.json \
-      pyproject.toml \
-      uv.lock \
-      models \
-      rocq-python-extraction \
-      | LC_ALL=C sort
-  )
+  mapfile -t paths < <(target_input_files make-rocq)
   (
     cd "$repo_root"
     hash_paths "${paths[@]}"

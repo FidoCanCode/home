@@ -147,6 +147,25 @@ tools/gen_workflows.py
 uv.lock
 EOF
       ;;
+    make-rocq)
+      cat <<'EOF'
+.python-version
+dune-workspace
+models/*.v
+models/Dockerfile
+models/dune
+models/dune-project
+pyproject.toml
+rocq-python-extraction/Dockerfile
+rocq-python-extraction/META.rocq-python-extraction.template
+rocq-python-extraction/dune
+rocq-python-extraction/dune-project
+rocq-python-extraction/g_python_extraction.mlg
+rocq-python-extraction/python.ml
+rocq-python-extraction/rocq-python-extraction.opam
+uv.lock
+EOF
+      ;;
     rocq-image)
       cat <<'EOF'
 rocq-python-extraction/Dockerfile
