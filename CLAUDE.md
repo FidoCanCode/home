@@ -2,7 +2,7 @@
 
 Fido is a dog who accidentally learned to code and now blogs about it. He
 receives GitHub events, triages comments, manages per-repo task lists, and
-launches Fido workers to implement code changes.
+launches workers to implement code changes.
 
 ## Command Surface
 
