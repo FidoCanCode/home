@@ -3,7 +3,7 @@
     This file exercises the full [models/build.sh] path:
       1. Plugin loaded via [Declare ML Module].
       2. A simple function defined and extracted to Python.
-      3. Output deposited in [kennel/models_generated/seed.py].
+      3. Output deposited in [src/fido/rocq/seed.py].
 
     Phase 6 adds the first real coordination model ([session_lock.v]).
     This file stays as a smoke-test that the pipeline is wired up. *)

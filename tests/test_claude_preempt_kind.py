@@ -13,9 +13,9 @@ import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from kennel import provider
-from kennel.claude import ClaudeSession
-from kennel.provider import SessionTalker, talker_now
+from fido import provider
+from fido.claude import ClaudeSession
+from fido.provider import SessionTalker, talker_now
 
 
 def _make_session_proc(lines: list[str]) -> MagicMock:
@@ -82,7 +82,7 @@ def test_webhook_preempting_worker_logs_preempting_and_fires_interrupt(
     session._send_control_interrupt = tracking_interrupt  # type: ignore[method-assign]
     provider.set_thread_kind("webhook")
     try:
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             session.prompt("reply plz")
     finally:
         provider.set_thread_kind(None)
@@ -114,7 +114,7 @@ def test_webhook_does_not_preempt_another_webhook(
     session._send_control_interrupt = tracking_interrupt  # type: ignore[method-assign]
     provider.set_thread_kind("webhook")
     try:
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             session.prompt("reply plz")
     finally:
         provider.set_thread_kind(None)
@@ -139,7 +139,7 @@ def test_worker_caller_does_not_preempt(tmp_path: Path, caplog, monkeypatch) -> 
     session._send_control_interrupt = tracking_interrupt  # type: ignore[method-assign]
     provider.set_thread_kind("worker")
     try:
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             session.prompt("keep working")
     finally:
         provider.set_thread_kind(None)
@@ -167,7 +167,7 @@ def test_webhook_with_idle_session_skips_early_control_request(
     session._send_control_interrupt = tracking_interrupt  # type: ignore[method-assign]
     provider.set_thread_kind("webhook")
     try:
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             session.prompt("reply plz")
     finally:
         provider.set_thread_kind(None)
@@ -197,7 +197,7 @@ def test_early_control_request_error_is_logged_not_fatal(
     ]
     provider.set_thread_kind("webhook")
     try:
-        with caplog.at_level(logging.WARNING, logger="kennel"):
+        with caplog.at_level(logging.WARNING, logger="fido"):
             try:
                 session.prompt("reply plz")
             except Exception:
@@ -218,7 +218,7 @@ def test_queuing_log_reports_no_holder_when_session_is_free(
     monkeypatch.setattr(provider, "get_talker", lambda _repo: None)
     provider.set_thread_kind("webhook")
     try:
-        with caplog.at_level(logging.INFO, logger="kennel"):
+        with caplog.at_level(logging.INFO, logger="fido"):
             session.prompt("hi")
     finally:
         provider.set_thread_kind(None)

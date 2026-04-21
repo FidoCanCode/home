@@ -1,5 +1,5 @@
 [project]
-name = "kennel"
+name = "fido"
 version = "0.1.0"
 description = "GitHub webhook listener for Fido"
 requires-python = ">=3.14"
@@ -16,22 +16,25 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-kennel = "kennel.main:main"
-fido-help = "kennel.fido_help:main"
-kennel-chat = "kennel.chat:main"
-kennel-gh-status = "kennel.gh_status:main"
-kennel-status = "kennel.status:main"
-kennel-sync-tasks = "kennel.sync_tasks_cli:main"
-kennel-task = "kennel.cli:main"
-tests = "kennel.tests_main:main"
-traceback = "kennel.rocq_traceback:main"
+fido = "fido.main:main"
+fido-help = "fido.fido_help:main"
+fido-chat = "fido.chat:main"
+fido-gh-status = "fido.gh_status:main"
+fido-status = "fido.status:main"
+fido-sync-tasks = "fido.sync_tasks_cli:main"
+fido-task = "fido.cli:main"
+tests = "fido.tests_main:main"
+traceback = "fido.rocq_traceback:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fido"]
 
 [tool.ruff]
 target-version = "py314"
 # Generated Python from Rocq extraction — formatted by build.sh, not by the
 # pre-commit hook.  ruff format is applied during generation; lint is skipped
 # because generated code has unused imports that are valid for richer models.
-exclude = ["kennel/models_generated"]
+exclude = ["src/fido/rocq"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
@@ -43,11 +46,11 @@ addopts = "-n auto"
 python_files = ["test_*.py"]
 
 [tool.coverage.run]
-source = ["kennel", "rocq-python-extraction/test"]
+source = ["fido", "rocq-python-extraction/test"]
 # Exclude generated Rocq extraction output — tested indirectly via the
 # Docker-backed CI build, not by the Python test suite.
 omit = [
-    "kennel/models_generated/*",
+    "src/fido/rocq/*",
     "rocq-python-extraction/test/conftest.py",
     "rocq-python-extraction/test/pyright_*.py",
 ]

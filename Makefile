@@ -1,6 +1,6 @@
 .PHONY: models
 
-# Extract Rocq models to Python and deposit in kennel/models_generated/.
+# Extract Rocq models to Python and deposit in src/fido/rocq/.
 # Requires: docker with buildx.
 models:
 	./build

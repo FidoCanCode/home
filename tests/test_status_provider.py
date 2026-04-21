@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kennel.provider import ProviderID
-from kennel.status import _repos_from_pid
+from fido.provider import ProviderID
+from fido.status import _repos_from_pid
 
 
 class TestReposFromPid:
@@ -11,9 +11,7 @@ class TestReposFromPid:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         pid = 1234
-        cmdline = (
-            f"uv\x00run\x00kennel\x00owner/repo:{tmp_path}:copilot-cli\x00".encode()
-        )
+        cmdline = f"uv\x00run\x00fido\x00owner/repo:{tmp_path}:copilot-cli\x00".encode()
         monkeypatch.setattr(
             Path,
             "read_bytes",
@@ -29,7 +27,7 @@ class TestReposFromPid:
     ) -> None:
         pid = 1234
         cmdline = (
-            f"uv\x00run\x00kennel\x00owner/repo:{tmp_path}:bad-provider\x00".encode()
+            f"uv\x00run\x00fido\x00owner/repo:{tmp_path}:bad-provider\x00".encode()
         )
         monkeypatch.setattr(
             Path,
@@ -42,7 +40,7 @@ class TestReposFromPid:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         pid = 1234
-        cmdline = f"uv\x00run\x00kennel\x00owner/repo:{tmp_path}\x00".encode()
+        cmdline = f"uv\x00run\x00fido\x00owner/repo:{tmp_path}\x00".encode()
         monkeypatch.setattr(
             Path,
             "read_bytes",

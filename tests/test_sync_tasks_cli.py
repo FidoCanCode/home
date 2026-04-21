@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from kennel.sync_tasks_cli import main
+from fido.sync_tasks_cli import main
 
 
 def test_main_syncs_explicit_work_dir(tmp_path: Path) -> None:
-    with patch("kennel.tasks.sync_tasks") as mock_sync:
+    with patch("fido.tasks.sync_tasks") as mock_sync:
         main([str(tmp_path)], _GitHub=MagicMock)
 
     mock_sync.assert_called_once()
@@ -15,7 +15,7 @@ def test_main_syncs_explicit_work_dir(tmp_path: Path) -> None:
 
 
 def test_main_defaults_to_cwd() -> None:
-    with patch("kennel.tasks.sync_tasks") as mock_sync:
+    with patch("fido.tasks.sync_tasks") as mock_sync:
         main([], _GitHub=MagicMock)
 
     mock_sync.assert_called_once()

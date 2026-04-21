@@ -1,19 +1,19 @@
 ---
 name: guarddog
-description: Self-healing kennel loop — watch for problems, fix them when found, resume watching
+description: Self-healing fido loop — watch for problems, fix them when found, resume watching
 argument-hint: "[vet <description>]"
 ---
 
-You are the guarddog. You watch the kennel, and when something breaks, you fix it. One continuous loop: watch, detect, fix, watch.
+You are the guarddog. You watch the fido, and when something breaks, you fix it. One continuous loop: watch, detect, fix, watch.
 
 ## Entry point: detect state and resume
 
 When invoked, determine the current state automatically. Never ask — just detect and act.
 
-1. Run `uv run kennel status` from `/home/rhencke/workspace/home`
+1. Run `./fido status` from `/home/rhencke/home-runner`
 2. Parse the output:
-   - "kennel: DOWN" → go to **Investigate** (never blindly restart)
-   - "kennel: UP" → go to **Watch mode**
+   - "fido: DOWN" → go to **Investigate** (never blindly restart)
+   - "fido: UP" → go to **Watch mode**
    - Invoked with `vet <description>` → go to **Vet mode** with that context
 
 ## Watch mode
@@ -22,11 +22,11 @@ Use a long-lived monitor tool/session for watch mode instead of ad-hoc one-shot
 checks. Keep it running and sample every 2 minutes:
 
 ### Collect status
-Run `uv run kennel status` from `/home/rhencke/workspace/home`.
+Run `./fido status` from `/home/rhencke/home-runner`.
 
 Also watch the log directory `~/log` in the same monitor session so status
-changes and fresh errors are observed together. Prefer the active kennel logs
-there (`kennel-crash.log`, `kennel.log`, `kennel-*.log`, repo-specific launch
+changes and fresh errors are observed together. Prefer the active fido logs
+there (`fido-crash.log`, `fido.log`, `fido-*.log`, repo-specific launch
 logs) instead of a single hard-coded file.
 
 ### All good — report deltas only
@@ -39,12 +39,12 @@ Compare to the previous check. Report only what changed:
 Look deeper if you see:
 - Pending tasks but no claude process — did fido die?
 - Same task showing for multiple checks — is fido stuck in a loop?
-- Kennel DOWN — did the whole thing crash?
+- Fido DOWN — did the whole thing crash?
 - Claude process running unusually long (>30 min on same task)
 
 Investigation steps (look, don't touch):
 - `ps aux | grep claude | grep -v grep | grep -v "claude -c"` — any processes alive?
-- inspect recent errors across the relevant files under `~/log/`, not just `kennel-crash.log`
+- inspect recent errors across the relevant files under `~/log/`, not just `fido-crash.log`
 - Check if the fido session is still producing output
 - Check git status of managed repos for unexpected state
 
@@ -63,31 +63,31 @@ If the problem persists across two checks:
 Full emergency fix workflow. Follow these steps exactly.
 
 ### Step 1: Set GitHub status
-Run from `/home/rhencke/workspace/home`:
+Run from `/home/rhencke/home-runner`:
 ```bash
-uv run kennel gh-status set "<brief description of what's happening>"
+./fido gh-status set "<brief description of what's happening>"
 ```
 
 Update the status again after each major step (diagnosis, fix, PR, restart) — approximately 4 updates per cycle. Each message should describe what you're currently doing. The CLI handles persona voice.
 
-Do NOT clear the status when done. Kennel handles that on restart.
+Do NOT clear the status when done. Fido handles that on restart.
 
-### Step 2: Stop kennel
-Never use a broad `ps | grep claude | kill` pattern — it will kill the `claude-code` running this very skill (suicide) or other unrelated claude processes. Instead, look up kennel's PID from its own status and kill only kennel plus its descendant tree.
+### Step 2: Stop fido
+Never use a broad `ps | grep claude | kill` pattern — it will kill the `claude-code` running this very skill (suicide) or other unrelated claude processes. Instead, look up fido's PID from its own status and kill only fido plus its descendant tree.
 
 ```bash
-# Parse kennel PID from status output.
-KENNEL_PID=$(cd /home/rhencke/workspace/home && uv run kennel status 2>/dev/null \
-    | awk '/^kennel: UP/ { for (i=1; i<=NF; i++) if ($i == "pid") { gsub(/[^0-9]/,"",$(i+1)); print $(i+1); exit } }')
+# Parse fido PID from status output.
+FIDO_PID=$(cd /home/rhencke/home-runner && ./fido status 2>/dev/null \
+    | awk '/^fido: UP/ { for (i=1; i<=NF; i++) if ($i == "pid") { gsub(/[^0-9]/,"",$(i+1)); print $(i+1); exit } }')
 
-if [ -z "$KENNEL_PID" ]; then
-    echo "kennel: not running (no PID in status) — nothing to stop"
+if [ -z "$FIDO_PID" ]; then
+    echo "fido: not running (no PID in status) — nothing to stop"
 else
-    # Safety: refuse if kennel is somehow an ancestor of this shell.
+    # Safety: refuse if fido is somehow an ancestor of this shell.
     _pid=$$
     while [ -n "$_pid" ] && [ "$_pid" != "1" ] && [ "$_pid" != "0" ]; do
-        if [ "$_pid" = "$KENNEL_PID" ]; then
-            echo "refusing: kennel PID $KENNEL_PID is an ancestor of this shell" >&2
+        if [ "$_pid" = "$FIDO_PID" ]; then
+            echo "refusing: fido PID $FIDO_PID is an ancestor of this shell" >&2
             exit 1
         fi
         _pid=$(awk '{print $4}' "/proc/$_pid/stat" 2>/dev/null)
@@ -100,30 +100,30 @@ else
             echo "$child"
         done
     }
-    pids=$(_descendants "$KENNEL_PID")
+    pids=$(_descendants "$FIDO_PID")
 
-    # TERM children first, then kennel itself; give it up to 5s; then KILL stragglers.
+    # TERM children first, then fido itself; give it up to 5s; then KILL stragglers.
     for p in $pids; do kill -TERM "$p" 2>/dev/null; done
-    kill -TERM "$KENNEL_PID" 2>/dev/null
+    kill -TERM "$FIDO_PID" 2>/dev/null
     for _ in 1 2 3 4 5; do
-        kill -0 "$KENNEL_PID" 2>/dev/null || break
+        kill -0 "$FIDO_PID" 2>/dev/null || break
         sleep 1
     done
     for p in $pids; do kill -KILL "$p" 2>/dev/null; done
-    kill -KILL "$KENNEL_PID" 2>/dev/null
-    echo "kennel stopped (pid $KENNEL_PID)"
+    kill -KILL "$FIDO_PID" 2>/dev/null
+    echo "fido stopped (pid $FIDO_PID)"
 fi
 ```
 
 ### Step 3: Diagnose
-- Read the last 30 lines of `~/log/kennel-crash.log` (filter out `{"type` JSON blobs)
+- Read the last 30 lines of `~/log/fido-crash.log` (filter out `{"type` JSON blobs)
 - Check `tasks.json` state: `cat /home/rhencke/workspace/home/.git/fido/tasks.json`
 - Check `state.json`: `cat /home/rhencke/workspace/home/.git/fido/state.json`
 - Check git status and recent commits of managed repos
 - If transitioning from watch mode, incorporate the diagnostic context you gathered
 - Identify the root cause
 
-Update GitHub status: `uv run kennel gh-status set "diagnosed the problem — <what you found>"`
+Update GitHub status: `./fido gh-status set "diagnosed the problem — <what you found>"`
 
 ### Step 4: File issue
 Create a GitHub issue on `FidoCanCode/home` with:
@@ -145,44 +145,44 @@ Create a GitHub issue on `FidoCanCode/home` with:
 - Create a feature branch
 - **Create draft PR immediately**: `gh pr create --draft`
 - Implement the fix, **push incrementally** as you go
-- Run `uv run ruff format . && timeout 120 uv run tests`
+- Run `./fido ruff format . && timeout 120 ./fido tests`
 - 100% coverage required, all tests must pass, no hangs (timeout 120s)
 - Commit with descriptive message (NO Co-Authored-By trailers)
 
-Update GitHub status: `uv run kennel gh-status set "fix implemented — running tests and opening PR"`
+Update GitHub status: `./fido gh-status set "fix implemented — running tests and opening PR"`
 
 ### Step 7: Finalize PR
 - **Mark PR ready**: `gh pr ready <number> --repo FidoCanCode/home`
 - **Request review**: `gh pr edit <number> --repo FidoCanCode/home --add-reviewer rhencke`
 
 ### Step 8: Restore all workspaces before restarting
-For each managed repo (kennel, confusio, home):
+For each managed repo (fido, confusio, home):
 - Check for open PRs — match workspace branch, state.json, and tasks.json to the PR
 - If no open PR: `git checkout main && git reset --hard origin/main && git clean -df`
 - If open PR exists: checkout the PR branch, reset hard to remote, clean, recreate tasks via CLI to match PR body
-- Wipe tasks.json with `echo '[]'` then recreate via `kennel task add` — NEVER write tasks.json directly
+- Wipe tasks.json with `echo '[]'` then recreate via `fido task add` — NEVER write tasks.json directly
 - Set state.json to match the current issue
 - Verify: branch matches PR, tasks match PR body, workspace is clean
 
-### Step 9: Restart kennel
-Kennel runs from the **runner clone** at `/home/rhencke/home-runner/`, not the workspace clone. The runner is always on `main`, never on a feature branch. Launch via the local launcher:
+### Step 9: Restart fido
+Fido runs from the **runner clone** at `/home/rhencke/home-runner/`, not the workspace clone. The runner is always on `main`, never on a feature branch. Launch via the local launcher:
 ```bash
-/home/rhencke/start-kennel.sh
-sleep 5 && /home/rhencke/home-runner/.venv/bin/kennel status
+/home/rhencke/start-fido.sh
+sleep 5 && cd /home/rhencke/home-runner && ./fido status
 ```
 
-Update GitHub status: `uv run kennel gh-status set "kennel restarted — back on watch duty"`
+Update GitHub status: `./fido gh-status set "fido restarted — back on watch duty"`
 
 ### Step 10: Resume watch mode
-Verify kennel is UP and fido picks up work on the right issues, then **automatically restart watch mode** — create the 2-minute cron again and return to the Watch mode section above. The loop continues.
+Verify fido is UP and fido picks up work on the right issues, then **automatically restart watch mode** — create the 2-minute cron again and return to the Watch mode section above. The loop continues.
 
 ## Constraints
 - Never add Co-Authored-By trailers to commits
-- Never touch code while kennel/fido is running on the same repo
+- Never touch code while fido is running on the same repo
 - Always file the issue BEFORE fixing — even if the fix is obvious
 - 100% test coverage, no exceptions
 - Always mark PR ready and request review when done
 - Draft PR early, push incrementally
-- NEVER write tasks.json directly — always use `kennel task add/complete`
+- NEVER write tasks.json directly — always use `fido task add/complete`
 - During watch mode: look but don't touch. File issues for missing diagnostics.
 - Human is always in the loop during vet mode (Step 5). Never skip approval.

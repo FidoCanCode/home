@@ -10,8 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kennel import provider
-from kennel.claude import (
+from fido import provider
+from fido.claude import (
     _LOG_LINE_TRUNCATE,
     _RETURNCODE_IDLE_TIMEOUT,
     ClaudeAPI,
@@ -33,7 +33,7 @@ from kennel.claude import (
     kill_active_children,
     raise_for_provider_error_output,
 )
-from kennel.provider import (
+from fido.provider import (
     ProviderID,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
@@ -190,7 +190,7 @@ def session_resolver():
 
 class TestRunStreaming:
     def test_yields_output_lines(self, tmp_path: Path) -> None:
-        from kennel.claude import _run_streaming
+        from fido.claude import _run_streaming
 
         stdin_file = tmp_path / "input.txt"
         stdin_file.write_text("hello")
@@ -198,7 +198,7 @@ class TestRunStreaming:
         assert "".join(lines).strip() == "hi"
 
     def test_raises_on_file_not_found(self, tmp_path: Path) -> None:
-        from kennel.claude import _run_streaming
+        from fido.claude import _run_streaming
 
         stdin_file = tmp_path / "input.txt"
         stdin_file.write_text("")
@@ -213,7 +213,7 @@ class TestRunStreaming:
         Uses a virtual clock and mocked popen/selector so the test runs in
         microseconds — no real ``sleep`` subprocess, no wall-clock waiting.
         """
-        from kennel.claude import _run_streaming
+        from fido.claude import _run_streaming
 
         stdin_file = tmp_path / "input.txt"
         stdin_file.write_text("")
@@ -250,7 +250,7 @@ class TestRunStreaming:
         proc.wait.assert_called_once()
 
     def test_raises_on_nonzero_exit(self, tmp_path: Path) -> None:
-        from kennel.claude import _run_streaming
+        from fido.claude import _run_streaming
 
         stdin_file = tmp_path / "input.txt"
         stdin_file.write_text("")
@@ -262,7 +262,7 @@ class TestRunStreaming:
 
     def test_handles_process_exit_without_eof(self, tmp_path: Path) -> None:
         """Cover the proc.poll() is not None branch."""
-        from kennel.claude import _run_streaming
+        from fido.claude import _run_streaming
 
         stdin_file = tmp_path / "input.txt"
         stdin_file.write_text("")
@@ -293,7 +293,7 @@ class TestRunStreaming:
         """Cover the remaining = proc.stdout.read() branch."""
         from io import StringIO
 
-        from kennel.claude import _run_streaming
+        from fido.claude import _run_streaming
 
         stdin_file = tmp_path / "input.txt"
         stdin_file.write_text("")
@@ -513,7 +513,7 @@ class TestRunStreamingTracksChildren:
         return proc
 
     def test_registers_and_unregisters(self, tmp_path: Path) -> None:
-        from kennel.claude import _active_children, _run_streaming
+        from fido.claude import _active_children, _run_streaming
 
         stdin_file = tmp_path / "in"
         stdin_file.write_text("hi")
@@ -541,7 +541,7 @@ class TestRunStreamingTracksChildren:
         assert proc not in _active_children
 
     def test_current_repo_session_returns_live_session(self) -> None:
-        from kennel.provider import (
+        from fido.provider import (
             current_repo_session,
             set_session_resolver,
             set_thread_repo,
@@ -558,14 +558,14 @@ class TestRunStreamingTracksChildren:
             provider.set_session_resolver(None)
 
     def test_current_repo_session_raises_without_repo(self) -> None:
-        from kennel.provider import current_repo_session
+        from fido.provider import current_repo_session
 
         provider.set_thread_repo(None)
         with pytest.raises(RuntimeError, match="thread-local repo_name"):
             current_repo_session()
 
     def test_current_repo_session_raises_without_resolver(self) -> None:
-        from kennel.provider import current_repo_session
+        from fido.provider import current_repo_session
 
         provider.set_session_resolver(None)
         provider.set_thread_repo("owner/repo")
@@ -576,7 +576,7 @@ class TestRunStreamingTracksChildren:
             provider.set_thread_repo(None)
 
     def test_current_repo_session_raises_when_no_session(self) -> None:
-        from kennel.provider import current_repo_session
+        from fido.provider import current_repo_session
 
         provider.set_session_resolver(lambda repo: None)
         provider.set_thread_repo("owner/repo")
@@ -588,7 +588,7 @@ class TestRunStreamingTracksChildren:
             provider.set_session_resolver(None)
 
     def test_current_repo_session_raises_when_not_alive(self) -> None:
-        from kennel.provider import current_repo_session
+        from fido.provider import current_repo_session
 
         dead = MagicMock()
         dead.is_alive.return_value = False
@@ -602,7 +602,7 @@ class TestRunStreamingTracksChildren:
             provider.set_session_resolver(None)
 
     def test_thread_name_for_id_returns_none_when_not_found(self) -> None:
-        from kennel.claude import _thread_name_for_id
+        from fido.claude import _thread_name_for_id
 
         # Pick a thread_id that's very unlikely to match any live thread.
         assert _thread_name_for_id(0xDEADBEEF) is None
@@ -613,8 +613,8 @@ class TestRunStreamingTracksChildren:
         """When thread-local repo_name is set, _run_streaming registers a
         webhook-kind SessionTalker for the duration of the subprocess and
         unregisters it on exit."""
-        from kennel.claude import _run_streaming
-        from kennel.provider import get_talker, set_thread_repo
+        from fido.claude import _run_streaming
+        from fido.provider import get_talker, set_thread_repo
 
         stdin_file = tmp_path / "in"
         stdin_file.write_text("hi")
@@ -975,7 +975,7 @@ class TestClaudeSessionLogEvent:
 
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        with caplog.at_level(_l.INFO, logger="kennel"):
+        with caplog.at_level(_l.INFO, logger="fido"):
             session._log_event(
                 {
                     "type": "assistant",
@@ -989,7 +989,7 @@ class TestClaudeSessionLogEvent:
 
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        with caplog.at_level(_l.INFO, logger="kennel"):
+        with caplog.at_level(_l.INFO, logger="fido"):
             session._log_event(
                 {
                     "type": "assistant",
@@ -1011,7 +1011,7 @@ class TestClaudeSessionLogEvent:
 
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        with caplog.at_level(_l.INFO, logger="kennel"):
+        with caplog.at_level(_l.INFO, logger="fido"):
             session._log_event(
                 {
                     "type": "assistant",
@@ -1033,7 +1033,7 @@ class TestClaudeSessionLogEvent:
 
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        with caplog.at_level(_l.INFO, logger="kennel"):
+        with caplog.at_level(_l.INFO, logger="fido"):
             session._log_event(
                 {
                     "type": "assistant",
@@ -1063,7 +1063,7 @@ class TestClaudeSessionLogEvent:
 
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        with caplog.at_level(_l.INFO, logger="kennel"):
+        with caplog.at_level(_l.INFO, logger="fido"):
             session._log_event(
                 {
                     "type": "user",
@@ -1079,7 +1079,7 @@ class TestClaudeSessionLogEvent:
 
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        with caplog.at_level(_l.INFO, logger="kennel"):
+        with caplog.at_level(_l.INFO, logger="fido"):
             session._log_event({"type": "system", "subtype": "init"})
         assert "claude system: init" in caplog.text
 
@@ -1088,7 +1088,7 @@ class TestClaudeSessionLogEvent:
 
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        with caplog.at_level(_l.INFO, logger="kennel"):
+        with caplog.at_level(_l.INFO, logger="fido"):
             session._log_event({"type": "result", "result": "all done"})
         assert "claude result: all done" in caplog.text
 
@@ -1097,7 +1097,7 @@ class TestClaudeSessionLogEvent:
 
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
-        with caplog.at_level(_l.WARNING, logger="kennel"):
+        with caplog.at_level(_l.WARNING, logger="fido"):
             session._log_event({"type": "error", "error": "kaboom"})
         assert "claude error: kaboom" in caplog.text
 
@@ -1420,7 +1420,7 @@ class TestClaudeSessionStop:
         proc = _make_session_proc([])
         proc.stdin.close = MagicMock(side_effect=OSError("broken pipe"))
         session = _make_session(tmp_path, proc)
-        with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
+        with caplog.at_level(logging.DEBUG, logger="fido.claude"):
             with pytest.raises(OSError):
                 session.stop()
         assert any("stdin close failed" in r.message for r in caplog.records)
@@ -1438,7 +1438,7 @@ class TestClaudeSessionStop:
         proc = _make_session_proc([])
         proc.wait = MagicMock(side_effect=OSError("already gone"))
         session = _make_session(tmp_path, proc)
-        with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
+        with caplog.at_level(logging.DEBUG, logger="fido.claude"):
             session.stop()  # must not raise
         assert any("wait failed" in r.message for r in caplog.records)
 
@@ -1451,7 +1451,7 @@ class TestClaudeSessionStop:
         )
         proc.kill = MagicMock(side_effect=ProcessLookupError())
         session = _make_session(tmp_path, proc)
-        with caplog.at_level(logging.DEBUG, logger="kennel.claude"):
+        with caplog.at_level(logging.DEBUG, logger="fido.claude"):
             with pytest.raises(ProcessLookupError):
                 session.stop(grace_seconds=0.0)
         assert any("kill/wait failed" in r.message for r in caplog.records)
@@ -1704,7 +1704,7 @@ class TestClaudeSessionIsAliveAndReset:
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        with caplog.at_level(_logging.INFO, logger="kennel.claude"):
+        with caplog.at_level(_logging.INFO, logger="fido.claude"):
             session.reset()
         assert any("reset" in r.message.lower() for r in caplog.records)
         session.stop()
@@ -1756,7 +1756,7 @@ class TestClaudeSessionIsAliveAndReset:
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+        with caplog.at_level(logging.WARNING, logger="fido.claude"):
             with pytest.raises(OSError):
                 session.reset()
         assert any("kill/wait failed" in r.message for r in caplog.records)
@@ -1774,7 +1774,7 @@ class TestClaudeSessionIsAliveAndReset:
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        with caplog.at_level(logging.WARNING, logger="kennel.claude"):
+        with caplog.at_level(logging.WARNING, logger="fido.claude"):
             with pytest.raises(_subprocess.TimeoutExpired):
                 session.reset()
         assert any("kill/wait failed" in r.message for r in caplog.records)
@@ -1885,7 +1885,7 @@ class TestClaudeSessionLock:
 
     def test_prompt_routes_through_session(self, tmp_path: Path) -> None:
         """ClaudeSession.prompt cancels, takes the lock, sends, and returns result."""
-        from kennel.claude import ClaudeSession
+        from fido.claude import ClaudeSession
 
         system_file = tmp_path / "system.md"
         system_file.write_text("persona")
@@ -1917,7 +1917,7 @@ class TestClaudeSessionLock:
             session.stop()
 
     def test_prompt_prepends_system_prompt_to_body(self, tmp_path: Path) -> None:
-        from kennel.claude import ClaudeSession
+        from fido.claude import ClaudeSession
 
         system_file = tmp_path / "system.md"
         system_file.write_text("persona")
@@ -1958,7 +1958,7 @@ class TestClaudeSessionLock:
 
     def test_owner_is_none_without_repo_name(self, tmp_path: Path) -> None:
         """Session without repo_name never registers a talker → owner None."""
-        from kennel.claude import ClaudeSession
+        from fido.claude import ClaudeSession
 
         system_file = tmp_path / "system.md"
         system_file.write_text("you are fido")
@@ -1981,7 +1981,7 @@ class TestClaudeSessionLock:
         releases the session lock so callers don't deadlock."""
         from datetime import datetime, timezone
 
-        from kennel.provider import SessionLeakError, SessionTalker, register_talker
+        from fido.provider import SessionLeakError, SessionTalker, register_talker
 
         session = _make_session(tmp_path, _make_session_proc([]))
         register_talker(
@@ -2727,7 +2727,7 @@ class TestClaudeAPI:
                 "OAuthState", (), {"access_token": "tok-123"}
             )(),
         )
-        with caplog.at_level(logging.ERROR, logger="kennel.claude"):
+        with caplog.at_level(logging.ERROR, logger="fido.claude"):
             snapshot = api.get_limit_snapshot()
         assert snapshot == ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE,
@@ -2748,7 +2748,7 @@ class TestClaudeAPI:
                 "OAuthState", (), {"access_token": "tok-123"}
             )(),
         )
-        with caplog.at_level(logging.ERROR, logger="kennel.claude"):
+        with caplog.at_level(logging.ERROR, logger="fido.claude"):
             snapshot = api.get_limit_snapshot()
         assert snapshot == ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE,

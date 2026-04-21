@@ -6,7 +6,7 @@ image=${FIDO_IMAGE:-fido:local}
 dev_image=${FIDO_DEV_IMAGE:-fido-dev:local}
 run_image=$image
 container=${FIDO_CONTAINER:-fido}
-secret=${FIDO_SECRET:-$HOME/.kennel-secret}
+secret=${FIDO_SECRET:-$HOME/.fido-secret}
 auto_update=${FIDO_AUTO_UPDATE:-1}
 builder=${FIDO_BUILDX_BUILDER:-fido}
 need_secret=0
@@ -82,7 +82,7 @@ warm_input_hash() {
     uv.lock
     README.md
     models
-    kennel
+    src
     tests
     rocq-python-extraction
   )
@@ -311,7 +311,7 @@ run_container() {
   secret_args=()
   if [ -f "$secret" ]; then
     chmod 600 "$secret"
-    secret_args=(--volume "$secret:/run/secrets/kennel-secret:ro")
+    secret_args=(--volume "$secret:/run/secrets/fido-secret:ro")
   elif [ "$need_secret" = "1" ]; then
     echo "secret file not found: $secret" >&2
     return 2
@@ -371,7 +371,7 @@ case "$command" in
     shift
     need_secret=1
     named_run=1
-    supervise_up kennel --secret-file /run/secrets/kennel-secret "$@"
+    supervise_up fido --secret-file /run/secrets/fido-secret "$@"
     ;;
   down)
     docker rm -f "$container" 2>/dev/null || true
@@ -382,23 +382,23 @@ case "$command" in
     ;;
   status)
     build_image fido "$image"
-    run_container kennel-status "${@:2}"
+    run_container fido-status "${@:2}"
     ;;
   task)
     build_image fido "$image"
-    run_container kennel-task "${@:2}"
+    run_container fido-task "${@:2}"
     ;;
   gh-status)
     build_image fido "$image"
-    run_container kennel-gh-status "${@:2}"
+    run_container fido-gh-status "${@:2}"
     ;;
   chat)
     build_image fido "$image"
-    run_container kennel-chat "${@:2}"
+    run_container fido-chat "${@:2}"
     ;;
   sync-tasks)
     build_image fido "$image"
-    run_container kennel-sync-tasks "${@:2}"
+    run_container fido-sync-tasks "${@:2}"
     ;;
   tests)
     build_image fido-dev "$dev_image"

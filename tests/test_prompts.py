@@ -1,10 +1,10 @@
-"""Unit tests for kennel/prompts.py — prompt-building functions and Prompts class."""
+"""Unit tests for fido/prompts.py — prompt-building functions and Prompts class."""
 
 from __future__ import annotations
 
 import pytest
 
-from kennel.prompts import (
+from fido.prompts import (
     Prompts,
     reply_context_block,
     triage_categories,
@@ -551,9 +551,9 @@ class TestPromptsStatusPrompt:
 
     def test_includes_repo_name(self) -> None:
         result = Prompts("persona").status_prompt(
-            [("rhencke/kennel", "fixing a bug", True)]
+            [("FidoCanCode/home", "fixing a bug", True)]
         )
-        assert "rhencke/kennel" in result
+        assert "FidoCanCode/home" in result
 
     def test_busy_worker_labeled(self) -> None:
         result = Prompts("persona").status_prompt(

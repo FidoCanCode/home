@@ -8,7 +8,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
-ENV UV_PROJECT_ENVIRONMENT=/tmp/kennel-venv
+ENV UV_PROJECT_ENVIRONMENT=/tmp/fido-venv
 ENV UV_LINK_MODE=copy
 ENV UV_PYTHON_CACHE_DIR=/root/.cache/uv/python
 
@@ -18,7 +18,7 @@ WORKDIR /workspace
 
 ENV HOME=/tmp
 ENV UV_CACHE_DIR=/tmp/uv-cache
-ENV UV_PROJECT_ENVIRONMENT=/opt/kennel-venv
+ENV UV_PROJECT_ENVIRONMENT=/opt/fido-venv
 ENV UV_PYTHON_CACHE_DIR=/tmp/uv-cache/python
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 
@@ -27,13 +27,13 @@ COPY .python-version pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/tmp/uv-cache \
     mkdir -p /tmp/uv-cache \
     && uv sync --frozen --no-dev --no-install-project \
-    && chmod -R a+rwX /opt/kennel-venv /opt/uv-python /tmp/uv-cache
+    && chmod -R a+rwX /opt/fido-venv /opt/uv-python /tmp/uv-cache
 
 FROM fido-python-prod AS fido-python-dev
 
 RUN --mount=type=cache,target=/tmp/uv-cache \
     uv sync --frozen --no-install-project \
-    && chmod -R a+rwX /opt/kennel-venv /opt/uv-python /tmp/uv-cache
+    && chmod -R a+rwX /opt/fido-venv /opt/uv-python /tmp/uv-cache
 
 FROM fido-python-prod AS fido-base
 
@@ -74,7 +74,7 @@ RUN groupadd --gid "$FIDO_GID" "$FIDO_USER" \
     && mkdir -p "$FIDO_HOME/.config" "$FIDO_HOME/.cache" "$FIDO_HOME/workspace" /tmp/uv-cache \
     && ln -sf /opt/fido-node-tools/node_modules/.bin/claude /usr/local/bin/claude \
     && ln -sf /opt/fido-node-tools/node_modules/.bin/copilot /usr/local/bin/copilot \
-    && chown -R "$FIDO_UID:$FIDO_GID" "$FIDO_HOME" /opt/fido-node-tools /opt/kennel-venv /opt/uv-python /tmp/uv-cache
+    && chown -R "$FIDO_UID:$FIDO_GID" "$FIDO_HOME" /opt/fido-node-tools /opt/fido-venv /opt/uv-python /tmp/uv-cache
 
 ENV HOME=$FIDO_HOME
 
@@ -90,7 +90,7 @@ ARG FIDO_HOME=/home/fido
 RUN groupadd --gid "$FIDO_GID" "$FIDO_USER" \
     && useradd --uid "$FIDO_UID" --gid "$FIDO_GID" --home-dir "$FIDO_HOME" --shell /bin/bash --create-home "$FIDO_USER" \
     && mkdir -p "$FIDO_HOME/.config" "$FIDO_HOME/.cache" "$FIDO_HOME/workspace" /tmp/uv-cache \
-    && chown -R "$FIDO_UID:$FIDO_GID" "$FIDO_HOME" /opt/kennel-venv /opt/uv-python /tmp/uv-cache
+    && chown -R "$FIDO_UID:$FIDO_GID" "$FIDO_HOME" /opt/fido-venv /opt/uv-python /tmp/uv-cache
 
 ENV HOME=$FIDO_HOME
 
@@ -121,10 +121,10 @@ COPY --from=rocq_models_cache --chown=opam:opam /_build/. /workspace/_build/
 RUN targets="" \
     && for model in models/*.v; do targets="$targets ${model%.v}.vo"; done \
     && opam exec -- dune build $targets \
-    && mkdir -p /tmp/model-output/kennel/models_generated \
+    && mkdir -p /tmp/model-output/src/fido/rocq \
     && py_files="$(find /workspace/_build/default -maxdepth 1 -name '*.py' -print)" \
     && if [ -z "$py_files" ]; then find /workspace/_build/default -maxdepth 2 -type f -print; exit 1; fi \
-    && cp $py_files /tmp/model-output/kennel/models_generated/ \
+    && cp $py_files /tmp/model-output/src/fido/rocq/ \
     && printf '%s\n' \
         '"""Python extracted from Rocq models in models/.' \
         '' \
@@ -132,21 +132,21 @@ RUN targets="" \
         'Source:        models/*.v (Rocq)' \
         'Generator:     rocq-python-extraction plugin' \
         '"""' \
-        > /tmp/model-output/kennel/models_generated/__init__.py
+        > /tmp/model-output/src/fido/rocq/__init__.py
 
 FROM python-base AS model-format
 
 WORKDIR /workspace
 COPY .python-version pyproject.toml uv.lock ./
-COPY --from=extract /tmp/model-output/kennel/models_generated /workspace/kennel/models_generated
+COPY --from=extract /tmp/model-output/src/fido/rocq /workspace/src/fido/rocq
 
-RUN uv run --no-project --with ruff==0.15.9 ruff format /workspace/kennel/models_generated \
-    && cd /workspace/kennel/models_generated \
+RUN uv run --no-project --with ruff==0.15.9 ruff format /workspace/src/fido/rocq \
+    && cd /workspace/src/fido/rocq \
     && find . -type f ! -name ".build-files" -printf "%P\n" | LC_ALL=C sort > .build-files
 
 FROM scratch AS export
 
-COPY --from=model-format /workspace/kennel/models_generated /kennel/models_generated
+COPY --from=model-format /workspace/src/fido/rocq /src/fido/rocq
 COPY --from=extract /workspace/_build /.cache/rocq-models/context/_build
 
 FROM rocq-plugin-source AS test-extract
@@ -181,7 +181,7 @@ WORKDIR /workspace
 COPY .dockerignore build docker-bake.hcl fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
 COPY .githooks/pre-commit .githooks/pre-commit
 COPY models/Dockerfile models/Dockerfile
-COPY kennel kennel
+COPY src src
 COPY tests tests
 COPY rocq-python-extraction/Dockerfile \
     rocq-python-extraction/DIAGNOSTICS.md \
@@ -194,10 +194,10 @@ COPY rocq-python-extraction/Dockerfile \
     rocq-python-extraction/run_in_docker.sh \
     rocq-python-extraction/
 COPY rocq-python-extraction/test/*.py rocq-python-extraction/test/
-COPY --from=model-format /workspace/kennel/models_generated /workspace/kennel/models_generated
+COPY --from=model-format /workspace/src/fido/rocq /workspace/src/fido/rocq
 
-ENV KENNEL_ROCQ_PYTEST_ARTIFACTS=prepared
-ENV KENNEL_SKIP_DOCKER_HELPER_TESTS=1
+ENV FIDO_ROCQ_PYTEST_ARTIFACTS=prepared
+ENV FIDO_SKIP_DOCKER_HELPER_TESTS=1
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pyright-python \

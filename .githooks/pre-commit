@@ -8,17 +8,17 @@ echo "==> warming buildx CI and runtime targets"
 ./fido warm
 
 # Enforce fresh model mirrors.  When any models/*.v file is staged, the
-# working-tree copy of kennel/models_generated/ must match the index — a
+# working-tree copy of src/fido/rocq/ must match the index — a
 # diff here means './build' regenerated the .py files but they were not staged.
 if git diff --cached --name-only | grep -q '^models/.*\.v$'; then
   echo "==> checking model mirrors (models/*.v staged)"
-  if ! git diff --quiet -- kennel/models_generated/; then
+  if ! git diff --quiet -- src/fido/rocq/; then
     echo ""
-    echo "Error: kennel/models_generated/ has unstaged changes while models/*.v"
+    echo "Error: src/fido/rocq/ has unstaged changes while models/*.v"
     echo "is staged for commit.  Looks like './build' was run but the"
     echo "output was not staged.  Fix with:"
     echo ""
-    echo "  git add kennel/models_generated/"
+    echo "  git add src/fido/rocq/"
     echo ""
     echo "then retry the commit."
     exit 1

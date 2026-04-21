@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from kennel.provider import ProviderModel, TurnSessionMode
-from kennel.session_agent import SessionBackedAgent
+from fido.provider import ProviderModel, TurnSessionMode
+from fido.session_agent import SessionBackedAgent
 
 
 class _FakeAgent(SessionBackedAgent):

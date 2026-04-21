@@ -1,4 +1,4 @@
-"""Tests for kennel.rate_limit — RateLimitMonitor + parsers (closes #812)."""
+"""Tests for fido.rate_limit — RateLimitMonitor + parsers (closes #812)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-from kennel.rate_limit import (
+from fido.rate_limit import (
     _REFRESH_INTERVAL,  # noqa: PLC2701
     RateLimitMonitor,
     RateLimitSnapshot,

@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from kennel.gemini import (
+from fido.gemini import (
     Gemini,
     GeminiACPRuntime,
     GeminiAPI,
@@ -17,7 +17,7 @@ from kennel.gemini import (
     extract_result_text,
     extract_session_id,
 )
-from kennel.provider import (
+from fido.provider import (
     PromptSession,
     ProviderAgent,
     ProviderID,

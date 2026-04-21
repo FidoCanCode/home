@@ -7,9 +7,9 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from kennel.github import GitHub
-from kennel.issue_cache import IssueTreeCache
-from kennel.worker import WorkerThread
+from fido.github import GitHub
+from fido.issue_cache import IssueTreeCache
+from fido.worker import WorkerThread
 
 
 def _make_thread(tmp_path: Path, **kwargs) -> WorkerThread:
@@ -59,7 +59,7 @@ def test_load_persisted_session_id_handles_state_load_oserror(
     fido_dir = _init_git_repo(tmp_path)
     (fido_dir / "state.json").write_text(json.dumps({"session_id": "abc"}))
     thread = _make_thread(tmp_path)
-    from kennel import state as state_mod
+    from fido import state as state_mod
 
     def boom(self):
         raise OSError("permission denied")
@@ -154,7 +154,7 @@ def test_persist_session_id_swallows_state_modify_oserror(
     thread = _make_thread(tmp_path, provider=provider)
     from contextlib import contextmanager
 
-    from kennel import state as state_mod
+    from fido import state as state_mod
 
     @contextmanager
     def boom(self):
@@ -162,6 +162,6 @@ def test_persist_session_id_swallows_state_modify_oserror(
         yield  # unreachable
 
     monkeypatch.setattr(state_mod.State, "modify", boom)
-    with caplog.at_level(logging.WARNING, logger="kennel"):
+    with caplog.at_level(logging.WARNING, logger="fido"):
         thread._persist_session_id()
     assert "failed to persist session_id" in caplog.text

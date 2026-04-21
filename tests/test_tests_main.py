@@ -6,13 +6,13 @@ from unittest.mock import patch
 
 import pytest
 
-from kennel.tests_main import ensure_rocq_python_artifacts, main
+from fido.tests_main import ensure_rocq_python_artifacts, main
 
 
 def test_ensure_rocq_python_artifacts_skips_prepared_artifacts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("KENNEL_ROCQ_PYTEST_ARTIFACTS", "prepared")
+    monkeypatch.setenv("FIDO_ROCQ_PYTEST_ARTIFACTS", "prepared")
 
     with patch("subprocess.run") as mock_run:
         ensure_rocq_python_artifacts()
@@ -23,7 +23,7 @@ def test_ensure_rocq_python_artifacts_skips_prepared_artifacts(
 def test_ensure_rocq_python_artifacts_runs_export_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("KENNEL_ROCQ_PYTEST_ARTIFACTS", raising=False)
+    monkeypatch.delenv("FIDO_ROCQ_PYTEST_ARTIFACTS", raising=False)
 
     with patch("subprocess.run") as mock_run:
         ensure_rocq_python_artifacts()
@@ -37,7 +37,7 @@ def test_ensure_rocq_python_artifacts_runs_export_helper(
 def test_main_delegates_to_pytest_with_repo_defaults() -> None:
     with (
         patch("sys.argv", ["tests", "-q"]),
-        patch("kennel.tests_main.ensure_rocq_python_artifacts") as mock_ensure,
+        patch("fido.tests_main.ensure_rocq_python_artifacts") as mock_ensure,
         patch("pytest.main", return_value=0) as mock_pytest_main,
     ):
         result = main()

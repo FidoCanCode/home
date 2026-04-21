@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 from acp.exceptions import RequestError
 
-from kennel.acp import (
+from fido.acp import (
     _ACP_STREAM_LIMIT,
     ACPClient,
     ACPClientBase,
@@ -28,7 +28,7 @@ from kennel.acp import (
     _tool_input_preview,
     combine_prompt,
 )
-from kennel.provider import (
+from fido.provider import (
     ProviderID,
     ProviderModel,
 )

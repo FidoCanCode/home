@@ -1,4 +1,4 @@
-# kennel
+# fido
 
 GitHub webhook listener and Fido runner.
 
@@ -19,7 +19,7 @@ Use the root launcher to run project commands inside the buildx uv image:
 
 `./fido` builds the `fido` bake target from `docker-bake.hcl` with `docker
 buildx bake`, loads it as `fido:local`, then runs it with Docker.
-`./fido help` lists the project commands. `./fido up` runs the kennel server,
+`./fido help` lists the project commands. `./fido up` runs the fido server,
 then supervises it in the foreground with `docker run --rm`. On update exits
 from the app, `./fido up` syncs the runner clone, rebuilds the image, and
 starts again. It exits normally on ordinary shutdown signals. `./fido down`
@@ -42,7 +42,7 @@ stage with an npm cache mount, so changing application code does not rerun
 The repository is bind-mounted at `/workspace`, and the container runs with the
 caller's UID/GID so files written through bind mounts keep the host user's
 ownership. `./fido up` bind-mounts the 0600 secret file read-only at
-`/run/secrets/kennel-secret`. All runs also mount the host workspace and, when
+`/run/secrets/fido-secret`. All runs also mount the host workspace and, when
 present, `.claude`, `.claude.json`, `.config/gh`, and `.cache/copilot` at the
 same absolute paths. Logs go to stdout/stderr for Docker or systemd to capture.
 Runs use host networking so `./fido up` exposes the webhook server normally and
@@ -68,7 +68,7 @@ Use the root build helper:
 `./build` is the canonical Rocq model generation entry point. It runs
 `docker buildx build`, extracts `models/*.v`, formats the generated Python in
 an Astral `uv` Python image, and writes the committed output to
-`kennel/models_generated/`.
+`src/fido/rocq/`.
 
 The helper keeps build work inside buildx:
 

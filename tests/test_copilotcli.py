@@ -16,8 +16,8 @@ from unittest.mock import MagicMock
 import pytest
 from acp.exceptions import RequestError
 
-from kennel import provider
-from kennel.acp import (
+from fido import provider
+from fido.acp import (
     _ACP_STREAM_LIMIT,
     _is_cancel_sentinel,
     _is_line_limit_overrun_error,
@@ -26,7 +26,7 @@ from kennel.acp import (
     _tool_input_preview,
     combine_prompt,
 )
-from kennel.copilotcli import (
+from fido.copilotcli import (
     _COPILOT_CANCEL_SENTINEL,
     CopilotACPRuntime,
     CopilotCLI,
@@ -38,7 +38,7 @@ from kennel.copilotcli import (
     extract_result_text,
     extract_session_id,
 )
-from kennel.provider import (
+from fido.provider import (
     ProviderID,
     ProviderLimitSnapshot,
     ProviderModel,

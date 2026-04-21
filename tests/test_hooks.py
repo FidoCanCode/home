@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kennel.hooks import (
+from fido.hooks import (
     _exclude_path,
     _hook_entry,
     _load,

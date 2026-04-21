@@ -10,31 +10,31 @@ Break the request into the smallest meaningful tasks — one task per logical co
 
 For each task, write it to the shared task file:
 ```bash
-uv run --project /home/rhencke/workspace/kennel kennel task <work_dir> add spec "<task title>"
+uv run --project /home/rhencke/workspace/fido fido task <work_dir> add spec "<task title>"
 ```
 Where `<work_dir>` is from the Context section.
 
-**Task titles must be short one-line summaries** — imperative verb-first, under 80 characters. Like `Add Dependabot routes and default handlers` or `Gitea: dependency-graph endpoints and tests`. NOT multi-paragraph specs with file lists, endpoint tables, or instructions. The title appears in `kennel status`, PR work queues, and log lines — it needs to fit on one line. Details belong in the implementation itself, not the task title.
+**Task titles must be short one-line summaries** — imperative verb-first, under 80 characters. Like `Add Dependabot routes and default handlers` or `Gitea: dependency-graph endpoints and tests`. NOT multi-paragraph specs with file lists, endpoint tables, or instructions. The title appears in `fido status`, PR work queues, and log lines — it needs to fit on one line. Details belong in the implementation itself, not the task title.
 
 The `spec` argument is the task type — always use `spec` for planned tasks. Other types (`thread`, `ci`) are created by the system, never by you.
 
-**CRITICAL**: Always use the `kennel task add` CLI command to create tasks. NEVER write to tasks.json directly — no `echo`, no `Write` tool, no `cat >`. The CLI handles locking, validation, and ID generation. Direct writes bypass all of this and create broken tasks.
+**CRITICAL**: Always use the `fido task add` CLI command to create tasks. NEVER write to tasks.json directly — no `echo`, no `Write` tool, no `cat >`. The CLI handles locking, validation, and ID generation. Direct writes bypass all of this and create broken tasks.
 
-Do NOT use TaskCreate or TodoWrite — only `kennel task`.
-Do NOT create a PR. Do NOT edit any PR body. The kennel server handles PR body sync.
+Do NOT use TaskCreate or TodoWrite — only `fido task`.
+Do NOT create a PR. Do NOT edit any PR body. The fido server handles PR body sync.
 
 ## Done when
-All tasks written to the task file via `kennel task`.
+All tasks written to the task file via `fido task`.
 
 **Stop immediately. Do not implement any tasks. Implementation is handled by subsequent invocations.**
 
 ## Constraints
 - **Never** commit code. No `git commit`, no `git add`. You are planning, not implementing.
-- **Never** edit source files. No `Edit`, no `Write` to any file except via `kennel task add`.
+- **Never** edit source files. No `Edit`, no `Write` to any file except via `fido task add`.
 - **Never** push to any branch. No `git push`.
 - **Never** mark the PR as ready for review (`gh pr ready`).
 - **Never** rebase, amend, or force-push.
-- **Never** use TaskCreate, TaskUpdate, TodoWrite, or TodoRead. Only `kennel task`.
-- **Never** edit any PR body. The kennel server handles that.
-- **Never** write to tasks.json directly. Always use `kennel task add`.
+- **Never** use TaskCreate, TaskUpdate, TodoWrite, or TodoRead. Only `fido task`.
+- **Never** edit any PR body. The fido server handles that.
+- **Never** write to tasks.json directly. Always use `fido task add`.
 - **You are a planner, not an implementer.** Read the code to understand it, then create tasks. Do not change it.

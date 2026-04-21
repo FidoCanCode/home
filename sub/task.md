@@ -41,7 +41,7 @@ mkdir -p "$(dirname "$COMMENT_LOCK")"
 exec 6>"$COMMENT_LOCK"
 flock -n 6 || { echo "comment locked — skipping reply"; exec 6>&-; }
 ```
-If the lock fails, skip the reply (kennel already handled it). Otherwise, post and then release:
+If the lock fails, skip the reply (fido already handled it). Otherwise, post and then release:
 
 ```bash
 # Draft the reply in plain English, then rewrite in character via Opus:
@@ -50,7 +50,7 @@ _PLAIN="Done — <one-line plain-English summary of what was changed>"
 # If infeasible / no-op:
 _PLAIN="Investigated — <brief plain-English explanation>"
 
-_PERSONA=$(cat /home/rhencke/workspace/kennel/sub/persona.md)
+_PERSONA=$(cat /home/rhencke/workspace/fido/sub/persona.md)
 _BODY=$(printf '%s\n\nRewrite the following GitHub PR comment in character as Fido. Keep it brief. Output only the comment text, no quotes, no explanation.\n\n%s' "$_PERSONA" "$_PLAIN" \
   | claude --model claude-opus-4-6 --print 2>/dev/null | head -10)
 : "${_BODY:=$_PLAIN}"
@@ -61,7 +61,7 @@ exec 6>&-  # release comment lock
 ```
 
 Do NOT use TaskCreate, TaskUpdate, TodoWrite, or any other task tools.
-Do NOT edit the PR body. The kennel server syncs it automatically.
+Do NOT edit the PR body. The fido server syncs it automatically.
 
 ## Done when
 Task implemented, committed, and pushed.
@@ -73,13 +73,13 @@ If you discover the task's change is already present in the current branch (e.g.
 
 Never post a top-level PR comment (`gh api .../issues/<n>/comments`) explaining you cannot mark the task complete. The worker handles task bookkeeping; your only job is the code. If there is nothing to change, leave no trace.
 
-Never prefix any PR comment with `BLOCKED:`. Never ask a human or the queue manager to mark a task complete on your behalf. The kennel worker sees your empty-tree run and completes the task itself.
+Never prefix any PR comment with `BLOCKED:`. Never ask a human or the queue manager to mark a task complete on your behalf. The fido worker sees your empty-tree run and completes the task itself.
 
 ## Constraints
 - **Never** mark the PR as ready for review (`gh pr ready`). It must stay draft. That is the user's decision.
 - **Never** continue to another task after completing the current one. One task per invocation, period.
 - **Never** rebase, amend, or force-push. New commits only.
 - **Never** call any `/reviews` endpoint (read or write). Use only `pulls/{pr}/comments` with `in_reply_to=<comment_id>` for thread replies.
-- **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, TodoRead, or `kennel task`.
-- **Never** edit the PR body directly. The kennel server owns PR body sync.
+- **Never** use TaskCreate, TaskUpdate, TaskList, TodoWrite, TodoRead, or `fido task`.
+- **Never** edit the PR body directly. The fido server owns PR body sync.
 - **Never** fix unrelated bugs in this PR. If you encounter a bug that is not directly related to the current task title, file a GitHub issue for it (`gh issue create`) — do NOT fix it here. One PR, one purpose. Scope creep breaks reviewability.

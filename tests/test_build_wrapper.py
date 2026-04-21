@@ -134,7 +134,7 @@ class TestModelsBuildScript:
         assert '--build-context "rocq_image=oci-layout://$image_oci"' in script
         assert '--output "type=oci,dest=$image_oci_tar"' in script
         assert "--output type=local,dest=." in script
-        assert "--smart-output kennel/models_generated" in script
+        assert "--smart-output src/fido/rocq" in script
         assert "--file rocq-python-extraction/Dockerfile" in script
         assert '--cache-to "type=local,dest=$image_cache_next,mode=max"' in script
         assert '--cache-to "type=local,dest=$build_cache_next,mode=max"' in script
@@ -169,15 +169,15 @@ class TestFidoLauncher:
         assert "help)" in script
         assert "run_container fido-help" in script
         assert "up)" in script
-        assert "supervise_up kennel --secret-file /run/secrets/kennel-secret" in script
+        assert "supervise_up fido --secret-file /run/secrets/fido-secret" in script
         assert "warm)" in script
         assert "warm_images" in script
         assert "status)" in script
-        assert "run_container kennel-status" in script
+        assert "run_container fido-status" in script
         assert "task)" in script
-        assert "run_container kennel-task" in script
+        assert "run_container fido-task" in script
         assert "sync-tasks)" in script
-        assert "run_container kennel-sync-tasks" in script
+        assert "run_container fido-sync-tasks" in script
 
     def test_supervises_foreground_container_and_down_stops_by_name(self) -> None:
         script = FIDO.read_text()
@@ -261,7 +261,7 @@ class TestFidoLauncher:
         assert '--volume "$repo_root:/workspace"' in script
         assert '--volume "$HOME/workspace:$HOME/workspace"' in script
         assert '--volume "$HOME/log:$HOME/log"' not in script
-        assert '--volume "$secret:/run/secrets/kennel-secret:ro"' in script
+        assert '--volume "$secret:/run/secrets/fido-secret:ro"' in script
         assert 'add_mount_if_exists "$HOME/.claude"' in script
         assert 'add_mount_if_exists "$HOME/.claude.json"' in script
         assert 'add_mount_if_exists "$HOME/.config/gh"' in script
@@ -284,7 +284,7 @@ class TestFidoLauncher:
         )
         assert (
             "Any other command is passed through to `uv run` unchanged."
-            in (REPO / "kennel" / "fido_help.py").read_text()
+            in (REPO / "src" / "fido" / "fido_help.py").read_text()
         )
 
 
@@ -391,7 +391,7 @@ class TestModelDockerfile:
         ) in dockerfile
         assert "COPY .githooks/pre-commit .githooks/pre-commit" in dockerfile
         assert "COPY models/Dockerfile models/Dockerfile" in dockerfile
-        assert "COPY kennel kennel" in dockerfile
+        assert "COPY src src" in dockerfile
         assert "COPY tests tests" in dockerfile
         assert (
             "COPY rocq-python-extraction/test/*.py rocq-python-extraction/test/"

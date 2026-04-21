@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from kennel import rocq_traceback
-from kennel.rocq_traceback import SourceMap, TracebackAnnotator, TracebackCLI
+from fido import rocq_traceback
+from fido.rocq_traceback import SourceMap, TracebackAnnotator, TracebackCLI
 
 
 def _write_map(

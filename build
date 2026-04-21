@@ -8,7 +8,7 @@ usage:
   ./build --smart-output DIR -- <command> [args...]
 
 With no mode flag, builds Rocq models through buildx and writes generated
-Python to kennel/models_generated/.
+Python to src/fido/rocq/.
 
 With --smart-output, runs the command and removes stale files from DIR only
 after the command produces a fresh output manifest or fresh files.
@@ -64,7 +64,7 @@ input_hash() {
 
 generated_hash() {
   mapfile -t paths < <(
-    find kennel/models_generated \
+    find src/fido/rocq \
       -type f \
       ! -name ".build-files" \
       ! -name "*.pyc" \
@@ -185,7 +185,7 @@ run_models_build() {
   fi
 
   ./build \
-    --smart-output kennel/models_generated \
+    --smart-output src/fido/rocq \
     -- \
     docker buildx build \
       --file models/Dockerfile \

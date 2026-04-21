@@ -6,9 +6,9 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from kennel.github import GitHub
-from kennel.issue_cache import IssueTreeCache
-from kennel.worker import Worker
+from fido.github import GitHub
+from fido.issue_cache import IssueTreeCache
+from fido.worker import Worker
 
 
 def _init_repo(tmp_path: Path) -> None:

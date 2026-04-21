@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from kennel.config import RepoConfig
-from kennel.provider import ProviderID
-from kennel.provider_factory import DefaultProviderFactory
+from fido.config import RepoConfig
+from fido.provider import ProviderID
+from fido.provider_factory import DefaultProviderFactory
 
 
 class TestDefaultProviderFactory:
@@ -49,7 +49,7 @@ class TestDefaultProviderFactory:
             provider=ProviderID.GEMINI,
         )
         api = factory.create_api(repo_cfg)
-        from kennel.gemini import GeminiAPI
+        from fido.gemini import GeminiAPI
 
         assert isinstance(api, GeminiAPI)
         assert factory.create_api(repo_cfg) is api
@@ -69,7 +69,7 @@ class TestDefaultProviderFactory:
             repo_name="owner/repo",
             session=None,
         )
-        from kennel.gemini import Gemini
+        from fido.gemini import Gemini
 
         assert isinstance(provider, Gemini)
 

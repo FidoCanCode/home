@@ -1,10 +1,10 @@
-"""Tests for kennel.cache_webhooks.translate (closes #812, #817)."""
+"""Tests for fido.cache_webhooks.translate (closes #812, #817)."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from kennel.cache_webhooks import translate
+from fido.cache_webhooks import translate
 
 
 def _sub_issues_payload(

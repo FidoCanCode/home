@@ -1,7 +1,7 @@
 {
   "pythonVersion": "3.14",
-  "include": ["kennel"],
-  "exclude": ["kennel/models_generated"],
+  "include": ["src/fido"],
+  "exclude": ["src/fido/rocq"],
   "typeCheckingMode": "strict",
   "reportUnknownMemberType": false,
   "reportUnknownVariableType": false,

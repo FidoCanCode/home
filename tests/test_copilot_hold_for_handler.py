@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from kennel import provider
-from kennel.copilotcli import CopilotCLIClient, CopilotCLISession
-from kennel.provider import ProviderID
+from fido import provider
+from fido.copilotcli import CopilotCLIClient, CopilotCLISession
+from fido.provider import ProviderID
 
 
 class FakeRuntime:

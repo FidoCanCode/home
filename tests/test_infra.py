@@ -1,4 +1,4 @@
-"""Tests for kennel.infra — infrastructure port protocols and real implementations."""
+"""Tests for fido.infra — infrastructure port protocols and real implementations."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kennel.infra import RealClock, RealFilesystem, RealOsProcess, RealProcessRunner
+from fido.infra import RealClock, RealFilesystem, RealOsProcess, RealProcessRunner
 
 
 class TestRealProcessRunner:
     def test_run_delegates_to_subprocess_run(self) -> None:
         mock_result = MagicMock(stdout="v2.43.0\n")
-        with patch("kennel.infra.subprocess.run", return_value=mock_result) as mock_run:
+        with patch("fido.infra.subprocess.run", return_value=mock_result) as mock_run:
             runner = RealProcessRunner()
             result = runner.run(
                 ["git", "--version"],
@@ -35,13 +35,13 @@ class TestRealProcessRunner:
 
     def test_run_forwards_arbitrary_kwargs(self) -> None:
         mock_result = MagicMock()
-        with patch("kennel.infra.subprocess.run", return_value=mock_result) as mock_run:
+        with patch("fido.infra.subprocess.run", return_value=mock_result) as mock_run:
             RealProcessRunner().run(["true"], env={"FOO": "bar"}, timeout=5)
         mock_run.assert_called_once_with(["true"], env={"FOO": "bar"}, timeout=5)
 
     def test_run_propagates_called_process_error(self) -> None:
         with patch(
-            "kennel.infra.subprocess.run",
+            "fido.infra.subprocess.run",
             side_effect=subprocess.CalledProcessError(1, ["bad"]),
         ):
             with pytest.raises(subprocess.CalledProcessError):
@@ -50,12 +50,12 @@ class TestRealProcessRunner:
 
 class TestRealClock:
     def test_sleep_delegates_to_time_sleep(self) -> None:
-        with patch("kennel.infra.time.sleep") as mock_sleep:
+        with patch("fido.infra.time.sleep") as mock_sleep:
             RealClock().sleep(2.5)
         mock_sleep.assert_called_once_with(2.5)
 
     def test_monotonic_delegates_to_time_monotonic(self) -> None:
-        with patch("kennel.infra.time.monotonic", return_value=123.456):
+        with patch("fido.infra.time.monotonic", return_value=123.456):
             result = RealClock().monotonic()
         assert result == 123.456
 
@@ -67,12 +67,12 @@ class TestRealClock:
 
 class TestRealFilesystem:
     def test_which_returns_path_when_tool_found(self) -> None:
-        with patch("kennel.infra.shutil.which", return_value="/usr/bin/git"):
+        with patch("fido.infra.shutil.which", return_value="/usr/bin/git"):
             result = RealFilesystem().which("git")
         assert result == "/usr/bin/git"
 
     def test_which_returns_none_when_tool_absent(self) -> None:
-        with patch("kennel.infra.shutil.which", return_value=None):
+        with patch("fido.infra.shutil.which", return_value=None):
             result = RealFilesystem().which("no-such-tool")
         assert result is None
 
@@ -90,29 +90,29 @@ class TestRealFilesystem:
 
 class TestRealOsProcess:
     def test_execvp_delegates_to_os_execvp(self) -> None:
-        with patch("kennel.infra.os.execvp") as mock_execvp:
-            RealOsProcess().execvp("uv", ["uv", "run", "kennel"])
-        mock_execvp.assert_called_once_with("uv", ["uv", "run", "kennel"])
+        with patch("fido.infra.os.execvp") as mock_execvp:
+            RealOsProcess().execvp("uv", ["uv", "run", "fido"])
+        mock_execvp.assert_called_once_with("uv", ["uv", "run", "fido"])
 
     def test_exit_delegates_to_os_exit(self) -> None:
-        with patch("kennel.infra.os._exit") as mock_exit:
+        with patch("fido.infra.os._exit") as mock_exit:
             RealOsProcess().exit(75)
         mock_exit.assert_called_once_with(75)
 
     def test_chdir_delegates_to_os_chdir(self, tmp_path: Path) -> None:
-        with patch("kennel.infra.os.chdir") as mock_chdir:
+        with patch("fido.infra.os.chdir") as mock_chdir:
             RealOsProcess().chdir(tmp_path)
         mock_chdir.assert_called_once_with(tmp_path)
 
     def test_chdir_accepts_string_path(self) -> None:
-        with patch("kennel.infra.os.chdir") as mock_chdir:
+        with patch("fido.infra.os.chdir") as mock_chdir:
             RealOsProcess().chdir("/tmp")
         mock_chdir.assert_called_once_with("/tmp")
 
     def test_install_signal_delegates_to_signal_signal(self) -> None:
         old_handler = MagicMock()
         handler = MagicMock()
-        with patch("kennel.infra.signal.signal", return_value=old_handler) as mock_sig:
+        with patch("fido.infra.signal.signal", return_value=old_handler) as mock_sig:
             result = RealOsProcess().install_signal(signal.SIGTERM, handler)
         mock_sig.assert_called_once_with(signal.SIGTERM, handler)
         assert result is old_handler

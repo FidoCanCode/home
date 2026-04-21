@@ -1,11 +1,11 @@
-"""Tests for kennel.issue_cache.IssueTreeCache (closes #812)."""
+"""Tests for fido.issue_cache.IssueTreeCache (closes #812)."""
 
 from __future__ import annotations
 
 import threading
 from datetime import datetime, timedelta, timezone
 
-from kennel.issue_cache import (
+from fido.issue_cache import (
     CacheMetrics,
     IssueTreeCache,
 )

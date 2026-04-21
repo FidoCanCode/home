@@ -5,10 +5,10 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
-from kennel.claude import ClaudeClient
-from kennel.config import Config, RepoMembership
-from kennel.config import RepoConfig as _RepoConfig
-from kennel.events import (
+from fido.claude import ClaudeClient
+from fido.config import Config, RepoMembership
+from fido.config import RepoConfig as _RepoConfig
+from fido.events import (
     Action,
     _comment_lock,
     _configured_agent,
@@ -31,8 +31,8 @@ from kennel.events import (
     reply_to_issue_comment,
     reply_to_review,
 )
-from kennel.provider import ProviderID
-from kennel.reply_promises import add_reply_promise
+from fido.provider import ProviderID
+from fido.reply_promises import add_reply_promise
 
 
 class RepoConfig(_RepoConfig):
@@ -52,7 +52,7 @@ def _config(tmp_path: Path) -> Config:
 
 
 def _repo_cfg(tmp_path: Path) -> RepoConfig:
-    from kennel.config import RepoMembership
+    from fido.config import RepoMembership
 
     return RepoConfig(
         name="owner/repo",
@@ -128,7 +128,7 @@ class TestNeedsMoreContext:
             provider=ProviderID.COPILOT_CLI,
         )
         sentinel = MagicMock()
-        with patch("kennel.events.DefaultProviderFactory") as factory_cls:
+        with patch("fido.events.DefaultProviderFactory") as factory_cls:
             factory_cls.return_value.create_agent.return_value = sentinel
             assert _configured_agent(cfg, cfg.repos["owner/repo"]) is sentinel
 
@@ -157,10 +157,10 @@ class TestRecoverReplyPromises:
         }
         with (
             patch(
-                "kennel.events.reply_to_issue_comment",
+                "fido.events.reply_to_issue_comment",
                 return_value=("ACT", ["task one"]),
             ),
-            patch("kennel.events.create_task") as mock_create_task,
+            patch("fido.events.create_task") as mock_create_task,
         ):
             result = recover_reply_promises(
                 fido_dir,
@@ -268,7 +268,7 @@ class TestRecoverReplyPromises:
         }
         with (
             pytest.raises(ValueError, match="invalid GitHub API URL"),
-            patch("kennel.events.reply_to_issue_comment") as mock_reply,
+            patch("fido.events.reply_to_issue_comment") as mock_reply,
         ):
             recover_reply_promises(
                 fido_dir,
@@ -294,7 +294,7 @@ class TestRecoverReplyPromises:
         }
         with (
             pytest.raises(ValueError, match="invalid GitHub API URL"),
-            patch("kennel.events.reply_to_comment") as mock_reply,
+            patch("fido.events.reply_to_comment") as mock_reply,
         ):
             recover_reply_promises(
                 fido_dir,
@@ -320,10 +320,10 @@ class TestRecoverReplyPromises:
         }
         with (
             patch(
-                "kennel.events.reply_to_issue_comment",
+                "fido.events.reply_to_issue_comment",
                 return_value=("DEFER", ["later"]),
             ),
-            patch("kennel.events.create_task") as mock_create_task,
+            patch("fido.events.create_task") as mock_create_task,
         ):
             result = recover_reply_promises(
                 fido_dir,
@@ -357,10 +357,10 @@ class TestRecoverReplyPromises:
 
         with (
             patch(
-                "kennel.events.reply_to_issue_comment",
+                "fido.events.reply_to_issue_comment",
                 return_value=("ACT", ["task one"]),
             ),
-            patch("kennel.events.create_task", side_effect=fail_after_reply),
+            patch("fido.events.create_task", side_effect=fail_after_reply),
         ):
             with pytest.raises(RuntimeError, match="task add failed"):
                 recover_reply_promises(
@@ -414,10 +414,10 @@ class TestRecoverReplyPromises:
         gh.get_pull_comment.side_effect = get_pull_comment
         with (
             patch(
-                "kennel.events.reply_to_comment",
+                "fido.events.reply_to_comment",
                 return_value=("DO", ["task a", "task b"]),
             ) as mock_reply,
-            patch("kennel.events.create_task") as mock_create_task,
+            patch("fido.events.create_task") as mock_create_task,
         ):
             result = recover_reply_promises(
                 fido_dir,
@@ -474,8 +474,8 @@ class TestRecoverReplyPromises:
             raise RuntimeError("task add failed")
 
         with (
-            patch("kennel.events.reply_to_comment", return_value=("DO", ["task a"])),
-            patch("kennel.events.create_task", side_effect=fail_after_reply),
+            patch("fido.events.reply_to_comment", return_value=("DO", ["task a"])),
+            patch("fido.events.create_task", side_effect=fail_after_reply),
         ):
             with pytest.raises(RuntimeError, match="task add failed"):
                 recover_reply_promises(
@@ -548,9 +548,9 @@ class TestRecoverReplyPromises:
         gh.get_pull_comment.side_effect = get_pull_comment
         with (
             patch(
-                "kennel.events.reply_to_comment", return_value=("ANSWER", [])
+                "fido.events.reply_to_comment", return_value=("ANSWER", [])
             ) as mock_reply,
-            patch("kennel.events.create_task") as mock_create_task,
+            patch("fido.events.create_task") as mock_create_task,
         ):
             with pytest.raises(ValueError, match="invalid GitHub API URL"):
                 recover_reply_promises(
@@ -615,7 +615,7 @@ class TestRecoverReplyPromises:
 
         gh.get_pull_comment.side_effect = get_pull_comment
         with patch(
-            "kennel.events.reply_to_comment", return_value=("ANSWER", [])
+            "fido.events.reply_to_comment", return_value=("ANSWER", [])
         ) as mock_reply:
             result = recover_reply_promises(
                 fido_dir,
@@ -633,7 +633,7 @@ class TestIsAllowed:
     def _repo_cfg(
         self, tmp_path: Path, collaborators: frozenset[str] = frozenset({"owner"})
     ) -> RepoConfig:
-        from kennel.config import RepoMembership
+        from fido.config import RepoMembership
 
         return RepoConfig(
             name="owner/repo",
@@ -1153,7 +1153,7 @@ class TestMaybeReact:
 
     def test_defaults_to_repo_configured_agent(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with patch("kennel.events.DefaultProviderFactory") as factory_cls:
+        with patch("fido.events.DefaultProviderFactory") as factory_cls:
             factory_cls.return_value.create_agent.return_value = _client("NONE")
             maybe_react("hi", 1, "pulls", "owner/repo", cfg, MagicMock())
         factory_cls.return_value.create_agent.assert_called_once_with(
@@ -1986,7 +1986,7 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return "ok"
 
-        with patch("kennel.events.DefaultProviderFactory") as factory_cls:
+        with patch("fido.events.DefaultProviderFactory") as factory_cls:
             factory_cls.return_value.create_agent.return_value = _client(
                 side_effect=fake_pp
             )
@@ -2016,7 +2016,7 @@ class TestReplyToIssueComment:
             return "ok"
 
         with patch(
-            "kennel.events._triage", wraps=lambda *a, **kw: ("ACT", ["do it"])
+            "fido.events._triage", wraps=lambda *a, **kw: ("ACT", ["do it"])
         ) as mock_triage:
             cat, titles = reply_to_issue_comment(
                 action,
@@ -2104,7 +2104,7 @@ class TestReplyToIssueComment:
 
     def test_writes_durable_claim_file_after_reply(self, tmp_path: Path) -> None:
         """After posting a reply, a .lock file is written at
-        .git/fido/comments/<comment_id>.lock so a kennel restart doesn't
+        .git/fido/comments/<comment_id>.lock so a fido restart doesn't
         re-pick the comment via backfill (closes #834)."""
         cfg = self._cfg(tmp_path)
 
@@ -2182,7 +2182,7 @@ class TestCreateTask:
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         mock_gh = MagicMock()
         mock_tasks = self._mock_tasks()
-        with patch("kennel.events.launch_sync") as mock_sync:
+        with patch("fido.events.launch_sync") as mock_sync:
             create_task("do something", cfg, repo_cfg, mock_gh, _tasks=mock_tasks)
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=None
@@ -2194,7 +2194,7 @@ class TestCreateTask:
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         thread = {"repo": "a/b", "pr": 1, "comment_id": 5}
         mock_tasks = self._mock_tasks()
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "do something",
                 cfg,
@@ -2217,7 +2217,7 @@ class TestCreateTask:
         mock_tasks = self._mock_tasks()
         mock_gh = MagicMock()
         mock_gh.is_thread_resolved_for_comment.return_value = True
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             result = create_task(
                 "do something",
                 cfg,
@@ -2239,7 +2239,7 @@ class TestCreateTask:
         mock_tasks = self._mock_tasks()
         mock_gh = MagicMock()
         mock_gh.is_thread_resolved_for_comment.side_effect = RuntimeError("api down")
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "do something",
                 cfg,
@@ -2261,7 +2261,7 @@ class TestCreateTask:
             "type": "spec",
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             result = create_task(
                 "do something", cfg, repo_cfg, MagicMock(), _tasks=mock_tasks
             )
@@ -2296,7 +2296,7 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
@@ -2335,7 +2335,7 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "Another plain task",
                 cfg,
@@ -2365,7 +2365,7 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
@@ -2411,7 +2411,7 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "New thread task",
                 cfg,
@@ -2438,7 +2438,7 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
@@ -2469,7 +2469,7 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
@@ -2500,7 +2500,7 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
@@ -2555,7 +2555,7 @@ class TestCreateTask:
             "thread": thread,
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
@@ -2586,7 +2586,7 @@ class TestCreateTask:
             "thread": thread,
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
@@ -2616,7 +2616,7 @@ class TestCreateTask:
             "thread": thread,
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
@@ -2637,7 +2637,7 @@ class TestCreateTask:
         registry, fido_dir = self._setup_abort_scenario(tmp_path, "thread")
         fake_task = {"id": "t-ci", "title": "CI fix", "status": "pending", "type": "ci"}
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "CI fix",
                 cfg,
@@ -2658,7 +2658,7 @@ class TestCreateTask:
         registry, fido_dir = self._setup_abort_scenario(tmp_path, "spec")
         fake_task = {"id": "t-ci", "title": "CI fix", "status": "pending", "type": "ci"}
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "CI fix",
                 cfg,
@@ -2683,7 +2683,7 @@ class TestCreateTask:
             "type": "spec",
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "New spec task",
                 cfg,
@@ -2708,7 +2708,7 @@ class TestCreateTask:
         mock_gh = MagicMock()
         reorder_called: list[tuple] = []
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "Comment task",
                 cfg,
@@ -2740,7 +2740,7 @@ class TestCreateTask:
         }
         reorder_called: list = []
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "Spec task",
                 cfg,
@@ -2759,8 +2759,8 @@ class TestCreateTask:
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         mock_tasks = self._mock_tasks()
         with (
-            patch("kennel.events.launch_sync"),
-            patch("kennel.events._rewrite_pr_description") as mock_rewrite,
+            patch("fido.events.launch_sync"),
+            patch("fido.events._rewrite_pr_description") as mock_rewrite,
         ):
             create_task(
                 "Spec task", cfg, repo_cfg, MagicMock(), _tasks=mock_tasks
@@ -2782,7 +2782,7 @@ class TestCreateTask:
         }
         summaries: list[str] = []
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             create_task(
                 "t",
                 cfg,
@@ -2801,10 +2801,10 @@ class TestCreateTask:
         """When _tasks is not passed, create_task constructs Tasks(work_dir) itself."""
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with patch("kennel.events.launch_sync"):
+        with patch("fido.events.launch_sync"):
             result = create_task("do a thing", cfg, repo_cfg, MagicMock())
         assert result["title"] == "do a thing"
-        from kennel.tasks import list_tasks
+        from fido.tasks import list_tasks
 
         assert any(t["title"] == "do a thing" for t in list_tasks(tmp_path))
 
@@ -2816,9 +2816,7 @@ class TestGetCommitSummary:
         fake_result = sp.CompletedProcess(
             args=[], returncode=0, stdout="abc123 add thing\n", stderr=""
         )
-        with patch(
-            "kennel.events.subprocess.run", return_value=fake_result
-        ) as mock_run:
+        with patch("fido.events.subprocess.run", return_value=fake_result) as mock_run:
             result = _get_commit_summary(tmp_path)
         assert result == "abc123 add thing"
         mock_run.assert_called_once_with(
@@ -2830,7 +2828,7 @@ class TestGetCommitSummary:
         )
 
     def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
-        with patch("kennel.events.subprocess.run", side_effect=FileNotFoundError):
+        with patch("fido.events.subprocess.run", side_effect=FileNotFoundError):
             result = _get_commit_summary(tmp_path)
         assert result == ""
 
@@ -2838,7 +2836,7 @@ class TestGetCommitSummary:
         import subprocess as sp
 
         with patch(
-            "kennel.events.subprocess.run",
+            "fido.events.subprocess.run",
             side_effect=sp.TimeoutExpired(cmd="git", timeout=10),
         ):
             result = _get_commit_summary(tmp_path)
@@ -2850,7 +2848,7 @@ class TestGetCommitSummary:
         fake_result = sp.CompletedProcess(
             args=[], returncode=128, stdout="", stderr="not a git repo"
         )
-        with patch("kennel.events.subprocess.run", return_value=fake_result):
+        with patch("fido.events.subprocess.run", return_value=fake_result):
             result = _get_commit_summary(tmp_path)
         assert result == ""
 
@@ -2861,13 +2859,13 @@ class TestGetCommitSummary:
         fake_result = sp.CompletedProcess(
             args=[], returncode=1, stdout="abc123 orphan output\n", stderr=""
         )
-        with patch("kennel.events.subprocess.run", return_value=fake_result):
+        with patch("fido.events.subprocess.run", return_value=fake_result):
             result = _get_commit_summary(tmp_path)
         assert result == ""
 
     def test_returns_empty_on_oserror(self, tmp_path: Path) -> None:
         with patch(
-            "kennel.events.subprocess.run", side_effect=OSError("permission denied")
+            "fido.events.subprocess.run", side_effect=OSError("permission denied")
         ):
             result = _get_commit_summary(tmp_path)
         assert result == ""
@@ -2977,7 +2975,7 @@ class TestReorderTasksBackground:
             },
             "kind": "completed",
         }
-        with patch("kennel.events._notify_thread_change") as mock_notify:
+        with patch("fido.events._notify_thread_change") as mock_notify:
             on_changes([change])
         mock_notify.assert_called_once_with(
             change, self._cfg(tmp_path), mock_gh, agent=None, prompts=None
@@ -3125,7 +3123,7 @@ class TestReorderTasksBackground:
         )
         self._run_thread(started)
         on_done = calls[0][2]["_on_done"]
-        with patch("kennel.tasks.sync_tasks") as mock_sync:
+        with patch("fido.tasks.sync_tasks") as mock_sync:
             on_done()
         mock_sync.assert_called_once()
 
@@ -3386,7 +3384,7 @@ class TestReorderTasksBackground:
 
     def test_sets_thread_local_repo_name_during_reorder(self, tmp_path: Path) -> None:
         """Thread-local repo_name is set to repo_cfg.name when reorder runs."""
-        from kennel.provider import current_repo
+        from fido.provider import current_repo
 
         started: list = []
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -3410,7 +3408,7 @@ class TestReorderTasksBackground:
 
     def test_clears_thread_local_repo_name_after_reorder(self, tmp_path: Path) -> None:
         """Thread-local repo_name is cleared in the finally block after reorder."""
-        from kennel.provider import current_repo, set_thread_repo
+        from fido.provider import current_repo, set_thread_repo
 
         started: list = []
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -3434,7 +3432,7 @@ class TestReorderTasksBackground:
         self, tmp_path: Path
     ) -> None:
         """Thread-local repo_name is cleared even when reorder raises."""
-        from kennel.provider import current_repo
+        from fido.provider import current_repo
 
         started: list = []
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -3458,7 +3456,7 @@ class TestReorderTasksBackground:
 
     def test_no_thread_local_set_when_no_repo_cfg(self, tmp_path: Path) -> None:
         """When repo_cfg is None, set_thread_repo is not called (no crash)."""
-        from kennel.provider import current_repo
+        from fido.provider import current_repo
 
         started: list = []
         seen: list = []
@@ -3647,7 +3645,7 @@ class TestNotifyThreadChange:
         task = self._task()
         task["thread"]["comment_type"] = "pulls"
         change = {"task": task, "kind": "completed"}
-        with patch("kennel.events.DefaultProviderFactory") as factory_cls:
+        with patch("fido.events.DefaultProviderFactory") as factory_cls:
             factory_cls.return_value.create_agent.return_value = _client("Auto reply")
             _notify_thread_change(change, cfg, mock_gh)
         factory_cls.return_value.create_agent.assert_called_once_with(
@@ -3662,7 +3660,7 @@ class TestNotifyThreadChange:
 
 
 class TestBackfillMissedPrComments:
-    """Replay of issue_comment webhooks missed during kennel downtime (fix #794).
+    """Replay of issue_comment webhooks missed during fido downtime (fix #794).
 
     Only top-level PR comments are in scope — inline review comments and review
     threads are already scanned each iteration by ``Worker.handle_threads``.
@@ -3705,14 +3703,14 @@ class TestBackfillMissedPrComments:
     def test_creates_task_for_allowed_collaborator_comment(
         self, tmp_path: Path
     ) -> None:
-        from kennel.events import backfill_missed_pr_comments
+        from fido.events import backfill_missed_pr_comments
 
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [self._comment(100)]
         mock_gh.is_thread_resolved_for_comment.return_value = False
         cfg = self._cfg(tmp_path)
         repo_cfg = self._repo_cfg(tmp_path)
-        with patch("kennel.events.create_task") as mock_create:
+        with patch("fido.events.create_task") as mock_create:
             count = backfill_missed_pr_comments(
                 cfg, repo_cfg, mock_gh, 1, gh_user="fidocancode"
             )
@@ -3724,13 +3722,13 @@ class TestBackfillMissedPrComments:
         assert kwargs["thread"]["author"] == "rhencke"
 
     def test_skips_fido_own_comments(self, tmp_path: Path) -> None:
-        from kennel.events import backfill_missed_pr_comments
+        from fido.events import backfill_missed_pr_comments
 
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="fidocancode", body="my own reply")
         ]
-        with patch("kennel.events.create_task") as mock_create:
+        with patch("fido.events.create_task") as mock_create:
             backfill_missed_pr_comments(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path),
@@ -3741,13 +3739,13 @@ class TestBackfillMissedPrComments:
         mock_create.assert_not_called()
 
     def test_skips_by_gh_user_case_insensitive(self, tmp_path: Path) -> None:
-        from kennel.events import backfill_missed_pr_comments
+        from fido.events import backfill_missed_pr_comments
 
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="Alice", body="mine")
         ]
-        with patch("kennel.events.create_task") as mock_create:
+        with patch("fido.events.create_task") as mock_create:
             backfill_missed_pr_comments(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path),
@@ -3762,13 +3760,13 @@ class TestBackfillMissedPrComments:
     ) -> None:
         """Defense in depth: even if ``gh_user`` is misconfigured, comments
         from the literal fido account must never trigger a backfill task."""
-        from kennel.events import backfill_missed_pr_comments
+        from fido.events import backfill_missed_pr_comments
 
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="fido-can-code", body="my reply")
         ]
-        with patch("kennel.events.create_task") as mock_create:
+        with patch("fido.events.create_task") as mock_create:
             backfill_missed_pr_comments(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path),
@@ -3779,13 +3777,13 @@ class TestBackfillMissedPrComments:
         mock_create.assert_not_called()
 
     def test_skips_non_allowed_users(self, tmp_path: Path) -> None:
-        from kennel.events import backfill_missed_pr_comments
+        from fido.events import backfill_missed_pr_comments
 
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="random-stranger")
         ]
-        with patch("kennel.events.create_task") as mock_create:
+        with patch("fido.events.create_task") as mock_create:
             backfill_missed_pr_comments(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path, collaborators=frozenset({"rhencke"})),
@@ -3796,13 +3794,13 @@ class TestBackfillMissedPrComments:
         mock_create.assert_not_called()
 
     def test_allows_configured_bots(self, tmp_path: Path) -> None:
-        from kennel.events import backfill_missed_pr_comments
+        from fido.events import backfill_missed_pr_comments
 
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="dependabot[bot]", body="bump dep")
         ]
-        with patch("kennel.events.create_task") as mock_create:
+        with patch("fido.events.create_task") as mock_create:
             backfill_missed_pr_comments(
                 self._cfg(tmp_path, allowed_bots=frozenset({"dependabot[bot]"})),
                 self._repo_cfg(tmp_path),
@@ -3815,14 +3813,14 @@ class TestBackfillMissedPrComments:
         assert "bot" in kwargs["thread"]["author"]
 
     def test_prompt_marks_bot_vs_human(self, tmp_path: Path) -> None:
-        from kennel.events import backfill_missed_pr_comments
+        from fido.events import backfill_missed_pr_comments
 
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="rhencke", body="human msg"),
             self._comment(101, user="bot[bot]", body="bot msg"),
         ]
-        with patch("kennel.events.create_task") as mock_create:
+        with patch("fido.events.create_task") as mock_create:
             backfill_missed_pr_comments(
                 self._cfg(tmp_path, allowed_bots=frozenset({"bot[bot]"})),
                 self._repo_cfg(tmp_path),
@@ -3835,7 +3833,7 @@ class TestBackfillMissedPrComments:
         assert any("(bot)" in p for p in prompts)
 
     def test_skips_empty_login_and_missing_id(self, tmp_path: Path) -> None:
-        from kennel.events import backfill_missed_pr_comments
+        from fido.events import backfill_missed_pr_comments
 
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
@@ -3843,7 +3841,7 @@ class TestBackfillMissedPrComments:
             {"id": None, "user": {"login": "rhencke"}, "body": "x"},
             {"id": 2, "user": None, "body": "x"},
         ]
-        with patch("kennel.events.create_task") as mock_create:
+        with patch("fido.events.create_task") as mock_create:
             backfill_missed_pr_comments(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path),
@@ -3854,11 +3852,11 @@ class TestBackfillMissedPrComments:
         mock_create.assert_not_called()
 
     def test_empty_comment_list_is_noop(self, tmp_path: Path) -> None:
-        from kennel.events import backfill_missed_pr_comments
+        from fido.events import backfill_missed_pr_comments
 
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = []
-        with patch("kennel.events.create_task") as mock_create:
+        with patch("fido.events.create_task") as mock_create:
             count = backfill_missed_pr_comments(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path),
@@ -3876,7 +3874,7 @@ class TestBackfillMissedPrComments:
         posting; backfill must honour that file and skip re-queueing —
         closes #834.
         """
-        from kennel.events import _comment_lock, backfill_missed_pr_comments
+        from fido.events import _comment_lock, backfill_missed_pr_comments
 
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
@@ -3887,7 +3885,7 @@ class TestBackfillMissedPrComments:
         # Pre-create the claim file for comment 100 (simulates a prior reply).
         _comment_lock(tmp_path, 100).touch(exist_ok=True)
 
-        with patch("kennel.events.create_task") as mock_create:
+        with patch("fido.events.create_task") as mock_create:
             backfill_missed_pr_comments(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path),
@@ -3919,13 +3917,13 @@ class TestLaunchSync:
     def test_calls_sync_tasks_background(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
-        with patch("kennel.tasks.sync_tasks_background") as mock_sync:
+        with patch("fido.tasks.sync_tasks_background") as mock_sync:
             launch_sync(cfg, self._repo_cfg(tmp_path), mock_gh)
         mock_sync.assert_called_once_with(tmp_path, mock_gh)
 
     def test_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
-        with patch("kennel.tasks.sync_tasks_background"):
+        with patch("fido.tasks.sync_tasks_background"):
             launch_sync(cfg, self._repo_cfg(tmp_path), MagicMock())  # should not raise
 
 
@@ -4115,8 +4113,8 @@ class TestReplyToCommentElseBranch:
         # fallback "ACT"/"DO". We need to force an unlisted category past _triage.
         # Monkey-patch _triage directly to return a fake category.
         with (
-            patch("kennel.events._triage", return_value=("UNKNOWN_CAT", ["do it"])),
-            patch("kennel.events.needs_more_context", return_value=False),
+            patch("fido.events._triage", return_value=("UNKNOWN_CAT", ["do it"])),
+            patch("fido.events.needs_more_context", return_value=False),
         ):
             cat, titles = reply_to_comment(
                 action,
@@ -4199,8 +4197,8 @@ class TestReplyToCommentTerseEnrichment:
         ]
 
         with (
-            patch("kennel.events._triage", side_effect=fake_triage),
-            patch("kennel.events.needs_more_context", return_value=True),
+            patch("fido.events._triage", side_effect=fake_triage),
+            patch("fido.events.needs_more_context", return_value=True),
         ):
             reply_to_comment(
                 action,
@@ -4230,7 +4228,7 @@ class TestReplyToCommentTerseEnrichment:
                 return "ACT: do it"
             return "Got it."
 
-        with patch("kennel.events.needs_more_context", return_value=False):
+        with patch("fido.events.needs_more_context", return_value=False):
             reply_to_comment(
                 action,
                 cfg,
@@ -4258,7 +4256,7 @@ class TestReplyToCommentTerseEnrichment:
                 return "ACT: do it"
             return "On it."
 
-        with patch("kennel.events.needs_more_context", return_value=True):
+        with patch("fido.events.needs_more_context", return_value=True):
             cat, titles = reply_to_comment(
                 action,
                 cfg,
@@ -4290,8 +4288,8 @@ class TestReplyToCommentTerseEnrichment:
         mock_gh.fetch_sibling_threads.return_value = []
 
         with (
-            patch("kennel.events._triage", side_effect=fake_triage),
-            patch("kennel.events.needs_more_context", return_value=True),
+            patch("fido.events._triage", side_effect=fake_triage),
+            patch("fido.events.needs_more_context", return_value=True),
         ):
             reply_to_comment(
                 action,
@@ -4684,7 +4682,7 @@ class TestRewritePrDescription:
     def _mock_pr_body_lock(self):
         from contextlib import nullcontext
 
-        with patch("kennel.tasks.pr_body_lock", return_value=nullcontext()):
+        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
             yield
 
     def _pr_body(self, desc: str = "Does something useful.\n\nFixes #42.") -> str:
@@ -4849,7 +4847,7 @@ class TestRewritePrDescription:
 
     def test_defaults_to_none_agent(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
-        with patch("kennel.worker._write_pr_description") as mock_write:
+        with patch("fido.worker._write_pr_description") as mock_write:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,
@@ -4862,7 +4860,7 @@ class TestRewritePrDescription:
     def test_defaults_to_state(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
         mock_state = self._mock_state(issue=None)
-        with patch("kennel.state.State", return_value=mock_state) as mock_state_cls:
+        with patch("fido.state.State", return_value=mock_state) as mock_state_cls:
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,

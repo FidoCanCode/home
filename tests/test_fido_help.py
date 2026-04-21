@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kennel.fido_help import main
+from fido.fido_help import main
 
 
 def test_help_lists_commands(capsys) -> None:  # type: ignore[no-untyped-def]

@@ -1,19 +1,19 @@
-"""Shared pytest fixtures for kennel tests."""
+"""Shared pytest fixtures for fido tests."""
 
 from __future__ import annotations
 
 import pytest
 
-from kennel import provider
+from fido import provider
 
 
 @pytest.fixture(autouse=True)
 def _reset_claude_talker_registry():
-    """Clear the global :class:`~kennel.provider.SessionTalker` registry between
+    """Clear the global :class:`~fido.provider.SessionTalker` registry between
     tests so entries from one test can't leak into the next and cause a
-    spurious :class:`~kennel.provider.SessionLeakError`.  Also clears any
+    spurious :class:`~fido.provider.SessionLeakError`.  Also clears any
     thread-local repo_name the test may have set via
-    :func:`kennel.provider.set_thread_repo`.
+    :func:`fido.provider.set_thread_repo`.
     """
     yield
     with provider._talkers_lock:
