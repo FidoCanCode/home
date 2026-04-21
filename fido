@@ -319,6 +319,7 @@ run_container() {
 
   run_args=(
     --rm
+    --interactive
     --user "$(id -u):$(id -g)"
     --env "HOME=$HOME"
     --network host

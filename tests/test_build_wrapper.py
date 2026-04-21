@@ -256,6 +256,7 @@ class TestFidoLauncher:
         script = FIDO.read_text()
 
         assert "--network host" in script
+        assert "--interactive" in script
         assert '--volume "$HOME:$HOME"' not in script
         assert '--volume "$repo_root:/workspace"' in script
         assert '--volume "$HOME/workspace:$HOME/workspace"' in script
