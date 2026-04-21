@@ -185,6 +185,13 @@ class TestModelsBuildScript:
         assert "parse_dockerfile" in generator
         assert "target_inputs" in generator
         assert "hashfiles_expression" in generator
+        assert "render_build_graph" in generator
+        assert "tools/build_graph.sh" in workflow
+        assert "Check generated workflow files" in workflow
+        assert (
+            "git diff --exit-code -- .github/workflows/ci.yml tools/build_graph.sh"
+            in workflow
+        )
         assert "rocq_cache_paths" in generator
         assert '"rocq-model-image":' not in generator
         assert '".cache/rocq-models/image"' not in generator
@@ -249,7 +256,14 @@ class TestFidoLauncher:
         assert "warm)" in script
         assert "warm_images" in script
         assert "gen-workflows)" in script
-        assert 'python3 "$repo_root/tools/gen_workflows.py"' in script
+        assert (
+            "docker buildx bake --print warm fido-test > .cache/bake-plan.json"
+            in script
+        )
+        assert (
+            "run_container python3 tools/gen_workflows.py --plan .cache/bake-plan.json"
+            in script
+        )
         assert "status)" in script
         assert "run_container fido-status" in script
         assert "task)" in script
@@ -303,7 +317,9 @@ class TestFidoLauncher:
             in script
         )
         assert "docker buildx inspect --bootstrap" in script
-        assert "image_input_hash()" in script
+        assert "image_input_hash()" not in script
+        assert "target_input_hash()" in script
+        assert "tools/build_graph.sh" in script
         assert "image_cache_ready()" in script
         assert 'local manifest="$repo_root/.cache/rocq-models/$target.sha"' in script
         assert 'log INFO "$target image cache hit $tag"' in script
@@ -316,25 +332,22 @@ class TestFidoLauncher:
         assert 'build_image fido "$image"' in script
         assert 'build_image fido-test "$test_image"' in script
         assert "warm_images()" in script
-        assert (
-            "warm_targets=(rocq-image format lint typecheck generated-typecheck "
-            "test fido)"
-        ) in script
+        assert "warm_targets=(" not in script
+        assert "bake_target_names()" not in script
+        assert "fido_build_targets_for_group warm" in script
         assert "buildx_cache_backend()" in script
         assert "FIDO_BUILDX_CACHE_BACKEND:-" in script
         assert "GITHUB_ACTIONS" in script
         assert '"$target.cache-from=type=gha,scope=$target"' in script
         assert '"$target.cache-to=type=gha,scope=$target,mode=max"' in script
-        assert "warm_input_hash()" in script
+        assert "warm_input_hash()" not in script
         assert "warm_cache_ready()" in script
-        assert 'local manifest="$repo_root/.cache/rocq-models/warm.sha"' in script
+        assert 'mkdir -p "$repo_root/.cache/rocq-models/warm"' in script
         assert 'log INFO "warm cache hit"' in script
         assert 'mkdir -p "$repo_root/.cache/rocq-models/context/_build"' in script
-        assert (
-            'git -C "$repo_root" ls-files --cached --others --exclude-standard'
-            in script
-        )
-        assert 'for target in "${warm_targets[@]}"; do' in script
+        assert "target_input_files()" in script
+        assert 'target_hashes+=("$target $(target_input_hash "$target")")' in script
+        assert 'for target in "${targets[@]}"; do' in script
         assert '--set "fido.output=type=cacheonly"' in script
         assert "exporting buildx cache target=" not in script
         assert "docker buildx bake" in script
@@ -426,7 +439,7 @@ class TestModelDockerfile:
         assert "FROM fido-base AS node-tools" in dockerfile
         assert "FROM fido-python-dev AS fido-test" in dockerfile
         assert "COPY package.json package-lock.json ./" in dockerfile
-        assert "RUN --mount=type=cache,target=/root/.npm" in dockerfile
+        assert "RUN --mount=type=cache,id=fido-npm,target=/root/.npm" in dockerfile
         assert "npm ci --omit=dev --ignore-scripts" in dockerfile
         assert "npm rebuild @anthropic-ai/claude-code" in dockerfile
         assert (

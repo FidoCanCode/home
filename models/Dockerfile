@@ -24,14 +24,14 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 
 COPY .python-version pyproject.toml uv.lock ./
 
-RUN --mount=type=cache,target=/tmp/uv-cache \
+RUN --mount=type=cache,id=fido-uv-prod,target=/tmp/uv-cache \
     mkdir -p /tmp/uv-cache \
     && uv sync --frozen --no-dev --no-install-project \
     && chmod -R a+rwX /opt/fido-venv /opt/uv-python /tmp/uv-cache
 
 FROM fido-python-prod AS fido-python-dev
 
-RUN --mount=type=cache,target=/tmp/uv-cache \
+RUN --mount=type=cache,id=fido-uv-dev,target=/tmp/uv-cache \
     uv sync --frozen --no-install-project \
     && chmod -R a+rwX /opt/fido-venv /opt/uv-python /tmp/uv-cache
 
@@ -56,7 +56,7 @@ FROM fido-base AS node-tools
 
 COPY package.json package-lock.json ./
 
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,id=fido-npm,target=/root/.npm \
     npm ci --omit=dev --ignore-scripts \
     && npm rebuild @anthropic-ai/claude-code
 
@@ -172,7 +172,7 @@ FROM python-base AS python-deps
 WORKDIR /workspace
 COPY .python-version pyproject.toml uv.lock ./
 
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     uv sync --frozen --no-install-project
 
 FROM python-deps AS python-check-base
@@ -181,7 +181,7 @@ WORKDIR /workspace
 COPY .dockerignore docker-bake.hcl fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
 COPY .githooks/pre-commit .githooks/pre-commit
 COPY .github/workflows/ci.yml .github/workflows/
-COPY tools/gen_workflows.py tools/gen_workflows.py
+COPY tools/gen_workflows.py tools/build_graph.sh tools/
 COPY models/Dockerfile models/Dockerfile
 COPY src src
 COPY tests tests
@@ -201,24 +201,24 @@ COPY --from=model-format /workspace/src/fido/rocq /workspace/src/fido/rocq
 ENV FIDO_ROCQ_PYTEST_ARTIFACTS=prepared
 ENV FIDO_SKIP_DOCKER_HELPER_TESTS=1
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cache/pyright-python \
+RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
+    --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
     uv sync --frozen
 
 FROM python-check-base AS format
 
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     uv run ruff format --check .
 
 FROM python-check-base AS lint
 
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     uv run ruff check .
 
 FROM python-check-base AS typecheck
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cache/pyright-python \
+RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
+    --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
     uv run pyright
 
 FROM python-check-base AS generated-typecheck
@@ -226,13 +226,13 @@ FROM python-check-base AS generated-typecheck
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 COPY --from=test-extract /tmp/pyright-artifacts /tmp/generated-pyright
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cache/pyright-python \
+RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
+    --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
     ./rocq-python-extraction/run_generated_pyright.sh /tmp/generated-pyright
 
 FROM python-check-base AS test
 
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     uv run tests
