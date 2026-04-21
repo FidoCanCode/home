@@ -80,21 +80,15 @@ ENV HOME=$FIDO_HOME
 
 ENTRYPOINT ["uv", "run"]
 
-FROM fido-python-dev AS fido-test
+FROM fido AS fido-test
 
 ARG FIDO_UID=1000
 ARG FIDO_GID=1000
-ARG FIDO_USER=fido
-ARG FIDO_HOME=/home/fido
 
-RUN groupadd --gid "$FIDO_GID" "$FIDO_USER" \
-    && useradd --uid "$FIDO_UID" --gid "$FIDO_GID" --home-dir "$FIDO_HOME" --shell /bin/bash --create-home "$FIDO_USER" \
-    && mkdir -p "$FIDO_HOME/.config" "$FIDO_HOME/.cache" "$FIDO_HOME/workspace" /tmp/uv-cache \
-    && chown -R "$FIDO_UID:$FIDO_GID" "$FIDO_HOME" /opt/fido-venv /opt/uv-python /tmp/uv-cache
+COPY --from=fido-python-dev /opt/fido-venv /opt/fido-venv
+COPY --from=fido-python-dev /opt/uv-python /opt/uv-python
 
-ENV HOME=$FIDO_HOME
-
-ENTRYPOINT ["uv", "run"]
+RUN chown -R "$FIDO_UID:$FIDO_GID" /opt/fido-venv /opt/uv-python
 
 FROM ${ROCQ_IMAGE} AS rocq-plugin-source
 
@@ -113,6 +107,34 @@ COPY --chown=opam:opam \
     rocq-python-extraction/python.ml \
     rocq-python-extraction/
 
+FROM ${ROCQ_IMAGE} AS rocq-toolchain
+
+FROM python-base AS rocq-repl
+
+WORKDIR /workspace
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        gcc \
+        libc6-dev \
+        libgmp-dev \
+        linux-libc-dev \
+        make \
+        pkg-config \
+        tar \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -s /bin/bash opam
+
+COPY --from=rocq-toolchain --chown=opam:opam /home/opam/.opam/5.3 /home/opam/.opam/5.3
+COPY --from=rocq-toolchain /usr/local/bin/opam /usr/local/bin/opam
+
+ENV PATH="/home/opam/.opam/5.3/bin:${PATH}"
+ENV OPAM_SWITCH_PREFIX="/home/opam/.opam/5.3"
+ENV CAML_LD_LIBRARY_PATH="/home/opam/.opam/5.3/lib/stublibs"
+ENV OCAML_TOPLEVEL_PATH="/home/opam/.opam/5.3/lib/toplevel"
+ENV OCAMLTOP_INCLUDE_PATH="/home/opam/.opam/5.3/lib/toplevel"
+
 FROM rocq-plugin-source AS extract
 
 COPY --chown=opam:opam models/dune-project models/dune models/*.v models/
@@ -125,6 +147,7 @@ RUN targets="" \
     && py_files="$(find /workspace/_build/default -maxdepth 1 -name '*.py' -print)" \
     && if [ -z "$py_files" ]; then find /workspace/_build/default -maxdepth 2 -type f -print; exit 1; fi \
     && cp $py_files /tmp/model-output/src/fido/rocq/ \
+    && find /workspace/_build/default -maxdepth 1 -name '*.pymap' -exec cp {} /tmp/model-output/src/fido/rocq/ \; \
     && printf '%s\n' \
         '"""Python extracted from Rocq models in models/.' \
         '' \
@@ -178,18 +201,21 @@ RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
 FROM python-deps AS python-check-base
 
 WORKDIR /workspace
-COPY .dockerignore docker-bake.hcl fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
+COPY .dockerignore docker-bake.hcl dune-workspace fido package.json package-lock.json pyproject.toml pyrightconfig.json uv.lock ./
 COPY .githooks/pre-commit .githooks/pre-commit
 COPY .github/workflows/ci.yml .github/workflows/
 COPY tools/gen_workflows.py tools/build_graph.sh tools/
 COPY models/Dockerfile models/Dockerfile
+COPY models/dune-project models/dune models/*.v models/
 COPY src src
 COPY tests tests
 COPY rocq-python-extraction/Dockerfile \
     rocq-python-extraction/DIAGNOSTICS.md \
+    rocq-python-extraction/META.rocq-python-extraction.template \
     rocq-python-extraction/dune \
     rocq-python-extraction/dune-project \
     rocq-python-extraction/export_pytest_generated.sh \
+    rocq-python-extraction/g_python_extraction.mlg \
     rocq-python-extraction/python.ml \
     rocq-python-extraction/rocq-python-extraction.opam \
     rocq-python-extraction/run_generated_pyright.sh \

@@ -286,7 +286,7 @@ class TestFidoLauncher:
         script = FIDO.read_text()
 
         assert "help)" in script
-        assert "run_fido_image fido-help" in script
+        assert "run_fido_cli_image fido-help" in script
         assert "up)" in script
         assert "supervise_up fido --secret-file /run/secrets/fido-secret" in script
         assert "make-rocq)" in script
@@ -299,15 +299,15 @@ class TestFidoLauncher:
             in script
         )
         assert (
-            "run_fido_image python3 tools/gen_workflows.py --plan .cache/bake-plan.json"
+            "run_fido_cli_image python3 tools/gen_workflows.py --plan .cache/bake-plan.json"
             in script
         )
         assert "status)" in script
-        assert "run_fido_image fido-status" in script
+        assert "run_fido_cli_image_quiet --no-sync python -m fido.status" in script
         assert "task)" in script
-        assert "run_fido_image fido-task" in script
+        assert "run_fido_cli_image fido-task" in script
         assert "sync-tasks)" in script
-        assert "run_fido_image fido-sync-tasks" in script
+        assert "run_fido_cli_image fido-sync-tasks" in script
 
     def test_supervises_foreground_container_and_down_stops_by_name(self) -> None:
         script = FIDO.read_text()
@@ -319,6 +319,14 @@ class TestFidoLauncher:
         assert "fido_log=${FIDO_LOG:-$HOME/log/fido.log}" in script
         assert "redirect_up_logs()" in script
         assert 'exec >>"$fido_log" 2>&1' in script
+        assert "prune_on_restart=${FIDO_PRUNE_ON_RESTART:-1}" in script
+        assert "prune_keep_storage=${FIDO_BUILDKIT_KEEP_STORAGE:-24gb}" in script
+        assert "prune_restart_buildkit_async()" in script
+        assert "docker buildx prune \\" in script
+        assert '--builder "$builder"' in script
+        assert '--keep-storage "$prune_keep_storage"' in script
+        assert "pruning buildkit cache action=async pid=$!" in script
+        assert "pruned buildkit cache action=done" in script
         assert "named_run=0" in script
         assert "named_run=1" in script
         assert 'if [ "$named_run" = "1" ]; then' in script
@@ -370,6 +378,7 @@ class TestFidoLauncher:
         assert 'FIDO_HOME="$HOME"' in script
         assert "run_fido_image()" in script
         assert "run_fido_test_image()" in script
+        assert "run_fido_cli_image()" in script
         assert "warm_images()" in script
         assert "warm_targets=(" not in script
         assert "bake_target_names()" not in script
@@ -399,6 +408,7 @@ class TestFidoLauncher:
 
         assert "--network host" in script
         assert "--interactive" in script
+        assert '--env "PYTHONPATH=/workspace/src"' in script
         assert '--volume "$HOME:$HOME"' not in script
         assert '--volume "$repo_root:/workspace"' in script
         assert '--volume "$HOME/workspace:$HOME/workspace"' in script
@@ -459,7 +469,7 @@ class TestModelDockerfile:
         )
         assert (
             'targets = ["format", "lint", "typecheck", "generated-typecheck", '
-            '"test", "fido"]'
+            '"test", "fido", "rocq-repl"]'
         ) in bake
         assert 'output = ["type=docker"]' in bake
         assert "FIDO_TEST_IMAGE" in bake
@@ -478,7 +488,7 @@ class TestModelDockerfile:
         assert "COPY .python-version pyproject.toml uv.lock ./" in dockerfile
         assert "COPY . ." not in dockerfile
         assert "FROM fido-base AS node-tools" in dockerfile
-        assert "FROM fido-python-dev AS fido-test" in dockerfile
+        assert "FROM fido AS fido-test" in dockerfile
         assert "COPY package.json package-lock.json ./" in dockerfile
         assert "RUN --mount=type=cache,id=fido-npm,target=/root/.npm" in dockerfile
         assert "npm ci --omit=dev --ignore-scripts" in dockerfile
@@ -528,7 +538,7 @@ class TestModelDockerfile:
 
         assert "FROM python-deps AS python-check-base" in dockerfile
         assert (
-            "COPY .dockerignore docker-bake.hcl fido package.json "
+            "COPY .dockerignore docker-bake.hcl dune-workspace fido package.json "
             "package-lock.json pyproject.toml pyrightconfig.json uv.lock ./"
         ) in dockerfile
         assert "COPY .githooks/pre-commit .githooks/pre-commit" in dockerfile
@@ -539,6 +549,10 @@ class TestModelDockerfile:
             "COPY rocq-python-extraction/test/*.py rocq-python-extraction/test/"
             in dockerfile
         )
+        assert (
+            "rocq-python-extraction/META.rocq-python-extraction.template" in dockerfile
+        )
+        assert "rocq-python-extraction/g_python_extraction.mlg" in dockerfile
 
     def test_fido_runtime_uses_host_uid_gid_build_args(self) -> None:
         dockerfile = (REPO / "models" / "Dockerfile").read_text()

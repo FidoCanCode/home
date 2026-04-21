@@ -6,6 +6,10 @@ variable "FIDO_TEST_IMAGE" {
   default = "fido-test:local"
 }
 
+variable "FIDO_ROCQ_REPL_IMAGE" {
+  default = "fido-rocq-repl:local"
+}
+
 variable "FIDO_UID" {
   default = "1000"
 }
@@ -47,6 +51,20 @@ target "fido-test" {
     FIDO_GID = FIDO_GID
     FIDO_USER = FIDO_USER
     FIDO_HOME = FIDO_HOME
+  }
+}
+
+target "rocq-repl" {
+  context = "."
+  dockerfile = "models/Dockerfile"
+  target = "rocq-repl"
+  tags = [FIDO_ROCQ_REPL_IMAGE]
+  output = ["type=docker"]
+  args = {
+    ROCQ_IMAGE = "rocq_image"
+  }
+  contexts = {
+    rocq_image = "target:rocq-image"
   }
 }
 
@@ -125,5 +143,5 @@ group "ci" {
 }
 
 group "warm" {
-  targets = ["format", "lint", "typecheck", "generated-typecheck", "test", "fido"]
+  targets = ["format", "lint", "typecheck", "generated-typecheck", "test", "fido", "rocq-repl"]
 }

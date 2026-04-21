@@ -7,7 +7,7 @@ fido_build_targets_for_group() {
       printf '%s\n' fido-test warm
       ;;
     warm)
-      printf '%s\n' fido format generated-typecheck lint rocq-image test typecheck
+      printf '%s\n' fido format generated-typecheck lint rocq-image rocq-repl test typecheck
       ;;
     *)
       return 2
@@ -31,6 +31,8 @@ EOF
       cat <<'EOF'
 .python-version
 models/Dockerfile
+package-lock.json
+package.json
 pyproject.toml
 uv.lock
 EOF
@@ -168,6 +170,14 @@ EOF
       ;;
     rocq-image)
       cat <<'EOF'
+rocq-python-extraction/Dockerfile
+rocq-python-extraction/dune-project
+rocq-python-extraction/rocq-python-extraction.opam
+EOF
+      ;;
+    rocq-repl)
+      cat <<'EOF'
+models/Dockerfile
 rocq-python-extraction/Dockerfile
 rocq-python-extraction/dune-project
 rocq-python-extraction/rocq-python-extraction.opam
