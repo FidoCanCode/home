@@ -44,26 +44,28 @@ def cache_scopes(plan: dict[str, object]) -> list[str]:
 
 
 def restore_step(name: str, path: str) -> str:
+    step_id = "restore-" + name.replace("-", "_")
     return f"""\
       - name: Restore {name} build cache
+        id: {step_id}
         uses: actions/cache/restore@v4
         with:
           path: {path}
-          key: buildx-{name}-${{{{ runner.os }}}}-${{{{ steps.build-cache.outputs.bucket }}}}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}
+          key: buildx-{name}-${{{{ runner.os }}}}-${{{{ steps.build-input.outputs.key }}}}
           restore-keys: |
-            buildx-{name}-${{{{ runner.os }}}}-${{{{ steps.build-cache.outputs.bucket }}}}-
             buildx-{name}-${{{{ runner.os }}}}-
 """
 
 
 def save_step(name: str, path: str) -> str:
+    restore_id = "restore-" + name.replace("-", "_")
     return f"""\
       - name: Save {name} build cache
-        if: success()
+        if: success() && steps.{restore_id}.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: {path}
-          key: buildx-{name}-${{{{ runner.os }}}}-${{{{ steps.build-cache.outputs.bucket }}}}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}
+          key: buildx-{name}-${{{{ runner.os }}}}-${{{{ steps.build-input.outputs.key }}}}
 """
 
 
@@ -93,16 +95,45 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
         id: setup-buildx
-      - name: Compute build cache bucket
-        id: build-cache
-        run: echo "bucket=$(( $(date +%s) / 518400 ))" >> "$GITHUB_OUTPUT"
+      - name: Compute build input cache key
+        id: build-input
+        shell: bash
+        run: |
+          mapfile -d '' files < <(
+            git ls-files -z -- \\
+              .dockerignore \\
+              .githooks \\
+              .github \\
+              .python-version \\
+              CLAUDE.md \\
+              Makefile \\
+              README.md \\
+              docker-bake.hcl \\
+              dune-workspace \\
+              fido \\
+              models \\
+              package-lock.json \\
+              package.json \\
+              pyproject.toml \\
+              pyrightconfig.json \\
+              rocq-python-extraction \\
+              src \\
+              tests \\
+              uv.lock
+          )
+          key="$(
+            tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - -- "${{files[@]}}" \\
+              | sha256sum \\
+              | awk '{{print $1}}'
+          )"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
 {restores}      - name: Restore buildkit cache mounts
+        id: restore-buildkit-mounts
         uses: actions/cache@v4
         with:
           path: .cache/buildkit-mounts
-          key: buildkit-mounts-${{{{ runner.os }}}}-${{{{ steps.build-cache.outputs.bucket }}}}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}
+          key: buildkit-mounts-${{{{ runner.os }}}}-${{{{ steps.build-input.outputs.key }}}}
           restore-keys: |
-            buildkit-mounts-${{{{ runner.os }}}}-${{{{ steps.build-cache.outputs.bucket }}}}-
             buildkit-mounts-${{{{ runner.os }}}}-
       - name: Inject buildkit cache mounts
         uses: reproducible-containers/buildkit-cache-dance@v3.3.2

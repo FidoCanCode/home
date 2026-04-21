@@ -19,40 +19,69 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
         id: setup-buildx
-      - name: Compute build cache bucket
-        id: build-cache
-        run: echo "bucket=$(( $(date +%s) / 518400 ))" >> "$GITHUB_OUTPUT"
+      - name: Compute build input cache key
+        id: build-input
+        shell: bash
+        run: |
+          mapfile -d '' files < <(
+            git ls-files -z -- \
+              .dockerignore \
+              .githooks \
+              .github \
+              .python-version \
+              CLAUDE.md \
+              Makefile \
+              README.md \
+              docker-bake.hcl \
+              dune-workspace \
+              fido \
+              models \
+              package-lock.json \
+              package.json \
+              pyproject.toml \
+              pyrightconfig.json \
+              rocq-python-extraction \
+              src \
+              tests \
+              uv.lock
+          )
+          key="$(
+            tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - -- "${files[@]}" \
+              | sha256sum \
+              | awk '{print $1}'
+          )"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
       - name: Restore rocq-model-image build cache
+        id: restore-rocq_model_image
         uses: actions/cache/restore@v4
         with:
           path: .cache/rocq-models/image
-          key: buildx-rocq-model-image-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: buildx-rocq-model-image-${{ runner.os }}-${{ steps.build-input.outputs.key }}
           restore-keys: |
-            buildx-rocq-model-image-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-
             buildx-rocq-model-image-${{ runner.os }}-
       - name: Restore rocq-model-buildx build cache
+        id: restore-rocq_model_buildx
         uses: actions/cache/restore@v4
         with:
           path: .cache/rocq-models/buildx
-          key: buildx-rocq-model-buildx-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: buildx-rocq-model-buildx-${{ runner.os }}-${{ steps.build-input.outputs.key }}
           restore-keys: |
-            buildx-rocq-model-buildx-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-
             buildx-rocq-model-buildx-${{ runner.os }}-
       - name: Restore rocq-model-context build cache
+        id: restore-rocq_model_context
         uses: actions/cache/restore@v4
         with:
           path: .cache/rocq-models/context
-          key: buildx-rocq-model-context-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: buildx-rocq-model-context-${{ runner.os }}-${{ steps.build-input.outputs.key }}
           restore-keys: |
-            buildx-rocq-model-context-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-
             buildx-rocq-model-context-${{ runner.os }}-
       - name: Restore buildkit cache mounts
+        id: restore-buildkit-mounts
         uses: actions/cache@v4
         with:
           path: .cache/buildkit-mounts
-          key: buildkit-mounts-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: buildkit-mounts-${{ runner.os }}-${{ steps.build-input.outputs.key }}
           restore-keys: |
-            buildkit-mounts-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-
             buildkit-mounts-${{ runner.os }}-
       - name: Inject buildkit cache mounts
         uses: reproducible-containers/buildkit-cache-dance@v3.3.2
@@ -66,20 +95,20 @@ jobs:
           ./fido make-rocq
           git diff --exit-code -- src/fido/rocq/
       - name: Save rocq-model-image build cache
-        if: success()
+        if: success() && steps.restore-rocq_model_image.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: .cache/rocq-models/image
-          key: buildx-rocq-model-image-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: buildx-rocq-model-image-${{ runner.os }}-${{ steps.build-input.outputs.key }}
       - name: Save rocq-model-buildx build cache
-        if: success()
+        if: success() && steps.restore-rocq_model_buildx.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: .cache/rocq-models/buildx
-          key: buildx-rocq-model-buildx-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: buildx-rocq-model-buildx-${{ runner.os }}-${{ steps.build-input.outputs.key }}
       - name: Save rocq-model-context build cache
-        if: success()
+        if: success() && steps.restore-rocq_model_context.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: .cache/rocq-models/context
-          key: buildx-rocq-model-context-${{ runner.os }}-${{ steps.build-cache.outputs.bucket }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: buildx-rocq-model-context-${{ runner.os }}-${{ steps.build-input.outputs.key }}

@@ -169,6 +169,15 @@ class TestModelsBuildScript:
         assert "schedule:" in workflow
         assert "cron: '17 3 */6 * *'" in workflow
         assert "FIDO_BUILDX_CACHE_BACKEND: gha" in workflow
+        assert "Compute build cache bucket" not in workflow
+        assert "518400" not in workflow
+        assert "steps.build-cache.outputs.bucket" not in workflow
+        assert "github.run_id" not in workflow
+        assert "github.run_attempt" not in workflow
+        assert "Compute build input cache key" in workflow
+        assert "tar --sort=name --mtime='UTC 1970-01-01'" in workflow
+        assert "sha256sum" in workflow
+        assert "steps.build-input.outputs.key" in workflow
         assert "docker buildx" in generator
         assert "bake" in generator
         for target in (
@@ -183,8 +192,20 @@ class TestModelsBuildScript:
             assert target in workflow
         for cache in ("image", "buildx", "context"):
             assert f"path: .cache/rocq-models/{cache}" in workflow
-            assert f"key: buildx-rocq-model-{cache}-" in workflow
+            assert (
+                f"key: buildx-rocq-model-{cache}-${{{{ runner.os }}}}-"
+                "${{ steps.build-input.outputs.key }}"
+            ) in workflow
+            assert f"buildx-rocq-model-{cache}-${{{{ runner.os }}}}-" in workflow
+            assert (
+                "if: success() && "
+                f"steps.restore-rocq_model_{cache}.outputs.cache-hit != 'true'"
+            ) in workflow
         assert "path: .cache/buildkit-mounts" in workflow
+        assert (
+            "key: buildkit-mounts-${{ runner.os }}-${{ steps.build-input.outputs.key }}"
+        ) in workflow
+        assert "buildkit-mounts-${{ runner.os }}-" in workflow
         assert "reproducible-containers/buildkit-cache-dance@v3.3.2" in workflow
 
 
