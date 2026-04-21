@@ -126,6 +126,8 @@ class TestModelsBuildScript:
     def test_passes_cache_context_and_local_output(self) -> None:
         script = BUILD.read_text()
 
+        assert "buildx_driver()" in script
+        assert "warning: docker buildx inspect failed" in script
         assert '--build-context "rocq_models_cache=$cache_context"' in script
         assert "--output type=local,dest=." in script
         assert "--smart-output kennel/models_generated" in script
