@@ -66,6 +66,28 @@ EXPLICIT_TARGETS = {
         "q_num.py",
         "q_den.py",
     ],
+    "test_finite_collections.py": [
+        "positive_task_map.py",
+        "positive_task_hit.py",
+        "positive_task_missing.py",
+        "positive_task_removed.py",
+        "positive_task_has_3.py",
+        "positive_task_count.py",
+        "positive_task_elements.py",
+        "positive_claim_set.py",
+        "positive_claim_union.py",
+        "positive_claim_inter.py",
+        "positive_claim_diff.py",
+        "positive_claim_removed.py",
+        "positive_claim_has_2.py",
+        "positive_claim_count.py",
+        "positive_claim_elements.py",
+        "string_label_map.py",
+        "string_label_hit.py",
+        "string_label_elements.py",
+        "string_label_set.py",
+        "string_label_set_elements.py",
+    ],
 }
 
 

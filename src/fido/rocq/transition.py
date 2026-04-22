@@ -50,6 +50,98 @@ def _rocq_numeric_domain_error(
     )  # From session_lock.v:67:11
 
 
+key = int  # finite-map module key alias  # From session_lock.v:67:11
+elt = int  # finite-set module element alias  # From session_lock.v:67:11
+
+
+def _rocq_positive_key(key: int) -> int:  # From session_lock.v:67:11
+    if key <= 0:  # From session_lock.v:67:11
+        raise _RocqNumericDomainError(
+            f"positive map/set key", key
+        )  # From session_lock.v:67:11
+    return key  # From session_lock.v:67:11
+
+
+def _rocq_string_key(key: str) -> str:  # From session_lock.v:67:11
+    if not isinstance(key, str):  # From session_lock.v:67:11
+        raise TypeError(
+            f"Rocq string map/set key must be str: {key!r}"
+        )  # From session_lock.v:67:11
+    return key  # From session_lock.v:67:11
+
+
+def _rocq_sorted_key(key: object) -> Any:  # From session_lock.v:67:11
+    return (
+        key.encode("utf-8") if isinstance(key, str) else key
+    )  # From session_lock.v:67:11
+
+
+def _rocq_map_add(
+    key: object, value: object, mapping: dict[object, object]
+) -> dict[object, object]:  # From session_lock.v:67:11
+    result = dict(mapping)  # From session_lock.v:67:11
+    result[key] = value  # From session_lock.v:67:11
+    return result  # From session_lock.v:67:11
+
+
+def _rocq_map_remove(
+    key: object, mapping: dict[object, object]
+) -> dict[object, object]:  # From session_lock.v:67:11
+    result = dict(mapping)  # From session_lock.v:67:11
+    result.pop(key, None)  # From session_lock.v:67:11
+    return result  # From session_lock.v:67:11
+
+
+def _rocq_map_elements(
+    mapping: dict[object, object],
+) -> list[tuple[object, object]]:  # From session_lock.v:67:11
+    return sorted(
+        mapping.items(), key=lambda item: _rocq_sorted_key(item[0])
+    )  # From session_lock.v:67:11
+
+
+def _rocq_map_fold(
+    function: Callable[[object, object, object], object],
+    mapping: dict[object, object],
+    initial: object,
+) -> object:  # From session_lock.v:67:11
+    result = initial  # From session_lock.v:67:11
+    for key, value in _rocq_map_elements(mapping):  # From session_lock.v:67:11
+        result = function(key, value, result)  # From session_lock.v:67:11
+    return result  # From session_lock.v:67:11
+
+
+def _rocq_set_add(
+    key: object, values: frozenset[object]
+) -> frozenset[object]:  # From session_lock.v:67:11
+    return frozenset((*values, key))  # From session_lock.v:67:11
+
+
+def _rocq_set_remove(
+    key: object, values: frozenset[object]
+) -> frozenset[object]:  # From session_lock.v:67:11
+    return frozenset(
+        value for value in values if value != key
+    )  # From session_lock.v:67:11
+
+
+def _rocq_set_elements(
+    values: frozenset[object],
+) -> list[object]:  # From session_lock.v:67:11
+    return sorted(values, key=_rocq_sorted_key)  # From session_lock.v:67:11
+
+
+def _rocq_set_fold(
+    function: Callable[[object, object], object],
+    values: frozenset[object],
+    initial: object,
+) -> object:  # From session_lock.v:67:11
+    result = initial  # From session_lock.v:67:11
+    for value in _rocq_set_elements(values):  # From session_lock.v:67:11
+        result = function(value, result)  # From session_lock.v:67:11
+    return result  # From session_lock.v:67:11
+
+
 def _rocq_string_cons(head: int, tail: str) -> str:  # From session_lock.v:67:11
     try:  # From session_lock.v:67:11
         return bytes([head]).decode("utf-8") + tail  # From session_lock.v:67:11
@@ -265,7 +357,9 @@ EventT = (
 )  # From session_lock.v:67:11
 
 
-def transition(current: State, event0: Event) -> object:  # From session_lock.v:67:11
+def transition(
+    current: State, event0: Event
+) -> State | None:  # From session_lock.v:67:11
     match current:  # From session_lock.v:67:11
         case Free():  # From session_lock.v:67:11
             match event0:  # From session_lock.v:67:11

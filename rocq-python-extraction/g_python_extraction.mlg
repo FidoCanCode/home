@@ -137,6 +137,83 @@ let write_python_with_source_map ~fname ~span pp =
   close_out oc;
   write_pymap ~python_file:fname ~span ~source:annotated
 
+let trim_left s =
+  let len = String.length s in
+  let rec loop i =
+    if i >= len then ""
+    else
+      match s.[i] with
+      | ' ' | '\t' -> loop (i + 1)
+      | _ -> String.sub s i (len - i)
+  in
+  loop 0
+
+let starts_with s prefix =
+  let len = String.length s in
+  let prefix_len = String.length prefix in
+  len >= prefix_len && String.equal (String.sub s 0 prefix_len) prefix
+
+let python_symbol_start_line source name =
+  let lines = String.split_on_char '\n' source in
+  let def_prefix = "def " ^ name ^ "(" in
+  let class_prefix = "class " ^ name in
+  let ann_prefix = name ^ ":" in
+  let assign_prefix = name ^ " =" in
+  let rec loop line_number = function
+    | [] -> 1
+    | line :: rest ->
+        let line = trim_left line in
+        if starts_with line def_prefix
+           || starts_with line class_prefix
+           || starts_with line ann_prefix
+           || starts_with line assign_prefix
+        then line_number
+        else loop (line_number + 1) rest
+  in
+  loop 1 lines
+
+let write_pymap_entries ~python_file ~source entries =
+  let entry_json (name, span) =
+    let line = python_symbol_start_line source name in
+    Printf.sprintf
+      "    {\n      \"python_start_line\": %d,\n      \"python_end_line\": %d,\n      \"source_file\": %s,\n      \"source_start_line\": %d,\n      \"source_start_col\": %d,\n      \"source_end_line\": %d,\n      \"source_end_col\": %d,\n      \"kind\": \"extraction\",\n      \"symbol\": %s\n    }"
+      line
+      line
+      (json_string span.source_file)
+      span.source_start_line
+      span.source_start_col
+      span.source_end_line
+      span.source_end_col
+      (json_string name)
+  in
+  let entries_json =
+    match entries with
+    | [] -> "[]"
+    | _ -> "[\n" ^ String.concat ",\n" (List.map entry_json entries) ^ "\n  ]"
+  in
+  let map_file = Filename.remove_extension python_file ^ ".pymap" in
+  let oc = open_out map_file in
+  output_string oc
+    (Printf.sprintf
+       "{\n  \"version\": 1,\n  \"python_file\": %s,\n  \"entries\": %s\n}\n"
+       (json_string (Filename.basename python_file))
+       entries_json);
+  close_out oc
+
+let write_python_group_with_source_map ~fname ~fallback_span ~entries pp =
+  let source = Pp.string_of_ppcmds pp in
+  let annotated = annotate_python_source fallback_span source in
+  let oc = open_out fname in
+  output_string oc annotated;
+  close_out oc;
+  write_pymap_entries ~python_file:fname ~source:annotated entries
+
+let qualids_of_space_separated_names names =
+  names
+  |> String.split_on_char ' '
+  |> List.filter (fun name -> not (String.equal name ""))
+  |> List.map (fun name -> qualid_of_ident (Id.of_string name))
+
 let string_contains haystack needle =
   let hay_len = String.length haystack in
   let needle_len = String.length needle in
@@ -242,6 +319,52 @@ let python_extract ~opaque_access qid =
   write_python_with_source_map ~fname ~span pp;
   Feedback.msg_notice (str "Extracted to " ++ str fname)
 
+(** Build one .py file from several global references while preserving a
+    source-map entry for each exported symbol. *)
+let python_extract_file ~opaque_access file_id qids =
+  let globals =
+    List.map
+      (fun qid ->
+        { glob = Smartlocate.global_with_alias qid; inst = InfvInst.empty })
+      qids
+  in
+  let state =
+    State.make ~modular:false ~library:false
+      ~keywords:Python.python_descr.keywords ()
+  in
+  let struc = Extract_env.mono_environment state ~opaque_access globals [] in
+  let safe = {
+    mldummy = false;
+    tdummy = false;
+    tunknown = false;
+    magic = false;
+  } in
+  let base = Id.to_string file_id in
+  let name = Id.of_string base in
+  let pp =
+    Python.python_descr.preamble state name None DirPath.Set.empty safe ++
+    Python.python_descr.pp_struct state struc
+  in
+  let fname = base ^ ".py" in
+  let entries =
+    List.map
+      (fun global ->
+        let symbol = Id.to_string (Nametab.basename_of_global global.glob) in
+        let span =
+          match source_span_of_global global.glob with
+          | Some span -> span
+          | None -> fallback_source_span symbol
+        in
+        symbol, span)
+      globals
+  in
+  write_python_group_with_source_map
+    ~fname
+    ~fallback_span:(fallback_source_span base)
+    ~entries
+    pp;
+  Feedback.msg_notice (str "Extracted to " ++ str fname)
+
 (** Build a monolithic .py file for the given module reference. *)
 let python_extract_module ~opaque_access qid =
   let mp = Nametab.locate_module qid in
@@ -281,4 +404,11 @@ END
 VERNAC COMMAND EXTEND PythonModuleExtraction CLASSIFIED AS QUERY STATE opaque_access
 | [ "Python" "Module" "Extraction" identref(m) ]
   -> { run_with_diagnostics (fun () -> python_extract_module (qualid_of_ident m.CAst.v)) }
+END
+
+(** [Python File Extraction output "a b c".] — extract globals [a b c] to
+    [output.py] and keep per-symbol source-map entries. *)
+VERNAC COMMAND EXTEND PythonFileExtraction CLASSIFIED AS QUERY STATE opaque_access
+| [ "Python" "File" "Extraction" ident(file) string(names) ]
+  -> { run_with_diagnostics (fun () -> python_extract_file file (qualids_of_space_separated_names names)) }
 END

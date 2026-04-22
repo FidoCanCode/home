@@ -19,4 +19,5 @@ From PyExtractTest Require Export
   modules
   source_maps
   strings_bytes
-  numbers.
+  numbers
+  finite_collections.

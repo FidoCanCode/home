@@ -883,6 +883,7 @@ def _python_signatures(path: Path) -> dict[str, tuple[str, Range]]:
             )
             if signature.endswith(":"):
                 signature = signature[:-1]
+            signature = _compact_python_signature(signature)
             signatures[node.name] = (
                 signature,
                 Range(Position(start, 0), Position(end, len(lines[end]))),
@@ -922,7 +923,7 @@ def _python_signatures(path: Path) -> dict[str, tuple[str, Range]]:
 def _signature_end_line(lines: list[str], start: int) -> int:
     balance = 0
     for index in range(start, len(lines)):
-        line = lines[index]
+        line = _strip_generated_comment(lines[index])
         balance += line.count("(") - line.count(")")
         if balance <= 0 and line.rstrip().endswith(":"):
             return index
@@ -931,6 +932,10 @@ def _signature_end_line(lines: list[str], start: int) -> int:
 
 def _strip_generated_comment(line: str) -> str:
     return line.split("  # From ", 1)[0].rstrip()
+
+
+def _compact_python_signature(signature: str) -> str:
+    return re.sub(r"\s+\)", ")", re.sub(r"\(\s+", "(", signature))
 
 
 def _identifier_matches_without_comments(

@@ -3,15 +3,48 @@
   "python_file": "retry_budget.py",
   "entries": [
     {
-      "python_start_line": 1,
-      "python_end_line": 106,
+      "python_start_line": 149,
+      "python_end_line": 149,
       "source_file": "retry_budget.v",
-      "source_start_line": 17,
+      "source_start_line": 18,
       "source_start_col": 11,
-      "source_end_line": 17,
+      "source_end_line": 18,
+      "source_end_col": 22,
+      "kind": "extraction",
+      "symbol": "max_retries"
+    },
+    {
+      "python_start_line": 150,
+      "python_end_line": 150,
+      "source_file": "retry_budget.v",
+      "source_start_line": 22,
+      "source_start_col": 11,
+      "source_end_line": 22,
       "source_end_col": 23,
       "kind": "extraction",
       "symbol": "retry_budget"
+    },
+    {
+      "python_start_line": 151,
+      "python_end_line": 151,
+      "source_file": "retry_budget.v",
+      "source_start_line": 27,
+      "source_start_col": 11,
+      "source_end_line": 27,
+      "source_end_col": 22,
+      "kind": "extraction",
+      "symbol": "retry_delta"
+    },
+    {
+      "python_start_line": 153,
+      "python_end_line": 153,
+      "source_file": "retry_budget.v",
+      "source_start_line": 35,
+      "source_start_col": 11,
+      "source_end_line": 35,
+      "source_end_col": 24,
+      "kind": "extraction",
+      "symbol": "backoff_ratio"
     }
   ]
 }

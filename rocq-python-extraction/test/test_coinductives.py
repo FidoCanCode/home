@@ -9,8 +9,8 @@ from zeros_pair import coprefix_eq, coprefix_hash, zeros_pair
 def test_coinductive_round_trip() -> None:
     assert list(islice(zeros, 6)) == [0, 0, 0, 0, 0, 0]
 
-    left = zeros_pair.arg0
-    right = zeros_pair.arg1
+    left = zeros_pair[0]
+    right = zeros_pair[1]
     assert coprefix_eq(8, left, right)
     assert coprefix_hash(8, left) == coprefix_hash(8, right)
 

@@ -48,6 +48,90 @@ def _rocq_numeric_domain_error(kind: str, value: object) -> Never:  # From seed.
     )  # From seed.v:21:11
 
 
+key = int  # finite-map module key alias  # From seed.v:21:11
+elt = int  # finite-set module element alias  # From seed.v:21:11
+
+
+def _rocq_positive_key(key: int) -> int:  # From seed.v:21:11
+    if key <= 0:  # From seed.v:21:11
+        raise _RocqNumericDomainError(f"positive map/set key", key)  # From seed.v:21:11
+    return key  # From seed.v:21:11
+
+
+def _rocq_string_key(key: str) -> str:  # From seed.v:21:11
+    if not isinstance(key, str):  # From seed.v:21:11
+        raise TypeError(
+            f"Rocq string map/set key must be str: {key!r}"
+        )  # From seed.v:21:11
+    return key  # From seed.v:21:11
+
+
+def _rocq_sorted_key(key: object) -> Any:  # From seed.v:21:11
+    return key.encode("utf-8") if isinstance(key, str) else key  # From seed.v:21:11
+
+
+def _rocq_map_add(
+    key: object, value: object, mapping: dict[object, object]
+) -> dict[object, object]:  # From seed.v:21:11
+    result = dict(mapping)  # From seed.v:21:11
+    result[key] = value  # From seed.v:21:11
+    return result  # From seed.v:21:11
+
+
+def _rocq_map_remove(
+    key: object, mapping: dict[object, object]
+) -> dict[object, object]:  # From seed.v:21:11
+    result = dict(mapping)  # From seed.v:21:11
+    result.pop(key, None)  # From seed.v:21:11
+    return result  # From seed.v:21:11
+
+
+def _rocq_map_elements(
+    mapping: dict[object, object],
+) -> list[tuple[object, object]]:  # From seed.v:21:11
+    return sorted(
+        mapping.items(), key=lambda item: _rocq_sorted_key(item[0])
+    )  # From seed.v:21:11
+
+
+def _rocq_map_fold(
+    function: Callable[[object, object, object], object],
+    mapping: dict[object, object],
+    initial: object,
+) -> object:  # From seed.v:21:11
+    result = initial  # From seed.v:21:11
+    for key, value in _rocq_map_elements(mapping):  # From seed.v:21:11
+        result = function(key, value, result)  # From seed.v:21:11
+    return result  # From seed.v:21:11
+
+
+def _rocq_set_add(
+    key: object, values: frozenset[object]
+) -> frozenset[object]:  # From seed.v:21:11
+    return frozenset((*values, key))  # From seed.v:21:11
+
+
+def _rocq_set_remove(
+    key: object, values: frozenset[object]
+) -> frozenset[object]:  # From seed.v:21:11
+    return frozenset(value for value in values if value != key)  # From seed.v:21:11
+
+
+def _rocq_set_elements(values: frozenset[object]) -> list[object]:  # From seed.v:21:11
+    return sorted(values, key=_rocq_sorted_key)  # From seed.v:21:11
+
+
+def _rocq_set_fold(
+    function: Callable[[object, object], object],
+    values: frozenset[object],
+    initial: object,
+) -> object:  # From seed.v:21:11
+    result = initial  # From seed.v:21:11
+    for value in _rocq_set_elements(values):  # From seed.v:21:11
+        result = function(value, result)  # From seed.v:21:11
+    return result  # From seed.v:21:11
+
+
 def _rocq_string_cons(head: int, tail: str) -> str:  # From seed.v:21:11
     try:  # From seed.v:21:11
         return bytes([head]).decode("utf-8") + tail  # From seed.v:21:11
@@ -202,4 +286,4 @@ __ = None  # erased logical argument  # From seed.v:21:11
 
 
 def bool_not(b: bool) -> bool:  # From seed.v:21:11
-    return False if b else True  # From seed.v:21:11
+    return (lambda: False)() if b else (lambda: True)()  # From seed.v:21:11
