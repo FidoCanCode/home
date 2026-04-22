@@ -26,7 +26,9 @@ def _write_map(
                 "entries": [
                     {
                         "python_start_line": start,
+                        "python_start_col": 0,
                         "python_end_line": end,
+                        "python_end_col": 0,
                         "source_file": "source_maps.v",
                         "source_start_line": 12,
                         "source_start_col": 4,
@@ -50,7 +52,9 @@ class TestSourceMap:
         data["entries"].append(
             {
                 "python_start_line": 4,
+                "python_start_col": 0,
                 "python_end_line": 4,
+                "python_end_col": 0,
                 "source_file": "inner.v",
                 "source_start_line": 20,
                 "source_start_col": 2,

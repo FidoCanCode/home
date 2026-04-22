@@ -214,8 +214,7 @@ class TestModelsBuildScript:
             "lint",
             "make-rocq",
             "rocq-image",
-            "test-rocq-generated",
-            "test-unit",
+            "test",
             "typecheck",
         ):
             assert target in workflow
@@ -407,8 +406,7 @@ class TestModelDockerfile:
         assert 'target "lint"' in bake
         assert 'target "typecheck"' in bake
         assert 'target "generated-typecheck"' in bake
-        assert 'target "test-unit"' in bake
-        assert 'target "test-rocq-generated"' in bake
+        assert 'target "test"' in bake
         assert 'group "ci"' in bake
         assert 'dockerfile = "models/Dockerfile"' in bake
         assert 'dockerfile = "Dockerfile"' in bake
@@ -416,14 +414,13 @@ class TestModelDockerfile:
         assert 'target = "fido-test"' in bake
         assert 'target = "export"' in bake
         assert 'target = "format"' in bake
-        assert 'target = "test-unit"' in bake
-        assert 'target = "test-rocq-generated"' in bake
+        assert 'target = "test"' in bake
         assert 'rocq_image = "target:rocq-image"' in bake
         assert 'rocq_models_cache = ".cache/rocq-models/context"' in bake
         assert ".lsp.json" in dockerfile
         assert (
             'targets = ["format", "lint", "typecheck", "generated-typecheck", '
-            '"test-unit", "test-rocq-generated", "fido", "rocq-repl"]' in bake
+            '"test", "fido", "rocq-repl"]' in bake
         )
         assert 'output = ["type=docker"]' in bake
         assert "FIDO_TEST_IMAGE" in bake
@@ -542,10 +539,8 @@ class TestModelDockerfile:
         assert (
             "COPY rocq-python-extraction/test/pyright_*.py rocq-python-extraction/test/"
         ) in dockerfile
-        assert "FROM python-test-base AS test-unit" in dockerfile
-        assert "FROM python-test-base AS test-rocq-generated" in dockerfile
-        assert "uv run tests-unit" in dockerfile
-        assert "uv run tests-rocq-generated" in dockerfile
+        assert "FROM python-test-base AS test" in dockerfile
+        assert "uv run tests" in dockerfile
         assert "FROM scratch AS ci" not in dockerfile
         assert "touch /tmp" not in dockerfile
         assert "-ready" not in dockerfile

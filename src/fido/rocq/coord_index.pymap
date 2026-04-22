@@ -3,8 +3,10 @@
   "python_file": "coord_index.py",
   "entries": [
     {
-      "python_start_line": 168,
-      "python_end_line": 168,
+      "python_start_line": 304,
+      "python_start_col": 0,
+      "python_end_line": 305,
+      "python_end_col": 60,
       "source_file": "coord_index.v",
       "source_start_line": 24,
       "source_start_col": 11,
@@ -14,8 +16,10 @@
       "symbol": "add_claim"
     },
     {
-      "python_start_line": 170,
-      "python_end_line": 170,
+      "python_start_line": 308,
+      "python_start_col": 0,
+      "python_end_line": 309,
+      "python_end_col": 63,
       "source_file": "coord_index.v",
       "source_start_line": 30,
       "source_start_col": 11,
@@ -25,8 +29,10 @@
       "symbol": "remove_claim"
     },
     {
-      "python_start_line": 172,
-      "python_end_line": 172,
+      "python_start_line": 312,
+      "python_start_col": 0,
+      "python_end_line": 313,
+      "python_end_col": 47,
       "source_file": "coord_index.v",
       "source_start_line": 34,
       "source_start_col": 11,
@@ -36,8 +42,10 @@
       "symbol": "has_claim"
     },
     {
-      "python_start_line": 174,
-      "python_end_line": 174,
+      "python_start_line": 316,
+      "python_start_col": 0,
+      "python_end_line": 317,
+      "python_end_col": 66,
       "source_file": "coord_index.v",
       "source_start_line": 40,
       "source_start_col": 11,
@@ -47,8 +55,10 @@
       "symbol": "assign_issue"
     },
     {
-      "python_start_line": 176,
-      "python_end_line": 176,
+      "python_start_line": 320,
+      "python_start_col": 0,
+      "python_end_line": 321,
+      "python_end_col": 62,
       "source_file": "coord_index.v",
       "source_start_line": 46,
       "source_start_col": 11,
@@ -58,8 +68,10 @@
       "symbol": "unassign_issue"
     },
     {
-      "python_start_line": 178,
-      "python_end_line": 178,
+      "python_start_line": 324,
+      "python_start_col": 0,
+      "python_end_line": 325,
+      "python_end_col": 48,
       "source_file": "coord_index.v",
       "source_start_line": 51,
       "source_start_col": 11,
@@ -69,8 +81,10 @@
       "symbol": "issue_owner"
     },
     {
-      "python_start_line": 183,
-      "python_end_line": 183,
+      "python_start_line": 341,
+      "python_start_col": 0,
+      "python_end_line": 347,
+      "python_end_col": 55,
       "source_file": "coord_index.v",
       "source_start_line": 70,
       "source_start_col": 9,
@@ -80,8 +94,10 @@
       "symbol": "repo_providers"
     },
     {
-      "python_start_line": 185,
-      "python_end_line": 185,
+      "python_start_line": 350,
+      "python_start_col": 0,
+      "python_end_line": 351,
+      "python_end_col": 24,
       "source_file": "coord_index.v",
       "source_start_line": 77,
       "source_start_col": 11,

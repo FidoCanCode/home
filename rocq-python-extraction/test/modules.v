@@ -5,9 +5,9 @@ Extract Inductive nat => "int"
   [ "0" "(lambda x: x + 1)" ]
   "(lambda fO, fS, n: fO() if n == 0 else fS(n - 1))".
 
-(** [Phase10Mod] groups the module-system acceptance fixture under one module
+(** [ModuleLookupFixture] groups the module-system acceptance fixture under one module
     so [Python Module Extraction] can emit a namespace-like Python object. *)
-Module Phase10Mod.
+Module ModuleLookupFixture.
 (** [MapSig] is the small module type consumed by the lookup functors. *)
   Module Type MapSig.
 (** [missing] is the default key/value supplied by a map implementation. *)
@@ -64,6 +64,6 @@ Module Phase10Mod.
   Module FreshLookupA := FreshLookupAFunctor NatMap.
 (** [FreshLookupB] applies the B functor to [NatMap]. *)
   Module FreshLookupB := FreshLookupBFunctor NatMap.
-End Phase10Mod.
+End ModuleLookupFixture.
 
-Python Module Extraction Phase10Mod.
+Python Module Extraction ModuleLookupFixture.

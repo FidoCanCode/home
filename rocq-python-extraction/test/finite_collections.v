@@ -18,6 +18,11 @@ Open Scope positive_scope.
 Open Scope string_scope.
 Import ListNotations.
 
+(** [FiniteCollectionFixtures] keeps the finite collection acceptance fixtures in
+    one extracted module so callers import a namespace instead of many
+    one-value modules. *)
+Module FiniteCollectionFixtures.
+
 (** [p1] is the smallest positive key used in map fixtures. *)
 Definition p1 : positive := xH.
 (** [p2] is the even positive key used in set fixtures. *)
@@ -114,23 +119,6 @@ Definition string_label_set (labels : list String.string) : list String.string :
 Definition string_label_set_elements (labels : list String.string) : list String.string :=
   string_label_set labels.
 
-Python Extraction positive_task_map.
-Python Extraction positive_task_hit.
-Python Extraction positive_task_missing.
-Python Extraction positive_task_removed.
-Python Extraction positive_task_has_3.
-Python Extraction positive_task_count.
-Python Extraction positive_task_elements.
-Python Extraction positive_claim_set.
-Python Extraction positive_claim_union.
-Python Extraction positive_claim_inter.
-Python Extraction positive_claim_diff.
-Python Extraction positive_claim_removed.
-Python Extraction positive_claim_has_2.
-Python Extraction positive_claim_count.
-Python Extraction positive_claim_elements.
-Python Extraction string_label_map.
-Python Extraction string_label_hit.
-Python Extraction string_label_elements.
-Python Extraction string_label_set.
-Python Extraction string_label_set_elements.
+End FiniteCollectionFixtures.
+
+Python Module Extraction FiniteCollectionFixtures.

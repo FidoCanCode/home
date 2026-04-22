@@ -3,10 +3,7 @@ mylist_is_empty.py
 roseforest_is_empty.py
 list_map.py
 zeros.py
-zeros_pair.py
-repeat_tree.py
-tree_root_of_repeat.py
-Phase10Mod.py
+ModuleLookupFixture.py
 github_key.py
 payload_fragment.py
 ascii_A.py
@@ -19,14 +16,4 @@ z_sign_code.py
 q_half.py
 q_num.py
 q_den.py
-positive_task_map.py
-positive_task_hit.py
-positive_task_elements.py
-positive_claim_set.py
-positive_claim_removed.py
-positive_claim_elements.py
-string_label_map.py
-string_label_hit.py
-string_label_elements.py
-string_label_set.py
-string_label_set_elements.py
+FiniteCollectionFixtures.py

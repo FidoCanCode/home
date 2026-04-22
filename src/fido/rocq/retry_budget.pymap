@@ -3,8 +3,10 @@
   "python_file": "retry_budget.py",
   "entries": [
     {
-      "python_start_line": 149,
-      "python_end_line": 149,
+      "python_start_line": 274,
+      "python_start_col": 0,
+      "python_end_line": 274,
+      "python_end_col": 36,
       "source_file": "retry_budget.v",
       "source_start_line": 18,
       "source_start_col": 11,
@@ -14,8 +16,10 @@
       "symbol": "max_retries"
     },
     {
-      "python_start_line": 150,
-      "python_end_line": 150,
+      "python_start_line": 277,
+      "python_start_col": 0,
+      "python_end_line": 277,
+      "python_end_col": 29,
       "source_file": "retry_budget.v",
       "source_start_line": 22,
       "source_start_col": 11,
@@ -25,8 +29,10 @@
       "symbol": "retry_budget"
     },
     {
-      "python_start_line": 151,
-      "python_end_line": 151,
+      "python_start_line": 280,
+      "python_start_col": 0,
+      "python_end_line": 287,
+      "python_end_col": 47,
       "source_file": "retry_budget.v",
       "source_start_line": 27,
       "source_start_col": 11,
@@ -36,8 +42,10 @@
       "symbol": "retry_delta"
     },
     {
-      "python_start_line": 153,
-      "python_end_line": 153,
+      "python_start_line": 290,
+      "python_start_col": 0,
+      "python_end_line": 290,
+      "python_end_col": 44,
       "source_file": "retry_budget.v",
       "source_start_line": 35,
       "source_start_col": 11,

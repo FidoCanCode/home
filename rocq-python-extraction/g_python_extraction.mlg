@@ -87,55 +87,61 @@ let fallback_source_span name =
     source_end_col = 0;
   }
 
-let source_comment span =
-  Printf.sprintf "# From %s:%d:%d"
-    span.source_file span.source_start_line span.source_start_col
+let starts_with s prefix =
+  let len = String.length s in
+  let prefix_len = String.length prefix in
+  len >= prefix_len && String.equal (String.sub s 0 prefix_len) prefix
 
-let annotate_python_source span source =
-  let comment = source_comment span in
+let top_level_spacing_before previous line =
+  if String.equal line "" || line.[0] = ' ' || line.[0] = '\t' then
+    None
+  else if starts_with line "class " then
+    (match previous with
+     | Some prev when starts_with prev "@dataclass" -> Some 0
+     | _ -> Some 2)
+  else if starts_with line "def "
+          || starts_with line "@dataclass" then
+    Some 2
+  else if starts_with line "#" then
+    match previous with
+    | Some prev when not (starts_with prev "#") -> Some 2
+    | _ -> None
+  else
+    None
+
+let normalize_top_level_spacing source =
   let lines = String.split_on_char '\n' source in
-  let annotated =
-    List.map
-      (fun line ->
-        if String.equal line "" then line else line ^ "  " ^ comment)
-      lines
+  let rec add_blank_lines count acc =
+    if count <= 0 then acc else add_blank_lines (count - 1) ("" :: acc)
   in
-  String.concat "\n" annotated
+  let rec loop previous_nonempty pending_blanks acc = function
+    | [] -> List.rev acc
+    | line :: rest ->
+        if String.equal line "" then
+          loop previous_nonempty (pending_blanks + 1) acc rest
+        else
+          let required_blanks =
+            match previous_nonempty with
+            | None -> min pending_blanks 2
+            | Some _ ->
+                (match top_level_spacing_before previous_nonempty line with
+                 | Some count -> count
+                 | None -> min pending_blanks 2)
+          in
+          let acc = add_blank_lines required_blanks acc in
+          loop (Some line) 0 (line :: acc) rest
+  in
+  String.concat "\n" (loop None 0 [] lines) ^ "\n"
+
+let source_lines source =
+  let lines = String.split_on_char '\n' source in
+  match List.rev lines with
+  | "" :: rest -> List.rev rest
+  | _ -> lines
 
 let count_lines source =
   if String.equal source "" then 0
-  else List.length (String.split_on_char '\n' source)
-
-let write_pymap ~python_file ~span ~source =
-  let entries =
-    if count_lines source = 0 then "[]"
-    else
-      Printf.sprintf
-        "[\n    {\n      \"python_start_line\": 1,\n      \"python_end_line\": %d,\n      \"source_file\": %s,\n      \"source_start_line\": %d,\n      \"source_start_col\": %d,\n      \"source_end_line\": %d,\n      \"source_end_col\": %d,\n      \"kind\": \"extraction\",\n      \"symbol\": %s\n    }\n  ]"
-        (count_lines source)
-        (json_string span.source_file)
-        span.source_start_line
-        span.source_start_col
-        span.source_end_line
-        span.source_end_col
-        (json_string (Filename.remove_extension (Filename.basename python_file)))
-  in
-  let map_file = Filename.remove_extension python_file ^ ".pymap" in
-  let oc = open_out map_file in
-  output_string oc
-    (Printf.sprintf
-       "{\n  \"version\": 1,\n  \"python_file\": %s,\n  \"entries\": %s\n}\n"
-       (json_string (Filename.basename python_file))
-       entries);
-  close_out oc
-
-let write_python_with_source_map ~fname ~span pp =
-  let source = Pp.string_of_ppcmds pp in
-  let annotated = annotate_python_source span source in
-  let oc = open_out fname in
-  output_string oc annotated;
-  close_out oc;
-  write_pymap ~python_file:fname ~span ~source:annotated
+  else List.length (source_lines source)
 
 let trim_left s =
   let len = String.length s in
@@ -148,37 +154,118 @@ let trim_left s =
   in
   loop 0
 
-let starts_with s prefix =
-  let len = String.length s in
-  let prefix_len = String.length prefix in
-  len >= prefix_len && String.equal (String.sub s 0 prefix_len) prefix
+let leading_column line =
+  let rec loop i =
+    if i >= String.length line then i
+    else
+      match line.[i] with
+      | ' ' | '\t' -> loop (i + 1)
+      | _ -> i
+  in
+  loop 0
 
-let python_symbol_start_line source name =
-  let lines = String.split_on_char '\n' source in
+let is_top_level_declaration line =
+  not (String.equal line "")
+  && leading_column line = 0
+  && (starts_with line "def "
+      || starts_with line "class "
+      || starts_with line "@dataclass"
+      || String.contains line '='
+      || String.contains line ':')
+
+let python_symbol_span source name =
+  let lines = Array.of_list (source_lines source) in
   let def_prefix = "def " ^ name ^ "(" in
   let class_prefix = "class " ^ name in
   let ann_prefix = name ^ ":" in
   let assign_prefix = name ^ " =" in
-  let rec loop line_number = function
-    | [] -> 1
-    | line :: rest ->
-        let line = trim_left line in
-        if starts_with line def_prefix
-           || starts_with line class_prefix
-           || starts_with line ann_prefix
-           || starts_with line assign_prefix
-        then line_number
-        else loop (line_number + 1) rest
+  let last_index = Array.length lines - 1 in
+  let rec find_start index =
+    if index > last_index then None
+    else
+      let line = lines.(index) in
+        let trimmed = trim_left line in
+        if starts_with trimmed def_prefix
+           || starts_with trimmed class_prefix
+           || starts_with trimmed ann_prefix
+           || starts_with trimmed assign_prefix
+        then Some (index, trimmed)
+        else find_start (index + 1)
   in
-  loop 1 lines
+  let rec next_top_level index =
+    if index > last_index then None
+    else if is_top_level_declaration lines.(index) then Some index
+    else next_top_level (index + 1)
+  in
+  let rec previous_nonempty index =
+    if index < 0 then 0
+    else if String.equal lines.(index) "" then previous_nonempty (index - 1)
+    else index
+  in
+  match find_start 0 with
+  | None -> (1, 0, 1, 0)
+  | Some (start_index, trimmed) ->
+      let start_line = start_index + 1 in
+      let start_col = leading_column lines.(start_index) in
+      let is_block =
+        starts_with trimmed def_prefix || starts_with trimmed class_prefix
+      in
+      let end_index =
+        if not is_block then start_index
+        else
+          match next_top_level (start_index + 1) with
+          | None -> previous_nonempty last_index
+          | Some index -> previous_nonempty (index - 1)
+      in
+      (start_line, start_col, end_index + 1, String.length lines.(end_index))
+
+let write_pymap ~python_file ~span ~source =
+  let line_count = count_lines source in
+  let symbol = Filename.remove_extension (Filename.basename python_file) in
+  let (python_start_line, python_start_col, python_end_line, python_end_col) =
+    python_symbol_span source symbol
+  in
+  let entries =
+    if line_count = 0 then "[]"
+    else
+      Printf.sprintf
+        "[\n    {\n      \"python_start_line\": %d,\n      \"python_start_col\": %d,\n      \"python_end_line\": %d,\n      \"python_end_col\": %d,\n      \"source_file\": %s,\n      \"source_start_line\": %d,\n      \"source_start_col\": %d,\n      \"source_end_line\": %d,\n      \"source_end_col\": %d,\n      \"kind\": \"extraction\",\n      \"symbol\": %s\n    }\n  ]"
+        python_start_line
+        python_start_col
+        python_end_line
+        python_end_col
+        (json_string span.source_file)
+        span.source_start_line
+        span.source_start_col
+        span.source_end_line
+        span.source_end_col
+        (json_string symbol)
+  in
+  let map_file = Filename.remove_extension python_file ^ ".pymap" in
+  let oc = open_out map_file in
+  output_string oc
+    (Printf.sprintf
+       "{\n  \"version\": 1,\n  \"python_file\": %s,\n  \"entries\": %s\n}\n"
+       (json_string (Filename.basename python_file))
+       entries);
+  close_out oc
+
+let write_python_with_source_map ~fname ~span pp =
+  let source = normalize_top_level_spacing (Pp.string_of_ppcmds pp) in
+  let oc = open_out fname in
+  output_string oc source;
+  close_out oc;
+  write_pymap ~python_file:fname ~span ~source
 
 let write_pymap_entries ~python_file ~source entries =
   let entry_json (name, span) =
-    let line = python_symbol_start_line source name in
+    let (start_line, start_col, end_line, end_col) = python_symbol_span source name in
     Printf.sprintf
-      "    {\n      \"python_start_line\": %d,\n      \"python_end_line\": %d,\n      \"source_file\": %s,\n      \"source_start_line\": %d,\n      \"source_start_col\": %d,\n      \"source_end_line\": %d,\n      \"source_end_col\": %d,\n      \"kind\": \"extraction\",\n      \"symbol\": %s\n    }"
-      line
-      line
+      "    {\n      \"python_start_line\": %d,\n      \"python_start_col\": %d,\n      \"python_end_line\": %d,\n      \"python_end_col\": %d,\n      \"source_file\": %s,\n      \"source_start_line\": %d,\n      \"source_start_col\": %d,\n      \"source_end_line\": %d,\n      \"source_end_col\": %d,\n      \"kind\": \"extraction\",\n      \"symbol\": %s\n    }"
+      start_line
+      start_col
+      end_line
+      end_col
       (json_string span.source_file)
       span.source_start_line
       span.source_start_col
@@ -200,13 +287,12 @@ let write_pymap_entries ~python_file ~source entries =
        entries_json);
   close_out oc
 
-let write_python_group_with_source_map ~fname ~fallback_span ~entries pp =
-  let source = Pp.string_of_ppcmds pp in
-  let annotated = annotate_python_source fallback_span source in
+let write_python_group_with_source_map ~fname ~fallback_span:_ ~entries pp =
+  let source = normalize_top_level_spacing (Pp.string_of_ppcmds pp) in
   let oc = open_out fname in
-  output_string oc annotated;
+  output_string oc source;
   close_out oc;
-  write_pymap_entries ~python_file:fname ~source:annotated entries
+  write_pymap_entries ~python_file:fname ~source entries
 
 let qualids_of_space_separated_names names =
   names

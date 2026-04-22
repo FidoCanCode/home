@@ -167,8 +167,7 @@ WORKDIR /workspace
 COPY .python-version pyproject.toml uv.lock ./
 COPY --from=extract /tmp/model-output/src/fido/rocq /workspace/src/fido/rocq
 
-RUN uv run --no-project --with ruff==0.15.9 ruff format /workspace/src/fido/rocq \
-    && cd /workspace/src/fido/rocq \
+RUN cd /workspace/src/fido/rocq \
     && find . -type f ! -name ".build-files" -printf "%P\n" | LC_ALL=C sort > .build-files
 
 FROM scratch AS export
@@ -296,17 +295,11 @@ RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
     uv run python -m fido.rocq_generated_pyright /tmp/generated-pyright
 
-FROM python-test-base AS test-unit
+FROM python-test-base AS test
 
 COPY tests tests
-
-RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    uv run tests-unit
-
-FROM python-test-base AS test-rocq-generated
-
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 COPY rocq-python-extraction/test/*.py rocq-python-extraction/test/
 
 RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    uv run tests-rocq-generated
+    uv run tests
