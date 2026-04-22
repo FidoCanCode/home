@@ -1,6 +1,6 @@
 (rocq.theory
  (name PyExtractTest)
- (synopsis "Python extraction acceptance tests — core terms, primitive remapping, datatypes, nested patterns, records, Acc-erasure, polymorphism, coinductives, modules, strings/bytes, and numbers")
+ (synopsis "Python extraction acceptance tests — core terms, primitive remapping, datatypes, nested patterns, records, Acc-erasure, polymorphism, coinductives, modules, strings/bytes, numbers, and finite collections")
  (plugins rocq-python-extraction)
  (theories Stdlib)
  (modules
@@ -21,4 +21,5 @@
   source_maps
   strings_bytes
   numbers
+  finite_collections
   reals_unsupported))

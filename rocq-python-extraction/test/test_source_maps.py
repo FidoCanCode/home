@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import io
 import json
 import traceback
@@ -10,12 +8,9 @@ import pytest
 from fido.rocq_traceback import TracebackAnnotator
 
 
-def test_generated_python_lines_carry_source_comments(build_default: Path) -> None:
+def test_generated_python_has_no_inline_source_comments(build_default: Path) -> None:
     source = (build_default / "source_map_runtime_error.py").read_text()
-    lines = [line for line in source.splitlines() if line]
-
-    assert lines
-    assert all("# From source_maps.v:" in line for line in lines)
+    assert "# From source_maps.v:" not in source
 
 
 def test_generated_pymap_points_back_to_rocq_source(build_default: Path) -> None:
@@ -26,6 +21,14 @@ def test_generated_pymap_points_back_to_rocq_source(build_default: Path) -> None
     assert data["entries"][0]["source_file"] == "source_maps.v"
     assert data["entries"][0]["source_start_line"] > 0
     assert data["entries"][0]["source_start_col"] >= 0
+    assert data["entries"][0]["python_start_line"] > 0
+    assert data["entries"][0]["python_start_col"] >= 0
+    assert (
+        data["entries"][0]["python_end_line"] >= data["entries"][0]["python_start_line"]
+    )
+    assert (
+        data["entries"][0]["python_end_col"] >= data["entries"][0]["python_start_col"]
+    )
 
 
 def test_traceback_cli_resolves_runtime_error_to_rocq_source(

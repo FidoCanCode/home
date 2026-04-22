@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
@@ -786,7 +784,7 @@ class TestDispatchCheckRun:
             "action": "completed",
             "check_run": {
                 "conclusion": "failure",
-                "name": "test-unit",
+                "name": "test",
                 "pull_requests": [{"number": 3}],
             },
         }
@@ -3998,7 +3996,7 @@ class TestDispatchCheckRunNoPrs:
             "action": "completed",
             "check_run": {
                 "conclusion": "failure",
-                "name": "test-unit",
+                "name": "test",
                 "pull_requests": [],
             },
         }

@@ -109,6 +109,7 @@ COPY --chown=opam:opam \
     rocq-python-extraction/g_python_extraction.mlg \
     rocq-python-extraction/python.ml \
     rocq-python-extraction/
+COPY --chown=opam:opam tools/rocq_model_outputs.sh tools/
 
 FROM ${ROCQ_IMAGE} AS rocq-toolchain
 
@@ -145,12 +146,12 @@ COPY --from=rocq_models_cache --chown=opam:opam /_build/. /workspace/_build/
 
 RUN targets="" \
     && for model in models/*.v; do targets="$targets ${model%.v}.vo"; done \
+    && tools/rocq_model_outputs.sh models/*.v > /tmp/expected-model-outputs \
     && opam exec -- dune build $targets \
     && mkdir -p /tmp/model-output/src/fido/rocq \
-    && py_files="$(find /workspace/_build/default -maxdepth 1 -name '*.py' -print)" \
-    && if [ -z "$py_files" ]; then find /workspace/_build/default -maxdepth 2 -type f -print; exit 1; fi \
-    && cp $py_files /tmp/model-output/src/fido/rocq/ \
-    && find /workspace/_build/default -maxdepth 1 -name '*.pymap' -exec cp {} /tmp/model-output/src/fido/rocq/ \; \
+    && while IFS= read -r output; do \
+        cp "/workspace/_build/default/$output" /tmp/model-output/src/fido/rocq/; \
+    done < /tmp/expected-model-outputs \
     && printf '%s\n' \
         '"""Python extracted from Rocq models in models/.' \
         '' \
@@ -166,8 +167,7 @@ WORKDIR /workspace
 COPY .python-version pyproject.toml uv.lock ./
 COPY --from=extract /tmp/model-output/src/fido/rocq /workspace/src/fido/rocq
 
-RUN uv run --no-project --with ruff==0.15.9 ruff format /workspace/src/fido/rocq \
-    && cd /workspace/src/fido/rocq \
+RUN cd /workspace/src/fido/rocq \
     && find . -type f ! -name ".build-files" -printf "%P\n" | LC_ALL=C sort > .build-files
 
 FROM scratch AS export
@@ -228,7 +228,6 @@ COPY rocq-python-extraction/Dockerfile \
     rocq-python-extraction/g_python_extraction.mlg \
     rocq-python-extraction/python.ml \
     rocq-python-extraction/rocq-python-extraction.opam \
-    rocq-python-extraction/run_generated_pyright.sh \
     rocq-python-extraction/run_in_docker.sh \
     rocq-python-extraction/
 COPY rocq-python-extraction/test/*.py rocq-python-extraction/test/
@@ -276,7 +275,6 @@ COPY rocq-python-extraction/Dockerfile \
     rocq-python-extraction/g_python_extraction.mlg \
     rocq-python-extraction/python.ml \
     rocq-python-extraction/rocq-python-extraction.opam \
-    rocq-python-extraction/run_generated_pyright.sh \
     rocq-python-extraction/run_in_docker.sh \
     rocq-python-extraction/
 COPY --from=model-format /workspace/src/fido/rocq /workspace/src/fido/rocq
@@ -295,19 +293,13 @@ COPY rocq-python-extraction/test/pyright_*.py rocq-python-extraction/test/
 
 RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
     --mount=type=cache,id=fido-pyright,target=/root/.cache/pyright-python \
-    ./rocq-python-extraction/run_generated_pyright.sh /tmp/generated-pyright
+    uv run python -m fido.rocq_generated_pyright /tmp/generated-pyright
 
-FROM python-test-base AS test-unit
+FROM python-test-base AS test
 
 COPY tests tests
-
-RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    uv run tests-unit
-
-FROM python-test-base AS test-rocq-generated
-
 COPY --from=test-extract /tmp/pytest-artifacts /workspace/_build/default
 COPY rocq-python-extraction/test/*.py rocq-python-extraction/test/
 
 RUN --mount=type=cache,id=fido-uv-check,target=/root/.cache/uv \
-    uv run tests-rocq-generated
+    uv run tests

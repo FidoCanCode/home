@@ -323,7 +323,10 @@ class RocqIndex:
         python_signature: str | None = None
         if python_info is not None:
             python_signature, python_range = python_info
-            python_location = Location(python_path.resolve(), python_range)
+            python_location = Location(
+                python_path.resolve(),
+                _python_range_from_entry(entry, python_range),
+            )
         else:
             self._diagnostics.append(
                 Diagnostic(f"generated Python declaration missing for {name}", source)
@@ -883,6 +886,7 @@ def _python_signatures(path: Path) -> dict[str, tuple[str, Range]]:
             )
             if signature.endswith(":"):
                 signature = signature[:-1]
+            signature = _compact_python_signature(signature)
             signatures[node.name] = (
                 signature,
                 Range(Position(start, 0), Position(end, len(lines[end]))),
@@ -919,10 +923,26 @@ def _python_signatures(path: Path) -> dict[str, tuple[str, Range]]:
     return signatures
 
 
+def _python_range_from_entry(entry: dict[str, Any], fallback: Range) -> Range:
+    try:
+        return Range(
+            Position(
+                max(0, int(entry["python_start_line"]) - 1),
+                max(0, int(entry["python_start_col"])),
+            ),
+            Position(
+                max(0, int(entry["python_end_line"]) - 1),
+                max(0, int(entry["python_end_col"])),
+            ),
+        )
+    except KeyError, TypeError, ValueError:
+        return fallback
+
+
 def _signature_end_line(lines: list[str], start: int) -> int:
     balance = 0
     for index in range(start, len(lines)):
-        line = lines[index]
+        line = _strip_generated_comment(lines[index])
         balance += line.count("(") - line.count(")")
         if balance <= 0 and line.rstrip().endswith(":"):
             return index
@@ -931,6 +951,10 @@ def _signature_end_line(lines: list[str], start: int) -> int:
 
 def _strip_generated_comment(line: str) -> str:
     return line.split("  # From ", 1)[0].rstrip()
+
+
+def _compact_python_signature(signature: str) -> str:
+    return re.sub(r"\s+\)", ")", re.sub(r"\(\s+", "(", signature))
 
 
 def _identifier_matches_without_comments(

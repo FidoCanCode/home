@@ -54,9 +54,12 @@ def test_index_finds_transition_symbol_and_python_signature() -> None:
     assert symbol.source.path == (REPO / "models" / "session_lock.v").resolve()
     assert symbol.python is not None
     assert symbol.python.path.name == "transition.py"
+    assert symbol.python.range.start.line > 0
+    assert symbol.python.range.start.character == 0
+    assert symbol.python.range.end.character > len("transition")
     assert (
         symbol.python_signature
-        == "def transition(current: State, event0: Event) -> object"
+        == "def transition(current: State, event0: Event) -> State | None"
     )
     assert not index.diagnostics
 
@@ -80,7 +83,7 @@ def test_service_hover_definition_references_symbols_and_diagnostics() -> None:
 
     assert hover is not None
     assert (
-        "def transition(current: State, event0: Event) -> object"
+        "def transition(current: State, event0: Event) -> State | None"
         in hover["contents"]["value"]
     )
     assert [item["path"] for item in definitions] == [

@@ -4,7 +4,7 @@
 fido_build_targets_for_group() {
   case "$1" in
     ci)
-      printf '%s\n' fido format generated-typecheck lint make-rocq rocq-image rocq-repl test-rocq-generated test-unit typecheck
+      printf '%s\n' fido format generated-typecheck lint make-rocq rocq-image rocq-repl test typecheck
       ;;
     default)
       printf '%s\n' ci fido-test make-rocq
@@ -64,13 +64,13 @@ rocq-python-extraction/export_pytest_generated.sh
 rocq-python-extraction/g_python_extraction.mlg
 rocq-python-extraction/python.ml
 rocq-python-extraction/rocq-python-extraction.opam
-rocq-python-extraction/run_generated_pyright.sh
 rocq-python-extraction/run_in_docker.sh
 rocq-python-extraction/test/*.py
 src
 tests
 tools/build_graph.sh
 tools/gen_workflows.py
+tools/rocq_model_outputs.sh
 uv.lock
 EOF
       ;;
@@ -101,7 +101,6 @@ rocq-python-extraction/export_pytest_generated.sh
 rocq-python-extraction/g_python_extraction.mlg
 rocq-python-extraction/python.ml
 rocq-python-extraction/rocq-python-extraction.opam
-rocq-python-extraction/run_generated_pyright.sh
 rocq-python-extraction/run_in_docker.sh
 rocq-python-extraction/test/*.v
 rocq-python-extraction/test/dune
@@ -111,6 +110,7 @@ rocq-python-extraction/test/pyright_*.py
 src
 tools/build_graph.sh
 tools/gen_workflows.py
+tools/rocq_model_outputs.sh
 uv.lock
 EOF
       ;;
@@ -141,13 +141,13 @@ rocq-python-extraction/export_pytest_generated.sh
 rocq-python-extraction/g_python_extraction.mlg
 rocq-python-extraction/python.ml
 rocq-python-extraction/rocq-python-extraction.opam
-rocq-python-extraction/run_generated_pyright.sh
 rocq-python-extraction/run_in_docker.sh
 rocq-python-extraction/test/*.py
 src
 tests
 tools/build_graph.sh
 tools/gen_workflows.py
+tools/rocq_model_outputs.sh
 uv.lock
 EOF
       ;;
@@ -167,6 +167,7 @@ rocq-python-extraction/dune-project
 rocq-python-extraction/g_python_extraction.mlg
 rocq-python-extraction/python.ml
 rocq-python-extraction/rocq-python-extraction.opam
+tools/rocq_model_outputs.sh
 uv.lock
 EOF
       ;;
@@ -185,7 +186,7 @@ rocq-python-extraction/dune-project
 rocq-python-extraction/rocq-python-extraction.opam
 EOF
       ;;
-    test-rocq-generated)
+    test)
       cat <<'EOF'
 .dockerignore
 .githooks/pre-commit
@@ -212,7 +213,6 @@ rocq-python-extraction/export_pytest_generated.sh
 rocq-python-extraction/g_python_extraction.mlg
 rocq-python-extraction/python.ml
 rocq-python-extraction/rocq-python-extraction.opam
-rocq-python-extraction/run_generated_pyright.sh
 rocq-python-extraction/run_in_docker.sh
 rocq-python-extraction/test/*.py
 rocq-python-extraction/test/*.v
@@ -220,44 +220,10 @@ rocq-python-extraction/test/dune
 rocq-python-extraction/test/generated_pyright_targets.txt
 rocq-python-extraction/test/generated_pytest_targets.txt
 src
-tools/build_graph.sh
-tools/gen_workflows.py
-uv.lock
-EOF
-      ;;
-    test-unit)
-      cat <<'EOF'
-.dockerignore
-.githooks/pre-commit
-.github/workflows/ci.yml
-.lsp.json
-.python-version
-docker-bake.hcl
-dune-workspace
-fido
-models/*.v
-models/Dockerfile
-models/dune
-models/dune-project
-package-lock.json
-package.json
-pyproject.toml
-pyrightconfig.json
-rocq-python-extraction/DIAGNOSTICS.md
-rocq-python-extraction/Dockerfile
-rocq-python-extraction/META.rocq-python-extraction.template
-rocq-python-extraction/dune
-rocq-python-extraction/dune-project
-rocq-python-extraction/export_pytest_generated.sh
-rocq-python-extraction/g_python_extraction.mlg
-rocq-python-extraction/python.ml
-rocq-python-extraction/rocq-python-extraction.opam
-rocq-python-extraction/run_generated_pyright.sh
-rocq-python-extraction/run_in_docker.sh
-src
 tests
 tools/build_graph.sh
 tools/gen_workflows.py
+tools/rocq_model_outputs.sh
 uv.lock
 EOF
       ;;
@@ -288,13 +254,13 @@ rocq-python-extraction/export_pytest_generated.sh
 rocq-python-extraction/g_python_extraction.mlg
 rocq-python-extraction/python.ml
 rocq-python-extraction/rocq-python-extraction.opam
-rocq-python-extraction/run_generated_pyright.sh
 rocq-python-extraction/run_in_docker.sh
 rocq-python-extraction/test/*.py
 src
 tests
 tools/build_graph.sh
 tools/gen_workflows.py
+tools/rocq_model_outputs.sh
 uv.lock
 EOF
       ;;

@@ -40,7 +40,7 @@ option_chain.py
 zeros_pair.py
 repeat_tree.py
 tree_root_of_repeat.py
-Phase10Mod.py
+ModuleLookupFixture.py
 source_map_runtime_error.py
 source_map_runtime_error.pymap
 github_key.py
@@ -63,3 +63,4 @@ z_sign_code.py
 q_half.py
 q_num.py
 q_den.py
+FiniteCollectionFixtures.py

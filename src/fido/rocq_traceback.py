@@ -1,7 +1,5 @@
 """Annotate extracted Python tracebacks with Rocq source locations."""
 
-from __future__ import annotations
-
 import argparse
 import json
 import re
@@ -19,7 +17,9 @@ _FRAME_RE = re.compile(
 @dataclass(frozen=True)
 class SourceMapEntry:
     python_start_line: int
+    python_start_col: int
     python_end_line: int
+    python_end_col: int
     source_file: str
     source_start_line: int
     source_start_col: int
@@ -28,7 +28,9 @@ class SourceMapEntry:
     def from_json(cls, data: dict[str, Any]) -> SourceMapEntry:
         return cls(
             python_start_line=int(data["python_start_line"]),
+            python_start_col=int(data.get("python_start_col", 0)),
             python_end_line=int(data["python_end_line"]),
+            python_end_col=int(data.get("python_end_col", 0)),
             source_file=str(data["source_file"]),
             source_start_line=int(data["source_start_line"]),
             source_start_col=int(data["source_start_col"]),

@@ -38,6 +38,271 @@ let file_naming state mp =
 
 (*s Preamble emitted at the top of every extracted .py file. *)
 
+let runtime_prelude = {|from itertools import islice
+from dataclasses import dataclass
+from fractions import Fraction
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Generic,
+    Iterable,
+    Iterator,
+    Never,
+    Protocol,
+    TypeVar,
+    assert_never,
+    cast,
+)
+
+_CoForceT = TypeVar("_CoForceT")
+_ModuleArgT = TypeVar("_ModuleArgT")
+_ModuleRetT = TypeVar("_ModuleRetT")
+_StateTState = TypeVar("_StateTState")
+_StateTValue = TypeVar("_StateTValue")
+_StateTNext = TypeVar("_StateTNext")
+_IOValue = TypeVar("_IOValue")
+_IONext = TypeVar("_IONext")
+
+
+class _Impossible(RuntimeError):
+    pass
+
+
+def _impossible() -> Never:
+    raise _Impossible()
+
+
+class _RocqUtf8BoundaryError(UnicodeError):
+    pass
+
+
+class _RocqNumericDomainError(ValueError):
+    pass
+
+
+def _rocq_numeric_domain_error(kind: str, value: object) -> Never:
+    raise _RocqNumericDomainError(f"Rocq {kind} value out of domain: {value!r}")
+
+
+key = int  # finite-map module key alias
+elt = int  # finite-set module element alias
+
+
+def _rocq_positive_key(key: int) -> int:
+    if key <= 0:
+        raise _RocqNumericDomainError("positive map/set key", key)
+    return key
+
+
+def _rocq_string_key(key: str) -> str:
+    if not isinstance(key, str):
+        raise TypeError(f"Rocq string map/set key must be str: {key!r}")
+    return key
+
+
+def _rocq_sorted_key(key: object) -> Any:
+    return key.encode("utf-8") if isinstance(key, str) else key
+
+
+def _rocq_map_add(
+    key: object, value: object, mapping: dict[object, object]
+) -> dict[object, object]:
+    result = dict(mapping)
+    result[key] = value
+    return result
+
+
+def _rocq_map_remove(
+    key: object, mapping: dict[object, object]
+) -> dict[object, object]:
+    result = dict(mapping)
+    result.pop(key, None)
+    return result
+
+
+def _rocq_map_elements(mapping: dict[object, object]) -> list[tuple[object, object]]:
+    return sorted(mapping.items(), key=lambda item: _rocq_sorted_key(item[0]))
+
+
+def _rocq_map_fold(
+    function: Callable[[object, object, object], object],
+    mapping: dict[object, object],
+    initial: object,
+) -> object:
+    result = initial
+    for key, value in _rocq_map_elements(mapping):
+        result = function(key, value, result)
+    return result
+
+
+def _rocq_set_add(key: object, values: frozenset[object]) -> frozenset[object]:
+    return frozenset((*values, key))
+
+
+def _rocq_set_remove(key: object, values: frozenset[object]) -> frozenset[object]:
+    return frozenset(value for value in values if value != key)
+
+
+def _rocq_set_elements(values: frozenset[object]) -> list[object]:
+    return sorted(values, key=_rocq_sorted_key)
+
+
+def _rocq_set_fold(
+    function: Callable[[object, object], object],
+    values: frozenset[object],
+    initial: object,
+) -> object:
+    result = initial
+    for value in _rocq_set_elements(values):
+        result = function(value, result)
+    return result
+
+
+def _rocq_string_cons(head: int, tail: str) -> str:
+    try:
+        return bytes([head]).decode("utf-8") + tail
+    except UnicodeDecodeError as exc:
+        raise _RocqUtf8BoundaryError(
+            "Rocq string split crosses a UTF-8 boundary"
+        ) from exc
+
+
+def _rocq_string_uncons(value: str) -> tuple[int, str]:
+    encoded = value.encode("utf-8")
+    if not encoded:
+        raise _Impossible()
+    try:
+        tail = encoded[1:].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _RocqUtf8BoundaryError(
+            "Rocq string split crosses a UTF-8 boundary"
+        ) from exc
+    return encoded[0], tail
+
+
+def _rocq_ascii_to_int(
+    b0: bool,
+    b1: bool,
+    b2: bool,
+    b3: bool,
+    b4: bool,
+    b5: bool,
+    b6: bool,
+    b7: bool,
+) -> int:
+    return sum(
+        (1 << i) for i, bit in enumerate((b0, b1, b2, b3, b4, b5, b6, b7)) if bit
+    )
+
+
+def _rocq_ascii_bits(
+    value: int,
+) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
+    if value < 0 or value > 255:
+        raise ValueError("Rocq byte/ascii value out of range")
+    return cast(
+        tuple[bool, bool, bool, bool, bool, bool, bool, bool],
+        tuple(bool(value & (1 << i)) for i in range(8)),
+    )
+
+
+class StateT(Generic[_StateTState, _StateTValue]):
+    def __init__(
+        self,
+        step: Callable[[_StateTState], tuple[_StateTValue, _StateTState]],
+        state: _StateTState | None = None,
+    ) -> None:
+        self._step = step
+        self.state = state
+
+    def run(self, state: _StateTState) -> _StateTValue:
+        value, next_state = self._step(state)
+        self.state = next_state
+        return value
+
+    def run_with_state(self, state: _StateTState) -> tuple[_StateTValue, _StateTState]:
+        result = self._step(state)
+        self.state = result[1]
+        return result
+
+    def bind(
+        self,
+        f: Callable[[_StateTValue], StateT[_StateTState, _StateTNext]],
+    ) -> StateT[_StateTState, _StateTNext]:
+        def run_bound(state: _StateTState) -> tuple[_StateTNext, _StateTState]:
+            value, next_state = self._step(state)
+            return f(value).run_with_state(next_state)
+
+        return StateT(run_bound, self.state)
+
+    @classmethod
+    def pure(cls, value: _StateTValue) -> StateT[_StateTState, _StateTValue]:
+        return StateT(lambda state: (value, state))
+
+    @classmethod
+    def get_state(cls) -> StateT[_StateTState, _StateTState]:
+        return StateT(lambda state: (state, state))
+
+    @classmethod
+    def put_state(cls, new_state: _StateTState) -> StateT[_StateTState, None]:
+        return StateT(lambda _state: (None, new_state))
+
+
+class IO(Generic[_IOValue]):
+    def __init__(self, thunk: Callable[[], Awaitable[_IOValue]]) -> None:
+        self._thunk = thunk
+
+    async def run(self) -> _IOValue:
+        return await self._thunk()
+
+    def bind(self, f: Callable[[_IOValue], IO[_IONext]]) -> IO[_IONext]:
+        async def run_bound() -> _IONext:
+            value = await self.run()
+            return await f(value).run()
+
+        return IO(run_bound)
+
+    @classmethod
+    def pure(cls, value: _IOValue) -> IO[_IOValue]:
+        async def run_pure() -> _IOValue:
+            return value
+
+        return IO(run_pure)
+
+
+def coforce(value: Callable[[], _CoForceT]) -> _CoForceT:
+    return value()
+
+
+def coprefix_eq(n: int, left: Iterable[object], right: Iterable[object]) -> bool:
+    return tuple(islice(iter(left), n)) == tuple(islice(iter(right), n))
+
+
+def coprefix_hash(n: int, value: Iterable[object]) -> int:
+    return hash(tuple(islice(iter(value), n)))
+
+
+class __ModuleNamespace:
+    pass
+
+
+def __apply_applicative(
+    cache: dict[int, _ModuleRetT],
+    build: Callable[[_ModuleArgT], _ModuleRetT],
+    arg: _ModuleArgT,
+) -> _ModuleRetT:
+    key = id(arg)
+    cached = cache.get(key)
+    if cached is None:
+        cached = build(arg)
+        cache[key] = cached
+    return cached
+
+
+__ = None  # erased logical argument
+|}
+
 let preamble _state _name comment _used_modules _safe =
   (* Target: Python 3.14t (free-threaded build, no GIL).
      PEP 649 deferred annotation evaluation is the default on 3.14, so forward
@@ -49,110 +314,9 @@ let preamble _state _name comment _used_modules _safe =
     | None -> mt ()
     | Some c -> str "# " ++ c ++ fnl ()
   in
-  str "# Generated by rocq-python-extraction (target: Python 3.14t)" ++ fnl () ++
-  comment ++
-  str "from itertools import islice" ++ fnl () ++
-  str "from dataclasses import dataclass" ++ fnl () ++
-  str "from fractions import Fraction" ++ fnl () ++
-  str "from typing import Any, Awaitable, Callable, Generic, Iterable, Iterator, Never, Protocol, TypeVar, assert_never, cast" ++ fnl () ++
-  str "_CoForceT = TypeVar(\"_CoForceT\")" ++ fnl () ++
-  str "_ModuleArgT = TypeVar(\"_ModuleArgT\")" ++ fnl () ++
-  str "_ModuleRetT = TypeVar(\"_ModuleRetT\")" ++ fnl () ++
-  str "_StateTState = TypeVar(\"_StateTState\")" ++ fnl () ++
-  str "_StateTValue = TypeVar(\"_StateTValue\")" ++ fnl () ++
-  str "_StateTNext = TypeVar(\"_StateTNext\")" ++ fnl () ++
-  str "_IOValue = TypeVar(\"_IOValue\")" ++ fnl () ++
-  str "_IONext = TypeVar(\"_IONext\")" ++ fnl () ++
-  str "class _Impossible(RuntimeError):" ++ fnl () ++
-  str "    pass" ++ fnl () ++
-  str "def _impossible() -> Never:" ++ fnl () ++
-  str "    raise _Impossible()" ++ fnl () ++
-  str "class _RocqUtf8BoundaryError(UnicodeError):" ++ fnl () ++
-  str "    pass" ++ fnl () ++
-  str "class _RocqNumericDomainError(ValueError):" ++ fnl () ++
-  str "    pass" ++ fnl () ++
-  str "def _rocq_numeric_domain_error(kind: str, value: object) -> Never:" ++ fnl () ++
-  str "    raise _RocqNumericDomainError(f\"Rocq {kind} value out of domain: {value!r}\")" ++ fnl () ++
-  str "def _rocq_string_cons(head: int, tail: str) -> str:" ++ fnl () ++
-  str "    try:" ++ fnl () ++
-  str "        return bytes([head]).decode(\"utf-8\") + tail" ++ fnl () ++
-  str "    except UnicodeDecodeError as exc:" ++ fnl () ++
-  str "        raise _RocqUtf8BoundaryError(\"Rocq string split crosses a UTF-8 boundary\") from exc" ++ fnl () ++
-  str "def _rocq_string_uncons(value: str) -> tuple[int, str]:" ++ fnl () ++
-  str "    encoded = value.encode(\"utf-8\")" ++ fnl () ++
-  str "    if not encoded:" ++ fnl () ++
-  str "        raise _Impossible()" ++ fnl () ++
-  str "    try:" ++ fnl () ++
-  str "        tail = encoded[1:].decode(\"utf-8\")" ++ fnl () ++
-  str "    except UnicodeDecodeError as exc:" ++ fnl () ++
-  str "        raise _RocqUtf8BoundaryError(\"Rocq string split crosses a UTF-8 boundary\") from exc" ++ fnl () ++
-  str "    return encoded[0], tail" ++ fnl () ++
-  str "def _rocq_ascii_to_int(b0: bool, b1: bool, b2: bool, b3: bool, b4: bool, b5: bool, b6: bool, b7: bool) -> int:" ++ fnl () ++
-  str "    return sum((1 << i) for i, bit in enumerate((b0, b1, b2, b3, b4, b5, b6, b7)) if bit)" ++ fnl () ++
-  str "def _rocq_ascii_bits(value: int) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:" ++ fnl () ++
-  str "    if value < 0 or value > 255:" ++ fnl () ++
-  str "        raise ValueError(\"Rocq byte/ascii value out of range\")" ++ fnl () ++
-  str "    return cast(tuple[bool, bool, bool, bool, bool, bool, bool, bool], tuple(bool(value & (1 << i)) for i in range(8)))" ++ fnl () ++
-  str "class StateT(Generic[_StateTState, _StateTValue]):" ++ fnl () ++
-  str "    def __init__(self, step: Callable[[_StateTState], tuple[_StateTValue, _StateTState]], state: _StateTState | None = None) -> None:" ++ fnl () ++
-  str "        self._step = step" ++ fnl () ++
-  str "        self.state = state" ++ fnl () ++
-  str "    def run(self, state: _StateTState) -> _StateTValue:" ++ fnl () ++
-  str "        value, next_state = self._step(state)" ++ fnl () ++
-  str "        self.state = next_state" ++ fnl () ++
-  str "        return value" ++ fnl () ++
-  str "    def run_with_state(self, state: _StateTState) -> tuple[_StateTValue, _StateTState]:" ++ fnl () ++
-  str "        result = self._step(state)" ++ fnl () ++
-  str "        self.state = result[1]" ++ fnl () ++
-  str "        return result" ++ fnl () ++
-  str "    def bind(self, f: Callable[[_StateTValue], StateT[_StateTState, _StateTNext]]) -> StateT[_StateTState, _StateTNext]:" ++ fnl () ++
-  str "        def run_bound(state: _StateTState) -> tuple[_StateTNext, _StateTState]:" ++ fnl () ++
-  str "            value, next_state = self._step(state)" ++ fnl () ++
-  str "            return f(value).run_with_state(next_state)" ++ fnl () ++
-  str "        return StateT(run_bound, self.state)" ++ fnl () ++
-  str "    @classmethod" ++ fnl () ++
-  str "    def pure(cls, value: _StateTValue) -> StateT[_StateTState, _StateTValue]:" ++ fnl () ++
-  str "        return StateT(lambda state: (value, state))" ++ fnl () ++
-  str "    @classmethod" ++ fnl () ++
-  str "    def get_state(cls) -> StateT[_StateTState, _StateTState]:" ++ fnl () ++
-  str "        return StateT(lambda state: (state, state))" ++ fnl () ++
-  str "    @classmethod" ++ fnl () ++
-  str "    def put_state(cls, new_state: _StateTState) -> StateT[_StateTState, None]:" ++ fnl () ++
-  str "        return StateT(lambda _state: (None, new_state))" ++ fnl () ++
-  str "class IO(Generic[_IOValue]):" ++ fnl () ++
-  str "    def __init__(self, thunk: Callable[[], Awaitable[_IOValue]]) -> None:" ++ fnl () ++
-  str "        self._thunk = thunk" ++ fnl () ++
-  str "    async def run(self) -> _IOValue:" ++ fnl () ++
-  str "        return await self._thunk()" ++ fnl () ++
-  str "    def bind(self, f: Callable[[_IOValue], IO[_IONext]]) -> IO[_IONext]:" ++ fnl () ++
-  str "        async def run_bound() -> _IONext:" ++ fnl () ++
-  str "            value = await self.run()" ++ fnl () ++
-  str "            return await f(value).run()" ++ fnl () ++
-  str "        return IO(run_bound)" ++ fnl () ++
-  str "    @classmethod" ++ fnl () ++
-  str "    def pure(cls, value: _IOValue) -> IO[_IOValue]:" ++ fnl () ++
-  str "        async def run_pure() -> _IOValue:" ++ fnl () ++
-  str "            return value" ++ fnl () ++
-  str "        return IO(run_pure)" ++ fnl () ++
-  str "def coforce(value: Callable[[], _CoForceT]) -> _CoForceT:" ++ fnl () ++
-  str "    return value()" ++ fnl () ++
-  str "def coprefix_eq(n: int, left: Iterable[object], right: Iterable[object]) -> bool:" ++ fnl () ++
-  str "    return tuple(islice(iter(left), n)) == tuple(islice(iter(right), n))" ++ fnl () ++
-  str "def coprefix_hash(n: int, value: Iterable[object]) -> int:" ++ fnl () ++
-  str "    return hash(tuple(islice(iter(value), n)))" ++ fnl () ++
-  str "class __ModuleNamespace:" ++ fnl () ++
-  str "    pass" ++ fnl () ++
-  str "def __apply_applicative(" ++
-  str "cache: dict[int, _ModuleRetT], " ++
-  str "build: Callable[[_ModuleArgT], _ModuleRetT], " ++
-  str "arg: _ModuleArgT) -> _ModuleRetT:" ++ fnl () ++
-  str "    key = id(arg)" ++ fnl () ++
-  str "    cached = cache.get(key)" ++ fnl () ++
-  str "    if cached is None:" ++ fnl () ++
-  str "        cached = build(arg)" ++ fnl () ++
-  str "        cache[key] = cached" ++ fnl () ++
-  str "    return cached" ++ fnl () ++
-  str "__ = None  # erased logical argument" ++ fnl ()
+  str (Printf.sprintf "# Generated by rocq-python-extraction (target: %s)\n"
+         "Python 3.14t") ++
+  comment ++ str runtime_prelude
 
 (*s Helpers for Python literal emission. *)
 
@@ -291,6 +455,18 @@ let has_suffix s suffix =
   s_len >= suffix_len &&
   String.equal suffix (String.sub s (s_len - suffix_len) suffix_len)
 
+let string_contains s needle =
+  let s_len = String.length s in
+  let needle_len = String.length needle in
+  if needle_len = 0 then true
+  else if needle_len > s_len then false
+  else
+    let rec loop i =
+      i + needle_len <= s_len &&
+      (String.equal needle (String.sub s i needle_len) || loop (i + 1))
+    in
+    loop 0
+
 let global_path r =
   try
     DirPath.to_string (Nametab.dirpath_of_global r.glob) ^ "." ^
@@ -378,6 +554,76 @@ let is_std_real_type_ref r =
   global_path_has_suffix r ".Reals.Rdefinitions.R" ||
   global_path_has_suffix r ".Reals.Rdefinitions.RbaseSymbolsImpl.R"
 
+let is_std_option_type_ref r =
+  global_path_has_suffix r ".Init.Datatypes.option"
+
+let is_std_option_none_ref r =
+  global_path_has_suffix r ".Init.Datatypes.None"
+
+let is_std_option_some_ref r =
+  global_path_has_suffix r ".Init.Datatypes.Some"
+
+let is_std_list_type_ref r =
+  global_path_has_suffix r ".Init.Datatypes.list"
+
+let is_std_list_nil_ref r =
+  global_path_has_suffix r ".Init.Datatypes.nil"
+
+let is_std_list_cons_ref r =
+  global_path_has_suffix r ".Init.Datatypes.cons"
+
+let is_std_prod_type_ref r =
+  global_path_has_suffix r ".Init.Datatypes.prod"
+
+let is_std_prod_pair_ref r =
+  global_path_has_suffix r ".Init.Datatypes.pair"
+
+let is_std_bool_type_ref r =
+  global_path_has_suffix r ".Init.Datatypes.bool"
+
+let is_positive_map_type_ref r =
+  global_path_has_suffix r ".FSets.FMapPositive.PositiveMap.t"
+
+let is_positive_set_type_ref r =
+  global_path_has_suffix r ".MSets.MSetPositive.PositiveSet.t"
+
+let is_string_map_type_ref r =
+  let p = global_path r in
+  has_suffix p ".t" && string_contains p ".StringMap."
+
+let is_string_set_type_ref r =
+  let p = global_path r in
+  has_suffix p ".t" && string_contains p ".StringSet."
+
+let is_positive_map_ref r name =
+  global_path_has_suffix r (".FSets.FMapPositive.PositiveMap." ^ name)
+
+let is_positive_set_ref r name =
+  global_path_has_suffix r (".MSets.MSetPositive.PositiveSet." ^ name)
+
+let is_string_map_ref r name =
+  let p = global_path r in
+  has_suffix p ("." ^ name) && string_contains p ".StringMap."
+
+let is_string_set_ref r name =
+  let p = global_path r in
+  has_suffix p ("." ^ name) && string_contains p ".StringSet."
+
+let is_std_collection_module_name name =
+  name = "PositiveMap" || name = "PositiveSet" ||
+  name = "StringMap" || name = "StringSet" ||
+  has_suffix name ".PositiveMap" || has_suffix name ".PositiveSet" ||
+  has_suffix name ".StringMap" || has_suffix name ".StringSet"
+
+let is_std_collection_term_ref r =
+  let names = ["empty"; "add"; "remove"; "find"; "mem"; "cardinal"; "elements"; "fold";
+               "union"; "inter"; "diff"] in
+  List.exists
+    (fun name ->
+       is_positive_map_ref r name || is_string_map_ref r name ||
+       is_positive_set_ref r name || is_string_set_ref r name)
+    names
+
 let std_byte_constructor_value r =
   let name = global_basename r in
   if String.length name = 3 && name.[0] = 'x' then
@@ -394,7 +640,10 @@ let is_std_remapped_type_ref r =
   is_std_string_type_ref r || is_std_ascii_type_ref r || is_std_byte_type_ref r ||
   is_prim_string_type_ref r || is_std_nat_type_ref r ||
   is_std_positive_type_ref r || is_std_N_type_ref r || is_std_Z_type_ref r ||
-  is_std_Q_type_ref r
+  is_std_Q_type_ref r || is_std_option_type_ref r || is_std_list_type_ref r ||
+  is_std_prod_type_ref r || is_positive_map_type_ref r ||
+  is_positive_set_type_ref r || is_string_map_type_ref r ||
+  is_string_set_type_ref r || is_std_bool_type_ref r
 
 let is_std_string_type = function
   | Tglob (r, _) -> is_std_string_type_ref r
@@ -428,16 +677,68 @@ let is_std_Q_type = function
   | Tglob (r, _) -> is_std_Q_type_ref r
   | _ -> false
 
+let is_std_option_type = function
+  | Tglob (r, _) -> is_std_option_type_ref r
+  | _ -> false
+
+let is_std_list_type = function
+  | Tglob (r, _) -> is_std_list_type_ref r
+  | _ -> false
+
+let is_std_prod_type = function
+  | Tglob (r, _) -> is_std_prod_type_ref r
+  | _ -> false
+
 let is_std_bool_true_ref r =
   global_path_has_suffix r ".Init.Datatypes.true"
 
 let is_std_bool_false_ref r =
   global_path_has_suffix r ".Init.Datatypes.false"
 
+let is_std_bool_type = function
+  | Tglob (r, _) -> is_std_bool_type_ref r
+  | _ -> false
+
 let std_bool_expr = function
   | MLcons (_, r, []) when is_std_bool_true_ref r -> Some true
   | MLcons (_, r, []) when is_std_bool_false_ref r -> Some false
   | _ -> None
+
+let std_ascii_expr_value = function
+  | MLcons (_, r, args) when is_std_ascii_cons_ref r && List.length args = 8 ->
+      let bits = List.map std_bool_expr args in
+      if List.exists (function None -> true | Some _ -> false) bits then None
+      else
+        Some
+          (List.mapi
+             (fun i bit -> if Option.get bit then 1 lsl i else 0)
+             bits
+           |> List.fold_left ( + ) 0)
+  | _ -> None
+
+let std_string_expr_value expr =
+  let buf = Buffer.create 16 in
+  let rec loop = function
+    | MLcons (_, r, []) when is_std_string_empty_ref r ->
+        Some (Buffer.contents buf)
+    | MLcons (_, r, [head; tail]) when is_std_string_cons_ref r ->
+        (match std_ascii_expr_value head with
+         | Some value when value >= 0 && value <= 255 ->
+             Buffer.add_char buf (Char.chr value);
+             loop tail
+         | _ -> None)
+    | _ -> None
+  in
+  loop expr
+
+let needs_numeric_constructor_parens = function
+  | MLcons (_, r, [_]) when is_std_nat_succ_ref r ->
+      true
+  | MLcons (_, r, [_])
+    when is_std_positive_xo_ref r || is_std_positive_xi_ref r ->
+      true
+  | _ ->
+      false
 
 type diagnostic = {
   code : string;
@@ -850,11 +1151,20 @@ let record_proj_info state branches =
 (*s Core expression printer.
     [env] carries de Bruijn binder names (innermost first). *)
 
-let rec pp_expr state env = function
+let rec pp_expr state env expr =
+  match std_string_expr_value expr with
+  | Some value ->
+      str "\"" ++ str (py_escape_str value) ++ str "\""
+  | None ->
+  match expr with
   | MLglob r when is_custom r && String.equal (find_custom r) marker_state_get ->
       str "StateT.get_state()"
   | MLglob r when is_custom r && String.equal (find_custom r) marker_reader_ask ->
       str "lambda __reader_env: __reader_env"
+  | MLglob r when is_positive_map_ref r "empty" || is_string_map_ref r "empty" ->
+      str "{}"
+  | MLglob r when is_positive_set_ref r "empty" || is_string_set_ref r "empty" ->
+      str "frozenset()"
   | MLrel n ->
       (* De Bruijn variable: look up the binder name.  The dummy name [_]
          signals an erased binder; emit [__] (the module-level sentinel). *)
@@ -891,6 +1201,89 @@ let rec pp_expr state env = function
       in
       let (head, all_args) = collect args f in
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      let collection_key kind key =
+        match kind with
+        | `Positive ->
+            str "_rocq_positive_key(" ++ pp_expr state env key ++ str ")"
+        | `String ->
+            str "_rocq_string_key(" ++ pp_expr state env key ++ str ")"
+      in
+      let pp_map_app kind r =
+        match all_args with
+        | [] when is_positive_map_ref r "empty" || is_string_map_ref r "empty" ->
+            Some (str "{}")
+        | [key; value; mapping] when is_positive_map_ref r "add" || is_string_map_ref r "add" ->
+            Some (str "_rocq_map_add(" ++ collection_key kind key ++ str ", " ++
+                  pp_expr state env value ++ str ", " ++ pp_expr state env mapping ++ str ")")
+        | [key; mapping] when is_positive_map_ref r "remove" || is_string_map_ref r "remove" ->
+            Some (str "_rocq_map_remove(" ++ collection_key kind key ++ str ", " ++
+                  pp_expr state env mapping ++ str ")")
+        | [key; mapping] when is_positive_map_ref r "find" || is_string_map_ref r "find" ->
+            Some (pp_expr state env mapping ++ str ".get(" ++ collection_key kind key ++ str ")")
+        | [key; mapping] when is_positive_map_ref r "mem" || is_string_map_ref r "mem" ->
+            Some (collection_key kind key ++ str " in " ++ pp_expr state env mapping)
+        | [mapping] when is_positive_map_ref r "cardinal" || is_string_map_ref r "cardinal" ->
+            Some (str "len(" ++ pp_expr state env mapping ++ str ")")
+        | [mapping] when is_positive_map_ref r "elements" || is_string_map_ref r "elements" ->
+            Some (str "_rocq_map_elements(" ++ pp_expr state env mapping ++ str ")")
+        | [fn; mapping; initial] when is_positive_map_ref r "fold" || is_string_map_ref r "fold" ->
+            Some (str "_rocq_map_fold(" ++ pp_expr state env fn ++ str ", " ++
+                  pp_expr state env mapping ++ str ", " ++ pp_expr state env initial ++ str ")")
+        | _ -> None
+      in
+      let pp_set_app kind r =
+        match all_args with
+        | [] when is_positive_set_ref r "empty" || is_string_set_ref r "empty" ->
+            Some (str "frozenset()")
+        | [key; values] when is_positive_set_ref r "add" || is_string_set_ref r "add" ->
+            Some (str "_rocq_set_add(" ++ collection_key kind key ++ str ", " ++
+                  pp_expr state env values ++ str ")")
+        | [key; values] when is_positive_set_ref r "remove" || is_string_set_ref r "remove" ->
+            Some (str "_rocq_set_remove(" ++ collection_key kind key ++ str ", " ++
+                  pp_expr state env values ++ str ")")
+        | [key; values] when is_positive_set_ref r "mem" || is_string_set_ref r "mem" ->
+            Some (collection_key kind key ++ str " in " ++ pp_expr state env values)
+        | [left; right] when is_positive_set_ref r "union" || is_string_set_ref r "union" ->
+            Some (str "(" ++ pp_expr state env left ++ str " | " ++ pp_expr state env right ++ str ")")
+        | [left; right] when is_positive_set_ref r "inter" || is_string_set_ref r "inter" ->
+            Some (str "(" ++ pp_expr state env left ++ str " & " ++ pp_expr state env right ++ str ")")
+        | [left; right] when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
+            Some (str "(" ++ pp_expr state env left ++ str " - " ++ pp_expr state env right ++ str ")")
+        | [values] when is_positive_set_ref r "cardinal" || is_string_set_ref r "cardinal" ->
+            Some (str "len(" ++ pp_expr state env values ++ str ")")
+        | [values] when is_positive_set_ref r "elements" || is_string_set_ref r "elements" ->
+            Some (str "_rocq_set_elements(" ++ pp_expr state env values ++ str ")")
+        | [fn; values; initial] when is_positive_set_ref r "fold" || is_string_set_ref r "fold" ->
+            Some (str "_rocq_set_fold(" ++ pp_expr state env fn ++ str ", " ++
+                  pp_expr state env values ++ str ", " ++ pp_expr state env initial ++ str ")")
+        | _ -> None
+      in
+      let pp_collection_expr =
+        match head with
+        | MLglob r when is_positive_map_ref r "empty" || is_positive_map_ref r "add" ||
+                        is_positive_map_ref r "remove" || is_positive_map_ref r "find" ||
+                        is_positive_map_ref r "mem" || is_positive_map_ref r "cardinal" ||
+                        is_positive_map_ref r "elements" || is_positive_map_ref r "fold" ->
+            pp_map_app `Positive r
+        | MLglob r when is_string_map_ref r "empty" || is_string_map_ref r "add" ||
+                        is_string_map_ref r "remove" || is_string_map_ref r "find" ||
+                        is_string_map_ref r "mem" || is_string_map_ref r "cardinal" ||
+                        is_string_map_ref r "elements" || is_string_map_ref r "fold" ->
+            pp_map_app `String r
+        | MLglob r when is_positive_set_ref r "empty" || is_positive_set_ref r "add" ||
+                        is_positive_set_ref r "remove" || is_positive_set_ref r "mem" ||
+                        is_positive_set_ref r "union" || is_positive_set_ref r "inter" ||
+                        is_positive_set_ref r "diff" || is_positive_set_ref r "cardinal" ||
+                        is_positive_set_ref r "elements" || is_positive_set_ref r "fold" ->
+            pp_set_app `Positive r
+        | MLglob r when is_string_set_ref r "empty" || is_string_set_ref r "add" ||
+                        is_string_set_ref r "remove" || is_string_set_ref r "mem" ||
+                        is_string_set_ref r "union" || is_string_set_ref r "inter" ||
+                        is_string_set_ref r "diff" || is_string_set_ref r "cardinal" ||
+                        is_string_set_ref r "elements" || is_string_set_ref r "fold" ->
+            pp_set_app `String r
+        | _ -> None
+      in
       let pp_option_bind_expr opt_expr fn_expr =
         str "(lambda __option_value: None if __option_value is None else (" ++
         pp_expr state env fn_expr ++ str ")(__option_value))(" ++
@@ -937,6 +1330,9 @@ let rec pp_expr state env = function
         | _ ->
             None
       in
+      (match pp_collection_expr with
+       | Some pp -> pp
+       | None ->
       (match pp_monad_expr with
        | Some pp -> pp
        | None ->
@@ -951,7 +1347,7 @@ let rec pp_expr state env = function
            else
              pp_head ++ str "(" ++
              prlist_with_sep (fun () -> str ", ") (pp_expr state env) all_args ++
-             str ")")
+             str ")"))
   | MLlam _ as a ->
       (* Collect consecutive lambdas: MLlam(x, MLlam(y, body)) → lambda x, y: body.
          [collect_lams] returns ids innermost-first; reverse for Python source order. *)
@@ -979,16 +1375,44 @@ let rec pp_expr state env = function
       str "(" ++
       prlist_with_sep (fun () -> str ", ") (pp_expr state env) l ++
       str ")"
+  | MLcons (_, r, []) when is_std_option_none_ref r ->
+      str "None"
+  | MLcons (_, r, [value]) when is_std_option_some_ref r ->
+      pp_expr state env value
+  | MLcons (_, r, []) when is_std_list_nil_ref r ->
+      str "[]"
+  | MLcons (_, r, [head; tail]) when is_std_list_cons_ref r ->
+      str "[" ++ pp_expr state env head ++ str "] + " ++
+      pp_expr state env tail
+  | MLcons (_, r, [left; right]) when is_std_prod_pair_ref r ->
+      str "(" ++ pp_expr state env left ++ str ", " ++
+      pp_expr state env right ++ str ")"
+  | MLcons (_, r, []) when is_std_bool_true_ref r ->
+      str "True"
+  | MLcons (_, r, []) when is_std_bool_false_ref r ->
+      str "False"
   | MLcons (_, r, []) when is_std_nat_zero_ref r ->
       str "0"
   | MLcons (_, r, [n]) when is_std_nat_succ_ref r ->
-      str "(" ++ pp_expr state env n ++ str " + 1)"
+      let pp_n = pp_expr state env n in
+      if needs_numeric_constructor_parens n then
+        str "(" ++ pp_n ++ str ") + 1"
+      else
+        pp_n ++ str " + 1"
   | MLcons (_, r, []) when is_std_positive_xh_ref r ->
       str "1"
   | MLcons (_, r, [p]) when is_std_positive_xo_ref r ->
-      str "(" ++ pp_expr state env p ++ str " * 2)"
+      let pp_p = pp_expr state env p in
+      if needs_numeric_constructor_parens p then
+        str "(" ++ pp_p ++ str ") * 2"
+      else
+        pp_p ++ str " * 2"
   | MLcons (_, r, [p]) when is_std_positive_xi_ref r ->
-      str "(" ++ pp_expr state env p ++ str " * 2 + 1)"
+      let pp_p = pp_expr state env p in
+      if needs_numeric_constructor_parens p then
+        str "(" ++ pp_p ++ str ") * 2 + 1"
+      else
+        pp_p ++ str " * 2 + 1"
   | MLcons (_, r, []) when is_std_N_zero_ref r ->
       str "0"
   | MLcons (_, r, [p]) when is_std_N_pos_ref r ->
@@ -998,7 +1422,11 @@ let rec pp_expr state env = function
   | MLcons (_, r, [p]) when is_std_Z_pos_ref r ->
       pp_expr state env p
   | MLcons (_, r, [p]) when is_std_Z_neg_ref r ->
-      str "(-" ++ pp_expr state env p ++ str ")"
+      let pp_p = pp_expr state env p in
+      if needs_numeric_constructor_parens p then
+        str "-(" ++ pp_p ++ str ")"
+      else
+        str "-" ++ pp_p
   | MLcons (_, r, [num; den]) when is_std_Q_make_ref r ->
       str "Fraction(" ++ pp_expr state env num ++ str ", " ++
       pp_expr state env den ++ str ")"
@@ -1096,6 +1524,14 @@ let rec pp_expr state env = function
         pp_std_Z_match_expr state env scrutinee branches
       else if is_std_Q_type ty then
         pp_std_Q_match_expr state env scrutinee branches
+      else if is_std_option_type ty then
+        pp_std_option_match_expr state env scrutinee branches
+      else if is_std_list_type ty then
+        pp_std_list_match_expr state env scrutinee branches
+      else if is_std_prod_type ty then
+        pp_std_prod_match_expr state env scrutinee branches
+      else if is_std_bool_type ty then
+        pp_std_bool_match_expr state env scrutinee branches
       else if is_bool then
         let (_, _, body_true)  = branches.(0) in
         let (_, _, body_false) = branches.(1) in
@@ -1218,11 +1654,11 @@ and pp_branch_lambda state env ids body =
   let ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
   let params = List.rev ids' in
   match visible_params params with
-  | [] -> str "(lambda: " ++ pp_expr state env' body ++ str ")"
+  | [] -> str "lambda: " ++ pp_expr state env' body
   | params ->
-      str "(lambda " ++
+      str "lambda " ++
       prlist_with_sep (fun () -> str ", ") pp_param params ++
-      str ": " ++ pp_expr state env' body ++ str ")"
+      str ": " ++ pp_expr state env' body
 
 and pp_std_string_match_expr state env scrutinee branches =
   let empty_arm = ref None in
@@ -1504,6 +1940,145 @@ and pp_std_Q_match_expr state env scrutinee branches =
            str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
        | None -> pp_impossible_expr ())
 
+and pp_std_bool_match_expr state env scrutinee branches =
+  let true_arm = ref None in
+  let false_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_bool_true_ref r ->
+        set_once true_arm (ids, body)
+    | Pcons (r, []) when is_std_bool_false_ref r ->
+        set_once false_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported bool pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  let fallback () =
+    match !wildcard_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> pp_impossible_expr ()
+  in
+  let pp_true =
+    match !true_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> fallback ()
+  in
+  let pp_false =
+    match !false_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> fallback ()
+  in
+  pp_true ++ str " if " ++ pp_expr state env scrutinee ++ str " else " ++ pp_false
+
+and pp_std_option_match_expr state env scrutinee branches =
+  let none_arm = ref None in
+  let some_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_option_none_ref r ->
+        set_once none_arm (ids, body)
+    | Pcons (r, _) when is_std_option_some_ref r ->
+        set_once some_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported option pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  let fallback () =
+    match !wildcard_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> pp_impossible_expr ()
+  in
+  let pp_none =
+    match !none_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> fallback ()
+  in
+  let pp_some =
+    match !some_arm with
+    | Some (ids, body) ->
+        str "(" ++ pp_branch_lambda state env ids body ++ str ")(__option)"
+    | None -> fallback ()
+  in
+  str "(lambda __option: " ++ pp_none ++ str " if __option is None else " ++
+  pp_some ++ str ")(" ++ pp_expr state env scrutinee ++ str ")"
+
+and pp_std_list_match_expr state env scrutinee branches =
+  let nil_arm = ref None in
+  let cons_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_list_nil_ref r ->
+        set_once nil_arm (ids, body)
+    | Pcons (r, _) when is_std_list_cons_ref r ->
+        set_once cons_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported list pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  let fallback () =
+    match !wildcard_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> pp_impossible_expr ()
+  in
+  let pp_nil =
+    match !nil_arm with
+    | Some (ids, body) -> str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+    | None -> fallback ()
+  in
+  let pp_cons =
+    match !cons_arm with
+    | Some (ids, body) ->
+        str "(" ++ pp_branch_lambda state env ids body ++
+        str ")(__list[0], __list[1:])"
+    | None -> fallback ()
+  in
+  str "(lambda __list: " ++ pp_nil ++ str " if __list == [] else " ++
+  pp_cons ++ str ")(" ++ pp_expr state env scrutinee ++ str ")"
+
+and pp_std_prod_match_expr state env scrutinee branches =
+  let pair_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, _) when is_std_prod_pair_ref r ->
+        set_once pair_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported prod pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  match !pair_arm with
+  | Some (ids, body) ->
+      str "(lambda __pair: (" ++ pp_branch_lambda state env ids body ++
+      str ")(__pair[0], __pair[1]))(" ++ pp_expr state env scrutinee ++ str ")"
+  | None ->
+      (match !wildcard_arm with
+       | Some (ids, body) ->
+           str "(" ++ pp_branch_lambda state env ids body ++ str ")()"
+       | None -> pp_impossible_expr ())
+
 (*s Custom-match expression emitter.
     When [Extract Inductive T => "t" [conA conB] "fn"] supplies a match
     function, case analysis on [T] cannot use Python [match]/[case] (the
@@ -1579,9 +2154,18 @@ let rec pp_return_body state env indent = function
           let (_, p1, _) = branches.(1) in
           is_bool_patt p0 "True" && is_bool_patt p1 "False" )
       in
-      if is_std_string_type ty || is_std_ascii_type ty ||
-         is_std_nat_type ty || is_std_positive_type ty ||
-         is_std_N_type ty || is_std_Z_type ty || is_std_Q_type ty then
+      if is_std_string_type ty then
+        pp_std_string_return_body state env indent scrutinee branches
+      else if is_std_N_type ty then
+        pp_std_N_return_body state env indent scrutinee branches
+      else if is_std_list_type ty then
+        pp_std_list_return_body state env indent scrutinee branches
+      else if is_std_prod_type ty then
+        pp_std_prod_return_body state env indent scrutinee branches
+      else if is_std_ascii_type ty ||
+              is_std_nat_type ty || is_std_positive_type ty ||
+              is_std_Z_type ty || is_std_Q_type ty ||
+              is_std_bool_type ty || is_std_option_type ty then
         str "return " ++ pp_expr state env expr
       else if is_bool then
         (* Ternary — valid expression; a single [return] suffices. *)
@@ -1649,7 +2233,7 @@ let rec pp_return_body state env indent = function
           fnl () ++ str def_pfx ++ pp_pyid bname ++
           str " = " ++ pp_pyid selected
       in
-      pp_defs ++ pp_alias ++ fnl () ++ str def_pfx ++
+      pp_defs ++ pp_alias ++ fnl () ++ fnl () ++ str def_pfx ++
       pp_return_body state env' indent a2 )
   | MLapp (f, args) -> (
       match collect_app f args with
@@ -1663,7 +2247,7 @@ let rec pp_return_body state env indent = function
               let visible_args =
                 List.filter (fun a -> not (is_erased_arg a)) all_args
               in
-              pp_defs ++ fnl () ++ str def_pfx ++ str "return " ++
+              pp_defs ++ fnl () ++ fnl () ++ str def_pfx ++ str "return " ++
               pp_pyid selected ++ str "(" ++
               prlist_with_sep (fun () -> str ", ") (pp_expr state env) visible_args ++
               str ")" ) )
@@ -1673,9 +2257,192 @@ let rec pp_return_body state env indent = function
          trying to put [def] after [return]. *)
       let def_pfx = String.make indent ' ' in
       let pp_defs, selected = pp_fix_statement state env indent i ids defs in
-      pp_defs ++ fnl () ++ str def_pfx ++ str "return " ++ pp_pyid selected
+      pp_defs ++ fnl () ++ fnl () ++ str def_pfx ++ str "return " ++ pp_pyid selected
   | expr ->
       str "return " ++ pp_expr state env expr
+
+and pp_return_arm state env indent ids values body =
+  let ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
+  let params = List.rev ids' in
+  let pfx = String.make indent ' ' in
+  let rec bindings params values =
+    match params, values with
+    | [], _ | _, [] -> []
+    | param :: params, value :: values ->
+        let rest = bindings params values in
+        if Id.equal param dummy_name then rest
+        else (pp_pyid param ++ str " = " ++ value) :: rest
+  in
+  match bindings params values with
+  | [] ->
+      pp_return_body state env' indent body
+  | lines ->
+      prlist_with_sep (fun () -> fnl () ++ str pfx) (fun line -> line) lines ++
+      fnl () ++ str pfx ++ pp_return_body state env' indent body
+
+and pp_std_list_return_body state env indent scrutinee branches =
+  let nil_arm = ref None in
+  let cons_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_list_nil_ref r ->
+        set_once nil_arm (ids, body)
+    | Pcons (r, _) when is_std_list_cons_ref r ->
+        set_once cons_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported list pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  let pfx = String.make indent ' ' in
+  let body_pfx = String.make (indent + 4) ' ' in
+  let fallback () =
+    match !wildcard_arm with
+    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
+    | None -> pp_impossible_stmt ()
+  in
+  let pp_nil =
+    match !nil_arm with
+    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
+    | None -> fallback ()
+  in
+  let pp_cons =
+    match !cons_arm with
+    | Some (ids, body) ->
+        pp_return_arm state env indent ids
+          [str "__list[0]"; str "__list[1:]"]
+          body
+    | None ->
+        (match !wildcard_arm with
+         | Some (ids, body) -> pp_return_arm state env indent ids [] body
+         | None -> pp_impossible_stmt ())
+  in
+  str "__list = " ++ pp_expr state env scrutinee ++ fnl () ++
+  str pfx ++ str "if __list == []:" ++ fnl () ++
+  str body_pfx ++ pp_nil ++ fnl () ++
+  str pfx ++ pp_cons
+
+and pp_std_string_return_body state env indent scrutinee branches =
+  let empty_arm = ref None in
+  let cons_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_string_empty_ref r ->
+        set_once empty_arm (ids, body)
+    | Pcons (r, _) when is_std_string_cons_ref r ->
+        set_once cons_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported string pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  let pfx = String.make indent ' ' in
+  let body_pfx = String.make (indent + 4) ' ' in
+  let fallback () =
+    match !wildcard_arm with
+    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
+    | None -> pp_impossible_stmt ()
+  in
+  let pp_empty =
+    match !empty_arm with
+    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
+    | None -> fallback ()
+  in
+  let pp_cons =
+    match !cons_arm with
+    | Some (ids, body) ->
+        pp_return_arm state env indent ids
+          [str "__pair[0]"; str "__pair[1]"]
+          body
+    | None ->
+        (match !wildcard_arm with
+         | Some (ids, body) -> pp_return_arm state env indent ids [] body
+         | None -> pp_impossible_stmt ())
+  in
+  str "__s = " ++ pp_expr state env scrutinee ++ fnl () ++
+  str pfx ++ str "if __s == \"\":" ++ fnl () ++
+  str body_pfx ++ pp_empty ++ fnl () ++
+  str pfx ++ str "__pair = _rocq_string_uncons(__s)" ++ fnl () ++
+  str pfx ++ pp_cons
+
+and pp_std_N_return_body state env indent scrutinee branches =
+  let zero_arm = ref None in
+  let pos_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_N_zero_ref r ->
+        set_once zero_arm (ids, body)
+    | Pcons (r, _) when is_std_N_pos_ref r ->
+        set_once pos_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported N pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  let pfx = String.make indent ' ' in
+  let body_pfx = String.make (indent + 4) ' ' in
+  let fallback branch_indent =
+    match !wildcard_arm with
+    | Some (ids, body) -> pp_return_arm state env branch_indent ids [] body
+    | None -> pp_impossible_stmt ()
+  in
+  let pp_zero =
+    match !zero_arm with
+    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
+    | None -> fallback (indent + 4)
+  in
+  let pp_pos =
+    match !pos_arm with
+    | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [str "__n"] body
+    | None -> fallback (indent + 4)
+  in
+  str "__n = " ++ pp_expr state env scrutinee ++ fnl () ++
+  str pfx ++ str "if __n == 0:" ++ fnl () ++
+  str body_pfx ++ pp_zero ++ fnl () ++
+  str pfx ++ str "if __n > 0:" ++ fnl () ++
+  str body_pfx ++ pp_pos ++ fnl () ++
+  str pfx ++ str "return _rocq_numeric_domain_error(\"N\", __n)"
+
+and pp_std_prod_return_body state env indent scrutinee branches =
+  let pair_arm = ref None in
+  let wildcard_arm = ref None in
+  let set_once slot value =
+    match !slot with None -> slot := Some value | Some _ -> ()
+  in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, _) when is_std_prod_pair_ref r ->
+        set_once pair_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported prod pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  match !pair_arm with
+  | Some (ids, body) ->
+      str "__pair = " ++ pp_expr state env scrutinee ++ fnl () ++
+      str (String.make indent ' ') ++
+      pp_return_arm state env indent ids [str "__pair[0]"; str "__pair[1]"] body
+  | None ->
+      (match !wildcard_arm with
+       | Some (ids, body) -> pp_return_arm state env indent ids [] body
+       | None -> pp_impossible_stmt ())
 
 and pp_fix_statement state env indent i ids defs =
   let n = Array.length ids in
@@ -1735,7 +2502,7 @@ let pp_typevar_decls ids =
       (fun i ->
          let tv = typevar_name i in
          str tv ++ str " = TypeVar(\"" ++ str tv ++ str "\")" ++ fnl ())
-      ids ++ fnl ()
+      ids ++ fnl () ++ fnl ()
 
 type protocol_spec = {
   protocol_name : string;
@@ -1773,12 +2540,24 @@ let rec pp_type_with state pp_tvar = function
          emitted by [pp_ind_decl] (PEP 8 PascalCase convention). *)
       let name =
         if is_std_real_type_ref r then extraction_diagnostic_error "PYEX041"
+        else if is_std_bool_type_ref r then "bool"
         else if is_std_string_type_ref r then "str"
         else if is_prim_string_type_ref r then "bytes"
         else if is_std_ascii_type_ref r || is_std_byte_type_ref r then "int"
         else if is_std_nat_type_ref r || is_std_positive_type_ref r ||
                 is_std_N_type_ref r || is_std_Z_type_ref r then "int"
         else if is_std_Q_type_ref r then "Fraction"
+        else if is_std_option_type_ref r then
+          (match args with
+           | [arg] ->
+               Pp.string_of_ppcmds (pp_type_with state pp_tvar arg) ^ " | None"
+           | _ -> "object | None")
+        else if is_std_list_type_ref r then "list"
+        else if is_std_prod_type_ref r then "tuple"
+        else if is_positive_map_type_ref r then "dict[int, object]"
+        else if is_positive_set_type_ref r then "frozenset[int]"
+        else if is_string_map_type_ref r then "dict[str, object]"
+        else if is_string_set_type_ref r then "frozenset[str]"
         else if is_custom r then find_custom r
         else
           let n = pp_global state Term r in
@@ -1787,7 +2566,27 @@ let rec pp_type_with state pp_tvar = function
           | IndRef _ -> capitalize_first n
           | _        -> n
       in
-      if String.equal "" name then str "object"
+      if String.contains name '|' then str name
+      else if String.equal "" name then str "object"
+      else if is_std_list_type_ref r then
+        (match args with
+         | [arg] -> str "list[" ++ pp_type_with state pp_tvar arg ++ str "]"
+         | _ -> str "list[object]")
+      else if is_std_prod_type_ref r then
+        (match args with
+         | [left; right] ->
+             str "tuple[" ++ pp_type_with state pp_tvar left ++ str ", " ++
+             pp_type_with state pp_tvar right ++ str "]"
+         | _ -> str "tuple[object, object]")
+      else if is_positive_map_type_ref r then
+        (match args with
+         | [arg] -> str "dict[int, " ++ pp_type_with state pp_tvar arg ++ str "]"
+         | _ -> str "dict[int, object]")
+      else if is_string_map_type_ref r then
+        (match args with
+         | [arg] -> str "dict[str, " ++ pp_type_with state pp_tvar arg ++ str "]"
+         | _ -> str "dict[str, object]")
+      else if is_positive_set_type_ref r || is_string_set_type_ref r then str name
       else if List.is_empty args then str name
       else
         str name ++ str "[" ++
@@ -1865,7 +2664,7 @@ let signature_data state name typ =
         (fun i ->
            let tv = local_tvar_name (i + 1) in
            str tv ++ str " = TypeVar(\"" ++ str tv ++ str "\")" ++ fnl ())
-        tvars ++ fnl ()
+        tvars ++ fnl () ++ fnl ()
   in
   let args, ret = type_decomp typ in
   let protocols = ref [] in
@@ -2139,7 +2938,7 @@ let pp_ind_decl state (ind : ml_ind) =
           in
           (* Constructor dataclasses, each inheriting from the base class. *)
           let pp_cons =
-            prlist_with_sep (fun () -> fnl ())
+            prlist_with_sep (fun () -> fnl () ++ fnl ())
               (fun j ->
                  let base =
                    if List.is_empty tvars then tname
@@ -2162,12 +2961,12 @@ let pp_ind_decl state (ind : ml_ind) =
             else
               mt ()
           in
-          pp_base ++ fnl () ++
+          pp_base ++ fnl () ++ fnl () ++
           pp_cons ++ fnl () ++
           (if List.is_empty tvars then fnl () ++ pp_union else mt ())
       in
       pp_typevars ++
-      prlist_with_sep (fun () -> fnl ())
+      prlist_with_sep (fun () -> fnl () ++ fnl ())
         pp_packet
         (Array.to_list ind.ind_packets)
   | Coinductive ->
@@ -2211,7 +3010,7 @@ let pp_ind_decl state (ind : ml_ind) =
           in
           let step_type_expr = String.concat " | " step_members in
           let pp_cons =
-            prlist_with_sep (fun () -> fnl ())
+            prlist_with_sep (fun () -> fnl () ++ fnl ())
               (fun j ->
                  pp_one_cons state ~typevar_shift:2 ~pp_tvar:local_tvar_name
                    p None ctor_base_opt j)
@@ -2221,29 +3020,30 @@ let pp_ind_decl state (ind : ml_ind) =
           pp_cons ++ fnl () ++ fnl () ++
           pp_coinductive_wrapper state p step_type_expr local_tvar_name local_tvars
       in
-      prlist_with_sep (fun () -> fnl ())
+      prlist_with_sep (fun () -> fnl () ++ fnl ())
         pp_packet
         (Array.to_list ind.ind_packets)
 
 (*s Declaration printer. *)
 
 let pp_decl state = function
-  | Dind  ind   -> pp_ind_decl state ind ++ fnl ()
+  | Dind  ind   -> pp_ind_decl state ind
   | Dtype (r, _, _) when is_std_real_type_ref r ->
       extraction_diagnostic_error "PYEX041"
   | Dtype (r, _, _) when is_custom r || is_std_remapped_type_ref r -> mt ()
-  | Dtype _     -> diagnostic_comment "PYEX003"
+  | Dtype _     -> fnl () ++ fnl () ++ diagnostic_comment "PYEX003"
   | Dterm (r, a, typ) ->
       if is_prop_type typ then mt ()
       else if is_monad_marker_ref r then mt ()
       else if is_inline_custom r then mt ()
+      else if is_std_collection_term_ref r then mt ()
       else if is_custom r then
         str (pp_global state Term r) ++ str " = " ++
         str (find_custom r) ++ fnl ()
       else
         let () = validate_prop_discipline_decl (Dterm (r, a, typ)) in
         let env = empty_env state () in
-        pp_term_decl state env (pp_global state Term r) a typ
+        fnl () ++ fnl () ++ pp_term_decl state env (pp_global state Term r) a typ
   | Dfix (rv, defs, typs) ->
       (* Each function in the fix block is named globally; the bodies use
          [MLglob] references for mutual recursion, so [empty_env] suffices. *)
@@ -2252,6 +3052,7 @@ let pp_decl state = function
         if is_prop_type typs.(i) then mt ()
         else if is_monad_marker_ref rv.(i) then mt ()
         else if is_inline_custom rv.(i) then mt ()
+        else if is_std_collection_term_ref rv.(i) then mt ()
         else if is_custom rv.(i) then
           str (pp_global state Term rv.(i)) ++ str " = " ++
           str (find_custom rv.(i)) ++ fnl ()
@@ -2260,6 +3061,7 @@ let pp_decl state = function
             validate_prop_discipline_decl
               (Dterm (rv.(i), defs.(i), typs.(i)))
           in
+          fnl () ++ fnl () ++
           pp_term_decl state env (pp_global state Term rv.(i)) defs.(i) typs.(i)
       in
       prlist_with_sep mt pp_one (List.init (Array.length rv) (fun i -> i))
@@ -2287,14 +3089,16 @@ let rec module_type_annotation state = function
 
 let decl_export_names state = function
   | Dterm (r, _, typ) ->
-      if is_prop_type typ || is_inline_custom r || is_monad_marker_ref r then []
+      if is_prop_type typ || is_inline_custom r || is_monad_marker_ref r ||
+         is_std_collection_term_ref r then []
       else [pp_global state Term r]
   | Dfix (rv, _, typs) ->
       List.init (Array.length rv) Fun.id
       |> List.filter (fun i ->
            not (is_prop_type typs.(i)) &&
            not (is_monad_marker_ref rv.(i)) &&
-           not (is_inline_custom rv.(i)))
+           not (is_inline_custom rv.(i)) &&
+           not (is_std_collection_term_ref rv.(i)))
       |> List.map (fun i -> pp_global state Term rv.(i))
   | Dtype (r, _, _) ->
       if is_custom r || is_std_remapped_type_ref r then [] else [pp_global state Type r]
@@ -2444,8 +3248,10 @@ and pp_module_structure_elem_into state indent target = function
       pp_decl_exports target (decl_export_names state d) indent
   | (l, SEmodule m) ->
       let name = module_binding_name state l in
-      pp_named_module_binding state indent name m ++
-      str (indent_string indent) ++ str target ++ str "." ++ str name ++ str " = " ++ str name ++ fnl ()
+      if is_std_collection_module_name name then mt ()
+      else
+        pp_named_module_binding state indent name m ++
+        str (indent_string indent) ++ str target ++ str "." ++ str name ++ str " = " ++ str name ++ fnl ()
   | (l, SEmodtype mt) ->
       let name = module_binding_name state l in
       indent_pp indent (pp_named_module_type_decl state name mt) ++
@@ -2485,7 +3291,8 @@ let pp_structure_elem state = function
       pp_decl state d
   | (l, SEmodule m) ->
       let name = module_binding_name state l in
-      pp_named_module_binding state 0 name m ++ fnl ()
+      if is_std_collection_module_name name then mt ()
+      else pp_named_module_binding state 0 name m ++ fnl ()
   | (l, SEmodtype mt) ->
       let name = module_binding_name state l in
       pp_named_module_type_decl state name mt
