@@ -41,25 +41,41 @@ let universe_trace_comment gr =
         (str "Erased universe variables: " ++
          str (String.concat ", " names))
 
-let json_escape s =
+let csv_escape s =
   let buf = Buffer.create (String.length s + 8) in
+  let needs_quotes = ref false in
   String.iter
     (function
-      | '"' -> Buffer.add_string buf "\\\""
-      | '\\' -> Buffer.add_string buf "\\\\"
-      | '\b' -> Buffer.add_string buf "\\b"
-      | '\012' -> Buffer.add_string buf "\\f"
-      | '\n' -> Buffer.add_string buf "\\n"
-      | '\r' -> Buffer.add_string buf "\\r"
-      | '\t' -> Buffer.add_string buf "\\t"
-      | c ->
-          let code = Char.code c in
-          if code < 0x20 then Buffer.add_string buf (Printf.sprintf "\\u%04x" code)
-          else Buffer.add_char buf c)
+      | '"' ->
+          needs_quotes := true;
+          Buffer.add_string buf "\"\""
+      | ',' | '\n' | '\r' as c ->
+          needs_quotes := true;
+          Buffer.add_char buf c
+      | c -> Buffer.add_char buf c)
     s;
-  Buffer.contents buf
+  let escaped = Buffer.contents buf in
+  if !needs_quotes then "\"" ^ escaped ^ "\"" else escaped
 
-let json_string s = "\"" ^ json_escape s ^ "\""
+let pymap_header =
+  "version,python_file,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol\n"
+
+let pymap_row ~python_file ~symbol ~python_start_line ~python_start_col
+    ~python_end_line ~python_end_col span =
+  Printf.sprintf "%s,%s,%d,%d,%d,%d,%s,%d,%d,%d,%d,%s,%s\n"
+    "1"
+    (csv_escape (Filename.basename python_file))
+    python_start_line
+    python_start_col
+    python_end_line
+    python_end_col
+    (csv_escape span.source_file)
+    span.source_start_line
+    span.source_start_col
+    span.source_end_line
+    span.source_end_col
+    "extraction"
+    (csv_escape symbol)
 
 let source_file_of_loc loc =
   match loc.Loc.fname with
@@ -225,29 +241,16 @@ let write_pymap ~python_file ~span ~source =
   let (python_start_line, python_start_col, python_end_line, python_end_col) =
     python_symbol_span source symbol
   in
-  let entries =
-    if line_count = 0 then "[]"
+  let rows =
+    if line_count = 0 then ""
     else
-      Printf.sprintf
-        "[\n    {\n      \"python_start_line\": %d,\n      \"python_start_col\": %d,\n      \"python_end_line\": %d,\n      \"python_end_col\": %d,\n      \"source_file\": %s,\n      \"source_start_line\": %d,\n      \"source_start_col\": %d,\n      \"source_end_line\": %d,\n      \"source_end_col\": %d,\n      \"kind\": \"extraction\",\n      \"symbol\": %s\n    }\n  ]"
-        python_start_line
-        python_start_col
-        python_end_line
-        python_end_col
-        (json_string span.source_file)
-        span.source_start_line
-        span.source_start_col
-        span.source_end_line
-        span.source_end_col
-        (json_string symbol)
+      pymap_row ~python_file ~symbol ~python_start_line ~python_start_col
+        ~python_end_line ~python_end_col span
   in
   let map_file = Filename.remove_extension python_file ^ ".pymap" in
   let oc = open_out map_file in
-  output_string oc
-    (Printf.sprintf
-       "{\n  \"version\": 1,\n  \"python_file\": %s,\n  \"entries\": %s\n}\n"
-       (json_string (Filename.basename python_file))
-       entries);
+  output_string oc pymap_header;
+  output_string oc rows;
   close_out oc
 
 let write_python_with_source_map ~fname ~span pp =
@@ -258,33 +261,16 @@ let write_python_with_source_map ~fname ~span pp =
   write_pymap ~python_file:fname ~span ~source
 
 let write_pymap_entries ~python_file ~source entries =
-  let entry_json (name, span) =
+  let entry_row (name, span) =
     let (start_line, start_col, end_line, end_col) = python_symbol_span source name in
-    Printf.sprintf
-      "    {\n      \"python_start_line\": %d,\n      \"python_start_col\": %d,\n      \"python_end_line\": %d,\n      \"python_end_col\": %d,\n      \"source_file\": %s,\n      \"source_start_line\": %d,\n      \"source_start_col\": %d,\n      \"source_end_line\": %d,\n      \"source_end_col\": %d,\n      \"kind\": \"extraction\",\n      \"symbol\": %s\n    }"
-      start_line
-      start_col
-      end_line
-      end_col
-      (json_string span.source_file)
-      span.source_start_line
-      span.source_start_col
-      span.source_end_line
-      span.source_end_col
-      (json_string name)
-  in
-  let entries_json =
-    match entries with
-    | [] -> "[]"
-    | _ -> "[\n" ^ String.concat ",\n" (List.map entry_json entries) ^ "\n  ]"
+    pymap_row ~python_file ~symbol:name ~python_start_line:start_line
+      ~python_start_col:start_col ~python_end_line:end_line
+      ~python_end_col:end_col span
   in
   let map_file = Filename.remove_extension python_file ^ ".pymap" in
   let oc = open_out map_file in
-  output_string oc
-    (Printf.sprintf
-       "{\n  \"version\": 1,\n  \"python_file\": %s,\n  \"entries\": %s\n}\n"
-       (json_string (Filename.basename python_file))
-       entries_json);
+  output_string oc pymap_header;
+  List.iter (fun entry -> output_string oc (entry_row entry)) entries;
   close_out oc
 
 let write_python_group_with_source_map ~fname ~fallback_span:_ ~entries pp =

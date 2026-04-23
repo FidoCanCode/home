@@ -1,19 +1,2 @@
-{
-  "version": 1,
-  "python_file": "concurrency_primitives.py",
-  "entries": [
-    {
-      "python_start_line": 1,
-      "python_start_col": 0,
-      "python_end_line": 1,
-      "python_end_col": 0,
-      "source_file": "concurrency_primitives.v",
-      "source_start_line": 74,
-      "source_start_col": 11,
-      "source_end_line": 74,
-      "source_end_col": 28,
-      "kind": "extraction",
-      "symbol": "roundtrip_message"
-    }
-  ]
-}
+version,python_file,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol
+1,concurrency_primitives.py,1,0,1,0,concurrency_primitives.v,74,11,74,28,extraction,roundtrip_message

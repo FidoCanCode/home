@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import IO, Any
 from urllib.parse import unquote, urlparse
 
+from fido.rocq_pymap import PyMap, PyMapEntry, PyMapError, UnsupportedPyMapVersion
+
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_']*")
 _KEYWORDS = frozenset(
     {
@@ -276,41 +278,45 @@ class RocqIndex:
 
     def _load_map(self, map_path: Path) -> None:
         try:
-            raw = json.loads(map_path.read_text())
-        except json.JSONDecodeError as exc:
-            self._diagnostics.append(
-                Diagnostic(f"bad source map {map_path.name}: {exc}")
-            )
-            return
-        if raw.get("version") != 1:
+            source_map = PyMap.load(map_path)
+        except UnsupportedPyMapVersion:
             self._diagnostics.append(
                 Diagnostic(f"unsupported source map version in {map_path.name}")
             )
             return
-        python_path = self._generated_dir / str(raw.get("python_file", ""))
+        except PyMapError as exc:
+            self._diagnostics.append(
+                Diagnostic(f"bad source map {map_path.name}: {exc}")
+            )
+            return
+        python_file = (
+            source_map.entries[0].python_file
+            if source_map.entries
+            else map_path.with_suffix(".py").name
+        )
+        python_path = self._generated_dir / python_file
         signatures = _python_signatures(python_path)
-        for entry in raw.get("entries", []):
-            if isinstance(entry, dict):
-                self._load_entry(map_path, python_path, signatures, entry)
+        for entry in source_map.entries:
+            self._load_entry(map_path, python_path, signatures, entry)
 
     def _load_entry(
         self,
         map_path: Path,
         python_path: Path,
         signatures: dict[str, tuple[str, Range]],
-        entry: dict[str, Any],
+        entry: PyMapEntry,
     ) -> None:
-        name = str(entry.get("symbol", ""))
+        name = entry.symbol
         if not name:
             return
-        source = self._source_path(str(entry.get("source_file", "")))
+        source = self._source_path(entry.source_file)
         if source is None:
             self._diagnostics.append(
                 Diagnostic(f"{map_path.name}: source file missing for {name}")
             )
             return
-        start_line = int(entry["source_start_line"]) - 1
-        start_col = int(entry["source_start_col"])
+        start_line = entry.source_start_line - 1
+        start_col = entry.source_start_col
         source_location = Location(
             source,
             Range(
@@ -923,20 +929,17 @@ def _python_signatures(path: Path) -> dict[str, tuple[str, Range]]:
     return signatures
 
 
-def _python_range_from_entry(entry: dict[str, Any], fallback: Range) -> Range:
-    try:
-        return Range(
-            Position(
-                max(0, int(entry["python_start_line"]) - 1),
-                max(0, int(entry["python_start_col"])),
-            ),
-            Position(
-                max(0, int(entry["python_end_line"]) - 1),
-                max(0, int(entry["python_end_col"])),
-            ),
-        )
-    except KeyError, TypeError, ValueError:
-        return fallback
+def _python_range_from_entry(entry: PyMapEntry, fallback: Range) -> Range:
+    return Range(
+        Position(
+            max(0, entry.python_start_line - 1),
+            max(0, entry.python_start_col),
+        ),
+        Position(
+            max(0, entry.python_end_line - 1),
+            max(0, entry.python_end_col),
+        ),
+    )
 
 
 def _signature_end_line(lines: list[str], start: int) -> int:

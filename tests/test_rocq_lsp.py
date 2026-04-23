@@ -435,49 +435,24 @@ def test_index_diagnostics_for_bad_maps_and_missing_declarations(
     generated.mkdir(parents=True)
     (models / "toy.v").write_text("Definition toy := 1.\nDefinition dupe := 2.\n")
     (generated / "bad.pymap").write_text("{")
-    (generated / "wrong.pymap").write_text(json.dumps({"version": 2}))
+    pymap_header = (
+        "version,python_file,python_start_line,python_start_col,python_end_line,"
+        "python_end_col,source_file,source_start_line,source_start_col,"
+        "source_end_line,source_end_col,kind,symbol\n"
+    )
+    (generated / "wrong.pymap").write_text(
+        pymap_header + "2,toy.py,1,0,1,0,toy.v,1,0,1,0,extraction,toy\n"
+    )
     py_path = generated / "toy.py"
     py_path.write_text("def dupe() -> int:\n    return 2\n")
     os.utime(py_path, (1, 1))
     (generated / "toy.pymap").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "python_file": "toy.py",
-                "entries": [
-                    {
-                        "symbol": "toy",
-                        "source_file": "toy.v",
-                        "source_start_line": 1,
-                        "source_start_col": 11,
-                    },
-                    {
-                        "symbol": "dupe",
-                        "source_file": "toy.v",
-                        "source_start_line": 2,
-                        "source_start_col": 11,
-                    },
-                    {
-                        "symbol": "dupe",
-                        "source_file": "toy.v",
-                        "source_start_line": 2,
-                        "source_start_col": 11,
-                    },
-                    {
-                        "source_file": "toy.v",
-                        "source_start_line": 1,
-                        "source_start_col": 0,
-                    },
-                    {
-                        "symbol": "missing_source",
-                        "source_file": "missing.v",
-                        "source_start_line": 1,
-                        "source_start_col": 0,
-                    },
-                    "ignored",
-                ],
-            }
-        )
+        pymap_header
+        + "1,toy.py,1,0,1,0,toy.v,1,11,1,0,extraction,toy\n"
+        + "1,toy.py,1,0,1,0,toy.v,2,11,2,0,extraction,dupe\n"
+        + "1,toy.py,1,0,1,0,toy.v,2,11,2,0,extraction,dupe\n"
+        + "1,toy.py,1,0,1,0,toy.v,1,0,1,0,extraction,\n"
+        + "1,toy.py,1,0,1,0,missing.v,1,0,1,0,extraction,missing_source\n"
     )
     index = RocqIndex(root)
 
