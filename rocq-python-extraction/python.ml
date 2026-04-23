@@ -567,6 +567,11 @@ let set_once slot value =
   | None -> slot := Some value
   | Some _ -> ()
 
+let pp_collection_key kind pp_key =
+  match kind with
+  | `Positive -> str "_rocq_positive_key(" ++ pp_key ++ str ")"
+  | `String -> str "_rocq_string_key(" ++ pp_key ++ str ")"
+
 (*s Built-in Stdlib remappings.
 
     These are deliberately backend-owned rather than expressed with local
@@ -1374,11 +1379,7 @@ let rec pp_expr state env expr =
       let (head, all_args) = collect args f in
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
       let collection_key kind key =
-        match kind with
-        | `Positive ->
-            str "_rocq_positive_key(" ++ pp_expr state env key ++ str ")"
-        | `String ->
-            str "_rocq_string_key(" ++ pp_expr state env key ++ str ")"
+        pp_collection_key kind (pp_expr state env key)
       in
       let pp_map_app kind r =
         match all_args with
@@ -1896,6 +1897,14 @@ and pp_branch_or_impossible_expr state env = function
   | Some (ids, body) -> pp_branch_thunk_expr state env ids body
   | None -> pp_impossible_expr ()
 
+and pp_branch_or_fallback_expr state env fallback = function
+  | Some (ids, body) -> pp_branch_thunk_expr state env ids body
+  | None -> fallback ()
+
+and pp_branch_pair_expr state env ids body pair_expr =
+  str "(lambda __pair: (" ++ pp_branch_lambda state env ids body ++
+  str ")(__pair[0], __pair[1]))(" ++ pair_expr ++ str ")"
+
 and pp_std_string_match_expr state env scrutinee branches =
   let empty_arm = ref None in
   let cons_arm = ref None in
@@ -1918,17 +1927,13 @@ and pp_std_string_match_expr state env scrutinee branches =
     pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_empty =
-    match !empty_arm with
-    | Some (ids, body) ->
-        pp_branch_thunk_expr state env ids body
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !empty_arm
   in
   let pp_cons =
     match !cons_arm with
     | Some (ids, body) ->
-        str "(lambda __pair: (" ++
-        pp_branch_lambda state env ids body ++
-        str ")(__pair[0], __pair[1]))(_rocq_string_uncons(__s))"
+        pp_branch_pair_expr state env ids body
+          (str "_rocq_string_uncons(__s)")
     | None -> fallback ()
   in
   str "(lambda __s: " ++ pp_empty ++ str " if __s == \"\" else " ++
@@ -1978,9 +1983,7 @@ and pp_std_nat_match_expr state env scrutinee branches =
     pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_zero =
-    match !zero_arm with
-    | Some (ids, body) -> pp_branch_thunk_expr state env ids body
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !zero_arm
   in
   let pp_succ =
     match !succ_arm with
@@ -2017,9 +2020,7 @@ and pp_std_positive_match_expr state env scrutinee branches =
     pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_xh =
-    match !xh_arm with
-    | Some (ids, body) -> pp_branch_thunk_expr state env ids body
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !xh_arm
   in
   let pp_xo =
     match !xo_arm with
@@ -2058,9 +2059,7 @@ and pp_std_N_match_expr state env scrutinee branches =
     pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_zero =
-    match !zero_arm with
-    | Some (ids, body) -> pp_branch_thunk_expr state env ids body
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !zero_arm
   in
   let pp_pos =
     match !pos_arm with
@@ -2094,9 +2093,7 @@ and pp_std_Z_match_expr state env scrutinee branches =
     pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_zero =
-    match !zero_arm with
-    | Some (ids, body) -> pp_branch_thunk_expr state env ids body
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !zero_arm
   in
   let pp_pos =
     match !pos_arm with
@@ -2154,14 +2151,10 @@ and pp_std_bool_match_expr state env scrutinee branches =
     pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_true =
-    match !true_arm with
-    | Some (ids, body) -> pp_branch_thunk_expr state env ids body
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !true_arm
   in
   let pp_false =
-    match !false_arm with
-    | Some (ids, body) -> pp_branch_thunk_expr state env ids body
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !false_arm
   in
   pp_true ++ str " if " ++ pp_expr state env scrutinee ++ str " else " ++ pp_false
 
@@ -2185,9 +2178,7 @@ and pp_std_option_match_expr state env scrutinee branches =
     pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_none =
-    match !none_arm with
-    | Some (ids, body) -> pp_branch_thunk_expr state env ids body
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !none_arm
   in
   let pp_some =
     match !some_arm with
@@ -2218,9 +2209,7 @@ and pp_std_list_match_expr state env scrutinee branches =
     pp_branch_or_impossible_expr state env !wildcard_arm
   in
   let pp_nil =
-    match !nil_arm with
-    | Some (ids, body) -> pp_branch_thunk_expr state env ids body
-    | None -> fallback ()
+    pp_branch_or_fallback_expr state env fallback !nil_arm
   in
   let pp_cons =
     match !cons_arm with
@@ -2246,8 +2235,7 @@ and pp_std_prod_match_expr state env scrutinee branches =
   Array.iter classify branches;
   match !pair_arm with
   | Some (ids, body) ->
-      str "(lambda __pair: (" ++ pp_branch_lambda state env ids body ++
-      str ")(__pair[0], __pair[1]))(" ++ pp_expr state env scrutinee ++ str ")"
+      pp_branch_pair_expr state env ids body (pp_expr state env scrutinee)
   | None ->
       pp_branch_or_impossible_expr state env !wildcard_arm
 
@@ -2342,11 +2330,7 @@ let rec pp_statement_expr state env indent = function
       let head, all_args = collect_app f args in
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
       let collection_key kind key =
-        match kind with
-        | `Positive ->
-            str "_rocq_positive_key(" ++ pp_expr state env key ++ str ")"
-        | `String ->
-            str "_rocq_string_key(" ++ pp_expr state env key ++ str ")"
+        pp_collection_key kind (pp_expr state env key)
       in
       let call callee args =
         pp_multiline_items indent callee
@@ -3128,6 +3112,17 @@ let pp_def_signature ?(is_async=false) name params ret_annot =
       params ++
     str ") -> " ++ ret_annot ++ str ":"
 
+let pp_unannotated_def_signature ?(is_async=false) name params ret_annot =
+  let def_prefix = if is_async then str "async def " else str "def " in
+  def_prefix ++ str name ++ str "(" ++ pp_param_list params ++ str ") -> " ++
+  ret_annot ++ str ":"
+
+let annotated_params_opt params annots =
+  if Int.equal (List.length params) (List.length annots) then
+    Some (List.mapi (fun i param -> (pp_param param, List.nth annots i)) params)
+  else
+    None
+
 (*s Python term declaration emitter.
     Detects a lambda-headed RHS and promotes it to a [def]; non-lambda
     RHS stays as a simple assignment. *)
@@ -3230,38 +3225,26 @@ let pp_io_term_decl state env name a typ ret_typ =
       let params', env' = push_vars params env in
       let visible_params_rev = List.rev (visible_params params') in
       let builder_params =
-        if Int.equal (List.length visible_params_rev) (List.length builder_arg_annots) then
-          Some (List.mapi
-            (fun i param -> (pp_param param, List.nth builder_arg_annots i))
-            visible_params_rev)
-        else
-          None
+        annotated_params_opt visible_params_rev builder_arg_annots
       in
       let facade_params =
-        if Int.equal (List.length visible_params_rev) (List.length facade_arg_annots) then
-          Some (List.mapi
-            (fun i param -> (pp_param param, List.nth facade_arg_annots i))
-            visible_params_rev)
-        else
-          None
+        annotated_params_opt visible_params_rev facade_arg_annots
       in
       let builder =
         builder_prefix ++
         (match builder_params with
          | Some params -> pp_def_signature builder_name params builder_ret_annot
          | None ->
-             str "def " ++ str builder_name ++ str "(" ++
-             pp_param_list (List.rev params') ++ str ") -> " ++
-             builder_ret_annot ++ str ":") ++ fnl () ++
+             pp_unannotated_def_signature builder_name (List.rev params')
+               builder_ret_annot) ++ fnl () ++
         str "    " ++ pp_return_body state env' 4 body ++ fnl ()
       in
       builder ++ fnl () ++ fnl () ++ facade_prefix ++
       (match facade_params with
        | Some params -> pp_def_signature ~is_async:true name params facade_ret_annot
        | None ->
-           str "async def " ++ str name ++ str "(" ++
-           pp_param_list (List.rev params') ++ str ") -> " ++
-           facade_ret_annot ++ str ":") ++ fnl () ++
+           pp_unannotated_def_signature ~is_async:true name (List.rev params')
+             facade_ret_annot) ++ fnl () ++
       str "    " ++ facade_call pp_pyid visible_params_rev ++ fnl ()
 
 let pp_term_decl state env name a typ =
@@ -3289,21 +3272,12 @@ let pp_term_decl state env name a typ =
     let params = List.map id_of_mlid lam_ids in
     let params', env' = push_vars params env in
     let visible_params_rev = List.rev (visible_params params') in
-    let pp_params =
-      if Int.equal (List.length visible_params_rev) (List.length arg_annots) then
-        Some (List.mapi
-          (fun i param -> (pp_param param, List.nth arg_annots i))
-          visible_params_rev)
-      else
-        None
-    in
+    let pp_params = annotated_params_opt visible_params_rev arg_annots in
     pp_prefix ++
     (match pp_params with
      | Some params -> pp_def_signature name params ret_annot
      | None ->
-         str "def " ++ str name ++ str "(" ++
-         pp_param_list (List.rev params') ++
-         str ") -> " ++ ret_annot ++ str ":") ++
+         pp_unannotated_def_signature name (List.rev params') ret_annot) ++
     fnl () ++
     (* [indent=4]: the body is indented by 4 spaces inside the def; [case] arms
        at 8, case bodies at 12.  The "    " prefix handles the first line only;
