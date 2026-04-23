@@ -19,8 +19,8 @@ from fido.config import RepoConfig as _RepoConfig
 from fido.events import Action, recover_reply_promises
 from fido.infra import Infra
 from fido.provider import ProviderID
-from fido.reply_store import ReplyStore
 from fido.server import PreflightError, WebhookHandler, _repo_status
+from fido.store import FidoStore
 
 
 class RepoConfig(_RepoConfig):
@@ -1763,7 +1763,7 @@ class TestProcessAction:
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
         mock_task.assert_not_called()
-        store = ReplyStore(cfg.repos["owner/repo"].work_dir)
+        store = FidoStore(cfg.repos["owner/repo"].work_dir)
         promises = store.recoverable_promises()
         assert len(promises) == 1
         assert promises[0].anchor_comment_id == 205
@@ -1773,7 +1773,7 @@ class TestProcessAction:
     def test_review_comment_promise_written_before_attempt(self, server: tuple) -> None:
         """Promise is durable before the reply attempt, not just on exception."""
         url, cfg = server
-        store = ReplyStore(cfg.repos["owner/repo"].work_dir)
+        store = FidoStore(cfg.repos["owner/repo"].work_dir)
         payload = {
             **self._payload(),
             "action": "created",
@@ -1832,7 +1832,7 @@ class TestProcessAction:
         WebhookHandler.gh = MagicMock()
         assert _post_webhook(url, cfg, "pull_request_review_comment", payload) == 200
         assert _post_webhook(url, cfg, "pull_request_review_comment", payload) == 200
-        store = ReplyStore(cfg.repos["owner/repo"].work_dir)
+        store = FidoStore(cfg.repos["owner/repo"].work_dir)
         assert store.claim_state(206) == "retryable_failed"
         assert WebhookHandler._fn_reply_to_comment.call_count == 1
         mock_task.assert_not_called()
@@ -1864,7 +1864,7 @@ class TestProcessAction:
         assert _post_webhook(url, cfg, "pull_request_review_comment", payload) == 200
         assert _post_webhook(url, cfg, "pull_request_review_comment", payload) == 200
 
-        store = ReplyStore(cfg.repos["owner/repo"].work_dir)
+        store = FidoStore(cfg.repos["owner/repo"].work_dir)
         assert [p.anchor_comment_id for p in store.recoverable_promises()] == [205]
 
         recovery_gh = MagicMock()
@@ -1953,7 +1953,7 @@ class TestProcessAction:
 
     def test_already_replied_comment_skipped(self, server: tuple) -> None:
         url, cfg = server
-        promise = ReplyStore(cfg.repos["owner/repo"].work_dir).prepare_reply(
+        promise = FidoStore(cfg.repos["owner/repo"].work_dir).prepare_reply(
             owner="webhook", comment_type="pulls", anchor_comment_id=203
         )
         assert promise is not None
@@ -2186,7 +2186,7 @@ class TestProcessAction:
         status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
         mock_task.assert_not_called()
-        store = ReplyStore(cfg.repos["owner/repo"].work_dir)
+        store = FidoStore(cfg.repos["owner/repo"].work_dir)
         promises = store.recoverable_promises()
         assert len(promises) == 1
         assert promises[0].anchor_comment_id == 302
@@ -2196,7 +2196,7 @@ class TestProcessAction:
     def test_issue_comment_promise_written_before_attempt(self, server: tuple) -> None:
         """Promise is durable before the issue-comment reply attempt, not just on exception."""
         url, cfg = server
-        store = ReplyStore(cfg.repos["owner/repo"].work_dir)
+        store = FidoStore(cfg.repos["owner/repo"].work_dir)
         payload = {
             **self._payload(),
             "action": "created",
@@ -2262,7 +2262,7 @@ class TestProcessAction:
         WebhookHandler.gh = MagicMock()
         assert _post_webhook(url, cfg, "issue_comment", payload) == 200
         assert _post_webhook(url, cfg, "issue_comment", payload) == 200
-        store = ReplyStore(cfg.repos["owner/repo"].work_dir)
+        store = FidoStore(cfg.repos["owner/repo"].work_dir)
         assert store.claim_state(304) == "retryable_failed"
         assert WebhookHandler._fn_reply_to_issue_comment.call_count == 1
         mock_task.assert_not_called()
@@ -2291,7 +2291,7 @@ class TestProcessAction:
         assert _post_webhook(url, cfg, "issue_comment", payload) == 200
         assert _post_webhook(url, cfg, "issue_comment", payload) == 200
 
-        store = ReplyStore(cfg.repos["owner/repo"].work_dir)
+        store = FidoStore(cfg.repos["owner/repo"].work_dir)
         assert [p.anchor_comment_id for p in store.recoverable_promises()] == [302]
 
         recovery_gh = MagicMock()

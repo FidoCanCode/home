@@ -14,9 +14,8 @@ from fido.prompts import NO_TOOLS_CLAUSE, Prompts
 from fido.provider import ProviderAgent, set_thread_repo
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
-from fido.reply_promises import list_reply_promises
-from fido.reply_store import ReplyStore, append_reply_promise_marker
 from fido.state import State
+from fido.store import FidoStore, append_reply_promise_marker
 from fido.tasks import Tasks
 from fido.types import TaskType
 
@@ -167,15 +166,7 @@ def recover_reply_promises(
     registry: WorkerRegistry | None = None,
 ) -> bool:
     """Recover queued webhook replies for the current PR from SQLite promises."""
-    store = ReplyStore(repo_cfg.work_dir)
-    for legacy in list_reply_promises(fido_dir):
-        if not store.is_claimed_or_completed(legacy.comment_id):
-            store.prepare_reply(
-                owner="recovery",
-                comment_type=legacy.comment_type,
-                anchor_comment_id=legacy.comment_id,
-            )
-        legacy.path.unlink(missing_ok=True)
+    store = FidoStore(repo_cfg.work_dir)
     promises = store.recoverable_promises()
     if not promises:
         return False
@@ -574,7 +565,7 @@ def reply_to_comment(
     if context.get("reply_promise_id") is None and isinstance(
         info.get("comment_id"), int
     ):
-        direct_promise = ReplyStore(repo_cfg.work_dir).prepare_reply(
+        direct_promise = FidoStore(repo_cfg.work_dir).prepare_reply(
             owner="worker",
             comment_type=str(info.get("comment_type", "pulls")),
             anchor_comment_id=int(info["comment_id"]),
@@ -699,7 +690,7 @@ def reply_to_comment(
             info.get("comment_id"),
         )
         if direct_promise is not None:
-            ReplyStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
+            FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
         return (category, titles)
 
     body = append_reply_promise_marker(body, context.get("reply_promise_id"))
@@ -727,7 +718,7 @@ def reply_to_comment(
         gh.reply_to_review_comment(info["repo"], info["pr"], body, info["comment_id"])
         log.info("reply posted")
     if direct_promise is not None:
-        store = ReplyStore(repo_cfg.work_dir)
+        store = FidoStore(repo_cfg.work_dir)
         store.mark_posted(direct_promise.promise_id)
         store.ack_promise(direct_promise.promise_id)
 
@@ -943,7 +934,7 @@ def reply_to_issue_comment(
     direct_promise = None
     comment_id = context.get("comment_id")
     if context.get("reply_promise_id") is None and isinstance(comment_id, int):
-        direct_promise = ReplyStore(repo_cfg.work_dir).prepare_reply(
+        direct_promise = FidoStore(repo_cfg.work_dir).prepare_reply(
             owner="worker",
             comment_type="issues",
             anchor_comment_id=comment_id,
@@ -1028,7 +1019,7 @@ def reply_to_issue_comment(
     gh.comment_issue(repo_full, number, body)
     log.info("reply posted on PR #%s", number)
     if direct_promise is not None:
-        store = ReplyStore(repo_cfg.work_dir)
+        store = FidoStore(repo_cfg.work_dir)
         store.mark_posted(direct_promise.promise_id)
         store.ack_promise(direct_promise.promise_id)
 
@@ -1581,7 +1572,7 @@ def backfill_missed_pr_comments(
         if comment_id is None:
             continue
         # Skip comments Fido already claimed or completed in the SQLite store.
-        if ReplyStore(repo_cfg.work_dir).is_claimed_or_completed(int(comment_id)):
+        if FidoStore(repo_cfg.work_dir).is_claimed_or_completed(int(comment_id)):
             log.info("backfill: comment %s already claimed — skipping", comment_id)
             continue
         body = c.get("body", "") or ""

@@ -41,10 +41,10 @@ from fido.infra import (
 from fido.provider_factory import DefaultProviderFactory
 from fido.rate_limit import RateLimitMonitor
 from fido.registry import WebhookActivityHandle, WorkerRegistry, make_registry
-from fido.reply_store import ReplyPromiseRecord, ReplyStore
 from fido.state import State
 from fido.static_files import StaticFiles
 from fido.status import provider_statuses_for_repo_configs
+from fido.store import FidoStore, ReplyPromiseRecord
 from fido.tasks import Tasks, unblock_tasks
 from fido.watchdog import (  # noqa: PLC2701
     _STALE_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
@@ -845,7 +845,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if promise_key is None:
             return None
         comment_type, comment_id = promise_key
-        promise = ReplyStore(repo_cfg.work_dir).prepare_reply(
+        promise = FidoStore(repo_cfg.work_dir).prepare_reply(
             owner="webhook",
             comment_type=comment_type,
             anchor_comment_id=comment_id,
@@ -865,7 +865,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         """Mark a reply promise completed after its handler returns."""
         if promise is None:
             return
-        store = ReplyStore(repo_cfg.work_dir)
+        store = FidoStore(repo_cfg.work_dir)
         store.mark_posted(promise.promise_id)
         store.ack_promise(promise.promise_id)
 
@@ -874,7 +874,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     ) -> None:
         """Mark a reply promise retryable after a handler failure."""
         if promise is not None:
-            ReplyStore(repo_cfg.work_dir).mark_failed(promise.promise_id)
+            FidoStore(repo_cfg.work_dir).mark_failed(promise.promise_id)
 
     def _process_action_inner(
         self,

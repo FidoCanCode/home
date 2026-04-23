@@ -34,11 +34,11 @@ from fido.provider import (
     set_thread_repo,
 )
 from fido.provider_factory import DefaultProviderFactory
-from fido.reply_store import ReplyPromiseRecord, ReplyStore
 from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
 )
+from fido.store import FidoStore, ReplyPromiseRecord
 from fido.tasks import Tasks
 from fido.types import GitIdentity, TaskStatus, TaskType
 
@@ -1911,7 +1911,7 @@ class Worker:
             if last_author not in collaborators and not last_author.endswith("[bot]"):
                 continue
             first_db_id = first_comment.get("databaseId")
-            if first_db_id is not None and ReplyStore(
+            if first_db_id is not None and FidoStore(
                 self.work_dir
             ).is_claimed_or_completed(int(first_db_id)):
                 continue
@@ -1997,7 +1997,7 @@ class Worker:
         # worker path prepares the SQLite promise first owns that comment.
         claimable: list[dict[str, Any]] = []
         promises: list[ReplyPromiseRecord] = []
-        store = ReplyStore(self.work_dir)
+        store = FidoStore(self.work_dir)
         for t in threads:
             first_db_id = t.get("first_db_id")
             if first_db_id is None:

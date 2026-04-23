@@ -3,17 +3,19 @@ import threading
 from contextlib import closing
 from pathlib import Path
 
-from fido.reply_store import (
+import pytest
+
+from fido.rocq import replied_comment_claims as oracle
+from fido.store import (
+    FidoStore,
     ReplyOwner,
-    ReplyStore,
     append_reply_promise_marker,
     extract_reply_promise_ids,
 )
-from fido.rocq import replied_comment_claims as oracle
 
 
 def test_prepare_claim_is_atomic_and_blocks_duplicate_owner(tmp_path: Path) -> None:
-    store = ReplyStore(tmp_path)
+    store = FidoStore(tmp_path)
 
     first = store.prepare_reply(
         owner="webhook", comment_type="issues", anchor_comment_id=101
@@ -28,7 +30,7 @@ def test_prepare_claim_is_atomic_and_blocks_duplicate_owner(tmp_path: Path) -> N
 
 
 def test_prepare_claim_adds_anchor_when_covered_list_omits_it(tmp_path: Path) -> None:
-    store = ReplyStore(tmp_path)
+    store = FidoStore(tmp_path)
 
     promise = store.prepare_reply(
         owner="webhook",
@@ -39,10 +41,13 @@ def test_prepare_claim_adds_anchor_when_covered_list_omits_it(tmp_path: Path) ->
 
     assert promise is not None
     assert promise.covered_comment_ids == (101, 102, 103)
+    stored = store.promise(promise.promise_id)
+    assert stored is not None
+    assert stored.covered_comment_ids == (101, 102, 103)
 
 
 def test_missing_claim_and_missing_promise_are_noops(tmp_path: Path) -> None:
-    store = ReplyStore(tmp_path)
+    store = FidoStore(tmp_path)
 
     assert not store.is_claimed_or_completed(999)
     assert store.claim_state(999) is None
@@ -52,7 +57,7 @@ def test_missing_claim_and_missing_promise_are_noops(tmp_path: Path) -> None:
 
 
 def test_failed_claim_becomes_retryable(tmp_path: Path) -> None:
-    store = ReplyStore(tmp_path)
+    store = FidoStore(tmp_path)
     first = store.prepare_reply(
         owner="webhook", comment_type="pulls", anchor_comment_id=102
     )
@@ -74,7 +79,7 @@ def test_failed_claim_becomes_retryable(tmp_path: Path) -> None:
 
 
 def test_retryable_claim_without_backoff_is_claimable(tmp_path: Path) -> None:
-    store = ReplyStore(tmp_path)
+    store = FidoStore(tmp_path)
     promise = store.prepare_reply(
         owner="webhook", comment_type="pulls", anchor_comment_id=103
     )
@@ -95,7 +100,7 @@ def test_retryable_claim_without_backoff_is_claimable(tmp_path: Path) -> None:
 
 
 def test_ack_promise_completes_every_covered_comment(tmp_path: Path) -> None:
-    store = ReplyStore(tmp_path)
+    store = FidoStore(tmp_path)
     promise = store.prepare_reply(
         owner="webhook",
         comment_type="pulls",
@@ -117,7 +122,7 @@ def test_ack_promise_completes_every_covered_comment(tmp_path: Path) -> None:
 
 
 def test_reply_promise_marker_round_trips_and_recovers(tmp_path: Path) -> None:
-    store = ReplyStore(tmp_path)
+    store = FidoStore(tmp_path)
     promise = store.prepare_reply(
         owner="webhook", comment_type="issues", anchor_comment_id=301
     )
@@ -134,7 +139,7 @@ def test_reply_promise_marker_round_trips_and_recovers(tmp_path: Path) -> None:
 def test_reply_promise_marker_helpers_ignore_empty_and_duplicate_body(
     tmp_path: Path,
 ) -> None:
-    store = ReplyStore(tmp_path)
+    store = FidoStore(tmp_path)
     promise = store.prepare_reply(
         owner="webhook", comment_type="issues", anchor_comment_id=302
     )
@@ -147,7 +152,7 @@ def test_reply_promise_marker_helpers_ignore_empty_and_duplicate_body(
 
 
 def test_recover_from_bodies_ignores_unknown_promise(tmp_path: Path) -> None:
-    store = ReplyStore(tmp_path)
+    store = FidoStore(tmp_path)
 
     assert (
         store.recover_from_bodies(
@@ -158,9 +163,10 @@ def test_recover_from_bodies_ignores_unknown_promise(tmp_path: Path) -> None:
 
 
 def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
-    store = ReplyStore(tmp_path)
+    store = FidoStore(tmp_path)
     store.ensure_schema()
     with closing(sqlite3.connect(store.db_path)) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
         tables = {
             row[0]
             for row in conn.execute(
@@ -168,9 +174,11 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
             ).fetchall()
         }
 
+    assert version == 1
     assert {
         "comment_claims",
         "reply_promises",
+        "reply_promise_comments",
         "command_queue",
         "implementation_tasks",
         "fido_state",
@@ -182,8 +190,19 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
     } <= tables
 
 
+def test_schema_rejects_newer_user_version(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    store.db_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(store.db_path)) as conn:
+        conn.execute("PRAGMA user_version = 999")
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="unsupported fido.db schema version 999"):
+        store.ensure_schema()
+
+
 def test_concurrent_prepare_has_one_winner(tmp_path: Path) -> None:
-    store = ReplyStore(tmp_path)
+    store = FidoStore(tmp_path)
     barrier = threading.Barrier(2)
     results = []
 
@@ -208,7 +227,7 @@ def test_concurrent_prepare_has_one_winner(tmp_path: Path) -> None:
 
 
 def test_transaction_rolls_back_on_exception(tmp_path: Path) -> None:
-    store = ReplyStore(tmp_path)
+    store = FidoStore(tmp_path)
 
     try:
         with store._transaction() as conn:  # pyright: ignore[reportPrivateUsage]

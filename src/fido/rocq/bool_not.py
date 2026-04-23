@@ -395,4 +395,6 @@ __ = None  # erased logical argument
 
 
 def bool_not(b: bool) -> bool:
-    return (lambda: False)() if b else (lambda: True)()
+    if b:
+        return False
+    return True

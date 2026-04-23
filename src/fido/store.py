@@ -1,16 +1,14 @@
-"""SQLite-backed reply claim and promise coordination."""
+"""Repo-local SQLite state store."""
 
-import json
 import re
 import sqlite3
-import threading
 import uuid
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 ReplyOwner = Literal["webhook", "worker", "recovery"]
 ClaimState = Literal["in_progress", "completed", "retryable_failed"]
@@ -18,7 +16,7 @@ PromiseState = Literal["prepared", "posted", "acked", "failed"]
 
 REPLY_PROMISE_MARKER_PREFIX = "fido:reply-promise:"
 _PROMISE_MARKER_RE = re.compile(r"<!--\s*fido:reply-promise:([0-9a-fA-F-]{36})\s*-->")
-_SCHEMA_LOCK = threading.Lock()
+_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -52,12 +50,11 @@ def extract_reply_promise_ids(body: str | None) -> tuple[str, ...]:
     return tuple(match.group(1).lower() for match in _PROMISE_MARKER_RE.finditer(body))
 
 
-class ReplyStore:
-    """Repo-local SQLite coordination store.
+class FidoStore:
+    """Repo-local SQLite state and coordination store.
 
-    The D1 claim/promise tables are live runtime truth.  The broader tables are
-    created now so later D-lane issues can refine/prove them without changing
-    the database identity or migration root.
+    Reply claim/promise tables are the first live runtime users.  Generic state
+    rows share the same database so future durable state has one home.
     """
 
     def __init__(self, work_dir: Path) -> None:
@@ -107,36 +104,46 @@ class ReplyStore:
                 """
                 INSERT INTO reply_promises (
                     promise_id, owner, comment_type, anchor_comment_id,
-                    covered_comment_ids_json, state, retry_count, created_at, updated_at
+                    state, retry_count, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, 'prepared', 0, ?, ?)
+                VALUES (?, ?, ?, ?, 'prepared', 0, ?, ?)
                 """,
                 (
                     promise_id,
                     owner,
                     comment_type,
                     anchor_comment_id,
-                    json.dumps(list(covered)),
                     now,
                     now,
                 ),
             )
-            for comment_id in covered:
-                conn.execute(
-                    """
-                    INSERT INTO comment_claims (
-                        comment_id, owner, state, promise_id, retry_count,
-                        created_at, updated_at
-                    )
-                    VALUES (?, ?, 'in_progress', ?, 0, ?, ?)
-                    ON CONFLICT(comment_id) DO UPDATE SET
-                        owner = excluded.owner,
-                        state = 'in_progress',
-                        promise_id = excluded.promise_id,
-                        updated_at = excluded.updated_at
-                    """,
-                    (comment_id, owner, promise_id, now, now),
+            conn.executemany(
+                """
+                INSERT INTO reply_promise_comments (
+                    promise_id, position, comment_id
                 )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    (promise_id, position, comment_id)
+                    for position, comment_id in enumerate(covered)
+                ),
+            )
+            conn.executemany(
+                """
+                INSERT INTO comment_claims (
+                    comment_id, owner, state, promise_id, retry_count,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, 'in_progress', ?, 0, ?, ?)
+                ON CONFLICT(comment_id) DO UPDATE SET
+                    owner = excluded.owner,
+                    state = 'in_progress',
+                    promise_id = excluded.promise_id,
+                    updated_at = excluded.updated_at
+                """,
+                ((comment_id, owner, promise_id, now, now) for comment_id in covered),
+            )
         return ReplyPromiseRecord(
             promise_id=promise_id,
             owner=owner,
@@ -159,7 +166,7 @@ class ReplyStore:
             row = self._promise_row(conn, promise_id)
             if row is None:
                 return
-            covered = tuple(json.loads(row["covered_comment_ids_json"]))
+            covered = self._covered_comments(conn, promise_id)
             conn.execute(
                 """
                 UPDATE reply_promises
@@ -168,15 +175,14 @@ class ReplyStore:
                 """,
                 (now, promise_id),
             )
-            for comment_id in covered:
-                conn.execute(
-                    """
-                    UPDATE comment_claims
-                    SET state = 'completed', updated_at = ?, next_retry_after = NULL
-                    WHERE comment_id = ?
-                    """,
-                    (now, int(comment_id)),
-                )
+            conn.executemany(
+                """
+                UPDATE comment_claims
+                SET state = 'completed', updated_at = ?, next_retry_after = NULL
+                WHERE comment_id = ?
+                """,
+                ((now, int(comment_id)) for comment_id in covered),
+            )
 
     def mark_failed(self, promise_id: str) -> None:
         """Mark a promise and its claims retryable with exponential backoff."""
@@ -189,7 +195,7 @@ class ReplyStore:
             retry_count = int(row["retry_count"]) + 1
             delay = min(3600, 2 ** min(retry_count, 12))
             next_retry_after = (now_dt + timedelta(seconds=delay)).isoformat()
-            covered = tuple(json.loads(row["covered_comment_ids_json"]))
+            covered = self._covered_comments(conn, promise_id)
             conn.execute(
                 """
                 UPDATE reply_promises
@@ -199,16 +205,18 @@ class ReplyStore:
                 """,
                 (retry_count, next_retry_after, now, promise_id),
             )
-            for comment_id in covered:
-                conn.execute(
-                    """
-                    UPDATE comment_claims
-                    SET state = 'retryable_failed', retry_count = ?,
-                        next_retry_after = ?, updated_at = ?
-                    WHERE comment_id = ?
-                    """,
-                    (retry_count, next_retry_after, now, int(comment_id)),
-                )
+            conn.executemany(
+                """
+                UPDATE comment_claims
+                SET state = 'retryable_failed', retry_count = ?,
+                    next_retry_after = ?, updated_at = ?
+                WHERE comment_id = ?
+                """,
+                (
+                    (retry_count, next_retry_after, now, int(comment_id))
+                    for comment_id in covered
+                ),
+            )
 
     def is_claimed_or_completed(self, comment_id: int) -> bool:
         """Return true when *comment_id* should not be handled again now."""
@@ -263,21 +271,35 @@ class ReplyStore:
                 ORDER BY created_at, promise_id
                 """
             ).fetchall()
-        return [self._record_from_row(row) for row in rows]
+            return [self._record_from_row(conn, row) for row in rows]
 
     def promise(self, promise_id: str) -> ReplyPromiseRecord | None:
         """Return one promise record."""
         self.ensure_schema()
         with closing(self._connect()) as conn:
             row = self._promise_row(conn, promise_id)
-        return self._record_from_row(row) if row is not None else None
+            return self._record_from_row(conn, row) if row is not None else None
 
     def ensure_schema(self) -> None:
         """Create the D-lane durable store schema if needed."""
-        with _SCHEMA_LOCK:
-            self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            with closing(self._connect()) as conn:
-                conn.executescript(_SCHEMA)
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+                if version > _SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"unsupported fido.db schema version {version}; "
+                        f"expected <= {_SCHEMA_VERSION}"
+                    )
+                if version < _SCHEMA_VERSION:
+                    for statement in _schema_statements():
+                        conn.execute(statement)
+                    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            except Exception:
+                conn.rollback()
+                raise
+            conn.commit()
 
     def _set_promise_state(self, promise_id: str, state: PromiseState) -> None:
         now = _utcnow()
@@ -299,7 +321,7 @@ class ReplyStore:
         return conn
 
     def _transaction(self) -> Any:
-        return _ReplyTransaction(self)
+        return _FidoTransaction(self)
 
     def _promise_row(
         self, conn: sqlite3.Connection, promise_id: str
@@ -308,24 +330,37 @@ class ReplyStore:
             "SELECT * FROM reply_promises WHERE promise_id = ?", (promise_id,)
         ).fetchone()
 
-    def _record_from_row(self, row: sqlite3.Row) -> ReplyPromiseRecord:
+    def _covered_comments(
+        self, conn: sqlite3.Connection, promise_id: str
+    ) -> tuple[int, ...]:
+        rows = conn.execute(
+            """
+            SELECT comment_id
+            FROM reply_promise_comments
+            WHERE promise_id = ?
+            ORDER BY position
+            """,
+            (promise_id,),
+        ).fetchall()
+        return tuple(int(row["comment_id"]) for row in rows)
+
+    def _record_from_row(
+        self, conn: sqlite3.Connection, row: sqlite3.Row
+    ) -> ReplyPromiseRecord:
         return ReplyPromiseRecord(
             promise_id=row["promise_id"],
-            owner=row["owner"],
+            owner=cast(ReplyOwner, row["owner"]),
             comment_type=row["comment_type"],
             anchor_comment_id=int(row["anchor_comment_id"]),
-            covered_comment_ids=tuple(
-                int(comment_id)
-                for comment_id in json.loads(row["covered_comment_ids_json"])
-            ),
-            state=row["state"],
+            covered_comment_ids=self._covered_comments(conn, row["promise_id"]),
+            state=cast(PromiseState, row["state"]),
             retry_count=int(row["retry_count"]),
             next_retry_after=row["next_retry_after"],
         )
 
 
-class _ReplyTransaction:
-    def __init__(self, store: ReplyStore) -> None:
+class _FidoTransaction:
+    def __init__(self, store: FidoStore) -> None:
         self._store = store
         self._conn: sqlite3.Connection | None = None
 
@@ -371,12 +406,20 @@ CREATE TABLE IF NOT EXISTS reply_promises (
     owner TEXT NOT NULL CHECK(owner IN ('webhook', 'worker', 'recovery')),
     comment_type TEXT NOT NULL,
     anchor_comment_id INTEGER NOT NULL,
-    covered_comment_ids_json TEXT NOT NULL,
     state TEXT NOT NULL CHECK(state IN ('prepared', 'posted', 'acked', 'failed')),
     retry_count INTEGER NOT NULL DEFAULT 0,
     next_retry_after TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reply_promise_comments (
+    promise_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    comment_id INTEGER NOT NULL,
+    PRIMARY KEY(promise_id, comment_id),
+    UNIQUE(promise_id, position),
+    FOREIGN KEY(promise_id) REFERENCES reply_promises(promise_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS command_queue (
@@ -446,3 +489,9 @@ CREATE TABLE IF NOT EXISTS transition_audit_log (
     created_at TEXT NOT NULL
 );
 """
+
+
+def _schema_statements() -> tuple[str, ...]:
+    return tuple(
+        statement.strip() for statement in _SCHEMA.split(";") if statement.strip()
+    )

@@ -954,7 +954,8 @@ def _strip_generated_comment(line: str) -> str:
 
 
 def _compact_python_signature(signature: str) -> str:
-    return re.sub(r"\s+\)", ")", re.sub(r"\(\s+", "(", signature))
+    compacted = re.sub(r"\s+\)", ")", re.sub(r"\(\s+", "(", signature))
+    return re.sub(r",\)", ")", compacted)
 
 
 def _identifier_matches_without_comments(

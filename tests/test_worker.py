@@ -23,11 +23,11 @@ from fido.provider import (
     ProviderModel,
     TurnSessionMode,
 )
-from fido.reply_store import ReplyStore
 from fido.state import (
     State,
     _resolve_git_dir,
 )
+from fido.store import FidoStore
 from fido.tasks import (
     _apply_queue_to_body,
     _auto_complete_ask_tasks,
@@ -6655,7 +6655,7 @@ class TestFilterThreads:
         """
         w = self._make_worker(tmp_path)
         node = self._make_node(first_db_id=700)
-        assert ReplyStore(tmp_path).prepare_reply(
+        assert FidoStore(tmp_path).prepare_reply(
             owner="webhook", comment_type="pulls", anchor_comment_id=700
         )
         result = w._filter_threads([node], "fido-bot", frozenset({"owner"}))
@@ -7045,7 +7045,7 @@ class TestHandleThreads:
         ):
             result = w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
-        assert ReplyStore(tmp_path).claim_state(1) == "completed"
+        assert FidoStore(tmp_path).claim_state(1) == "completed"
 
     def test_skips_thread_if_claimed_in_race_window(self, tmp_path: Path) -> None:
         """Race simulation: webhook claims a thread ID after _filter_threads but before handle_threads claims it.
@@ -7068,7 +7068,7 @@ class TestHandleThreads:
             "url": "https://example.com",
             "total": 1,
         }
-        assert ReplyStore(tmp_path).prepare_reply(
+        assert FidoStore(tmp_path).prepare_reply(
             owner="webhook", comment_type="pulls", anchor_comment_id=901
         )
         with (
@@ -7111,7 +7111,7 @@ class TestHandleThreads:
             "url": "https://example.com/b",
             "total": 1,
         }
-        store = ReplyStore(tmp_path)
+        store = FidoStore(tmp_path)
         assert store.prepare_reply(
             owner="webhook", comment_type="pulls", anchor_comment_id=902
         )
@@ -7141,7 +7141,7 @@ class TestHandleThreads:
         ):
             with pytest.raises(RuntimeError, match="boom"):
                 w.handle_threads(fido_dir, self._repo_ctx(), 1, "branch")
-        assert ReplyStore(tmp_path).claim_state(1) == "retryable_failed"
+        assert FidoStore(tmp_path).claim_state(1) == "retryable_failed"
 
     def test_logs_skip_when_thread_claimed_in_race_window(
         self, tmp_path: Path, caplog
@@ -7163,7 +7163,7 @@ class TestHandleThreads:
             "url": "https://example.com",
             "total": 1,
         }
-        assert ReplyStore(tmp_path).prepare_reply(
+        assert FidoStore(tmp_path).prepare_reply(
             owner="webhook", comment_type="pulls", anchor_comment_id=904
         )
         with (
@@ -7207,7 +7207,7 @@ class TestHandleThreads:
             "url": "https://example.com/f",
             "total": 1,
         }
-        assert ReplyStore(tmp_path).prepare_reply(
+        assert FidoStore(tmp_path).prepare_reply(
             owner="webhook", comment_type="pulls", anchor_comment_id=905
         )
         with (

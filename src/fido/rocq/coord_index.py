@@ -428,27 +428,56 @@ def length(x: list[_LengthT0]) -> int:
 # string: remapped to Python primitive
 
 
-def add_claim(thread: int, claims: frozenset[int]) -> frozenset[int]:
+def add_claim(
+    thread: int,
+    claims: frozenset[int],
+) -> frozenset[int]:
     return _rocq_set_add(_rocq_positive_key(thread), claims)
 
 
-def remove_claim(thread: int, claims: frozenset[int]) -> frozenset[int]:
-    return _rocq_set_remove(_rocq_positive_key(thread), claims)
+def remove_claim(
+    thread: int,
+    claims: frozenset[int],
+) -> frozenset[int]:
+    return _rocq_set_remove(
+        _rocq_positive_key(thread),
+        claims,
+    )
 
 
-def has_claim(claims: frozenset[int], thread: int) -> bool:
+def has_claim(
+    claims: frozenset[int],
+    thread: int,
+) -> bool:
     return _rocq_positive_key(thread) in claims
 
 
-def assign_issue(issue: int, owner: str, owners: dict[int, str]) -> dict[int, str]:
-    return _rocq_map_add(_rocq_positive_key(issue), owner, owners)
+def assign_issue(
+    issue: int,
+    owner: str,
+    owners: dict[int, str],
+) -> dict[int, str]:
+    return _rocq_map_add(
+        _rocq_positive_key(issue),
+        owner,
+        owners,
+    )
 
 
-def unassign_issue(issue: int, owners: dict[int, str]) -> dict[int, str]:
-    return _rocq_map_remove(_rocq_positive_key(issue), owners)
+def unassign_issue(
+    issue: int,
+    owners: dict[int, str],
+) -> dict[int, str]:
+    return _rocq_map_remove(
+        _rocq_positive_key(issue),
+        owners,
+    )
 
 
-def issue_owner(owners: dict[int, str], issue: int) -> str | None:
+def issue_owner(
+    owners: dict[int, str],
+    issue: int,
+) -> str | None:
     return owners.get(_rocq_positive_key(issue))
 
 
