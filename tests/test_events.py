@@ -742,6 +742,65 @@ class TestRecoverReplyPromises:
             oracle.ReplayPosted(),
         )
 
+    def test_issue_recovery_replay_records_one_artifact_for_group(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        first = self._prepare_promise(tmp_path, "issues", 301)
+        second = self._prepare_promise(tmp_path, "issues", 302)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.get_repo_info.return_value = "owner/repo"
+        gh.comment_issue.return_value = {"id": 9001}
+
+        def get_issue_comment(_repo: str, comment_id: int) -> dict[str, object]:
+            comments = {
+                301: {
+                    "id": 301,
+                    "body": "first",
+                    "html_url": "https://github.com/owner/repo/pull/7#issuecomment-301",
+                    "issue_url": "https://api.github.com/repos/owner/repo/issues/7",
+                    "user": {"login": "owner"},
+                },
+                302: {
+                    "id": 302,
+                    "body": "second",
+                    "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
+                    "issue_url": "https://api.github.com/repos/owner/repo/issues/7",
+                    "user": {"login": "owner"},
+                },
+            }
+            return comments[comment_id]
+
+        gh.get_issue_comment.side_effect = get_issue_comment
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ANSWER: yep"
+            return "One combined reply."
+
+        with patch("fido.events.maybe_react"):
+            assert recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+                agent=_client(side_effect=fake_pp),
+            )
+
+        store = FidoStore(tmp_path)
+        first_artifact = store.artifact_for_promise(first.promise_id)
+        second_artifact = store.artifact_for_promise(second.promise_id)
+        assert first_artifact is not None
+        assert second_artifact is not None
+        assert first_artifact == second_artifact
+        assert first_artifact.artifact_comment_id == 9001
+        assert first_artifact.lane_key == "issues:owner/repo:7"
+        assert first_artifact.promise_ids == tuple(
+            sorted((first.promise_id, second.promise_id))
+        )
+
     def test_review_recovery_clears_group_promises_before_task_creation(
         self, tmp_path: Path
     ) -> None:
@@ -800,6 +859,83 @@ class TestRecoverReplyPromises:
         store = FidoStore(tmp_path)
         assert store.promise(first.promise_id).state == "acked"
         assert store.promise(second.promise_id).state == "acked"
+
+    def test_review_recovery_replay_records_one_artifact_for_group(
+        self, tmp_path: Path
+    ) -> None:
+        fido_dir = tmp_path / ".git" / "fido"
+        first = self._prepare_promise(tmp_path, "pulls", 101)
+        second = self._prepare_promise(tmp_path, "pulls", 102)
+        gh = MagicMock()
+        gh.view_issue.return_value = {"title": "My PR", "body": "body"}
+        gh.reply_to_review_comment.return_value = {"id": 9101}
+
+        comments = {
+            101: {
+                "id": 101,
+                "body": "first",
+                "path": "foo.py",
+                "line": 1,
+                "diff_hunk": "@@ @@",
+                "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                "html_url": "https://github.com/owner/repo/pull/7#discussion_r101",
+                "user": {"login": "owner"},
+            },
+            102: {
+                "id": 102,
+                "body": "second",
+                "path": "foo.py",
+                "line": 2,
+                "diff_hunk": "@@ @@",
+                "in_reply_to_id": 101,
+                "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/7",
+                "html_url": "https://github.com/owner/repo/pull/7#discussion_r102",
+                "user": {"login": "owner"},
+            },
+        }
+
+        gh.get_pull_comment.side_effect = lambda _repo, comment_id: comments[comment_id]
+        gh.fetch_comment_thread.side_effect = lambda _repo, _pr, _comment_id: [
+            {
+                "id": 101,
+                "body": "first",
+                "author": "owner",
+            },
+            {
+                "id": 102,
+                "body": "second",
+                "author": "owner",
+            },
+        ]
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ANSWER: yep"
+            return "One combined review reply."
+
+        with patch("fido.events.maybe_react"):
+            assert recover_reply_promises(
+                fido_dir,
+                _config(tmp_path),
+                _repo_cfg(tmp_path),
+                gh,
+                7,
+                agent=_client(side_effect=fake_pp),
+            )
+
+        store = FidoStore(tmp_path)
+        first_artifact = store.artifact_for_promise(first.promise_id)
+        second_artifact = store.artifact_for_promise(second.promise_id)
+        assert first_artifact is not None
+        assert second_artifact is not None
+        assert first_artifact == second_artifact
+        assert first_artifact.artifact_comment_id == 9101
+        assert first_artifact.lane_key == "pulls:owner/repo:7:thread:101"
+        assert first_artifact.promise_ids == tuple(
+            sorted((first.promise_id, second.promise_id))
+        )
 
     def test_recovery_raises_on_invalid_candidate_in_later_group(
         self, tmp_path: Path

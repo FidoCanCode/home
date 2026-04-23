@@ -2,7 +2,7 @@ import logging
 import re
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -210,6 +210,18 @@ def _apply_reply_result(
         )
 
 
+def _mark_promises_failed(store: FidoStore, promise_ids: Iterable[str]) -> None:
+    """Mark every promise in the group retryable after replay failure."""
+    for promise_id in promise_ids:
+        store.mark_failed(promise_id)
+
+
+def _ack_promises(store: FidoStore, promise_ids: Iterable[str]) -> None:
+    """Ack every promise in the group after replay success."""
+    for promise_id in promise_ids:
+        store.ack_promise(promise_id)
+
+
 def recover_reply_promises(
     fido_dir: Path,
     config: Config,
@@ -311,11 +323,9 @@ def recover_reply_promises(
                 prompts=prompts,
             )
         except Exception:
-            for promise_id, _ in group:
-                store.mark_failed(promise_id)
+            _mark_promises_failed(store, (promise_id for promise_id, _ in group))
             raise
-        for promise_id, _ in group:
-            store.ack_promise(promise_id)
+        _ack_promises(store, (promise_id for promise_id, _ in group))
         _apply_reply_result(
             category,
             titles,
@@ -378,11 +388,11 @@ def recover_reply_promises(
                 prompts=prompts,
             )
         except Exception:
-            for group_promise_id, _ in group:
-                store.mark_failed(group_promise_id)
+            _mark_promises_failed(
+                store, (group_promise_id for group_promise_id, _ in group)
+            )
             raise
-        for group_promise_id, _ in group:
-            store.ack_promise(group_promise_id)
+        _ack_promises(store, (group_promise_id for group_promise_id, _ in group))
         _apply_reply_result(
             category,
             titles,
