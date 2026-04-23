@@ -2069,15 +2069,15 @@ class Worker:
             except Exception:
                 store.mark_failed(promise.promise_id)
                 raise
-            if events.review_outcome_creates_tasks(category):
-                for title in titles:
-                    events.create_task(
-                        title,
-                        config,
-                        repo_cfg,
-                        self.gh,
-                        thread=action.reply_to,
-                    )
+            events.queue_reply_tasks(
+                category,
+                titles,
+                config,
+                repo_cfg,
+                self.gh,
+                thread=action.reply_to,
+                registry=self._registry,
+            )
         log.info("threads done")
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True

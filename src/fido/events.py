@@ -217,6 +217,47 @@ def review_outcome_resolves_thread(category: str) -> bool:
     return bool(oracle.review_outcome_resolves_thread(_review_outcome(category)))
 
 
+def reply_outcome_creates_tasks(
+    category: str,
+    *,
+    thread: dict[str, Any] | None,
+) -> bool:
+    """Return whether a reply outcome should create task objects."""
+    if thread is not None:
+        return review_outcome_creates_tasks(category)
+    return category not in ("DUMP", "ANSWER", "ASK", "DEFER")
+
+
+def queue_reply_tasks(
+    category: str,
+    titles: list[str],
+    config: Config,
+    repo_cfg: RepoConfig,
+    gh: GitHub,
+    *,
+    thread: dict[str, Any] | None,
+    registry: Any = None,
+    create_task_fn: Callable[..., object] | None = None,
+) -> int:
+    """Create any tasks implied by a reply outcome.
+
+    Returns the number of created task objects.
+    """
+    if not reply_outcome_creates_tasks(category, thread=thread):
+        return 0
+    task_fn = create_task if create_task_fn is None else create_task_fn
+    for title in titles:
+        task_fn(
+            title,
+            config,
+            repo_cfg,
+            gh,
+            thread=thread,
+            registry=registry,
+        )
+    return len(titles)
+
+
 def _apply_reply_result(
     category: str,
     titles: list[str],
@@ -227,20 +268,16 @@ def _apply_reply_result(
     thread: dict[str, Any] | None,
     registry: WorkerRegistry | None,
 ) -> None:
-    """Apply ACT/DO titles from a recovered reply just like webhook handling."""
-    if thread is not None and not review_outcome_creates_tasks(category):
-        return
-    if thread is None and category in ("DUMP", "ANSWER", "ASK", "DEFER"):
-        return
-    for title in titles:
-        create_task(
-            title,
-            config,
-            repo_cfg,
-            gh,
-            thread=thread,
-            registry=registry,
-        )
+    """Apply task side effects from a recovered reply."""
+    queue_reply_tasks(
+        category,
+        titles,
+        config,
+        repo_cfg,
+        gh,
+        thread=thread,
+        registry=registry,
+    )
 
 
 def _mark_promises_failed(store: FidoStore, promise_ids: Iterable[str]) -> None:
