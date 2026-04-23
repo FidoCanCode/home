@@ -18,6 +18,7 @@ _FIELDNAMES = (
     "source_end_col",
     "kind",
     "symbol",
+    "python_symbol",
 )
 # "open" means the listed fields are stable and future writers may append
 # fields. Readers must reject missing or reordered listed fields but ignore
@@ -46,6 +47,7 @@ class PyMapEntry:
     source_end_col: int
     kind: str
     symbol: str
+    python_symbol: str | None
 
     @classmethod
     def from_row(cls, row: dict[str, str | None], path: Path) -> Self:
@@ -67,6 +69,7 @@ class PyMapEntry:
                 source_end_col=int(_field(row, "source_end_col")),
                 kind=_field(row, "kind"),
                 symbol=_field(row, "symbol"),
+                python_symbol=_optional_field(row, "python_symbol"),
             )
         except ValueError as exc:
             raise PyMapError(f"bad source map row in {path}: {exc}") from exc
@@ -82,7 +85,7 @@ class PyMap:
             with path.open(newline="") as handle:
                 reader = csv.DictReader(handle)
                 fieldnames = tuple(reader.fieldnames or ())
-                if fieldnames[: len(_FIELDNAMES)] != _FIELDNAMES:
+                if fieldnames[: len(_FIELDNAMES) - 1] != _FIELDNAMES[:-1]:
                     raise PyMapError(f"bad source map header in {path}")
                 return cls(tuple(PyMapEntry.from_row(row, path) for row in reader))
         except csv.Error as exc:
@@ -93,4 +96,11 @@ def _field(row: dict[str, str | None], name: str) -> str:
     value = row.get(name)
     if value is None:
         raise PyMapError(f"missing {name}")
+    return value
+
+
+def _optional_field(row: dict[str, str | None], name: str) -> str | None:
+    value = row.get(name)
+    if value in (None, ""):
+        return None
     return value

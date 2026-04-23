@@ -23,6 +23,13 @@ from fido.rocq_lsp import (
 REPO = Path(__file__).resolve().parents[1]
 
 
+def _line_containing(path: Path, fragment: str) -> int:
+    for index, line in enumerate(path.read_text().splitlines()):
+        if fragment in line:
+            return index
+    raise AssertionError(f"{fragment!r} not found in {path}")
+
+
 def test_location_and_diagnostic_json_shapes() -> None:
     location = Location(
         REPO / "models" / "session_lock.v",
@@ -159,6 +166,38 @@ def test_lsp_shapes() -> None:
     assert actions[0]["title"] == "Refresh Rocq extraction"
     assert service.lsp_definition(Path("models/session_lock.v"), 0, 0) == []
     assert service.lsp_references(Path("models/session_lock.v"), 0, 0) == []
+
+
+def test_index_resolves_generated_python_methods_back_to_rocq_symbols() -> None:
+    index = RocqIndex(REPO)
+    index.refresh()
+
+    coord_index_path = REPO / "src" / "fido" / "rocq" / "coord_index.py"
+    add_claim_line = _line_containing(coord_index_path, "    def add_claim(")
+
+    symbol = index.symbol_at(coord_index_path, add_claim_line, 8)
+
+    assert symbol is not None
+    assert symbol.name == "coord_add_claim"
+    assert symbol.python is not None
+    assert symbol.python.path == coord_index_path.resolve()
+    assert symbol.python_signature == "def add_claim(self, thread: int) -> CoordIndex"
+
+
+def test_index_maps_runtime_marker_symbols_to_runtime_python_methods() -> None:
+    index = RocqIndex(REPO)
+    index.refresh()
+
+    runtime_path = REPO / "src" / "fido" / "rocq" / "concurrency_primitives.py"
+    pure_line = _line_containing(runtime_path, "def pure(cls, value:")
+
+    symbol = index.symbol_at(runtime_path, pure_line, 8)
+
+    assert symbol is not None
+    assert symbol.name == "io_pure"
+    assert symbol.python is not None
+    assert symbol.python.path == runtime_path.resolve()
+    assert symbol.python_signature.startswith("def pure(cls, value:")
 
 
 def test_cli_outputs_json_for_each_command() -> None:
@@ -550,7 +589,9 @@ def test_helpers_cover_comments_strings_uris_and_main(
     assert rocq_lsp._path_from_uri("models/session_lock.v") == Path(
         "models/session_lock.v"
     )
+    assert not rocq_lsp._contains(Range(Position(0, 1), Position(0, 2)), 0, 0)
     assert rocq_lsp._contains(Range(Position(0, 1), Position(0, 2)), 0, 2)
+    assert not rocq_lsp._contains(Range(Position(0, 1), Position(0, 2)), 0, 3)
     assert not rocq_lsp._contains(Range(Position(0, 1), Position(0, 2)), 1, 1)
     assert rocq_lsp._repo_path(REPO, Path("/tmp/outside.v")) == "/tmp/outside.v"
     assert rocq_lsp._python_signatures(tmp_path / "missing.py") == {}
@@ -603,6 +644,24 @@ def test_helpers_cover_comments_strings_uris_and_main(
     assert rocq_lsp.main() == 8
     monkeypatch.setattr(rocq_lsp.sys, "argv", ["prog", "diagnostics"])
     assert rocq_lsp.main() == 7
+
+
+def test_index_symbol_at_falls_back_to_source_token_lookup(tmp_path: Path) -> None:
+    source = tmp_path / "toy.v"
+    source.write_text("foo\n")
+    symbol = rocq_lsp.Symbol(
+        name="foo",
+        source=Location(
+            source,
+            Range(Position(1, 0), Position(1, 3)),
+        ),
+        python=None,
+        python_signature=None,
+    )
+    index = RocqIndex(tmp_path)
+    index._symbols = {"foo": symbol}
+
+    assert index.symbol_at(source, 0, 1) == symbol
 
 
 def _argparse_namespace(command: str) -> Any:

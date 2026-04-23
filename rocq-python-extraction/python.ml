@@ -567,6 +567,11 @@ let set_once slot value =
   | None -> slot := Some value
   | Some _ -> ()
 
+let active_method_targets : (string * (string * string)) list ref = ref []
+
+let lookup_active_method_target source_name =
+  List.assoc_opt source_name !active_method_targets
+
 let pp_collection_key kind pp_key =
   match kind with
   | `Positive -> str "_rocq_positive_key(" ++ pp_key ++ str ")"
@@ -1326,14 +1331,44 @@ let rec pp_expr state env expr =
   match expr with
   | MLglob r when is_custom r && String.equal (find_custom r) marker_state_get ->
       str "StateT.get_state()"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_state_pure ->
+      str "StateT.pure"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_state_bind ->
+      str "StateT.bind"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_state_put ->
+      str "StateT.put_state"
   | MLglob r when is_custom r && String.equal (find_custom r) marker_reader_ask ->
       str "lambda __reader_env: __reader_env"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_reader_pure ->
+      str "(lambda value: (lambda __reader_env: value))"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_reader_bind ->
+      str "(lambda reader_expr, fn_expr: lambda __reader_env: fn_expr(reader_expr(__reader_env))(__reader_env))"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_io_pure ->
+      str "IO.pure"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_io_bind ->
+      str "IO.bind"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_io_bracket ->
+      str "IO.bracket"
   | MLglob r when is_custom r && String.equal (find_custom r) marker_new_mutex ->
       str "Mutex.new()"
   | MLglob r when is_custom r && String.equal (find_custom r) marker_new_channel ->
       str "Channel.new()"
   | MLglob r when is_custom r && String.equal (find_custom r) marker_new_future ->
       str "Future.new()"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_mutex_acquire ->
+      str "Mutex.acquire"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_mutex_release ->
+      str "Mutex.release"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_channel_send ->
+      str "Channel.send"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_channel_receive ->
+      str "Channel.receive"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_future_set ->
+      str "Future.set_result"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_future_result ->
+      str "Future.result"
+  | MLglob r when is_custom r && String.equal (find_custom r) marker_future_done ->
+      str "Future.done"
   | MLglob r when is_custom r && String.equal (find_custom r) marker_interleave ->
       extraction_diagnostic_error ~detail:(find_custom r) "PYEX043"
   | MLglob r when is_custom r && is_concurrency_marker_string (find_custom r) ->
@@ -1378,6 +1413,18 @@ let rec pp_expr state env expr =
       in
       let (head, all_args) = collect args f in
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      let pp_method_call_expr =
+        match head, all_args with
+        | MLglob r, self_arg :: method_args -> (
+            match lookup_active_method_target (pp_global state Term r) with
+            | Some (_class_name, method_name) ->
+                Some
+                  (pp_expr state env self_arg ++ str "." ++ str method_name ++ str "(" ++
+                   prlist_with_sep (fun () -> str ", ") (pp_expr state env) method_args ++
+                   str ")")
+            | None -> None)
+        | _ -> None
+      in
       let collection_key kind key =
         pp_collection_key kind (pp_expr state env key)
       in
@@ -1537,27 +1584,34 @@ let rec pp_expr state env expr =
         | _ ->
             None
       in
-      (match pp_collection_expr with
+      let pp_default_app =
+        (* Parenthesise the function if it is itself a lambda expression,
+           since [lambda x: e] has very low precedence in Python. *)
+        let pp_head =
+          match head with
+          | MLlam _ -> str "(" ++ pp_expr state env head ++ str ")"
+          | _ -> pp_expr state env head
+        in
+        if List.is_empty all_args then pp_head
+        else
+          pp_head ++ str "(" ++
+          prlist_with_sep (fun () -> str ", ") (pp_expr state env) all_args ++
+          str ")"
+      in
+      let pp_special =
+        match pp_method_call_expr with
+        | Some _ as pp -> pp
+        | None ->
+            (match pp_collection_expr with
+             | Some _ as pp -> pp
+             | None ->
+                 (match pp_concurrency_expr with
+                  | Some _ as pp -> pp
+                  | None -> pp_monad_expr))
+      in
+      (match pp_special with
        | Some pp -> pp
-       | None ->
-      (match pp_concurrency_expr with
-       | Some pp -> pp
-       | None ->
-      (match pp_monad_expr with
-       | Some pp -> pp
-       | None ->
-           (* Parenthesise the function if it is itself a lambda expression,
-              since [lambda x: e] has very low precedence in Python. *)
-           let pp_head =
-             match head with
-             | MLlam _ -> str "(" ++ pp_expr state env head ++ str ")"
-             | _       -> pp_expr state env head
-           in
-           if List.is_empty all_args then pp_head
-           else
-             pp_head ++ str "(" ++
-             prlist_with_sep (fun () -> str ", ") (pp_expr state env) all_args ++
-             str ")")))
+       | None -> pp_default_app)
   | MLlam _ as a ->
       (* Collect consecutive lambdas: MLlam(x, MLlam(y, body)) → lambda x, y: body.
          [collect_lams] returns ids innermost-first; reverse for Python source order. *)
@@ -3247,6 +3301,24 @@ let pp_io_term_decl state env name a typ ret_typ =
              facade_ret_annot) ++ fnl () ++
       str "    " ++ facade_call pp_pyid visible_params_rev ++ fnl ()
 
+let pp_top_level_record_value state env name typ r args =
+  let fields = get_record_fields (State.get_table state) r in
+  let pp_field_arg (index, value) =
+    str "    " ++ pp_field_name state r fields index ++ str "=" ++ pp_expr state env value
+  in
+  str name ++ str ": " ++ pp_type state typ ++ str " = " ++
+  str (pp_global state Cons r) ++ str "(" ++ fnl () ++
+  prlist_with_sep
+    (fun () -> str "," ++ fnl ())
+    pp_field_arg
+    (List.mapi (fun index value -> (index, value)) args) ++
+  str "," ++ fnl () ++
+  str ")" ++ fnl ()
+
+let uses_native_record_constructor state r =
+  let fields = get_record_fields (State.get_table state) r in
+  not (List.is_empty fields) && not (is_std_Q_make_ref r)
+
 let pp_term_decl state env name a typ =
   let lam_ids, body = collect_lams a in
   let pp_prefix, arg_annots, ret_annot = signature_data state name typ in
@@ -3261,6 +3333,8 @@ let pp_term_decl state env name a typ =
     ( match a with
       | MLaxiom _ | MLexn _ | MLparray _ ->
           pp_expr state env a ++ fnl ()
+      | MLcons (_, r, args) when uses_native_record_constructor state r ->
+          pp_prefix ++ pp_top_level_record_value state env name typ r args
       | _ ->
           (match pp_function_wrapper state env name a typ with
           | Some pp -> pp
@@ -3283,6 +3357,122 @@ let pp_term_decl state env name a typ =
        at 8, case bodies at 12.  The "    " prefix handles the first line only;
        [pp_return_body] generates the rest with absolute column positions. *)
     str "    " ++ pp_return_body state env' 4 body ++ fnl ()
+
+let pp_method_signature ?(is_async=false) name params ret_annot =
+  let def_prefix = if is_async then str "async def " else str "def " in
+  if List.length params >= 1 then
+    def_prefix ++ str name ++ str "(" ++ fnl () ++
+    str "    self," ++ fnl () ++
+    prlist_with_sep
+      (fun () -> str "," ++ fnl ())
+      (fun (param, annot) -> str "    " ++ param ++ str ": " ++ annot)
+      params ++
+    str "," ++ fnl () ++
+    str ") -> " ++ ret_annot ++ str ":"
+  else
+    def_prefix ++ str name ++ str "(self) -> " ++ ret_annot ++ str ":"
+
+let pp_unannotated_method_signature ?(is_async=false) name params ret_annot =
+  let def_prefix = if is_async then str "async def " else str "def " in
+  let pp_tail =
+    if List.is_empty params then
+      mt ()
+    else
+      str ", " ++
+      prlist_with_sep (fun () -> str ", ") pp_param params
+  in
+  def_prefix ++ str name ++ str "(self" ++ pp_tail ++ str ") -> " ++
+  ret_annot ++ str ":"
+
+let pp_method_term_decl state env method_name a typ =
+  let lam_ids, body = collect_lams a in
+  let args, ret = type_decomp typ in
+  match lam_ids, args with
+  | _ :: _, _ :: method_args ->
+      let method_typ = arrow_type method_args ret in
+      let pp_prefix, arg_annots, ret_annot =
+        signature_data state method_name method_typ
+      in
+      let params = List.map id_of_mlid lam_ids in
+      let params', env' = push_vars params env in
+      let visible_params_rev = List.rev (visible_params params') in
+      (match visible_params_rev with
+       | [] -> extraction_diagnostic_error "PYEX040"
+       | self_param :: method_params ->
+           let self_alias = Pp.string_of_ppcmds (pp_param self_param) in
+           let pp_params = annotated_params_opt method_params arg_annots in
+           pp_prefix ++
+           (match pp_params with
+            | Some params -> pp_method_signature method_name params ret_annot
+            | None ->
+                pp_unannotated_method_signature method_name method_params ret_annot) ++
+           fnl () ++
+           (if String.equal self_alias "self" then mt ()
+            else str "    " ++ str self_alias ++ str " = self" ++ fnl ()) ++
+           str "    " ++ pp_return_body state env' 4 body ++ fnl ())
+  | _ -> extraction_diagnostic_error "PYEX040"
+
+let underscore_prefix name =
+  match String.index_opt name '_' with
+  | None -> None
+  | Some index when index > 0 -> Some (String.sub name 0 index)
+  | Some _ -> None
+
+let consistent_field_prefix field_names =
+  match List.filter_map underscore_prefix field_names with
+  | [] -> None
+  | prefix :: rest when List.for_all (String.equal prefix) rest -> Some prefix
+  | _ -> None
+
+let method_target_of_term_decl state record_class_prefixes record_field_names = function
+  | Dterm (r, _a, typ) -> (
+      if is_custom r then None else
+      let args, _ret = type_decomp typ in
+      match args with
+      | [] -> None
+      | Tglob (self_ref, _) :: _ ->
+          let class_name = capitalize_first (pp_global state Term self_ref) in
+          let source_name = pp_global state Term r in
+          if List.mem source_name record_field_names then None
+          else
+            (match List.assoc_opt class_name record_class_prefixes, String.index_opt source_name '_' with
+             | Some prefix, Some index when String.equal prefix (String.sub source_name 0 index) ->
+                 let method_name =
+                   String.sub source_name (index + 1)
+                     (String.length source_name - index - 1)
+                 in
+                 Some (class_name, method_name)
+             | _ -> None)
+      | _ :: _ -> None)
+  | _ -> None
+
+let record_class_name_of_decl state = function
+  | Dind ind -> (
+      match ind.ind_kind with
+      | Record _ when Array.length ind.ind_packets > 0 ->
+          Some (capitalize_first (pp_global state Term ind.ind_packets.(0).ip_typename_ref))
+      | _ -> None)
+  | _ -> None
+
+let record_field_names_of_decl state = function
+  | Dind ind -> (
+      match ind.ind_kind with
+      | Record fields when Array.length ind.ind_packets > 0 ->
+          let packet = ind.ind_packets.(0) in
+          let ind_kn = kn_of_ind packet.ip_typename_ref in
+          Some
+            (List.filter_map
+               (function
+                 | Some r' -> Some (pp_global_with_key state Term ind_kn r')
+                 | None -> None)
+               fields)
+      | _ -> None)
+  | _ -> None
+
+let record_class_prefix_of_decl state decl =
+  match record_class_name_of_decl state decl, record_field_names_of_decl state decl with
+  | Some class_name, Some field_names -> Option.map (fun prefix -> (class_name, prefix)) (consistent_field_prefix field_names)
+  | _ -> None
 
 (*s Inductive type emission as Python dataclasses.
     Each live constructor becomes a frozen [@dataclass] class whose fields
@@ -3315,8 +3505,13 @@ let pp_type_shifted_with state shift pp_tvar typ =
 let pp_type_shifted state shift =
   pp_type_shifted_with state shift typevar_name
 
-let pp_one_cons state ?(typevar_shift=1) ?(pp_tvar=typevar_name) packet fields_opt base_opt j =
-  let cname = pp_global state Cons packet.ip_consnames_ref.(j) in
+let pp_one_cons state ?(typevar_shift=1) ?(pp_tvar=typevar_name)
+    ?class_name packet fields_opt base_opt j =
+  let cname =
+    match class_name with
+    | Some name -> name
+    | None -> pp_global state Cons packet.ip_consnames_ref.(j)
+  in
   let nargs  = List.length packet.ip_types.(j) in
   let ind_kn = kn_of_ind packet.ip_typename_ref in
   let field_name i =
@@ -3796,10 +3991,102 @@ let pp_structure_elem state = function
       let name = module_binding_name state l in
       pp_named_module_type_decl state name mt
 
+let pp_structure_sel state sel =
+  let methods_by_class = Hashtbl.create 8 in
+  let class_names =
+    List.filter_map
+      (function
+        | (_, SEdecl d) -> record_class_name_of_decl state d
+        | (_, SEmodule _) | (_, SEmodtype _) -> None)
+      sel
+  in
+  let class_prefixes =
+    List.filter_map
+      (function
+        | (_, SEdecl d) -> record_class_prefix_of_decl state d
+        | (_, SEmodule _) | (_, SEmodtype _) -> None)
+      sel
+  in
+  let record_field_names =
+    List.concat
+      (List.filter_map
+         (function
+           | (_, SEdecl d) -> record_field_names_of_decl state d
+           | (_, SEmodule _) | (_, SEmodtype _) -> None)
+         sel)
+  in
+  List.iter
+      (function
+      | (_, SEdecl (Dterm (r, _a, _typ) as d)) -> (
+          match method_target_of_term_decl state class_prefixes record_field_names d with
+          | Some (class_name, method_name) when List.mem class_name class_names ->
+              let entries =
+                match Hashtbl.find_opt methods_by_class class_name with
+                | Some entries -> entries
+                | None -> []
+              in
+              Hashtbl.replace methods_by_class class_name ((method_name, d) :: entries)
+          | _ -> ())
+      | (_, SEdecl _d) -> ()
+      | (_, SEmodule _) | (_, SEmodtype _) -> ())
+    sel;
+  let method_targets =
+    Hashtbl.to_seq methods_by_class
+    |> List.of_seq
+    |> List.concat_map
+         (fun (class_name, methods) ->
+            List.map
+              (fun (method_name, decl) ->
+                 match decl with
+                 | Dterm (r, _a, _typ) ->
+                     (pp_global state Term r, (class_name, method_name))
+                 | _ -> extraction_diagnostic_error "PYEX040")
+              methods)
+  in
+  let prior_method_targets = !active_method_targets in
+  active_method_targets := method_targets;
+  let rendered =
+  let pp_record_methods class_name =
+    match Hashtbl.find_opt methods_by_class class_name with
+    | None -> mt ()
+    | Some methods ->
+        fnl () ++
+        prlist_with_sep
+          (fun () -> fnl ())
+          (fun (method_name, decl) ->
+             match decl with
+             | Dterm (_r, a, typ) ->
+                 indent_pp 4 (pp_method_term_decl state (empty_env state ()) method_name a typ)
+             | _ -> mt ())
+          (List.rev methods)
+  in
+  prlist
+    (function
+      | (_, SEdecl d) -> (
+          match method_target_of_term_decl state class_prefixes record_field_names d with
+          | Some (class_name, _method_name) when List.mem class_name class_names ->
+              mt ()
+          | _ ->
+              pp_decl state d ++
+              (match record_class_name_of_decl state d with
+               | Some class_name -> pp_record_methods class_name
+               | None -> mt ()))
+      | (l, SEmodule m) ->
+          let name = module_binding_name state l in
+          if is_std_collection_module_name name then mt ()
+          else pp_named_module_binding state 0 name m ++ fnl ()
+      | (l, SEmodtype mt) ->
+          let name = module_binding_name state l in
+          pp_named_module_type_decl state name mt)
+    sel
+  in
+  active_method_targets := prior_method_targets;
+  rendered
+
 let pp_struct state struc =
   let pp_mod (mp, sel) =
     State.with_visibility state mp [] (fun state ->
-      prlist (pp_structure_elem state) sel)
+      pp_structure_sel state sel)
   in
   prlist pp_mod struc
 
