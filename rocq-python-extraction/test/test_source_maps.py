@@ -17,7 +17,6 @@ def test_generated_pymap_points_back_to_rocq_source(build_default: Path) -> None
     source_map = PyMap.load(build_default / "source_map_runtime_error.pymap")
     entry = source_map.entries[0]
 
-    assert entry.python_file == "source_map_runtime_error.py"
     assert entry.source_file == "source_maps.v"
     assert entry.source_start_line > 0
     assert entry.source_start_col >= 0

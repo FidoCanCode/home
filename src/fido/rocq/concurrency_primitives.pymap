@@ -1,2 +1,2 @@
-version,python_file,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol
-1,concurrency_primitives.py,1,0,1,0,concurrency_primitives.v,74,11,74,28,extraction,roundtrip_message
+stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol
+open,1,0,1,0,concurrency_primitives.v,74,11,74,28,extraction,roundtrip_message

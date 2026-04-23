@@ -6,8 +6,7 @@ from pathlib import Path
 from typing import Self
 
 _FIELDNAMES = (
-    "version",
-    "python_file",
+    "stability",
     "python_start_line",
     "python_start_col",
     "python_end_line",
@@ -20,19 +19,22 @@ _FIELDNAMES = (
     "kind",
     "symbol",
 )
+# "open" means the listed fields are stable and future writers may append
+# fields. Readers must reject missing or reordered listed fields but ignore
+# appended fields they do not understand.
+_SUPPORTED_STABILITY = "open"
 
 
 class PyMapError(ValueError):
     pass
 
 
-class UnsupportedPyMapVersion(PyMapError):
+class UnsupportedPyMapStability(PyMapError):
     pass
 
 
 @dataclass(frozen=True)
 class PyMapEntry:
-    python_file: str
     python_start_line: int
     python_start_col: int
     python_end_line: int
@@ -47,12 +49,13 @@ class PyMapEntry:
 
     @classmethod
     def from_row(cls, row: dict[str, str | None], path: Path) -> Self:
-        version = row.get("version")
-        if version != "1":
-            raise UnsupportedPyMapVersion(f"unsupported source map version in {path}")
+        stability = row.get("stability")
+        if stability != _SUPPORTED_STABILITY:
+            raise UnsupportedPyMapStability(
+                f"unsupported source map stability in {path}"
+            )
         try:
             return cls(
-                python_file=_field(row, "python_file"),
                 python_start_line=int(_field(row, "python_start_line")),
                 python_start_col=int(_field(row, "python_start_col")),
                 python_end_line=int(_field(row, "python_end_line")),
@@ -78,7 +81,8 @@ class PyMap:
         try:
             with path.open(newline="") as handle:
                 reader = csv.DictReader(handle)
-                if tuple(reader.fieldnames or ()) != _FIELDNAMES:
+                fieldnames = tuple(reader.fieldnames or ())
+                if fieldnames[: len(_FIELDNAMES)] != _FIELDNAMES:
                     raise PyMapError(f"bad source map header in {path}")
                 return cls(tuple(PyMapEntry.from_row(row, path) for row in reader))
         except csv.Error as exc:

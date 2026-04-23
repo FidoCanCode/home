@@ -1,8 +1,8 @@
-version,python_file,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol
-1,replied_comment_claims.py,585,0,587,17,replied_comment_claims.v,95,11,95,28,extraction,comment_claimable
-1,replied_comment_claims.py,596,0,598,24,replied_comment_claims.v,103,9,103,22,extraction,all_claimable
-1,replied_comment_claims.py,644,0,650,36,replied_comment_claims.v,134,11,134,25,extraction,prepare_claims
-1,replied_comment_claims.py,677,0,679,36,replied_comment_claims.v,156,11,156,30,extraction,mark_promise_posted
-1,replied_comment_claims.py,738,0,741,36,replied_comment_claims.v,198,11,198,22,extraction,ack_promise
-1,replied_comment_claims.py,806,0,809,36,replied_comment_claims.v,237,11,237,23,extraction,fail_promise
-1,replied_comment_claims.py,847,0,849,17,replied_comment_claims.v,262,11,262,26,extraction,claim_completed
+stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol
+open,585,0,587,17,replied_comment_claims.v,95,11,95,28,extraction,comment_claimable
+open,596,0,598,24,replied_comment_claims.v,103,9,103,22,extraction,all_claimable
+open,644,0,650,36,replied_comment_claims.v,134,11,134,25,extraction,prepare_claims
+open,677,0,679,36,replied_comment_claims.v,156,11,156,30,extraction,mark_promise_posted
+open,738,0,741,36,replied_comment_claims.v,198,11,198,22,extraction,ack_promise
+open,806,0,809,36,replied_comment_claims.v,237,11,237,23,extraction,fail_promise
+open,847,0,849,17,replied_comment_claims.v,262,11,262,26,extraction,claim_completed

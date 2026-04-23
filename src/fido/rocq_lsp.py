@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import IO, Any
 from urllib.parse import unquote, urlparse
 
-from fido.rocq_pymap import PyMap, PyMapEntry, PyMapError, UnsupportedPyMapVersion
+from fido.rocq_pymap import PyMap, PyMapEntry, PyMapError, UnsupportedPyMapStability
 
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_']*")
 _KEYWORDS = frozenset(
@@ -279,9 +279,9 @@ class RocqIndex:
     def _load_map(self, map_path: Path) -> None:
         try:
             source_map = PyMap.load(map_path)
-        except UnsupportedPyMapVersion:
+        except UnsupportedPyMapStability:
             self._diagnostics.append(
-                Diagnostic(f"unsupported source map version in {map_path.name}")
+                Diagnostic(f"unsupported source map stability in {map_path.name}")
             )
             return
         except PyMapError as exc:
@@ -289,12 +289,7 @@ class RocqIndex:
                 Diagnostic(f"bad source map {map_path.name}: {exc}")
             )
             return
-        python_file = (
-            source_map.entries[0].python_file
-            if source_map.entries
-            else map_path.with_suffix(".py").name
-        )
-        python_path = self._generated_dir / python_file
+        python_path = map_path.with_suffix(".py")
         signatures = _python_signatures(python_path)
         for entry in source_map.entries:
             self._load_entry(map_path, python_path, signatures, entry)

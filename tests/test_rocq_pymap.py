@@ -7,21 +7,20 @@ from fido import rocq_pymap
 from fido.rocq_pymap import PyMap, PyMapEntry, PyMapError
 
 _HEADER = (
-    "version,python_file,python_start_line,python_start_col,python_end_line,"
-    "python_end_col,source_file,source_start_line,source_start_col,"
-    "source_end_line,source_end_col,kind,symbol\n"
+    "stability,python_start_line,python_start_col,python_end_line,python_end_col,"
+    "source_file,source_start_line,source_start_col,source_end_line,"
+    "source_end_col,kind,symbol\n"
 )
 
 
 def test_pymap_loads_csv_rows(tmp_path: Path) -> None:
     path = tmp_path / "x.pymap"
-    path.write_text(_HEADER + "1,x.py,2,3,4,5,x.v,6,7,8,9,extraction,x\n")
+    path.write_text(_HEADER + "open,2,3,4,5,x.v,6,7,8,9,extraction,x\n")
 
     source_map = PyMap.load(path)
 
     assert source_map.entries == (
         PyMapEntry(
-            python_file="x.py",
             python_start_line=2,
             python_start_col=3,
             python_end_line=4,
@@ -39,15 +38,34 @@ def test_pymap_loads_csv_rows(tmp_path: Path) -> None:
 
 def test_pymap_rejects_bad_integer(tmp_path: Path) -> None:
     path = tmp_path / "x.pymap"
-    path.write_text(_HEADER + "1,x.py,nope,3,4,5,x.v,6,7,8,9,extraction,x\n")
+    path.write_text(_HEADER + "open,nope,3,4,5,x.v,6,7,8,9,extraction,x\n")
 
     with pytest.raises(PyMapError, match="bad source map row"):
         PyMap.load(path)
 
 
 def test_pymap_rejects_missing_fields(tmp_path: Path) -> None:
-    with pytest.raises(PyMapError, match="missing python_file"):
-        PyMapEntry.from_row({"version": "1"}, tmp_path / "x.pymap")
+    with pytest.raises(PyMapError, match="missing python_start_line"):
+        PyMapEntry.from_row({"stability": "open"}, tmp_path / "x.pymap")
+
+
+def test_pymap_rejects_unsupported_stability(tmp_path: Path) -> None:
+    path = tmp_path / "x.pymap"
+    path.write_text(_HEADER + "closed,2,3,4,5,x.v,6,7,8,9,extraction,x\n")
+
+    with pytest.raises(PyMapError, match="unsupported source map stability"):
+        PyMap.load(path)
+
+
+def test_pymap_allows_extra_columns_for_open_stability(tmp_path: Path) -> None:
+    path = tmp_path / "x.pymap"
+    path.write_text(
+        _HEADER.rstrip("\n")
+        + ",future\n"
+        + "open,2,3,4,5,x.v,6,7,8,9,extraction,x,ignored\n"
+    )
+
+    assert PyMap.load(path).entries[0].symbol == "x"
 
 
 def test_pymap_wraps_csv_errors(

@@ -58,13 +58,12 @@ let csv_escape s =
   if !needs_quotes then "\"" ^ escaped ^ "\"" else escaped
 
 let pymap_header =
-  "version,python_file,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol\n"
+  "stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol\n"
 
-let pymap_row ~python_file ~symbol ~python_start_line ~python_start_col
-    ~python_end_line ~python_end_col span =
-  Printf.sprintf "%s,%s,%d,%d,%d,%d,%s,%d,%d,%d,%d,%s,%s\n"
-    "1"
-    (csv_escape (Filename.basename python_file))
+let pymap_row ~symbol ~python_start_line ~python_start_col ~python_end_line
+    ~python_end_col span =
+  Printf.sprintf "%s,%d,%d,%d,%d,%s,%d,%d,%d,%d,%s,%s\n"
+    "open"
     python_start_line
     python_start_col
     python_end_line
@@ -244,8 +243,8 @@ let write_pymap ~python_file ~span ~source =
   let rows =
     if line_count = 0 then ""
     else
-      pymap_row ~python_file ~symbol ~python_start_line ~python_start_col
-        ~python_end_line ~python_end_col span
+      pymap_row ~symbol ~python_start_line ~python_start_col ~python_end_line
+        ~python_end_col span
   in
   let map_file = Filename.remove_extension python_file ^ ".pymap" in
   let oc = open_out map_file in
@@ -263,9 +262,8 @@ let write_python_with_source_map ~fname ~span pp =
 let write_pymap_entries ~python_file ~source entries =
   let entry_row (name, span) =
     let (start_line, start_col, end_line, end_col) = python_symbol_span source name in
-    pymap_row ~python_file ~symbol:name ~python_start_line:start_line
-      ~python_start_col:start_col ~python_end_line:end_line
-      ~python_end_col:end_col span
+    pymap_row ~symbol:name ~python_start_line:start_line ~python_start_col:start_col
+      ~python_end_line:end_line ~python_end_col:end_col span
   in
   let map_file = Filename.remove_extension python_file ^ ".pymap" in
   let oc = open_out map_file in

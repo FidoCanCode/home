@@ -7,9 +7,9 @@ from fido import rocq_traceback
 from fido.rocq_traceback import SourceMap, TracebackAnnotator, TracebackCLI
 
 _PYMAP_HEADER = (
-    "version,python_file,python_start_line,python_start_col,python_end_line,"
-    "python_end_col,source_file,source_start_line,source_start_col,"
-    "source_end_line,source_end_col,kind,symbol\n"
+    "stability,python_start_line,python_start_col,python_end_line,python_end_col,"
+    "source_file,source_start_line,source_start_col,source_end_line,"
+    "source_end_col,kind,symbol\n"
 )
 
 
@@ -21,11 +21,11 @@ def _pymap_row(
     source_file: str = "source_maps.v",
     source_start_line: int = 12,
     source_start_col: int = 4,
-    version: int = 1,
+    stability: str = "open",
     symbol: str = "source_map_runtime_error",
 ) -> str:
     return (
-        f"{version},{py_file.name},{start},0,{end},0,{source_file},"
+        f"{stability},{start},0,{end},0,{source_file},"
         f"{source_start_line},{source_start_col},13,7,extraction,{symbol}\n"
     )
 
@@ -35,11 +35,11 @@ def _write_map(
     *,
     start: int = 3,
     end: int = 5,
-    version: int = 1,
+    stability: str = "open",
 ) -> Path:
     map_file = py_file.with_suffix(".pymap")
     map_file.write_text(
-        _PYMAP_HEADER + _pymap_row(py_file, start=start, end=end, version=version)
+        _PYMAP_HEADER + _pymap_row(py_file, start=start, end=end, stability=stability)
     )
     return map_file
 
@@ -67,10 +67,10 @@ class TestSourceMap:
         assert entry.rocq_location() == "inner.v:20:2"
         assert source_map.lookup(99) is None
 
-    def test_rejects_unsupported_version(self, tmp_path: Path) -> None:
-        map_file = _write_map(tmp_path / "boom.py", version=2)
+    def test_rejects_unsupported_stability(self, tmp_path: Path) -> None:
+        map_file = _write_map(tmp_path / "boom.py", stability="closed")
 
-        with pytest.raises(ValueError, match="unsupported source map version"):
+        with pytest.raises(ValueError, match="unsupported source map stability"):
             SourceMap.load(map_file)
 
 

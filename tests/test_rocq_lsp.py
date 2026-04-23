@@ -436,23 +436,23 @@ def test_index_diagnostics_for_bad_maps_and_missing_declarations(
     (models / "toy.v").write_text("Definition toy := 1.\nDefinition dupe := 2.\n")
     (generated / "bad.pymap").write_text("{")
     pymap_header = (
-        "version,python_file,python_start_line,python_start_col,python_end_line,"
+        "stability,python_start_line,python_start_col,python_end_line,"
         "python_end_col,source_file,source_start_line,source_start_col,"
         "source_end_line,source_end_col,kind,symbol\n"
     )
     (generated / "wrong.pymap").write_text(
-        pymap_header + "2,toy.py,1,0,1,0,toy.v,1,0,1,0,extraction,toy\n"
+        pymap_header + "closed,1,0,1,0,toy.v,1,0,1,0,extraction,toy\n"
     )
     py_path = generated / "toy.py"
     py_path.write_text("def dupe() -> int:\n    return 2\n")
     os.utime(py_path, (1, 1))
     (generated / "toy.pymap").write_text(
         pymap_header
-        + "1,toy.py,1,0,1,0,toy.v,1,11,1,0,extraction,toy\n"
-        + "1,toy.py,1,0,1,0,toy.v,2,11,2,0,extraction,dupe\n"
-        + "1,toy.py,1,0,1,0,toy.v,2,11,2,0,extraction,dupe\n"
-        + "1,toy.py,1,0,1,0,toy.v,1,0,1,0,extraction,\n"
-        + "1,toy.py,1,0,1,0,missing.v,1,0,1,0,extraction,missing_source\n"
+        + "open,1,0,1,0,toy.v,1,11,1,0,extraction,toy\n"
+        + "open,1,0,1,0,toy.v,2,11,2,0,extraction,dupe\n"
+        + "open,1,0,1,0,toy.v,2,11,2,0,extraction,dupe\n"
+        + "open,1,0,1,0,toy.v,1,0,1,0,extraction,\n"
+        + "open,1,0,1,0,missing.v,1,0,1,0,extraction,missing_source\n"
     )
     index = RocqIndex(root)
 
@@ -460,7 +460,7 @@ def test_index_diagnostics_for_bad_maps_and_missing_declarations(
 
     messages = [diag.message for diag in index.diagnostics]
     assert any("bad source map" in message for message in messages)
-    assert any("unsupported source map version" in message for message in messages)
+    assert any("unsupported source map stability" in message for message in messages)
     assert any(
         "generated Python declaration missing for toy" in message
         for message in messages
