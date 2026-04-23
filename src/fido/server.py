@@ -28,6 +28,7 @@ from fido.events import (
     reply_to_comment,
     reply_to_issue_comment,
     reply_to_review,
+    review_outcome_creates_tasks,
 )
 from fido.github import GitHub
 from fido.infra import (
@@ -913,7 +914,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 # Create task based on triage result.
                 # DEFER files a GitHub issue (handled in reply_to_comment) — no tasks.json entry.
                 # ACT, DO → add each task title to work queue.
-                if category not in ("DUMP", "ANSWER", "ASK", "DEFER"):
+                if category is not None and review_outcome_creates_tasks(category):
                     activity.set_description(
                         "queuing review comment tasks"
                         if len(titles or []) != 1

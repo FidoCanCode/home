@@ -616,6 +616,45 @@ class ReplyArtifact:
     artifact_promises: list[int]
 
 
+class ReviewReplyOutcome:
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewAct(ReviewReplyOutcome):
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewDo(ReviewReplyOutcome):
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewAsk(ReviewReplyOutcome):
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewAnswer(ReviewReplyOutcome):
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewDefer(ReviewReplyOutcome):
+    pass
+
+
+@dataclass(frozen=True)
+class ReviewDump(ReviewReplyOutcome):
+    pass
+
+
+ReviewReplyOutcomeT = (
+    ReviewAct | ReviewDo | ReviewAsk | ReviewAnswer | ReviewDefer | ReviewDump
+)
+
+
 def new_attempt(owner: ClaimOwner) -> Attempt:
     return Attempt(
         attempt_owner=owner,
@@ -962,6 +1001,42 @@ def record_reply_artifact(
         ),
         artifacts,
     )
+
+
+def review_outcome_creates_tasks(outcome: ReviewReplyOutcome) -> bool:
+    match outcome:
+        case ReviewAct():
+            return True
+        case ReviewDo():
+            return True
+        case ReviewAsk():
+            return False
+        case ReviewAnswer():
+            return False
+        case ReviewDefer():
+            return False
+        case ReviewDump():
+            return False
+        case __impossible:
+            assert_never(__impossible)
+
+
+def review_outcome_resolves_thread(outcome: ReviewReplyOutcome) -> bool:
+    match outcome:
+        case ReviewAct():
+            return False
+        case ReviewDo():
+            return False
+        case ReviewAsk():
+            return False
+        case ReviewAnswer():
+            return False
+        case ReviewDefer():
+            return True
+        case ReviewDump():
+            return True
+        case __impossible:
+            assert_never(__impossible)
 
 
 def claim_state_completed(state: ClaimState) -> bool:

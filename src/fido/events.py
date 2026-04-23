@@ -14,6 +14,7 @@ from fido.prompts import NO_TOOLS_CLAUSE, Prompts
 from fido.provider import ProviderAgent, set_thread_repo
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
+from fido.rocq import replied_comment_claims as oracle
 from fido.state import State
 from fido.store import FidoStore, append_reply_promise_markers
 from fido.tasks import Tasks
@@ -59,7 +60,7 @@ def _pr_number_from_api_url(url: str, kind: str) -> int:
     return int(match.group(1))
 
 
-def _build_review_comment_action(
+def build_review_comment_action(
     repo: str,
     pr_number: int,
     pr_title: str,
@@ -67,9 +68,14 @@ def _build_review_comment_action(
     comment: dict[str, Any],
     *,
     comment_body: str | None = None,
+    comment_author: str | None = None,
 ) -> Action:
     """Rebuild a review-comment Action from live GitHub state."""
-    user = comment["user"]["login"]
+    user = (
+        comment_author
+        if comment_author is not None
+        else comment.get("user", {}).get("login", "")
+    )
     body = comment_body if comment_body is not None else (comment["body"] or "")
     is_bot = user.endswith("[bot]")
     return Action(
@@ -186,6 +192,31 @@ def _issue_lane_key(repo: str, pr_number: int) -> str:
     return f"issues:{repo}:{pr_number}"
 
 
+def _review_outcome(category: str) -> oracle.ReviewReplyOutcome:
+    return {
+        "ACT": oracle.ReviewAct(),
+        "DO": oracle.ReviewDo(),
+        "ASK": oracle.ReviewAsk(),
+        "ANSWER": oracle.ReviewAnswer(),
+        "DEFER": oracle.ReviewDefer(),
+        "DUMP": oracle.ReviewDump(),
+    }[category]
+
+
+def review_outcome_creates_tasks(category: str) -> bool:
+    """Return whether a review reply outcome should create task objects."""
+    if category not in {"ACT", "DO", "ASK", "ANSWER", "DEFER", "DUMP"}:
+        return False
+    return bool(oracle.review_outcome_creates_tasks(_review_outcome(category)))
+
+
+def review_outcome_resolves_thread(category: str) -> bool:
+    """Return whether a review reply outcome should resolve the thread."""
+    if category not in {"ACT", "DO", "ASK", "ANSWER", "DEFER", "DUMP"}:
+        return False
+    return bool(oracle.review_outcome_resolves_thread(_review_outcome(category)))
+
+
 def _apply_reply_result(
     category: str,
     titles: list[str],
@@ -197,7 +228,9 @@ def _apply_reply_result(
     registry: WorkerRegistry | None,
 ) -> None:
     """Apply ACT/DO titles from a recovered reply just like webhook handling."""
-    if category in ("DUMP", "ANSWER", "ASK", "DEFER"):
+    if thread is not None and not review_outcome_creates_tasks(category):
+        return
+    if thread is None and category in ("DUMP", "ANSWER", "ASK", "DEFER"):
         return
     for title in titles:
         create_task(
@@ -365,7 +398,7 @@ def recover_reply_promises(
                 combined_parts.append(body)
         combined_body = "\n\n---\n\n".join(combined_parts) if combined_parts else None
         representative = group[-1][1]
-        action = _build_review_comment_action(
+        action = build_review_comment_action(
             repo_cfg.name,
             pr_number,
             pr_title,
@@ -815,17 +848,34 @@ def reply_to_comment(
         prompts=prompts,
     )
 
-    # For DUMP: also resolve the thread
-    if category == "DUMP" and info.get("comment_id"):
-        _try_resolve_thread(info, config)
+    if review_outcome_resolves_thread(category) and info.get("comment_id"):
+        _try_resolve_thread(info, gh)
 
     return (category, titles)
 
 
-def _try_resolve_thread(info: dict[str, Any], config: Config) -> None:
-    """Best-effort resolve a review thread via GraphQL."""
-    # Thread node_id not available in webhook payload — skip
-    pass
+def _try_resolve_thread(info: dict[str, Any], gh: GitHub) -> None:
+    """Best-effort resolve the review thread containing a comment."""
+    repo = info.get("repo")
+    pr = info.get("pr")
+    comment_id = info.get("comment_id")
+    if not isinstance(repo, str) or not isinstance(comment_id, int):
+        return
+    if pr is None:
+        return
+    if not isinstance(pr, int):
+        try:
+            pr = int(pr)
+        except TypeError, ValueError:
+            return
+    owner, repo_name = repo.split("/", 1)
+    for node in gh.get_review_threads(owner, repo_name, pr):
+        if node.get("isResolved"):
+            continue
+        comments = node.get("comments", {}).get("nodes", [])
+        if any(c.get("databaseId") == comment_id for c in comments):
+            gh.resolve_thread(node["id"])
+            return
 
 
 def reply_to_review(

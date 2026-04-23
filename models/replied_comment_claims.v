@@ -86,6 +86,17 @@ Record ReplyArtifact : Type := {
   artifact_promises : list positive
 }.
 
+(** [ReviewReplyOutcome] is the policy-level result of triaging one review
+    comment or unresolved review thread.  Python still performs the actual
+    GitHub and task side effects; the model states which obligations apply. *)
+Inductive ReviewReplyOutcome : Type :=
+| ReviewAct
+| ReviewDo
+| ReviewAsk
+| ReviewAnswer
+| ReviewDefer
+| ReviewDump.
+
 (** [new_attempt] creates the initial shared metadata for a prepared promise. *)
 Definition new_attempt (owner : ClaimOwner) : Attempt :=
   {| attempt_owner := owner;
@@ -319,6 +330,24 @@ Definition record_reply_artifact
        artifact_promises := covered_promises |}
     artifacts.
 
+(** [review_outcome_creates_tasks] states whether a review reply outcome owes
+    one or more durable work-queue entries after the reply is posted. *)
+Definition review_outcome_creates_tasks (outcome : ReviewReplyOutcome) : bool :=
+  match outcome with
+  | ReviewAct => true
+  | ReviewDo => true
+  | _ => false
+  end.
+
+(** [review_outcome_resolves_thread] states whether a review reply outcome
+    should close the review thread after the reply is posted. *)
+Definition review_outcome_resolves_thread (outcome : ReviewReplyOutcome) : bool :=
+  match outcome with
+  | ReviewDefer => true
+  | ReviewDump => true
+  | _ => false
+  end.
+
 (** [claim_completed] observes whether one raw comment id is completed. *)
 Definition claim_state_completed (state : ClaimState) : bool :=
   match state with
@@ -334,4 +363,4 @@ Definition claim_completed (claims : PositiveMap.t ClaimRow) (comment : positive
   end.
 
 Python File Extraction replied_comment_claims
-  "promise_recoverable comment_claimable all_claimable prepare_claims mark_promise_posted ack_promise fail_promise recover_promise record_reply_artifact claim_completed".
+  "promise_recoverable comment_claimable all_claimable prepare_claims mark_promise_posted ack_promise fail_promise recover_promise record_reply_artifact review_outcome_creates_tasks review_outcome_resolves_thread claim_completed".

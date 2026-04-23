@@ -8,6 +8,7 @@ from fido.config import Config, RepoMembership
 from fido.config import RepoConfig as _RepoConfig
 from fido.events import (
     Action,
+    _apply_reply_result,
     _configured_agent,
     _get_commit_summary,
     _is_allowed,
@@ -20,6 +21,7 @@ from fido.events import (
     _summarize_as_action_item,
     _task_snapshot,
     _triage,
+    _try_resolve_thread,
     create_task,
     dispatch,
     launch_sync,
@@ -30,6 +32,8 @@ from fido.events import (
     reply_to_comment,
     reply_to_issue_comment,
     reply_to_review,
+    review_outcome_creates_tasks,
+    review_outcome_resolves_thread,
 )
 from fido.provider import ProviderID
 from fido.rocq import replied_comment_claims as oracle
@@ -1767,6 +1771,116 @@ class TestReplyToComment:
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ASK"
+
+    @pytest.mark.parametrize(
+        ("category", "creates_tasks", "resolves_thread"),
+        [
+            ("ACT", True, False),
+            ("DO", True, False),
+            ("ASK", False, False),
+            ("ANSWER", False, False),
+            ("DEFER", False, True),
+            ("DUMP", False, True),
+        ],
+    )
+    def test_review_outcome_helpers(
+        self,
+        category: str,
+        creates_tasks: bool,
+        resolves_thread: bool,
+    ) -> None:
+        assert review_outcome_creates_tasks(category) is creates_tasks
+        assert review_outcome_resolves_thread(category) is resolves_thread
+
+    def test_review_outcome_helpers_return_false_for_unknown_category(self) -> None:
+        assert review_outcome_creates_tasks("UNKNOWN") is False
+        assert review_outcome_resolves_thread("UNKNOWN") is False
+
+    @pytest.mark.parametrize("category", ["DEFER", "DUMP"])
+    def test_resolve_categories_resolve_review_thread(
+        self, tmp_path: Path, category: str
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 11},
+            comment_body="please defer",
+            is_bot=False,
+        )
+        gh = MagicMock()
+        gh.fetch_comment_thread.return_value = [
+            {"id": 11, "author": "owner", "body": "please defer"}
+        ]
+        gh.reply_to_review_comment.return_value = {"id": 88}
+        gh.get_review_threads.return_value = [
+            {
+                "id": "thread-node-1",
+                "isResolved": False,
+                "comments": {"nodes": [{"databaseId": 11}]},
+            }
+        ]
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return f"{category}: handled"
+            return "Handled."
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            gh,
+            agent=_client(side_effect=fake_pp),
+        )
+        gh.resolve_thread.assert_called_once_with("thread-node-1")
+
+    def test_try_resolve_thread_returns_early_for_missing_repo(self) -> None:
+        gh = MagicMock()
+        _try_resolve_thread({"pr": 1, "comment_id": 11}, gh)
+        gh.get_review_threads.assert_not_called()
+
+    def test_try_resolve_thread_returns_early_for_missing_pr(self) -> None:
+        gh = MagicMock()
+        _try_resolve_thread({"repo": "owner/repo", "comment_id": 11}, gh)
+        gh.get_review_threads.assert_not_called()
+
+    def test_try_resolve_thread_returns_early_for_unparseable_pr(self) -> None:
+        gh = MagicMock()
+        _try_resolve_thread(
+            {"repo": "owner/repo", "pr": object(), "comment_id": 11}, gh
+        )
+        gh.get_review_threads.assert_not_called()
+
+    def test_try_resolve_thread_skips_resolved_threads(self) -> None:
+        gh = MagicMock()
+        gh.get_review_threads.return_value = [
+            {
+                "id": "thread-node-1",
+                "isResolved": True,
+                "comments": {"nodes": [{"databaseId": 11}]},
+            }
+        ]
+        _try_resolve_thread({"repo": "owner/repo", "pr": 1, "comment_id": 11}, gh)
+        gh.resolve_thread.assert_not_called()
+
+    def test_apply_reply_result_skips_non_task_issue_categories(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        with patch("fido.events.create_task") as mock_create_task:
+            _apply_reply_result(
+                "ASK",
+                ["ignored"],
+                cfg,
+                repo_cfg,
+                MagicMock(),
+                thread=None,
+                registry=None,
+            )
+        mock_create_task.assert_not_called()
 
     def test_full_flow_answer(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
