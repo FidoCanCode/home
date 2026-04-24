@@ -1369,15 +1369,41 @@ def _notify_thread_change(
             "has been updated. Reference the comment URL."
         )
 
+    # retry_on_preempt=True: if a webhook handler preempts this voice turn
+    # mid-flight (cancelled=True, result_len=0), wait for the preempter and
+    # retry the same prompt.  Without this, empty-because-cancelled comes
+    # back indistinguishable from empty-because-Opus-broke, and the old
+    # `raise ValueError` took down either the reorder-<repo> daemon or the
+    # worker thread that owned rescope_before_pick (fixes #935).
     body = agent.run_turn(
         prompts.persona_wrap(instruction),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
+        retry_on_preempt=True,
     )
     if not body:
-        raise ValueError(
-            f"_notify_thread_change: run_turn returned empty for comment {comment_id}"
+        # Genuinely empty after any preempt retries — post a plain-text
+        # fallback so the reviewer still sees the status change, and so one
+        # silent provider failure can't kill the caller thread.
+        log.warning(
+            "_notify_thread_change: empty voice reply for comment %s (%s) — "
+            "posting plain-text fallback",
+            comment_id,
+            kind,
         )
+        new_title = change.get("new_title", "")
+        if kind == "completed":
+            body = (
+                f'Fido: your task "{original_title}" has been marked done — '
+                f"a recent commit already covered it, so it was removed from "
+                f"the active queue. Ref: {url}"
+            )
+        else:
+            body = (
+                f'Fido: your task "{original_title}" has been rewritten to '
+                f'"{new_title}" to reflect the updated requirements. '
+                f"Ref: {url}"
+            )
 
     try:
         gh.reply_to_review_comment(repo, pr, body, comment_id)
