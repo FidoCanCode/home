@@ -111,5 +111,5 @@ class Config:
                 b.strip() for b in args.allowed_bots.split(",") if b.strip()
             ),
             log_level=args.log_level.upper(),
-            sub_dir=Path(__file__).resolve().parent.parent / "sub",
+            sub_dir=Path(__file__).resolve().parents[2] / "sub",
         )

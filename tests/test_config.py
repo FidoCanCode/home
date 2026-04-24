@@ -140,6 +140,32 @@ class TestFromArgs:
         )
         assert cfg.sub_dir.name == "sub"
 
+    def test_sub_dir_resolves_to_real_skill_files(self, tmp_path: Path) -> None:
+        """The default sub_dir must point at the actual sub/ directory at
+        the repo root, containing the canonical sub-skill markdown files.
+
+        Regression test for #919: a leftover ``parent.parent`` from the
+        kennel→fido rename made the default path ``src/sub`` instead of
+        ``sub``, which passed unit tests that only checked the directory
+        name but failed preflight at boot time.
+        """
+        secret_file = tmp_path / "secret"
+        secret_file.write_text("s")
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        cfg = Config.from_args(
+            [
+                "--secret-file",
+                str(secret_file),
+                f"owner/repo:{repo_dir}:claude-code",
+            ]
+        )
+        assert cfg.sub_dir.is_dir(), f"default sub_dir {cfg.sub_dir} does not exist"
+        for name in ("persona.md", "setup.md", "task.md", "ci.md", "resume.md"):
+            assert (cfg.sub_dir / name).is_file(), (
+                f"expected sub-skill {name} under {cfg.sub_dir}"
+            )
+
     def test_repo_provider_parses_from_args(self, tmp_path: Path) -> None:
         secret_file = tmp_path / "secret"
         secret_file.write_text("s")
