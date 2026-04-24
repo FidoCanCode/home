@@ -2446,12 +2446,15 @@ let rec pp_statement_expr state env indent = function
     when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
          not (String.equal "" (str_cons state r)) &&
          List.is_empty (get_record_fields (State.get_table state) r) &&
+         not (is_std_list_cons_ref r) &&
+         not (is_std_ascii_cons_ref r) &&
          List.length args >= 2 ->
       (* Non-record, non-coinductive sum constructor with two or more arguments.
          Using pp_multiline_items produces stable output (one arg per line with
          trailing comma) that ruff will not reformat regardless of indentation
          depth.  Single-argument constructors fall through to pp_expr since
-         they always fit on one line. *)
+         they always fit on one line.  Cons and Ascii have their own lowerings
+         in pp_expr; the guards above prevent this case from shadowing them. *)
       let cons_name = str_cons state r in
       pp_multiline_items indent (str cons_name)
         (List.map (pp_statement_expr state env (indent + 4)) args)

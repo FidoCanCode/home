@@ -1220,10 +1220,7 @@ def completed_tasks_in_order(
         case StatusPending():
             return completed_tasks_in_order(rest, rows)
         case StatusCompleted():
-            return Cons(
-                task,
-                completed_tasks_in_order(rest, rows),
-            )
+            return [task] + completed_tasks_in_order(rest, rows)
         case StatusBlocked():
             return completed_tasks_in_order(rest, rows)
         case __impossible:
@@ -1253,17 +1250,11 @@ def preserve_newly_added(
     row = __option
     match task_status(row):
         case StatusPending():
-            return Cons(
-                task,
-                rest_,
-            )
+            return [task] + rest_
         case StatusCompleted():
             return rest_
         case StatusBlocked():
-            return Cons(
-                task,
-                rest_,
-            )
+            return [task] + rest_
         case __impossible:
             assert_never(__impossible)
 
@@ -1301,10 +1292,7 @@ def collect_ci_tasks(
     rest = __list[1:]
     rest_ = collect_ci_tasks(rest, rows)
     if task_is_ci(rows, task):
-        return Cons(
-            task,
-            rest_,
-        )
+        return [task] + rest_
     return rest_
 
 
@@ -1319,10 +1307,7 @@ def collect_non_ci_tasks(
     rest = __list[1:]
     rest_ = collect_non_ci_tasks(rest, rows)
     if task_is_non_ci(rows, task):
-        return Cons(
-            task,
-            rest_,
-        )
+        return [task] + rest_
     return rest_
 
 
@@ -1566,10 +1551,7 @@ def compute_task_changes(
     if __option is None:
         return rest_
     change = __option
-    return Cons(
-        change,
-        rest_,
-    )
+    return [change] + rest_
 
 
 def remove_from_order(
@@ -1584,10 +1566,7 @@ def remove_from_order(
     rest_ = remove_from_order(task, rest)
     if positive_eqb(t0, task):
         return rest_
-    return Cons(
-        t0,
-        rest_,
-    )
+    return [t0] + rest_
 
 
 def cleanup_aborted_task(

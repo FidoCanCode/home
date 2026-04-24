@@ -746,10 +746,7 @@ def prepare_claims(
     claims: dict[int, ClaimRow],
     promises: dict[int, PromiseRow],
 ) -> tuple[dict[int, ClaimRow], dict[int, PromiseRow]] | None:
-    comments = Cons(
-        anchor,
-        covered,
-    )
+    comments = [anchor] + covered
     if all_claimable(claims, comments):
         claims_ = claim_all(
             owner,
