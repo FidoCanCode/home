@@ -168,10 +168,6 @@ def _rocq_set_fold(
     return result
 
 
-def _rocq_string_cons(head: str, tail: str) -> str:
-    return head + tail
-
-
 def _rocq_string_uncons(value: str) -> tuple[str, str]:
     if not value:
         raise _Impossible()
@@ -1794,8 +1790,7 @@ let rec pp_expr state env expr =
   | MLcons (_, r, []) when is_std_string_empty_ref r ->
       str "\"\""
   | MLcons (_, r, [head; tail]) when is_std_string_cons_ref r ->
-      str "_rocq_string_cons(" ++ pp_expr state env head ++ str ", " ++
-      pp_expr state env tail ++ str ")"
+      pp_expr state env head ++ str " + " ++ pp_expr state env tail
   | MLcons (t_, r, args) when is_std_ascii_cons_ref r ->
       if List.length args <> 8 then extraction_diagnostic_error "PYEX008"
       else

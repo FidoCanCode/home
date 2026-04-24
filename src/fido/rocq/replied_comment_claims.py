@@ -129,10 +129,6 @@ def _rocq_set_fold(
     return result
 
 
-def _rocq_string_cons(head: str, tail: str) -> str:
-    return head + tail
-
-
 def _rocq_string_uncons(value: str) -> tuple[str, str]:
     if not value:
         raise _Impossible()
