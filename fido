@@ -648,7 +648,7 @@ format_host_resources() {
 fetch_status_payload() {
   local payload=$1
   local port=${FIDO_PORT:-9000}
-  local status_url=${_FIDO_STATUS_URL:-${FIDO_STATUS_URL:-http://127.0.0.1:${port}/status.json}}
+  local status_url=${FIDO_STATUS_URL:-http://127.0.0.1:${port}/status.json}
   local curl_args=(
     -fsS
     --connect-timeout 1
