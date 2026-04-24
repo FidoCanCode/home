@@ -632,13 +632,8 @@ format_host_resources() {
 
 fetch_status_payload() {
   local payload=$1
-  local status_json_file=${_FIDO_STATUS_JSON_FILE:-}
   local port=${FIDO_PORT:-9000}
-  local status_url=${FIDO_STATUS_URL:-http://127.0.0.1:${port}/status.json}
-  if [ -n "$status_json_file" ]; then
-    cat "$status_json_file" >"$payload"
-    return
-  fi
+  local status_url=${_FIDO_STATUS_URL:-${FIDO_STATUS_URL:-http://127.0.0.1:${port}/status.json}}
   local curl_args=(
     -fsS
     --connect-timeout 1
@@ -656,7 +651,7 @@ require_status_tools() {
     echo "fido status requires jq on PATH" >&2
     return 127
   fi
-  if [ -z "${_FIDO_STATUS_JSON_FILE:-}" ] && ! command -v curl >/dev/null 2>&1; then
+  if ! command -v curl >/dev/null 2>&1; then
     echo "fido status requires curl on PATH" >&2
     return 127
   fi

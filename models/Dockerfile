@@ -5,7 +5,7 @@ ARG ROCQ_IMAGE=rocq-python-extraction:ci
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS python-base
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git jq libatomic1 \
+    && apt-get install -y --no-install-recommends curl git jq libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV UV_PROJECT_ENVIRONMENT=/tmp/fido-venv
