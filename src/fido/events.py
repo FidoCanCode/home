@@ -1369,15 +1369,46 @@ def _notify_thread_change(
             "has been updated. Reference the comment URL."
         )
 
-    body = agent.run_turn(
-        prompts.persona_wrap(instruction),
-        model=agent.voice_model,
-        system_prompt=prompts.reply_system_prompt(),
-    )
-    if not body:
-        raise ValueError(
-            f"_notify_thread_change: run_turn returned empty for comment {comment_id}"
+    try:
+        body = agent.run_turn(
+            prompts.persona_wrap(instruction),
+            model=agent.voice_model,
+            system_prompt=prompts.reply_system_prompt(),
         )
+    except Exception:
+        log.exception(
+            "_notify_thread_change: run_turn failed for comment %s — "
+            "falling back to plain-text notice",
+            comment_id,
+        )
+        body = ""
+
+    if not body:
+        # Opus came back empty (or raised) — post a plain-text fallback so the
+        # reviewer still sees *something*, and so a single empty reply can't
+        # kill the caller.  Both _on_changes call sites run on threads whose
+        # death costs real state: the background reorder-<repo> thread loses
+        # all remaining notifications in that cycle, and the worker's
+        # synchronous rescope_before_pick takes down the worker itself.
+        log.warning(
+            "_notify_thread_change: empty voice reply for comment %s (%s) — "
+            "posting plain-text fallback",
+            comment_id,
+            kind,
+        )
+        new_title = change.get("new_title", "")
+        if kind == "completed":
+            body = (
+                f'Fido: your task "{original_title}" has been marked done — '
+                f"a recent commit already covered it, so it was removed from "
+                f"the active queue. Ref: {url}"
+            )
+        else:
+            body = (
+                f'Fido: your task "{original_title}" has been rewritten to '
+                f'"{new_title}" to reflect the updated requirements. '
+                f"Ref: {url}"
+            )
 
     try:
         gh.reply_to_review_comment(repo, pr, body, comment_id)

@@ -4170,18 +4170,28 @@ class TestNotifyThreadChange:
         _notify_thread_change(change, cfg, mock_gh, agent=_client())
         mock_gh.comment_issue.assert_not_called()
 
-    def test_review_comment_empty_opus_raises_for_completed(
+    def test_review_comment_empty_opus_falls_back_for_completed(
         self, tmp_path: Path
     ) -> None:
+        """Opus empty reply must not raise — #935.
+
+        An empty voice reply used to raise ValueError, which killed both the
+        background reorder daemon and the synchronous worker via
+        rescope_before_pick.  Now it falls back to a plain-text notification
+        so the reviewer still sees the status change.
+        """
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         task = self._task()
         task["thread"]["comment_type"] = "pulls"
         change = {"task": task, "kind": "completed"}
-        with pytest.raises(ValueError, match="_notify_thread_change"):
-            _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
+        _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
+        mock_gh.reply_to_review_comment.assert_called_once()
+        body = mock_gh.reply_to_review_comment.call_args.args[2]
+        assert "marked done" in body
+        assert task["title"] in body
 
-    def test_review_comment_empty_opus_raises_for_modified(
+    def test_review_comment_empty_opus_falls_back_for_modified(
         self, tmp_path: Path
     ) -> None:
         cfg = self._cfg(tmp_path)
@@ -4194,8 +4204,11 @@ class TestNotifyThreadChange:
             "new_title": "New title",
             "new_description": "",
         }
-        with pytest.raises(ValueError, match="_notify_thread_change"):
-            _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
+        _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
+        mock_gh.reply_to_review_comment.assert_called_once()
+        body = mock_gh.reply_to_review_comment.call_args.args[2]
+        assert "rewritten" in body
+        assert "New title" in body
 
     def test_review_comment_uses_reply_to_review_comment(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
