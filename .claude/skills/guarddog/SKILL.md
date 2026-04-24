@@ -139,22 +139,15 @@ workspace.
 ### Step 9: Restart Fido
 Fido runs from the **runner clone** at `/home/rhencke/home-runner/`, not the workspace clone. The runner must be on `main`, clean, before restart — verify `git -C /home/rhencke/home-runner status` and `git -C /home/rhencke/home-runner rev-parse --abbrev-ref HEAD` first. `./fido up`'s `sync_runner` will try to `git pull` and will misbehave on a feature branch or dirty tree.
 
-Secret file: the launcher expects `$FIDO_SECRET` (default `~/.fido-secret`). If only the legacy `~/.kennel-secret` exists, either symlink it (`ln -s ~/.kennel-secret ~/.fido-secret`) or `export FIDO_SECRET=~/.kennel-secret` before launch.
+Secret file: the launcher expects `~/.fido-secret`. If it does not exist, `mv ~/.kennel-secret ~/.fido-secret` (or recreate the secret) before launch.
 
-Launch via the local launcher if it exists, otherwise run directly under setsid so the process survives the calling shell:
+Launch via the local launcher — this is the only supported start path:
 ```bash
-if [ -x /home/rhencke/start-fido.sh ]; then
-  /home/rhencke/start-fido.sh
-else
-  cd /home/rhencke/home-runner && \
-    mkdir -p ~/log && \
-    setsid ./fido up --port 9000 \
-      rhencke/confusio:/home/rhencke/workspace/confusio:claude-code \
-      FidoCanCode/home:/home/rhencke/workspace/home:claude-code \
-      >> ~/log/fido.log 2>&1 < /dev/null &
-fi
+/home/rhencke/start-fido.sh
 sleep 5 && cd /home/rhencke/home-runner && ./fido status
 ```
+
+If `/home/rhencke/start-fido.sh` does not exist, stop and ask the human to restore it — do not improvise a replacement command. The launcher owns logging redirection, session detachment, and restart semantics that a one-liner will get subtly wrong.
 
 First boot rebuilds the buildx runtime image and can take several minutes; don't treat a slow first `./fido status` as a failure.
 
