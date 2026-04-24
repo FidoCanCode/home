@@ -11,7 +11,7 @@ from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.prompts import NO_TOOLS_CLAUSE, Prompts
-from fido.provider import ProviderAgent, set_thread_repo
+from fido.provider import ProviderAgent, safe_voice_turn, set_thread_repo
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.rocq import replied_comment_claims as oracle
@@ -802,21 +802,18 @@ def reply_to_comment(
         info["pr"],
         info["comment_id"],
     )
-    body = agent.run_turn(
+    body = safe_voice_turn(
+        agent,
         prompts.persona_wrap(instr),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
-        retry_on_preempt=True,
+        log_prefix="reply_to_comment",
     )
     log.info(
         "reply generator: returned %d chars (preview=%r)",
-        len(body or ""),
-        (body or "")[:80],
+        len(body),
+        body[:80],
     )
-    if not body:
-        raise ValueError(
-            f"review-comment reply: run_turn returned empty for PR #{info['pr']}"
-        )
 
     # Re-fetch the thread right before posting so the edit-vs-post decision
     # uses current GitHub state rather than the snapshot taken before triage.
@@ -999,32 +996,36 @@ def _summarize_as_action_item(
         f"Comment: {comment_body}"
     )
     log.info("summarize-action-item: requesting initial title from opus")
-    result = agent.run_turn(prompt, model=agent.voice_model).strip()
+    raw = safe_voice_turn(
+        agent, prompt, model=agent.voice_model, log_prefix="_summarize_as_action_item"
+    )
+    result = raw.strip()
     log.info(
         "summarize-action-item: returned %d chars (preview=%r)",
         len(result),
         result[:60],
     )
     for _ in range(3):
-        if not result or len(result) <= _MAX_TITLE_LEN:
+        if len(result) <= _MAX_TITLE_LEN:
             break
         log.info(
             "summarize-action-item: title too long (%d chars), requesting shorten",
             len(result),
         )
-        result = agent.run_turn(
+        shortened = safe_voice_turn(
+            agent,
             f"{NO_TOOLS_CLAUSE}\n\n"
             f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
             f"Reply with ONLY the shortened title.\n\nTitle: {result}",
             model=agent.voice_model,
-        ).strip()
+            log_prefix="_summarize_as_action_item/shorten",
+        )
+        result = shortened.strip()
         log.info(
             "summarize-action-item: shorten returned %d chars (preview=%r)",
             len(result),
             result[:60],
         )
-    if not result:
-        raise ValueError("_summarize_as_action_item: run_turn returned empty")
     return result[:_MAX_TITLE_LEN]
 
 
@@ -1165,22 +1166,19 @@ def reply_to_issue_comment(
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
-    body = agent.run_turn(
+    body = safe_voice_turn(
+        agent,
         prompts.persona_wrap(instr),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
-        retry_on_preempt=True,
+        log_prefix="reply_to_issue_comment",
     )
     log.info(
         "reply generation returned for PR #%s — body_len=%d preview=%r",
         number,
-        len(body or ""),
-        (body or "")[:80],
+        len(body),
+        body[:80],
     )
-    if not body:
-        raise ValueError(
-            f"issue-comment reply: run_turn returned empty for PR #{number}"
-        )
 
     promise_ids = _reply_promise_ids(context)
     body = append_reply_promise_markers(body, promise_ids)
@@ -1369,42 +1367,13 @@ def _notify_thread_change(
             "has been updated. Reference the comment URL."
         )
 
-    # retry_on_preempt=True: if a webhook handler preempts this voice turn
-    # mid-flight (cancelled=True, result_len=0), wait for the preempter and
-    # retry the same prompt.  Without this, empty-because-cancelled comes
-    # back indistinguishable from empty-because-Opus-broke, and the old
-    # `raise ValueError` took down either the reorder-<repo> daemon or the
-    # worker thread that owned rescope_before_pick (fixes #935).
-    body = agent.run_turn(
+    body = safe_voice_turn(
+        agent,
         prompts.persona_wrap(instruction),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
-        retry_on_preempt=True,
+        log_prefix="_notify_thread_change",
     )
-    if not body:
-        # Genuinely empty after any preempt retries — post a plain-text
-        # fallback so the reviewer still sees the status change, and so one
-        # silent provider failure can't kill the caller thread.
-        log.warning(
-            "_notify_thread_change: empty voice reply for comment %s (%s) — "
-            "posting plain-text fallback",
-            comment_id,
-            kind,
-        )
-        new_title = change.get("new_title", "")
-        if kind == "completed":
-            body = (
-                f'Fido: your task "{original_title}" has been marked done — '
-                f"a recent commit already covered it, so it was removed from "
-                f"the active queue. Ref: {url}"
-            )
-        else:
-            body = (
-                f'Fido: your task "{original_title}" has been rewritten to '
-                f'"{new_title}" to reflect the updated requirements. '
-                f"Ref: {url}"
-            )
-
     try:
         gh.reply_to_review_comment(repo, pr, body, comment_id)
         log.info("notified thread %s (%s)", comment_id, kind)

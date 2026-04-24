@@ -1452,6 +1452,21 @@ class TestSummarizeAsActionItem:
         assert result == "short title"
         assert client.run_turn.call_count == 3  # 1 initial + 2 retries
 
+    def test_uses_retry_on_preempt_via_safe_voice_turn(self) -> None:
+        """safe_voice_turn always passes retry_on_preempt=True to run_turn."""
+        client = _client("add tests")
+        _summarize_as_action_item("add some tests", agent=client)
+        _, kwargs = client.run_turn.call_args
+        assert kwargs.get("retry_on_preempt") is True
+
+    def test_shorten_empty_raises(self) -> None:
+        """If shorten returns empty, safe_voice_turn raises ValueError."""
+        long_title = "a" * 81
+        # Initial returns long_title; shorten returns ""
+        client = _client(side_effect=[long_title, ""])
+        with pytest.raises(ValueError, match="run_turn returned empty"):
+            _summarize_as_action_item("add some tests", agent=client)
+
 
 class TestTriage:
     def test_returns_parsed_category(self, tmp_path: Path) -> None:
@@ -2043,7 +2058,7 @@ class TestReplyToComment:
                 return "Do something"
             return ""
 
-        with pytest.raises(ValueError, match="review-comment reply"):
+        with pytest.raises(ValueError, match="run_turn returned empty"):
             reply_to_comment(
                 action,
                 cfg,
@@ -2534,7 +2549,7 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return ""
 
-        with pytest.raises(ValueError, match="issue-comment reply"):
+        with pytest.raises(ValueError, match="run_turn returned empty"):
             reply_to_issue_comment(
                 self._action(),
                 cfg,
@@ -4192,43 +4207,16 @@ class TestNotifyThreadChange:
         run_turn_kwargs = agent.run_turn.call_args.kwargs
         assert run_turn_kwargs.get("retry_on_preempt") is True
 
-    def test_review_comment_empty_opus_falls_back_for_completed(
-        self, tmp_path: Path
-    ) -> None:
-        """Empty Opus reply after any preempt retries falls back to a plain
-        text notification rather than raising.  Callers of _on_changes run
-        on threads without surrounding try/except, so a raise here kills
-        either the reorder daemon or the worker (see #935).
-        """
+    def test_review_comment_empty_opus_raises(self, tmp_path: Path) -> None:
+        """Empty Opus reply after retries raises — session reconnect handles
+        recovery (#935)."""
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         task = self._task()
         task["thread"]["comment_type"] = "pulls"
         change = {"task": task, "kind": "completed"}
-        _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
-        mock_gh.reply_to_review_comment.assert_called_once()
-        body = mock_gh.reply_to_review_comment.call_args.args[2]
-        assert "marked done" in body
-        assert task["title"] in body
-
-    def test_review_comment_empty_opus_falls_back_for_modified(
-        self, tmp_path: Path
-    ) -> None:
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        task = self._task()
-        task["thread"]["comment_type"] = "pulls"
-        change = {
-            "task": task,
-            "kind": "modified",
-            "new_title": "New title",
-            "new_description": "",
-        }
-        _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
-        mock_gh.reply_to_review_comment.assert_called_once()
-        body = mock_gh.reply_to_review_comment.call_args.args[2]
-        assert "rewritten" in body
-        assert "New title" in body
+        with pytest.raises(ValueError, match="run_turn returned empty"):
+            _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
 
     def test_review_comment_uses_reply_to_review_comment(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -5447,7 +5435,7 @@ class TestRewritePrDescription:
 
     def test_raises_when_opus_returns_empty(self, tmp_path: Path) -> None:
         mock_gh = self._mock_gh()
-        with pytest.raises(ValueError, match="no <body> content"):
+        with pytest.raises(ValueError, match="run_turn returned empty"):
             _rewrite_pr_description(
                 tmp_path,
                 mock_gh,

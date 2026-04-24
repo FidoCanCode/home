@@ -10,6 +10,7 @@ from before the copilot provider existed; they were moved here once both
 providers needed them so the naming stopped lying about scope.
 """
 
+import logging
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -27,6 +28,8 @@ from fido.rocq.transition import State as _FsmState
 from fido.rocq.transition import WorkerAcquire as _FsmWorkerAcquire
 from fido.rocq.transition import WorkerRelease as _FsmWorkerRelease
 from fido.rocq.transition import transition as _fsm_transition
+
+log = logging.getLogger(__name__)
 
 
 class ProviderID(StrEnum):
@@ -815,6 +818,32 @@ class ProviderAgent(Protocol):
     def extract_session_id(self, output: str) -> str:
         """Extract a session id from provider-specific raw one-shot output."""
         ...
+
+
+def safe_voice_turn(
+    agent: ProviderAgent,
+    content: str,
+    *,
+    model: ProviderModel | None = None,
+    system_prompt: str | None = None,
+    log_prefix: str = "safe_voice_turn",
+) -> str:
+    """Run a voice turn with ``retry_on_preempt=True``; raise on empty.
+
+    Centralises the ``retry_on_preempt=True`` flag so every voice-turn call
+    site automatically retries when a session preemption returns an empty
+    result.  If the result is still empty after retries, raises
+    ``ValueError`` — the session reconnect layer handles recovery.
+    """
+    result = agent.run_turn(
+        content,
+        model=model,
+        system_prompt=system_prompt,
+        retry_on_preempt=True,
+    )
+    if not result:
+        raise ValueError(f"{log_prefix}: run_turn returned empty after retries")
+    return result
 
 
 class ProviderAPI(Protocol):

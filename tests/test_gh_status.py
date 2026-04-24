@@ -43,7 +43,7 @@ class TestGeneratePersonaStatus:
     def test_empty_response_raises(self) -> None:
         mock_client = _client()
         mock_client.run_turn.return_value = ""
-        with pytest.raises(ValueError, match="humanify_status"):
+        with pytest.raises(ValueError, match="run_turn returned empty"):
             generate_persona_status("at the vet", "persona", provider=mock_client)
 
     def test_empty_persona(self) -> None:
@@ -60,6 +60,14 @@ class TestGeneratePersonaStatus:
             mock_cls.return_value.run_turn.return_value = "woof"
             generate_persona_status("test", "persona")
             mock_cls.assert_called_once_with()
+
+    def test_uses_retry_on_preempt_via_safe_voice_turn(self) -> None:
+        """safe_voice_turn always passes retry_on_preempt=True to run_turn."""
+        mock_client = _client()
+        mock_client.run_turn.return_value = "fetching bugs"
+        generate_persona_status("fixing bugs", "persona", provider=mock_client)
+        _, kwargs = mock_client.run_turn.call_args
+        assert kwargs.get("retry_on_preempt") is True
 
 
 class TestGeneratePersonaEmoji:

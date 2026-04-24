@@ -30,6 +30,7 @@ from fido.provider import (
     ProviderPressureStatus,
     SessionLeakError,
     TurnSessionMode,
+    safe_voice_turn,
     set_thread_kind,
     set_thread_repo,
 )
@@ -827,8 +828,9 @@ def _write_pr_description(
     description rewrite from overwriting a concurrent work-queue update.
 
     Raises ``ValueError`` when the existing body has no ``---`` divider
-    (rewrite precondition) or when the agent returns no ``<body>``-tagged
-    content.
+    (rewrite precondition).  Returns without writing when the agent returns
+    empty or un-parseable output — the existing body is kept as-is and a
+    warning is logged.
     """
     if agent is None:
         raise ValueError("_write_pr_description requires agent")
@@ -860,13 +862,18 @@ def _write_pr_description(
         rest = f"## Work queue\n\n<!-- WORK_QUEUE_START -->\n{queue}\n<!-- WORK_QUEUE_END -->"
 
     prompt = Prompts("").rewrite_description_prompt(existing_body, task_list)
-    raw = agent.run_turn(prompt, model=agent.voice_model)
+    raw = safe_voice_turn(
+        agent, prompt, model=agent.voice_model, log_prefix="_write_pr_description"
+    )
     new_desc = _extract_body(raw)
     if not new_desc:
-        raise ValueError(
-            f"_write_pr_description: provider returned no <body> content for PR #{pr_number}"
-            f" (raw={str(raw or '')[:200]!r})"
+        log.warning(
+            "_write_pr_description: skipping PR #%s description update — "
+            "no <body> content in provider output (raw=%r)",
+            pr_number,
+            raw[:200],
         )
+        return
 
     # Ensure "Fixes #N" is always present (the agent preserves it for rewrites via
     # prompt rules; for initial writes we append it here).
