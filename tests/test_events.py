@@ -1452,6 +1452,21 @@ class TestSummarizeAsActionItem:
         assert result == "short title"
         assert client.run_turn.call_count == 3  # 1 initial + 2 retries
 
+    def test_uses_retry_on_preempt_via_safe_voice_turn(self) -> None:
+        """safe_voice_turn always passes retry_on_preempt=True to run_turn."""
+        client = _client("add tests")
+        _summarize_as_action_item("add some tests", agent=client)
+        _, kwargs = client.run_turn.call_args
+        assert kwargs.get("retry_on_preempt") is True
+
+    def test_shorten_empty_falls_back_to_hard_truncation(self) -> None:
+        """If shorten returns empty, use the too-long title with hard truncation."""
+        long_title = "a" * 81
+        # Initial returns long_title; shorten always returns ""
+        client = _client(side_effect=[long_title, "", "", ""])
+        result = _summarize_as_action_item("add some tests", agent=client)
+        assert result == long_title[:80]
+
 
 class TestTriage:
     def test_returns_parsed_category(self, tmp_path: Path) -> None:

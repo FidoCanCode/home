@@ -1000,7 +1000,10 @@ def _summarize_as_action_item(
         f"Comment: {comment_body}"
     )
     log.info("summarize-action-item: requesting initial title from opus")
-    result = agent.run_turn(prompt, model=agent.voice_model).strip()
+    raw = safe_voice_turn(
+        agent, prompt, model=agent.voice_model, log_prefix="_summarize_as_action_item"
+    )
+    result = raw.strip() if raw is not None else ""
     log.info(
         "summarize-action-item: returned %d chars (preview=%r)",
         len(result),
@@ -1013,12 +1016,18 @@ def _summarize_as_action_item(
             "summarize-action-item: title too long (%d chars), requesting shorten",
             len(result),
         )
-        result = agent.run_turn(
+        shortened = safe_voice_turn(
+            agent,
             f"{NO_TOOLS_CLAUSE}\n\n"
             f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
             f"Reply with ONLY the shortened title.\n\nTitle: {result}",
             model=agent.voice_model,
-        ).strip()
+            log_prefix="_summarize_as_action_item/shorten",
+        )
+        if shortened is None:
+            # Provider couldn't shorten — fall through to hard truncation
+            break
+        result = shortened.strip()
         log.info(
             "summarize-action-item: shorten returned %d chars (preview=%r)",
             len(result),
