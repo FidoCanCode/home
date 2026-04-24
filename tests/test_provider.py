@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
+import pytest
+
 from fido.provider import (
     ProviderID,
     ProviderLimitSnapshot,
@@ -218,7 +220,7 @@ class TestProviderPalette:
 
 
 class TestSafeVoiceTurn:
-    """safe_voice_turn: retry_on_preempt + None-on-empty contract."""
+    """safe_voice_turn: retry_on_preempt + raise-on-empty contract."""
 
     def _agent(self, return_value: str = "ok") -> MagicMock:
         agent = MagicMock()
@@ -237,19 +239,15 @@ class TestSafeVoiceTurn:
         _, kwargs = agent.run_turn.call_args
         assert kwargs.get("retry_on_preempt") is True
 
-    def test_returns_none_on_empty_string(self) -> None:
+    def test_raises_on_empty_string(self) -> None:
         agent = self._agent("")
-        result = safe_voice_turn(agent, "prompt")
-        assert result is None
+        with pytest.raises(ValueError, match="run_turn returned empty"):
+            safe_voice_turn(agent, "prompt")
 
-    def test_warns_on_empty_output(self, caplog) -> None:
-        import logging
-
+    def test_error_includes_log_prefix(self) -> None:
         agent = self._agent("")
-        with caplog.at_level(logging.WARNING, logger="fido.provider"):
+        with pytest.raises(ValueError, match="my_caller"):
             safe_voice_turn(agent, "prompt", log_prefix="my_caller")
-        assert "my_caller" in caplog.text
-        assert "empty" in caplog.text
 
     def test_passes_model_and_system_prompt(self) -> None:
         from fido.provider import ProviderModel
@@ -260,11 +258,3 @@ class TestSafeVoiceTurn:
         _, kwargs = agent.run_turn.call_args
         assert kwargs["model"] == model
         assert kwargs["system_prompt"] == "be brief"
-
-    def test_default_log_prefix_used_when_not_specified(self, caplog) -> None:
-        import logging
-
-        agent = self._agent("")
-        with caplog.at_level(logging.WARNING, logger="fido.provider"):
-            safe_voice_turn(agent, "prompt")
-        assert "safe_voice_turn" in caplog.text

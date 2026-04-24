@@ -865,13 +865,6 @@ def _write_pr_description(
     raw = safe_voice_turn(
         agent, prompt, model=agent.voice_model, log_prefix="_write_pr_description"
     )
-    if raw is None:
-        log.warning(
-            "_write_pr_description: skipping PR #%s description update — "
-            "provider returned empty after retries",
-            pr_number,
-        )
-        return
     new_desc = _extract_body(raw)
     if not new_desc:
         log.warning(

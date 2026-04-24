@@ -811,13 +811,9 @@ def reply_to_comment(
     )
     log.info(
         "reply generator: returned %d chars (preview=%r)",
-        len(body or ""),
-        (body or "")[:80],
+        len(body),
+        body[:80],
     )
-    if body is None:
-        raise ValueError(
-            f"review-comment reply: run_turn returned empty for PR #{info['pr']}"
-        )
 
     # Re-fetch the thread right before posting so the edit-vs-post decision
     # uses current GitHub state rather than the snapshot taken before triage.
@@ -1003,14 +999,14 @@ def _summarize_as_action_item(
     raw = safe_voice_turn(
         agent, prompt, model=agent.voice_model, log_prefix="_summarize_as_action_item"
     )
-    result = raw.strip() if raw is not None else ""
+    result = raw.strip()
     log.info(
         "summarize-action-item: returned %d chars (preview=%r)",
         len(result),
         result[:60],
     )
     for _ in range(3):
-        if not result or len(result) <= _MAX_TITLE_LEN:
+        if len(result) <= _MAX_TITLE_LEN:
             break
         log.info(
             "summarize-action-item: title too long (%d chars), requesting shorten",
@@ -1024,17 +1020,12 @@ def _summarize_as_action_item(
             model=agent.voice_model,
             log_prefix="_summarize_as_action_item/shorten",
         )
-        if shortened is None:
-            # Provider couldn't shorten — fall through to hard truncation
-            break
         result = shortened.strip()
         log.info(
             "summarize-action-item: shorten returned %d chars (preview=%r)",
             len(result),
             result[:60],
         )
-    if not result:
-        raise ValueError("_summarize_as_action_item: run_turn returned empty")
     return result[:_MAX_TITLE_LEN]
 
 
@@ -1185,13 +1176,9 @@ def reply_to_issue_comment(
     log.info(
         "reply generation returned for PR #%s — body_len=%d preview=%r",
         number,
-        len(body or ""),
-        (body or "")[:80],
+        len(body),
+        body[:80],
     )
-    if body is None:
-        raise ValueError(
-            f"issue-comment reply: run_turn returned empty for PR #{number}"
-        )
 
     promise_ids = _reply_promise_ids(context)
     body = append_reply_promise_markers(body, promise_ids)
@@ -1387,24 +1374,6 @@ def _notify_thread_change(
         system_prompt=prompts.reply_system_prompt(),
         log_prefix="_notify_thread_change",
     )
-    if body is None:
-        # Genuinely empty after any preempt retries — post a plain-text
-        # fallback so the reviewer still sees the status change, and so one
-        # silent provider failure can't kill the caller thread.
-        new_title = change.get("new_title", "")
-        if kind == "completed":
-            body = (
-                f'Fido: your task "{original_title}" has been marked done — '
-                f"a recent commit already covered it, so it was removed from "
-                f"the active queue. Ref: {url}"
-            )
-        else:
-            body = (
-                f'Fido: your task "{original_title}" has been rewritten to '
-                f'"{new_title}" to reflect the updated requirements. '
-                f"Ref: {url}"
-            )
-
     try:
         gh.reply_to_review_comment(repo, pr, body, comment_id)
         log.info("notified thread %s (%s)", comment_id, kind)

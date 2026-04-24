@@ -88,16 +88,13 @@ def generate_persona_status(
     if provider is None:
         provider = ClaudeClient()
     system = f"{persona}\n\n{_STATUS_SYSTEM}" if persona else _STATUS_SYSTEM
-    result = safe_voice_turn(
+    return safe_voice_turn(
         provider,
         f"Rewrite this status in Fido's voice: {message}",
         model=provider.voice_model,
         system_prompt=system,
         log_prefix="generate_persona_status",
     )
-    if result is None:
-        raise ValueError("humanify_status: run_turn returned empty")
-    return result
 
 
 def generate_persona_emoji(

@@ -827,25 +827,13 @@ def safe_voice_turn(
     model: ProviderModel | None = None,
     system_prompt: str | None = None,
     log_prefix: str = "safe_voice_turn",
-) -> str | None:
-    """Run a voice turn with ``retry_on_preempt=True``; return ``None`` on empty.
+) -> str:
+    """Run a voice turn with ``retry_on_preempt=True``; raise on empty.
 
-    Drop-in replacement for ``agent.run_turn(...)`` call sites that previously
-    raised on empty output.  Callers that used to do::
-
-        result = agent.run_turn(prompt, model=..., retry_on_preempt=True)
-        if not result:
-            raise ValueError("...")
-
-    can instead do::
-
-        result = safe_voice_turn(agent, prompt, model=..., log_prefix="...")
-        if result is None:
-            # handle empty — fall back, skip, or re-raise as appropriate
-            ...
-
-    The ``log_prefix`` is included in the warning so call-site context shows
-    up in the log without importing or constructing anything extra.
+    Centralises the ``retry_on_preempt=True`` flag so every voice-turn call
+    site automatically retries when a session preemption returns an empty
+    result.  If the result is still empty after retries, raises
+    ``ValueError`` — the session reconnect layer handles recovery.
     """
     result = agent.run_turn(
         content,
@@ -854,10 +842,7 @@ def safe_voice_turn(
         retry_on_preempt=True,
     )
     if not result:
-        log.warning(
-            "%s: run_turn returned empty after retries — falling back", log_prefix
-        )
-        return None
+        raise ValueError(f"{log_prefix}: run_turn returned empty after retries")
     return result
 
 

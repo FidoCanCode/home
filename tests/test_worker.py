@@ -4113,14 +4113,10 @@ class TestWritePrDescription:
             )
         mock_lock.assert_called_once_with(Path("/tmp"))
 
-    def test_skips_write_when_provider_returns_empty(self, caplog) -> None:
-        import logging
-
+    def test_raises_when_provider_returns_empty(self) -> None:
         gh = MagicMock()
-        with caplog.at_level(logging.WARNING, logger="fido.worker"):
+        with pytest.raises(ValueError, match="run_turn returned empty"):
             self._call(gh, print_return="", issue=7)
-        gh.edit_pr_body.assert_not_called()
-        assert "skipping" in caplog.text
 
     def test_uses_retry_on_preempt_via_safe_voice_turn(self) -> None:
         """safe_voice_turn is called, which always passes retry_on_preempt=True."""
