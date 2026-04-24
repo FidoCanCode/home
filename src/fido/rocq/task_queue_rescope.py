@@ -1539,3 +1539,58 @@ def compute_thread_changes(
         return rest_
     change = __option
     return [change] + rest_
+
+
+def remove_from_order(
+    task: int,
+    order: list[int],
+) -> list[int]:
+    __list = order
+    if __list == []:
+        return []
+    t0 = __list[0]
+    rest = __list[1:]
+    rest_ = remove_from_order(task, rest)
+    if positive_eqb(t0, task):
+        return rest_
+    return [t0] + rest_
+
+
+def cleanup_aborted_task(
+    task: int,
+    lease: ExecutionLease | None,
+    order: list[int],
+    rows: dict[int, TaskRow],
+) -> tuple[tuple[ExecutionLease | None, list[int]], dict[int, TaskRow]]:
+    lease_ = clear_matching_lease(task, lease)
+    order_ = remove_from_order(task, order)
+    rows_ = _rocq_map_remove(
+        _rocq_positive_key(task),
+        rows,
+    )
+    return (
+        (
+            lease_,
+            order_,
+        ),
+        rows_,
+    )
+
+
+def task_still_pending(
+    task: int,
+    rows: dict[int, TaskRow],
+) -> bool:
+    __option = rows.get(_rocq_positive_key(task))
+    if __option is None:
+        return False
+    row = __option
+    match task_status(row):
+        case StatusPending():
+            return True
+        case StatusCompleted():
+            return False
+        case StatusBlocked():
+            return False
+        case __impossible:
+            assert_never(__impossible)

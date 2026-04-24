@@ -619,5 +619,56 @@ Fixpoint compute_thread_changes
       end
   end.
 
+(** [remove_from_order] removes all occurrences of [task] from [order].
+
+    At most one occurrence normally exists; the function is total on any list
+    so the proof is structural without needing uniqueness. *)
+Fixpoint remove_from_order
+    (task : positive)
+    (order : list positive) : list positive :=
+  match order with
+  | [] => []
+  | t :: rest =>
+      let rest' := remove_from_order task rest in
+      if positive_eqb t task then rest' else t :: rest'
+  end.
+
+(** [cleanup_aborted_task] removes an aborted task from the queue entirely and
+    clears the active lease.
+
+    This models [_cleanup_aborted_task] in [worker.py]: when the abort signal
+    fires mid-execution the task is removed from both the durable order and the
+    row map — not merely marked completed — and the lease is cleared.  The
+    abort signal itself is outside the pure model; the caller signals abort by
+    invoking this transition. *)
+Definition cleanup_aborted_task
+    (task : positive)
+    (lease : option ExecutionLease)
+    (order : list positive)
+    (rows : PositiveMap.t TaskRow)
+    : option ExecutionLease * list positive * PositiveMap.t TaskRow :=
+  let lease' := clear_matching_lease task lease in
+  let order' := remove_from_order task order in
+  let rows'  := PositiveMap.remove task rows in
+  (lease', order', rows').
+
+(** [task_still_pending] says whether a task remains in PENDING status.
+
+    This models the external-completion guard inside [execute_task]'s resume
+    loop in [worker.py]: if the task is no longer PENDING (e.g. it was
+    completed externally via ``fido task complete`` while the provider was
+    running) the retry loop exits without further provider invocations. *)
+Definition task_still_pending
+    (task : positive)
+    (rows : PositiveMap.t TaskRow) : bool :=
+  match PositiveMap.find task rows with
+  | Some row =>
+      match task_status row with
+      | StatusPending => true
+      | _ => false
+      end
+  | None => false
+  end.
+
 Python File Extraction task_queue_rescope
-  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot apply_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_thread_change compute_thread_changes".
+  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot apply_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_thread_change compute_thread_changes remove_from_order cleanup_aborted_task task_still_pending".
