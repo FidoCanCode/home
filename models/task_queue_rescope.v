@@ -531,5 +531,93 @@ Definition should_abort_for_new_task
         end
   end.
 
+(** [complete_task_visible] marks a task completed and returns its source
+    comment id on the first completion.
+
+    This models the key invariant of [Tasks.complete_by_id]: the source
+    comment is returned to the caller only on the first status transition from
+    a non-completed state.  Subsequent calls on an already-completed task
+    return [None] — the caller must not re-resolve the review thread.  The
+    lease is not managed here; the worker clears active-task state separately
+    after the completion is durable. *)
+Definition complete_task_visible
+    (task : positive)
+    (rows : PositiveMap.t TaskRow) : PositiveMap.t TaskRow * option positive :=
+  match PositiveMap.find task rows with
+  | None => (rows, None)
+  | Some row =>
+      match task_status row with
+      | StatusCompleted => (rows, None)
+      | _ =>
+          let row' := row_with_status row StatusCompleted in
+          (PositiveMap.add task row' rows, task_source_comment row)
+      end
+  end.
+
+(** [ThreadChange] records one change to a thread-originated task detected
+    during rescope.
+
+    [ThreadCompleted task] means the task was omitted or explicitly completed
+    by rescope; the original commenter should be told their request is done.
+
+    [ThreadModified task new_title new_description] means the task's title or
+    description changed; the commenter should be told of the updated plan. *)
+Inductive ThreadChange : Type :=
+| ThreadCompleted : positive -> ThreadChange
+| ThreadModified : positive -> string -> string -> ThreadChange.
+
+(** [task_thread_change] computes the change record, if any, for one snapped
+    task given the queue state before and after rescope.
+
+    Returns [None] when the task has no source comment, was already completed
+    before rescope, or is unchanged. *)
+Definition task_thread_change
+    (task : positive)
+    (rows_before rows_after : PositiveMap.t TaskRow) : option ThreadChange :=
+  match PositiveMap.find task rows_before with
+  | None => None
+  | Some before_row =>
+      match task_source_comment before_row with
+      | None => None
+      | Some _ =>
+          match task_status before_row with
+          | StatusCompleted => None
+          | _ =>
+              match PositiveMap.find task rows_after with
+              | None => Some (ThreadCompleted task)
+              | Some after_row =>
+                  match task_status after_row with
+                  | StatusCompleted => Some (ThreadCompleted task)
+                  | _ =>
+                      if task_metadata_changed before_row after_row then
+                        Some (ThreadModified task
+                          (task_title after_row)
+                          (task_description after_row))
+                      else None
+                  end
+              end
+          end
+      end
+  end.
+
+(** [compute_thread_changes] collects change records for all thread-originated
+    tasks in the rescope snapshot that were completed or modified.
+
+    Only tasks in [snapshot_order] (those Opus knew about at snap time) are
+    checked.  Already-completed tasks and tasks without a source comment are
+    skipped, matching [_compute_thread_changes] in [tasks.py]. *)
+Fixpoint compute_thread_changes
+    (snapshot_order : list positive)
+    (rows_before rows_after : PositiveMap.t TaskRow) : list ThreadChange :=
+  match snapshot_order with
+  | [] => []
+  | task :: rest =>
+      let rest' := compute_thread_changes rest rows_before rows_after in
+      match task_thread_change task rows_before rows_after with
+      | None => rest'
+      | Some change => change :: rest'
+      end
+  end.
+
 Python File Extraction task_queue_rescope
-  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot apply_rescope rescope_affects_active_task should_abort_for_new_task".
+  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot apply_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_thread_change compute_thread_changes".

@@ -1393,3 +1393,149 @@ def should_abort_for_new_task(
         return False
     current_row = __option
     return new_row.requires_abort(current_row)
+
+
+def complete_task_visible(
+    task: int,
+    rows: dict[int, TaskRow],
+) -> tuple[dict[int, TaskRow], int | None]:
+    __option = rows.get(_rocq_positive_key(task))
+    if __option is None:
+        return (
+            rows,
+            None,
+        )
+    row = __option
+    match task_status(row):
+        case StatusPending():
+            row_ = row_with_status(row, StatusCompleted())
+            return (
+                _rocq_map_add(
+                    _rocq_positive_key(task),
+                    row_,
+                    rows,
+                ),
+                task_source_comment(row),
+            )
+        case StatusCompleted():
+            return (
+                rows,
+                None,
+            )
+        case StatusBlocked():
+            row_ = row_with_status(row, StatusCompleted())
+            return (
+                _rocq_map_add(
+                    _rocq_positive_key(task),
+                    row_,
+                    rows,
+                ),
+                task_source_comment(row),
+            )
+        case __impossible:
+            assert_never(__impossible)
+
+
+class ThreadChange:
+    pass
+
+
+@dataclass(frozen=True)
+class ThreadCompleted(ThreadChange):
+    arg0: int
+
+
+@dataclass(frozen=True)
+class ThreadModified(ThreadChange):
+    arg0: int
+    arg1: str
+    arg2: str
+
+
+ThreadChangeT = ThreadCompleted | ThreadModified
+
+
+def task_thread_change(
+    task: int,
+    rows_before: dict[int, TaskRow],
+    rows_after: dict[int, TaskRow],
+) -> ThreadChange | None:
+    __option = rows_before.get(_rocq_positive_key(task))
+    if __option is None:
+        return None
+    before_row = __option
+    __option = task_source_comment(before_row)
+    if __option is None:
+        return None
+    p = __option
+    match task_status(before_row):
+        case StatusPending():
+            __option = rows_after.get(_rocq_positive_key(task))
+            if __option is None:
+                return ThreadCompleted(task)
+            after_row = __option
+            match task_status(after_row):
+                case StatusPending():
+                    if before_row.metadata_changed(after_row):
+                        return ThreadModified(
+                            task, task_title(after_row), task_description(after_row)
+                        )
+                    return None
+                case StatusCompleted():
+                    return ThreadCompleted(task)
+                case StatusBlocked():
+                    if before_row.metadata_changed(after_row):
+                        return ThreadModified(
+                            task, task_title(after_row), task_description(after_row)
+                        )
+                    return None
+                case __impossible:
+                    assert_never(__impossible)
+        case StatusCompleted():
+            return None
+        case StatusBlocked():
+            __option = rows_after.get(_rocq_positive_key(task))
+            if __option is None:
+                return ThreadCompleted(task)
+            after_row = __option
+            match task_status(after_row):
+                case StatusPending():
+                    if before_row.metadata_changed(after_row):
+                        return ThreadModified(
+                            task, task_title(after_row), task_description(after_row)
+                        )
+                    return None
+                case StatusCompleted():
+                    return ThreadCompleted(task)
+                case StatusBlocked():
+                    if before_row.metadata_changed(after_row):
+                        return ThreadModified(
+                            task, task_title(after_row), task_description(after_row)
+                        )
+                    return None
+                case __impossible:
+                    assert_never(__impossible)
+        case __impossible:
+            assert_never(__impossible)
+
+
+def compute_thread_changes(
+    snapshot_order: list[int],
+    rows_before: dict[int, TaskRow],
+    rows_after: dict[int, TaskRow],
+) -> list[ThreadChange]:
+    __list = snapshot_order
+    if __list == []:
+        return []
+    task = __list[0]
+    rest = __list[1:]
+    rest_ = compute_thread_changes(
+        rest,
+        rows_before,
+        rows_after,
+    )
+    __option = task_thread_change(task, rows_before, rows_after)
+    if __option is None:
+        return rest_
+    change = __option
+    return [change] + rest_

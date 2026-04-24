@@ -49,4 +49,10 @@ open,561,4,563,27,task_queue_rescope.v,476,11,476,32,extraction,task_metadata_ch
 open,1323,0,1327,25,task_queue_rescope.v,484,11,484,24,extraction,apply_rescope,apply_rescope
 open,1348,0,1351,35,task_queue_rescope.v,499,11,499,38,extraction,rescope_affects_active_task,rescope_affects_active_task
 open,1376,0,1379,29,task_queue_rescope.v,519,11,519,36,extraction,should_abort_for_new_task,should_abort_for_new_task
+open,1398,0,1400,29,task_queue_rescope.v,543,11,543,32,extraction,complete_task_visible,complete_task_visible
+open,1439,0,1440,8,task_queue_rescope.v,565,10,565,22,extraction,ThreadChange,ThreadChange
+open,1444,0,1445,13,task_queue_rescope.v,566,2,566,17,extraction,ThreadCompleted,ThreadCompleted
+open,1449,0,1452,13,task_queue_rescope.v,567,2,567,16,extraction,ThreadModified,ThreadModified
+open,1458,0,1461,35,task_queue_rescope.v,574,11,574,29,extraction,task_thread_change,task_thread_change
 open,1041,0,1043,25,task_queue_rescope.v,327,9,327,35,extraction,rescope_ops_cover_snapshot,rescope_ops_cover_snapshot
+open,1514,0,1517,35,task_queue_rescope.v,609,9,609,31,extraction,compute_thread_changes,compute_thread_changes

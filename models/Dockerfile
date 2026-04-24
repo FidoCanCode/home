@@ -176,7 +176,9 @@ COPY .python-version pyproject pyproject.*.toml uv.lock ./
 COPY tools/compose_pyproject.py tools/compose_pyproject.py
 COPY --from=extract /tmp/model-output/src/fido/rocq /workspace/src/fido/rocq
 
-RUN cd /workspace/src/fido/rocq \
+RUN --mount=type=cache,id=fido-uv-tool,target=/root/.cache/uv \
+    uvx --from ruff==0.15.9 ruff format src/fido/rocq/ \
+    && cd /workspace/src/fido/rocq \
     && find . -type f ! -name ".build-files" -printf "%P\n" | LC_ALL=C sort > .build-files
 
 FROM scratch AS export
