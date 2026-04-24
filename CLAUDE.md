@@ -181,7 +181,12 @@ When a `thread`-type task is created (PR comment feedback), `create_task()` trig
   duplicate logic that can be merged cleanly.
 - **No hacks** — do not compensate for backend, extraction, generator, or
   runtime bugs in models, generated files, or tests. Fix the layer that is
-  wrong rather than adding a workaround in a neighboring layer.
+  wrong rather than adding a workaround in a neighboring layer.  In particular,
+  the Rocq extraction backend must emit Python that is already formatted — do
+  not add a post-extraction `ruff format` step in the `model-format` Dockerfile
+  stage to paper over output that does not pass the format check.  If extracted
+  Python fails the format check, fix the pretty-printer in `python.ml` to emit
+  correct formatting in the first place.
 - **No compatibility shims** — when replacing a path or interface, remove the
   old one instead of preserving a parallel legacy path.
 - **Verify upstream facts** — when a fix depends on external or standard-library

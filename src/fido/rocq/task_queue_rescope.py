@@ -1220,7 +1220,10 @@ def completed_tasks_in_order(
         case StatusPending():
             return completed_tasks_in_order(rest, rows)
         case StatusCompleted():
-            return [task] + completed_tasks_in_order(rest, rows)
+            return Cons(
+                task,
+                completed_tasks_in_order(rest, rows),
+            )
         case StatusBlocked():
             return completed_tasks_in_order(rest, rows)
         case __impossible:
@@ -1250,11 +1253,17 @@ def preserve_newly_added(
     row = __option
     match task_status(row):
         case StatusPending():
-            return [task] + rest_
+            return Cons(
+                task,
+                rest_,
+            )
         case StatusCompleted():
             return rest_
         case StatusBlocked():
-            return [task] + rest_
+            return Cons(
+                task,
+                rest_,
+            )
         case __impossible:
             assert_never(__impossible)
 
@@ -1292,7 +1301,10 @@ def collect_ci_tasks(
     rest = __list[1:]
     rest_ = collect_ci_tasks(rest, rows)
     if task_is_ci(rows, task):
-        return [task] + rest_
+        return Cons(
+            task,
+            rest_,
+        )
     return rest_
 
 
@@ -1307,7 +1319,10 @@ def collect_non_ci_tasks(
     rest = __list[1:]
     rest_ = collect_non_ci_tasks(rest, rows)
     if task_is_non_ci(rows, task):
-        return [task] + rest_
+        return Cons(
+            task,
+            rest_,
+        )
     return rest_
 
 
@@ -1483,7 +1498,9 @@ def task_thread_change(
                 case StatusPending():
                     if before_row.metadata_changed(after_row):
                         return TaskModified(
-                            task, task_title(after_row), task_description(after_row)
+                            task,
+                            task_title(after_row),
+                            task_description(after_row),
                         )
                     return None
                 case StatusCompleted():
@@ -1491,7 +1508,9 @@ def task_thread_change(
                 case StatusBlocked():
                     if before_row.metadata_changed(after_row):
                         return TaskModified(
-                            task, task_title(after_row), task_description(after_row)
+                            task,
+                            task_title(after_row),
+                            task_description(after_row),
                         )
                     return None
                 case __impossible:
@@ -1507,7 +1526,9 @@ def task_thread_change(
                 case StatusPending():
                     if before_row.metadata_changed(after_row):
                         return TaskModified(
-                            task, task_title(after_row), task_description(after_row)
+                            task,
+                            task_title(after_row),
+                            task_description(after_row),
                         )
                     return None
                 case StatusCompleted():
@@ -1515,7 +1536,9 @@ def task_thread_change(
                 case StatusBlocked():
                     if before_row.metadata_changed(after_row):
                         return TaskModified(
-                            task, task_title(after_row), task_description(after_row)
+                            task,
+                            task_title(after_row),
+                            task_description(after_row),
                         )
                     return None
                 case __impossible:
@@ -1543,7 +1566,10 @@ def compute_thread_changes(
     if __option is None:
         return rest_
     change = __option
-    return [change] + rest_
+    return Cons(
+        change,
+        rest_,
+    )
 
 
 def remove_from_order(
@@ -1558,7 +1584,10 @@ def remove_from_order(
     rest_ = remove_from_order(task, rest)
     if positive_eqb(t0, task):
         return rest_
-    return [t0] + rest_
+    return Cons(
+        t0,
+        rest_,
+    )
 
 
 def cleanup_aborted_task(

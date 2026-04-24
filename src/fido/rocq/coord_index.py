@@ -500,7 +500,10 @@ def repo_providers(repos: list[repo_entry]) -> list[str]:
         return []
     repo = __list[0]
     rest = __list[1:]
-    return [repo_provider(repo)] + repo_providers(rest)
+    return Cons(
+        repo_provider(repo),
+        repo_providers(rest),
+    )
 
 
 def repo_count(repos: list[repo_entry]) -> int:

@@ -2442,6 +2442,19 @@ let rec pp_statement_expr state env indent = function
               pp_field_name state r fds i ++ str "=" ++
               pp_statement_expr state env (indent + 4) a)
            args)
+  | MLcons (_, r, args)
+    when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
+         not (String.equal "" (str_cons state r)) &&
+         List.is_empty (get_record_fields (State.get_table state) r) &&
+         List.length args >= 2 ->
+      (* Non-record, non-coinductive sum constructor with two or more arguments.
+         Using pp_multiline_items produces stable output (one arg per line with
+         trailing comma) that ruff will not reformat regardless of indentation
+         depth.  Single-argument constructors fall through to pp_expr since
+         they always fit on one line. *)
+      let cons_name = str_cons state r in
+      pp_multiline_items indent (str cons_name)
+        (List.map (pp_statement_expr state env (indent + 4)) args)
   | MLapp (f, args) -> (
       let head, all_args = collect_app f args in
       match head with

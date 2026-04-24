@@ -409,7 +409,16 @@ newline_byte: int = 10
 def first_char_or_newline(s: str) -> int:
     __s = s
     if __s == "":
-        return _rocq_ascii_to_int(False, True, False, True, False, False, False, False)
+        return Ascii(
+            False,
+            True,
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+        )
     __pair = _rocq_string_uncons(__s)
     c = __pair[0]
     s0 = __pair[1]
