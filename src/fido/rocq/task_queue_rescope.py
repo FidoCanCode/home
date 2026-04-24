@@ -129,28 +129,6 @@ def _rocq_set_fold(
     return result
 
 
-def _rocq_string_cons(head: int, tail: str) -> str:
-    try:
-        return bytes([head]).decode("utf-8") + tail
-    except UnicodeDecodeError as exc:
-        raise _RocqUtf8BoundaryError(
-            "Rocq string split crosses a UTF-8 boundary"
-        ) from exc
-
-
-def _rocq_string_uncons(value: str) -> tuple[int, str]:
-    encoded = value.encode("utf-8")
-    if not encoded:
-        raise _Impossible()
-    try:
-        tail = encoded[1:].decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise _RocqUtf8BoundaryError(
-            "Rocq string split crosses a UTF-8 boundary"
-        ) from exc
-    return encoded[0], tail
-
-
 def _rocq_ascii_to_int(
     b0: bool,
     b1: bool,
@@ -163,17 +141,6 @@ def _rocq_ascii_to_int(
 ) -> int:
     return sum(
         (1 << i) for i, bit in enumerate((b0, b1, b2, b3, b4, b5, b6, b7)) if bit
-    )
-
-
-def _rocq_ascii_bits(
-    value: int,
-) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
-    if value < 0 or value > 255:
-        raise ValueError("Rocq byte/ascii value out of range")
-    return cast(
-        tuple[bool, bool, bool, bool, bool, bool, bool, bool],
-        tuple(bool(value & (1 << i)) for i in range(8)),
     )
 
 
@@ -602,19 +569,19 @@ class RescopeOp:
 
 @dataclass(frozen=True)
 class KeepTask(RescopeOp):
-    arg0: int
+    task: int
 
 
 @dataclass(frozen=True)
 class RewriteTask(RescopeOp):
-    arg0: int
-    arg1: str
-    arg2: str
+    task: int
+    new_title: str
+    new_description: str
 
 
 @dataclass(frozen=True)
 class CompleteTask(RescopeOp):
-    arg0: int
+    task: int
 
 
 RescopeOpT = KeepTask | RewriteTask | CompleteTask
@@ -1016,7 +983,7 @@ def rescope_task_id(op: RescopeOp) -> int:
     match op:
         case KeepTask(task):
             return task
-        case RewriteTask(task, s, s0):
+        case RewriteTask(task, new_title, new_description):
             return task
         case CompleteTask(task):
             return task
@@ -1080,7 +1047,7 @@ def apply_rescope_ops(
         )
     row = __option
     match op:
-        case KeepTask(p):
+        case KeepTask(task0):
             match task_status(row):
                 case StatusPending():
                     return apply_rescope_ops(
@@ -1105,7 +1072,7 @@ def apply_rescope_ops(
                     )
                 case __impossible:
                     assert_never(__impossible)
-        case RewriteTask(p, title, description):
+        case RewriteTask(task0, title, description):
             match task_status(row):
                 case StatusPending():
                     row_ = TaskRow(
@@ -1152,7 +1119,7 @@ def apply_rescope_ops(
                     )
                 case __impossible:
                     assert_never(__impossible)
-        case CompleteTask(p):
+        case CompleteTask(task0):
             match task_status(row):
                 case StatusPending():
                     row_ = TaskRow(
@@ -1393,3 +1360,217 @@ def should_abort_for_new_task(
         return False
     current_row = __option
     return new_row.requires_abort(current_row)
+
+
+def complete_task_visible(
+    task: int,
+    rows: dict[int, TaskRow],
+) -> tuple[dict[int, TaskRow], int | None]:
+    __option = rows.get(_rocq_positive_key(task))
+    if __option is None:
+        return (
+            rows,
+            None,
+        )
+    row = __option
+    match task_status(row):
+        case StatusPending():
+            row_ = row_with_status(row, StatusCompleted())
+            return (
+                _rocq_map_add(
+                    _rocq_positive_key(task),
+                    row_,
+                    rows,
+                ),
+                task_source_comment(row),
+            )
+        case StatusCompleted():
+            return (
+                rows,
+                None,
+            )
+        case StatusBlocked():
+            row_ = row_with_status(row, StatusCompleted())
+            return (
+                _rocq_map_add(
+                    _rocq_positive_key(task),
+                    row_,
+                    rows,
+                ),
+                task_source_comment(row),
+            )
+        case __impossible:
+            assert_never(__impossible)
+
+
+class TaskChange:
+    pass
+
+
+@dataclass(frozen=True)
+class TaskCompleted(TaskChange):
+    task: int
+
+
+@dataclass(frozen=True)
+class TaskCancelled(TaskChange):
+    task: int
+
+
+@dataclass(frozen=True)
+class TaskModified(TaskChange):
+    task: int
+    new_title: str
+    new_description: str
+
+
+TaskChangeT = TaskCompleted | TaskCancelled | TaskModified
+
+
+def task_change(
+    task: int,
+    rows_before: dict[int, TaskRow],
+    rows_after: dict[int, TaskRow],
+) -> TaskChange | None:
+    __option = rows_before.get(_rocq_positive_key(task))
+    if __option is None:
+        return None
+    before_row = __option
+    __option = task_source_comment(before_row)
+    if __option is None:
+        return None
+    p = __option
+    match task_status(before_row):
+        case StatusPending():
+            __option = rows_after.get(_rocq_positive_key(task))
+            if __option is None:
+                return TaskCancelled(task)
+            after_row = __option
+            match task_status(after_row):
+                case StatusPending():
+                    if before_row.metadata_changed(after_row):
+                        return TaskModified(
+                            task,
+                            task_title(after_row),
+                            task_description(after_row),
+                        )
+                    return None
+                case StatusCompleted():
+                    return TaskCompleted(task)
+                case StatusBlocked():
+                    if before_row.metadata_changed(after_row):
+                        return TaskModified(
+                            task,
+                            task_title(after_row),
+                            task_description(after_row),
+                        )
+                    return None
+                case __impossible:
+                    assert_never(__impossible)
+        case StatusCompleted():
+            return None
+        case StatusBlocked():
+            __option = rows_after.get(_rocq_positive_key(task))
+            if __option is None:
+                return TaskCancelled(task)
+            after_row = __option
+            match task_status(after_row):
+                case StatusPending():
+                    if before_row.metadata_changed(after_row):
+                        return TaskModified(
+                            task,
+                            task_title(after_row),
+                            task_description(after_row),
+                        )
+                    return None
+                case StatusCompleted():
+                    return TaskCompleted(task)
+                case StatusBlocked():
+                    if before_row.metadata_changed(after_row):
+                        return TaskModified(
+                            task,
+                            task_title(after_row),
+                            task_description(after_row),
+                        )
+                    return None
+                case __impossible:
+                    assert_never(__impossible)
+        case __impossible:
+            assert_never(__impossible)
+
+
+def compute_task_changes(
+    snapshot_order: list[int],
+    rows_before: dict[int, TaskRow],
+    rows_after: dict[int, TaskRow],
+) -> list[TaskChange]:
+    __list = snapshot_order
+    if __list == []:
+        return []
+    task = __list[0]
+    rest = __list[1:]
+    rest_ = compute_task_changes(
+        rest,
+        rows_before,
+        rows_after,
+    )
+    __option = task_change(task, rows_before, rows_after)
+    if __option is None:
+        return rest_
+    change = __option
+    return [change] + rest_
+
+
+def remove_from_order(
+    task: int,
+    order: list[int],
+) -> list[int]:
+    __list = order
+    if __list == []:
+        return []
+    t0 = __list[0]
+    rest = __list[1:]
+    rest_ = remove_from_order(task, rest)
+    if positive_eqb(t0, task):
+        return rest_
+    return [t0] + rest_
+
+
+def cleanup_aborted_task(
+    task: int,
+    lease: ExecutionLease | None,
+    order: list[int],
+    rows: dict[int, TaskRow],
+) -> tuple[tuple[ExecutionLease | None, list[int]], dict[int, TaskRow]]:
+    lease_ = clear_matching_lease(task, lease)
+    order_ = remove_from_order(task, order)
+    rows_ = _rocq_map_remove(
+        _rocq_positive_key(task),
+        rows,
+    )
+    return (
+        (
+            lease_,
+            order_,
+        ),
+        rows_,
+    )
+
+
+def task_still_pending(
+    task: int,
+    rows: dict[int, TaskRow],
+) -> bool:
+    __option = rows.get(_rocq_positive_key(task))
+    if __option is None:
+        return False
+    row = __option
+    match task_status(row):
+        case StatusPending():
+            return True
+        case StatusCompleted():
+            return False
+        case StatusBlocked():
+            return False
+        case __impossible:
+            assert_never(__impossible)

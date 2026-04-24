@@ -129,28 +129,6 @@ def _rocq_set_fold(
     return result
 
 
-def _rocq_string_cons(head: int, tail: str) -> str:
-    try:
-        return bytes([head]).decode("utf-8") + tail
-    except UnicodeDecodeError as exc:
-        raise _RocqUtf8BoundaryError(
-            "Rocq string split crosses a UTF-8 boundary"
-        ) from exc
-
-
-def _rocq_string_uncons(value: str) -> tuple[int, str]:
-    encoded = value.encode("utf-8")
-    if not encoded:
-        raise _Impossible()
-    try:
-        tail = encoded[1:].decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise _RocqUtf8BoundaryError(
-            "Rocq string split crosses a UTF-8 boundary"
-        ) from exc
-    return encoded[0], tail
-
-
 def _rocq_ascii_to_int(
     b0: bool,
     b1: bool,
@@ -163,17 +141,6 @@ def _rocq_ascii_to_int(
 ) -> int:
     return sum(
         (1 << i) for i, bit in enumerate((b0, b1, b2, b3, b4, b5, b6, b7)) if bit
-    )
-
-
-def _rocq_ascii_bits(
-    value: int,
-) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
-    if value < 0 or value > 255:
-        raise ValueError("Rocq byte/ascii value out of range")
-    return cast(
-        tuple[bool, bool, bool, bool, bool, bool, bool, bool],
-        tuple(bool(value & (1 << i)) for i in range(8)),
     )
 
 
@@ -406,11 +373,10 @@ event_name_bytes: bytes = b"pull_request"
 newline_byte: int = 10
 
 
-def first_char_or_newline(s: str) -> int:
+def first_char_or_newline(s: str) -> str:
     __s = s
     if __s == "":
-        return _rocq_ascii_to_int(False, True, False, True, False, False, False, False)
-    __pair = _rocq_string_uncons(__s)
-    c = __pair[0]
-    s0 = __pair[1]
+        return "\n"
+    c = __s[0]
+    s0 = __s[1:]
     return c

@@ -168,28 +168,6 @@ def _rocq_set_fold(
     return result
 
 
-def _rocq_string_cons(head: int, tail: str) -> str:
-    try:
-        return bytes([head]).decode("utf-8") + tail
-    except UnicodeDecodeError as exc:
-        raise _RocqUtf8BoundaryError(
-            "Rocq string split crosses a UTF-8 boundary"
-        ) from exc
-
-
-def _rocq_string_uncons(value: str) -> tuple[int, str]:
-    encoded = value.encode("utf-8")
-    if not encoded:
-        raise _Impossible()
-    try:
-        tail = encoded[1:].decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise _RocqUtf8BoundaryError(
-            "Rocq string split crosses a UTF-8 boundary"
-        ) from exc
-    return encoded[0], tail
-
-
 def _rocq_ascii_to_int(
     b0: bool,
     b1: bool,
@@ -202,17 +180,6 @@ def _rocq_ascii_to_int(
 ) -> int:
     return sum(
         (1 << i) for i, bit in enumerate((b0, b1, b2, b3, b4, b5, b6, b7)) if bit
-    )
-
-
-def _rocq_ascii_bits(
-    value: int,
-) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
-    if value < 0 or value > 255:
-        raise ValueError("Rocq byte/ascii value out of range")
-    return cast(
-        tuple[bool, bool, bool, bool, bool, bool, bool, bool],
-        tuple(bool(value & (1 << i)) for i in range(8)),
     )
 
 
@@ -458,6 +425,23 @@ let py_escape_str s =
     | '\t' -> Buffer.add_string buf "\\t"
     | c    -> Buffer.add_char buf c) s;
   Buffer.contents buf
+
+(** Emit a Python double-quoted single-character string literal for an ASCII
+    code point (0–255).  Printable ASCII characters are emitted directly;
+    common escape sequences ([\\n], [\\r], [\\t]) use their symbolic form;
+    everything else uses [\\xNN]. *)
+let pp_ascii_char_lit code =
+  let escaped =
+    match Char.chr code with
+    | '"'  -> "\\\""
+    | '\\' -> "\\\\"
+    | '\n' -> "\\n"
+    | '\r' -> "\\r"
+    | '\t' -> "\\t"
+    | c when Char.code c >= 32 && Char.code c < 127 -> String.make 1 c
+    | c    -> Printf.sprintf "\\x%02x" (Char.code c)
+  in
+  str ("\"" ^ escaped ^ "\"")
 
 (** Escape bytes for Python [b"..."] literals.  Non-printable and non-ASCII
     bytes are emitted as [\\xHH] hex escapes. *)
@@ -1221,6 +1205,46 @@ let kn_of_ind r =
   | _              ->
       extraction_diagnostic_error "PYEX021"
 
+(** Extract constructor parameter names from the Rocq kernel.
+    Returns [string option list] of length [nargs]:
+    [Some name] for a named binder, [None] for an anonymous one.
+    Skips the [mind_nparams] leading products (type parameters) before
+    collecting the [nargs] argument binders from [mind_user_lc.(j)]. *)
+let cons_arg_names_from_kernel packet j nargs =
+  let open GlobRef in
+  match packet.ip_typename_ref.glob with
+  | IndRef (mut_kn, i_ind) ->
+      let env = Global.env () in
+      let mib = Environ.lookup_mind mut_kn env in
+      let oib = mib.mind_packets.(i_ind) in
+      let constr_ty = oib.mind_user_lc.(j) in
+      let rec skip n ty =
+        if n <= 0 then ty
+        else
+          match Constr.kind ty with
+          | Constr.Prod (_, _, body) -> skip (n - 1) body
+          | _                        -> ty
+      in
+      let arg_ty = skip mib.mind_nparams constr_ty in
+      let rec collect n ty acc =
+        if n <= 0 then List.rev acc
+        else
+          match Constr.kind ty with
+          | Constr.Prod (bnd, _, body) ->
+              let name_opt =
+                match Context.binder_name bnd with
+                | Name.Name id ->
+                    let s = Id.to_string id in
+                    let s = if Id.Set.mem id keywords then s ^ "_" else s in
+                    Some s
+                | Name.Anonymous -> None
+              in
+              collect (n - 1) body (name_opt :: acc)
+          | _ -> List.rev acc
+      in
+      collect nargs arg_ty []
+  | _ -> List.init nargs (fun _ -> None)
+
 (** Python keyword-argument name for record field at position [i].
     Uses [pp_global_with_key] for named fields, ["arg<i>"] for anonymous ones. *)
 let pp_field_name state r fds i =
@@ -1748,20 +1772,24 @@ let rec pp_expr state env expr =
   | MLcons (_, r, []) when is_std_string_empty_ref r ->
       str "\"\""
   | MLcons (_, r, [head; tail]) when is_std_string_cons_ref r ->
-      str "_rocq_string_cons(" ++ pp_expr state env head ++ str ", " ++
-      pp_expr state env tail ++ str ")"
-  | MLcons (_, r, args) when is_std_ascii_cons_ref r ->
+      pp_expr state env head ++ str " + " ++ pp_expr state env tail
+  | MLcons (t_, r, args) when is_std_ascii_cons_ref r ->
       if List.length args <> 8 then extraction_diagnostic_error "PYEX008"
       else
-        let pp_bool_bit a =
-          match std_bool_expr a with
-          | Some true -> str "True"
-          | Some false -> str "False"
-          | None -> pp_expr state env a
-        in
-        str "_rocq_ascii_to_int(" ++
-        prlist_with_sep (fun () -> str ", ") pp_bool_bit args ++
-        str ")"
+        (match std_ascii_expr_value (MLcons (t_, r, args)) with
+         | Some code -> pp_ascii_char_lit code
+         | None ->
+             (* Non-static bit arguments — wrap the int helper in chr() to
+                preserve the str representation contract for ascii values. *)
+             let pp_bool_bit a =
+               match std_bool_expr a with
+               | Some true -> str "True"
+               | Some false -> str "False"
+               | None -> pp_expr state env a
+             in
+             str "chr(_rocq_ascii_to_int(" ++
+             prlist_with_sep (fun () -> str ", ") pp_bool_bit args ++
+             str "))")
   | MLcons (_, r, []) when is_std_byte_cons_ref r ->
       str (string_of_int (Option.get (std_byte_constructor_value r)))
   | MLcons (_, r, args) ->
@@ -2044,7 +2072,7 @@ and pp_std_string_match_expr state env scrutinee branches =
     match !cons_arm with
     | Some (ids, body) ->
         pp_branch_pair_expr state env ids body
-          (str "_rocq_string_uncons(__s)")
+          (str "(__s[0], __s[1:])")
     | None -> fallback ()
   in
   str "(lambda __s: " ++ pp_ternary_text pp_empty ++ str " if __s == \"\" else " ++
@@ -2067,9 +2095,9 @@ and pp_std_ascii_match_expr state env scrutinee branches =
   Array.iter classify branches;
   match !ascii_arm with
   | Some (ids, body) ->
-      str "(lambda __bits: (" ++
+      str "(lambda __c: (" ++
       pp_branch_lambda state env ids body ++
-      str ")(__bits[0], __bits[1], __bits[2], __bits[3], __bits[4], __bits[5], __bits[6], __bits[7]))(_rocq_ascii_bits(" ++
+      str ")(bool(__c & 1), bool(__c & 2), bool(__c & 4), bool(__c & 8), bool(__c & 16), bool(__c & 32), bool(__c & 64), bool(__c & 128)))(ord(" ++
       pp_expr state env scrutinee ++ str "))"
   | None ->
       pp_branch_or_impossible_expr state env !wildcard_arm
@@ -2442,6 +2470,22 @@ let rec pp_statement_expr state env indent = function
               pp_field_name state r fds i ++ str "=" ++
               pp_statement_expr state env (indent + 4) a)
            args)
+  | MLcons (_, r, args)
+    when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
+         not (String.equal "" (str_cons state r)) &&
+         List.is_empty (get_record_fields (State.get_table state) r) &&
+         not (is_std_list_cons_ref r) &&
+         not (is_std_ascii_cons_ref r) &&
+         List.length args >= 2 ->
+      (* Non-record, non-coinductive sum constructor with two or more arguments.
+         Using pp_multiline_items produces stable output (one arg per line with
+         trailing comma) that ruff will not reformat regardless of indentation
+         depth.  Single-argument constructors fall through to pp_expr since
+         they always fit on one line.  Cons and Ascii have their own lowerings
+         in pp_expr; the guards above prevent this case from shadowing them. *)
+      let cons_name = str_cons state r in
+      pp_multiline_items indent (str cons_name)
+        (List.map (pp_statement_expr state env (indent + 4)) args)
   | MLapp (f, args) -> (
       let head, all_args = collect_app f args in
       match head with
@@ -2878,7 +2922,7 @@ and pp_std_string_return_body state env indent scrutinee branches =
     match !cons_arm with
     | Some (ids, body) ->
         pp_return_arm state env indent ids
-          [str "__pair[0]"; str "__pair[1]"]
+          [str "__s[0]"; str "__s[1:]"]
           body
     | None ->
         pp_return_or_impossible state env indent !wildcard_arm
@@ -2886,7 +2930,6 @@ and pp_std_string_return_body state env indent scrutinee branches =
   str "__s = " ++ pp_expr state env scrutinee ++ fnl () ++
   str pfx ++ str "if __s == \"\":" ++ fnl () ++
   str body_pfx ++ pp_empty ++ fnl () ++
-  str pfx ++ str "__pair = _rocq_string_uncons(__s)" ++ fnl () ++
   str pfx ++ pp_cons
 
 and pp_std_N_return_body state env indent scrutinee branches =
@@ -3047,7 +3090,8 @@ let rec pp_type_with state pp_tvar = function
         else if is_std_bool_type_ref r then "bool"
         else if is_std_string_type_ref r then "str"
         else if is_prim_string_type_ref r then "bytes"
-        else if is_std_ascii_type_ref r || is_std_byte_type_ref r then "int"
+        else if is_std_ascii_type_ref r then "str"
+        else if is_std_byte_type_ref r then "int"
         else if is_std_nat_type_ref r || is_std_positive_type_ref r ||
                 is_std_N_type_ref r || is_std_Z_type_ref r then "int"
         else if is_std_Q_type_ref r then "Fraction"
@@ -3618,13 +3662,21 @@ let pp_one_cons state ?(typevar_shift=1) ?(pp_tvar=typevar_name)
   in
   let nargs  = List.length packet.ip_types.(j) in
   let ind_kn = kn_of_ind packet.ip_typename_ref in
+  let kernel_names =
+    match fields_opt with
+    | None   -> cons_arg_names_from_kernel packet j nargs
+    | Some _ -> []
+  in
   let field_name i =
     match fields_opt with
     | Some fds ->
         ( match List.nth fds i with
           | Some r' -> pp_global_with_key state Term ind_kn r'
           | None    -> Printf.sprintf "arg%d" i )
-    | None -> Printf.sprintf "arg%d" i
+    | None ->
+        ( match List.nth kernel_names i with
+          | Some name -> name
+          | None      -> Printf.sprintf "arg%d" i )
   in
   let pp_bases = match base_opt with
     | None      -> mt ()

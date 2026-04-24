@@ -129,28 +129,6 @@ def _rocq_set_fold(
     return result
 
 
-def _rocq_string_cons(head: int, tail: str) -> str:
-    try:
-        return bytes([head]).decode("utf-8") + tail
-    except UnicodeDecodeError as exc:
-        raise _RocqUtf8BoundaryError(
-            "Rocq string split crosses a UTF-8 boundary"
-        ) from exc
-
-
-def _rocq_string_uncons(value: str) -> tuple[int, str]:
-    encoded = value.encode("utf-8")
-    if not encoded:
-        raise _Impossible()
-    try:
-        tail = encoded[1:].decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise _RocqUtf8BoundaryError(
-            "Rocq string split crosses a UTF-8 boundary"
-        ) from exc
-    return encoded[0], tail
-
-
 def _rocq_ascii_to_int(
     b0: bool,
     b1: bool,
@@ -163,17 +141,6 @@ def _rocq_ascii_to_int(
 ) -> int:
     return sum(
         (1 << i) for i, bit in enumerate((b0, b1, b2, b3, b4, b5, b6, b7)) if bit
-    )
-
-
-def _rocq_ascii_bits(
-    value: int,
-) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
-    if value < 0 or value > 255:
-        raise ValueError("Rocq byte/ascii value out of range")
-    return cast(
-        tuple[bool, bool, bool, bool, bool, bool, bool, bool],
-        tuple(bool(value & (1 << i)) for i in range(8)),
     )
 
 
@@ -598,12 +565,12 @@ class ConversationLane:
 
 @dataclass(frozen=True)
 class ReviewThreadLane(ConversationLane):
-    arg0: int
+    thread_id: int
 
 
 @dataclass(frozen=True)
 class PullRequestLane(ConversationLane):
-    arg0: int
+    pr_number: int
 
 
 ConversationLaneT = ReviewThreadLane | PullRequestLane

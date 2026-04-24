@@ -356,3 +356,486 @@ def test_tasks_unblock_matches_oracle(tmp_path: Path) -> None:
     assert next(t for t in runtime if t["id"] == done["id"])["status"] == "completed"
     assert type(oracle_rows[ids[blocked["id"]]].task_status).__name__ == "StatusPending"
     assert type(oracle_rows[ids[done["id"]]].task_status).__name__ == "StatusCompleted"
+
+
+def test_complete_task_visible_idempotency() -> None:
+    # Thread task with source comment: first call marks completed, returns comment id
+    thread_row = oracle.TaskRow(
+        task_title="Review follow-up",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=99,
+    )
+    rows: dict[int, object] = {1: thread_row}
+    rows_after, comment_id = oracle.complete_task_visible(1, rows)
+    assert comment_id == 99
+    assert type(rows_after[1].task_status).__name__ == "StatusCompleted"
+
+    # Second call is idempotent: already completed → returns None, rows unchanged
+    rows_again, comment_id2 = oracle.complete_task_visible(1, rows_after)
+    assert comment_id2 is None
+    assert rows_again is rows_after
+
+    # Spec task (no source comment): completes but returns None on first call too
+    spec_row = oracle.TaskRow(
+        task_title="Implement feature",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    rows2: dict[int, object] = {2: spec_row}
+    rows2_after, comment_id3 = oracle.complete_task_visible(2, rows2)
+    assert comment_id3 is None
+    assert type(rows2_after[2].task_status).__name__ == "StatusCompleted"
+
+    # Blocked thread task: completes and returns comment id on first call
+    blocked_thread_row = oracle.TaskRow(
+        task_title="Blocked review",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusBlocked(),
+        task_source_comment=77,
+    )
+    rows3: dict[int, object] = {3: blocked_thread_row}
+    rows3_after, comment_id4 = oracle.complete_task_visible(3, rows3)
+    assert comment_id4 == 77
+    assert type(rows3_after[3].task_status).__name__ == "StatusCompleted"
+
+    # Re-call on the now-completed blocked task returns None
+    rows3_again, comment_id5 = oracle.complete_task_visible(3, rows3_after)
+    assert comment_id5 is None
+
+
+def test_task_change_detection() -> None:
+    # Baseline rows before rescope: two thread tasks, one spec task
+    thread1_row = oracle.TaskRow(
+        task_title="First review",
+        task_description="old desc",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=101,
+    )
+    thread2_row = oracle.TaskRow(
+        task_title="Second review",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=202,
+    )
+    spec_row = oracle.TaskRow(
+        task_title="Spec task",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    rows_before: dict[int, object] = {1: thread1_row, 2: thread2_row, 3: spec_row}
+
+    # Case 1: task rewritten → TaskModified with new title/description
+    rewritten_row = oracle.TaskRow(
+        task_title="First review (updated)",
+        task_description="new desc",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=101,
+    )
+    rows_rewritten = {1: rewritten_row, 2: thread2_row, 3: spec_row}
+    change = oracle.task_change(1, rows_before, rows_rewritten)
+    assert isinstance(change, oracle.TaskModified)
+    assert change.task == 1
+    assert change.new_title == "First review (updated)"
+    assert change.new_description == "new desc"
+
+    # Case 2: task completed → TaskCompleted
+    completed_row = oracle.TaskRow(
+        task_title="First review",
+        task_description="old desc",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusCompleted(),
+        task_source_comment=101,
+    )
+    rows_completed = {1: completed_row, 2: thread2_row, 3: spec_row}
+    change2 = oracle.task_change(1, rows_before, rows_completed)
+    assert isinstance(change2, oracle.TaskCompleted)
+    assert change2.task == 1
+
+    # Case 3: task absent from rows_after → TaskCancelled
+    rows_cancelled = {2: thread2_row, 3: spec_row}
+    change3 = oracle.task_change(1, rows_before, rows_cancelled)
+    assert isinstance(change3, oracle.TaskCancelled)
+    assert change3.task == 1
+
+    # Case 4: spec task (no source comment) → None regardless of changes
+    spec_rewritten = oracle.TaskRow(
+        task_title="Spec task new title",
+        task_description="updated",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    rows_spec_changed = {1: thread1_row, 2: thread2_row, 3: spec_rewritten}
+    change4 = oracle.task_change(3, rows_before, rows_spec_changed)
+    assert change4 is None
+
+    # Case 5: no change to thread task → None
+    change5 = oracle.task_change(2, rows_before, rows_before)
+    assert change5 is None
+
+
+def test_compute_task_changes_aggregates_in_snapshot_order() -> None:
+    thread1_row = oracle.TaskRow(
+        task_title="First review",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=101,
+    )
+    thread2_row = oracle.TaskRow(
+        task_title="Second review",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=202,
+    )
+    spec_row = oracle.TaskRow(
+        task_title="Spec task",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    late_row = oracle.TaskRow(
+        task_title="Late thread task",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=303,
+    )
+    rows_before: dict[int, object] = {
+        1: thread1_row,
+        2: thread2_row,
+        3: spec_row,
+        4: late_row,
+    }
+    snapshot_order = [1, 2, 3]  # task 4 arrived after snapshot
+
+    # After rescope: task 1 completed, task 2 rewritten, task 3 unchanged (spec)
+    completed_row = oracle.TaskRow(
+        task_title="First review",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusCompleted(),
+        task_source_comment=101,
+    )
+    rewritten_row = oracle.TaskRow(
+        task_title="Second review (updated)",
+        task_description="now with detail",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=202,
+    )
+    rows_after: dict[int, object] = {
+        1: completed_row,
+        2: rewritten_row,
+        3: spec_row,
+        4: late_row,
+    }
+
+    changes = oracle.compute_task_changes(snapshot_order, rows_before, rows_after)
+
+    # Only thread tasks with changes appear, in snapshot order
+    assert len(changes) == 2
+    assert isinstance(changes[0], oracle.TaskCompleted)
+    assert changes[0].task == 1
+    assert isinstance(changes[1], oracle.TaskModified)
+    assert changes[1].task == 2
+    assert changes[1].new_title == "Second review (updated)"
+    assert changes[1].new_description == "now with detail"
+
+    # Task 4 (post-snapshot) not included even though it's a thread task
+    task4_change = oracle.task_change(4, rows_before, rows_after)
+    assert task4_change is None  # task 4 wasn't in rows_before with a status change
+
+
+def test_active_task_ownership_lifecycle() -> None:
+    spec_row = oracle.TaskRow(
+        task_title="Implement feature",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    ask_row = oracle.TaskRow(
+        task_title="ASK: should we widen?",
+        task_description="",
+        task_kind=oracle.TaskAsk(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    rows: dict[int, object] = {1: spec_row, 2: ask_row}
+
+    # No lease held — begin_task acquires lease for an executable task
+    lease = oracle.begin_task(1, None, rows)
+    assert lease == 1
+
+    # Lease already held — begin_task returns None even for a different task
+    second_attempt = oracle.begin_task(2, lease, rows)
+    assert second_attempt is None
+
+    # Non-executable task (ASK kind) — begin_task returns None even with no lease
+    ask_lease = oracle.begin_task(2, None, rows)
+    assert ask_lease is None
+
+    # Task not in rows — begin_task returns None
+    missing_lease = oracle.begin_task(99, None, rows)
+    assert missing_lease is None
+
+    # abort_task clears matching lease
+    after_abort = oracle.abort_task(1, lease)
+    assert after_abort is None
+
+    # abort_task is a no-op when task doesn't match lease
+    other_lease: object = 2
+    after_wrong_abort = oracle.abort_task(1, other_lease)
+    assert after_wrong_abort == other_lease
+
+    # abort_task is a no-op when no lease held
+    after_no_lease_abort = oracle.abort_task(1, None)
+    assert after_no_lease_abort is None
+
+    # complete_task clears matching lease and marks task completed
+    lease = oracle.begin_task(1, None, rows)
+    new_lease, rows_after = oracle.complete_task(1, lease, rows)
+    assert new_lease is None
+    assert type(rows_after[1].task_status).__name__ == "StatusCompleted"
+    # Other tasks unchanged
+    assert type(rows_after[2].task_status).__name__ == "StatusPending"
+
+    # complete_task with non-matching lease leaves lease intact
+    other_lease2: object = 2
+    new_lease2, rows_after2 = oracle.complete_task(1, other_lease2, rows)
+    assert new_lease2 == other_lease2
+    assert type(rows_after2[1].task_status).__name__ == "StatusCompleted"
+
+    # task_still_pending returns True for pending, False for completed or missing
+    assert oracle.task_still_pending(2, rows)
+    assert not oracle.task_still_pending(1, rows_after)
+    assert not oracle.task_still_pending(99, rows)
+
+
+def test_cleanup_aborted_task() -> None:
+    spec_row = oracle.TaskRow(
+        task_title="Spec task",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    other_row = oracle.TaskRow(
+        task_title="Other task",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    rows: dict[int, object] = {1: spec_row, 2: other_row}
+    order = [1, 2]
+    lease: object = 1
+
+    # cleanup_aborted_task clears the matching lease, removes task from order and rows
+    (new_lease, new_order), new_rows = oracle.cleanup_aborted_task(
+        1, lease, order, rows
+    )
+    assert new_lease is None
+    assert new_order == [2]
+    assert 1 not in new_rows
+    assert 2 in new_rows
+
+    # cleanup_aborted_task with non-matching lease leaves lease intact
+    other_lease: object = 2
+    (new_lease2, new_order2), new_rows2 = oracle.cleanup_aborted_task(
+        1, other_lease, order, rows
+    )
+    assert new_lease2 == other_lease  # non-matching lease preserved
+    assert new_order2 == [2]
+    assert 1 not in new_rows2
+
+    # cleanup_aborted_task with None lease leaves lease None
+    (new_lease3, new_order3), new_rows3 = oracle.cleanup_aborted_task(
+        1, None, order, rows
+    )
+    assert new_lease3 is None
+    assert new_order3 == [2]
+    assert 1 not in new_rows3
+
+    # cleanup_aborted_task on task not in order/rows is a no-op for those structures
+    (new_lease4, new_order4), new_rows4 = oracle.cleanup_aborted_task(
+        99, lease, order, rows
+    )
+    assert new_lease4 == lease  # task 99 doesn't match task 1's lease
+    assert new_order4 == [1, 2]
+    assert 1 in new_rows4 and 2 in new_rows4
+
+    # remove_from_order removes only the target, preserves duplicates of other ids
+    order_with_extras = [3, 1, 3, 2, 1]
+    stripped = oracle.remove_from_order(1, order_with_extras)
+    assert stripped == [3, 3, 2]
+
+
+def test_create_task_dedup_and_abort_decision_integration() -> None:
+    """Full integration: enqueue tasks with dedup, acquire a lease, then
+    enqueue higher/lower/equal priority tasks and check abort decisions."""
+    order: list[int] = []
+    rows: dict[int, object] = {}
+
+    # --- Phase 1: build a realistic queue via enqueue_task ---
+
+    spec_row = oracle.TaskRow(
+        task_title="Implement feature",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    thread_row = oracle.TaskRow(
+        task_title="Review follow-up",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=42,
+    )
+    ci_row = oracle.TaskRow(
+        task_title="Fix CI",
+        task_description="",
+        task_kind=oracle.TaskCI(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+
+    # Enqueue spec task (id 1)
+    order, rows, created_spec = _enqueue(1, spec_row, order, rows)
+    assert created_spec == 1
+
+    # Enqueue thread task (id 2)
+    order, rows, created_thread = _enqueue(2, thread_row, order, rows)
+    assert created_thread == 2
+    assert order == [1, 2]
+
+    # Dedup: re-enqueue same comment_id → returns existing thread task
+    thread_row_dup = oracle.TaskRow(
+        task_title="Different title same comment",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=42,
+    )
+    order, rows, dup_thread = _enqueue(3, thread_row_dup, order, rows)
+    assert dup_thread == 2  # deduped to existing
+    assert 3 not in [rows.get(k) for k in rows]  # task 3 never added to rows
+
+    # Dedup: re-enqueue same spec title while pending → returns existing
+    spec_row_dup = oracle.TaskRow(
+        task_title="Implement feature",
+        task_description="different desc",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    order, rows, dup_spec = _enqueue(4, spec_row_dup, order, rows)
+    assert dup_spec == 1  # deduped to existing
+    assert order == [1, 2]
+
+    # Complete spec task, then re-enqueue same title → no dedup (original completed)
+    lease = oracle.begin_task(1, None, rows)
+    _, rows = oracle.complete_task(1, lease, rows)
+    order, rows, new_spec = _enqueue(5, spec_row, order, rows)
+    assert new_spec == 5  # fresh entry, not deduped
+    assert order == [1, 2, 5]
+
+    # --- Phase 2: acquire lease on spec task 5, test abort decisions ---
+
+    lease = oracle.begin_task(5, None, rows)
+    assert lease == 5
+
+    # CI task (rank 0) preempts spec (rank 2) → should abort
+    order, rows, created_ci = _enqueue(6, ci_row, order, rows)
+    assert created_ci == 6
+    assert oracle.should_abort_for_new_task(6, lease, rows) is True
+
+    # Thread task (rank 1) preempts spec (rank 2) → should abort
+    thread_row2 = oracle.TaskRow(
+        task_title="Another review",
+        task_description="",
+        task_kind=oracle.TaskThread(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=99,
+    )
+    order, rows, created_thread2 = _enqueue(7, thread_row2, order, rows)
+    assert oracle.should_abort_for_new_task(7, lease, rows) is True
+
+    # Spec task (rank 2) does NOT preempt spec (rank 2) → no abort
+    spec_row2 = oracle.TaskRow(
+        task_title="Another feature",
+        task_description="",
+        task_kind=oracle.TaskSpec(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    order, rows, created_spec2 = _enqueue(8, spec_row2, order, rows)
+    assert oracle.should_abort_for_new_task(8, lease, rows) is False
+
+    # ASK task (no rank) does NOT cause abort
+    ask_row = oracle.TaskRow(
+        task_title="ASK: expand scope?",
+        task_description="",
+        task_kind=oracle.TaskAsk(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    order, rows, created_ask = _enqueue(9, ask_row, order, rows)
+    assert oracle.should_abort_for_new_task(9, lease, rows) is False
+
+    # DEFER task (no rank) does NOT cause abort
+    defer_row = oracle.TaskRow(
+        task_title="DEFER: out of scope",
+        task_description="",
+        task_kind=oracle.TaskDefer(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    order, rows, created_defer = _enqueue(10, defer_row, order, rows)
+    assert oracle.should_abort_for_new_task(10, lease, rows) is False
+
+    # Same task as active lease → no abort (self-reference)
+    assert oracle.should_abort_for_new_task(5, lease, rows) is False
+
+    # No lease held → no abort regardless of priority
+    assert oracle.should_abort_for_new_task(6, None, rows) is False
+
+    # --- Phase 3: abort, pick next, verify CI-first ordering ---
+
+    aborted_lease = oracle.abort_task(5, lease)
+    assert aborted_lease is None
+
+    # pick_next_task should select CI (rank 0) first
+    next_task = oracle.pick_next_task(order, rows)
+    assert next_task == 6  # CI task
+
+    # --- Phase 4: switch lease to CI, thread no longer preempts ---
+
+    ci_lease = oracle.begin_task(6, None, rows)
+    assert ci_lease == 6
+    # Thread (rank 1) does NOT preempt CI (rank 0)
+    assert oracle.should_abort_for_new_task(7, ci_lease, rows) is False
+    # Another CI (rank 0) does NOT preempt CI (rank 0)
+    ci_row2 = oracle.TaskRow(
+        task_title="Fix CI again",
+        task_description="",
+        task_kind=oracle.TaskCI(),
+        task_status=oracle.StatusPending(),
+        task_source_comment=None,
+    )
+    order, rows, created_ci2 = _enqueue(11, ci_row2, order, rows)
+    assert oracle.should_abort_for_new_task(11, ci_lease, rows) is False

@@ -58,9 +58,9 @@ Record ExecutionLease : Type := {
     task.  The handwritten adapter can derive these from today's omission-based
     provider output before comparing against the model. *)
 Inductive RescopeOp : Type :=
-| KeepTask : positive -> RescopeOp
-| RewriteTask : positive -> string -> string -> RescopeOp
-| CompleteTask : positive -> RescopeOp.
+| KeepTask (task : positive) : RescopeOp
+| RewriteTask (task : positive) (new_title : string) (new_description : string) : RescopeOp
+| CompleteTask (task : positive) : RescopeOp.
 
 (** [task_executable] says whether a task kind may be selected for execution. *)
 Definition task_executable (kind : TaskKind) : bool :=
@@ -531,5 +531,154 @@ Definition should_abort_for_new_task
         end
   end.
 
+(** [complete_task_visible] marks a task completed and returns its source
+    comment id on the first completion.
+
+    This models the key invariant of [Tasks.complete_by_id]: the source
+    comment is returned to the caller only on the first status transition from
+    a non-completed state.  Subsequent calls on an already-completed task
+    return [None] — the caller must not re-resolve the review thread.  The
+    lease is not managed here; the worker clears active-task state separately
+    after the completion is durable. *)
+Definition complete_task_visible
+    (task : positive)
+    (rows : PositiveMap.t TaskRow) : PositiveMap.t TaskRow * option positive :=
+  match PositiveMap.find task rows with
+  | None => (rows, None)
+  | Some row =>
+      match task_status row with
+      | StatusCompleted => (rows, None)
+      | _ =>
+          let row' := row_with_status row StatusCompleted in
+          (PositiveMap.add task row' rows, task_source_comment row)
+      end
+  end.
+
+(** [TaskChange] records one change to a thread-originated task detected
+    during rescope.
+
+    [TaskCompleted task] means Opus explicitly marked the task as completed
+    in its rescope result; the original commenter should be told their request
+    is done because it was covered by recent work.
+
+    [TaskCancelled task] means Opus omitted the task entirely from the rescope
+    result; the original commenter should be told their task was removed from
+    the queue.  This is semantically different from completion: the work was
+    not done, it was deprioritised or deemed no longer relevant.
+
+    The distinction matters because the reply body to the commenter differs:
+    "completed" (work was done) vs "cancelled" (work was removed).
+
+    [TaskModified task new_title new_description] means the task's title or
+    description changed; the commenter should be told of the updated plan. *)
+Inductive TaskChange : Type :=
+| TaskCompleted (task : positive) : TaskChange
+| TaskCancelled (task : positive) : TaskChange
+| TaskModified (task : positive) (new_title : string) (new_description : string) : TaskChange.
+
+(** [task_change] computes the change record, if any, for one snapped
+    task given the queue state before and after rescope.
+
+    Returns [None] when the task has no source comment, was already completed
+    before rescope, or is unchanged. *)
+Definition task_change
+    (task : positive)
+    (rows_before rows_after : PositiveMap.t TaskRow) : option TaskChange :=
+  match PositiveMap.find task rows_before with
+  | None => None
+  | Some before_row =>
+      match task_source_comment before_row with
+      | None => None
+      | Some _ =>
+          match task_status before_row with
+          | StatusCompleted => None
+          | _ =>
+              match PositiveMap.find task rows_after with
+              | None => Some (TaskCancelled task)
+              | Some after_row =>
+                  match task_status after_row with
+                  | StatusCompleted => Some (TaskCompleted task)
+                  | _ =>
+                      if task_metadata_changed before_row after_row then
+                        Some (TaskModified task
+                          (task_title after_row)
+                          (task_description after_row))
+                      else None
+                  end
+              end
+          end
+      end
+  end.
+
+(** [compute_task_changes] collects change records for all thread-originated
+    tasks in the rescope snapshot that were completed, cancelled, or modified.
+
+    Only tasks in [snapshot_order] (those Opus knew about at snap time) are
+    checked.  Already-completed tasks and tasks without a source comment are
+    skipped, matching [_compute_thread_changes] in [tasks.py]. *)
+Fixpoint compute_task_changes
+    (snapshot_order : list positive)
+    (rows_before rows_after : PositiveMap.t TaskRow) : list TaskChange :=
+  match snapshot_order with
+  | [] => []
+  | task :: rest =>
+      let rest' := compute_task_changes rest rows_before rows_after in
+      match task_change task rows_before rows_after with
+      | None => rest'
+      | Some change => change :: rest'
+      end
+  end.
+
+(** [remove_from_order] removes all occurrences of [task] from [order].
+
+    At most one occurrence normally exists; the function is total on any list
+    so the proof is structural without needing uniqueness. *)
+Fixpoint remove_from_order
+    (task : positive)
+    (order : list positive) : list positive :=
+  match order with
+  | [] => []
+  | t :: rest =>
+      let rest' := remove_from_order task rest in
+      if positive_eqb t task then rest' else t :: rest'
+  end.
+
+(** [cleanup_aborted_task] removes an aborted task from the queue entirely and
+    clears the active lease.
+
+    This models [_cleanup_aborted_task] in [worker.py]: when the abort signal
+    fires mid-execution the task is removed from both the durable order and the
+    row map — not merely marked completed — and the lease is cleared.  The
+    abort signal itself is outside the pure model; the caller signals abort by
+    invoking this transition. *)
+Definition cleanup_aborted_task
+    (task : positive)
+    (lease : option ExecutionLease)
+    (order : list positive)
+    (rows : PositiveMap.t TaskRow)
+    : option ExecutionLease * list positive * PositiveMap.t TaskRow :=
+  let lease' := clear_matching_lease task lease in
+  let order' := remove_from_order task order in
+  let rows'  := PositiveMap.remove task rows in
+  (lease', order', rows').
+
+(** [task_still_pending] says whether a task remains in PENDING status.
+
+    This models the external-completion guard inside [execute_task]'s resume
+    loop in [worker.py]: if the task is no longer PENDING (e.g. it was
+    completed externally via ``fido task complete`` while the provider was
+    running) the retry loop exits without further provider invocations. *)
+Definition task_still_pending
+    (task : positive)
+    (rows : PositiveMap.t TaskRow) : bool :=
+  match PositiveMap.find task rows with
+  | Some row =>
+      match task_status row with
+      | StatusPending => true
+      | _ => false
+      end
+  | None => false
+  end.
+
 Python File Extraction task_queue_rescope
-  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot apply_rescope rescope_affects_active_task should_abort_for_new_task".
+  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot apply_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes remove_from_order cleanup_aborted_task task_still_pending".
