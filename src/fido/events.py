@@ -11,7 +11,7 @@ from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.prompts import NO_TOOLS_CLAUSE, Prompts
-from fido.provider import ProviderAgent, set_thread_repo
+from fido.provider import ProviderAgent, safe_voice_turn, set_thread_repo
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.rocq import replied_comment_claims as oracle
@@ -802,18 +802,19 @@ def reply_to_comment(
         info["pr"],
         info["comment_id"],
     )
-    body = agent.run_turn(
+    body = safe_voice_turn(
+        agent,
         prompts.persona_wrap(instr),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
-        retry_on_preempt=True,
+        log_prefix="reply_to_comment",
     )
     log.info(
         "reply generator: returned %d chars (preview=%r)",
         len(body or ""),
         (body or "")[:80],
     )
-    if not body:
+    if body is None:
         raise ValueError(
             f"review-comment reply: run_turn returned empty for PR #{info['pr']}"
         )
@@ -1165,11 +1166,12 @@ def reply_to_issue_comment(
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
-    body = agent.run_turn(
+    body = safe_voice_turn(
+        agent,
         prompts.persona_wrap(instr),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
-        retry_on_preempt=True,
+        log_prefix="reply_to_issue_comment",
     )
     log.info(
         "reply generation returned for PR #%s — body_len=%d preview=%r",
@@ -1177,7 +1179,7 @@ def reply_to_issue_comment(
         len(body or ""),
         (body or "")[:80],
     )
-    if not body:
+    if body is None:
         raise ValueError(
             f"issue-comment reply: run_turn returned empty for PR #{number}"
         )
@@ -1369,28 +1371,17 @@ def _notify_thread_change(
             "has been updated. Reference the comment URL."
         )
 
-    # retry_on_preempt=True: if a webhook handler preempts this voice turn
-    # mid-flight (cancelled=True, result_len=0), wait for the preempter and
-    # retry the same prompt.  Without this, empty-because-cancelled comes
-    # back indistinguishable from empty-because-Opus-broke, and the old
-    # `raise ValueError` took down either the reorder-<repo> daemon or the
-    # worker thread that owned rescope_before_pick (fixes #935).
-    body = agent.run_turn(
+    body = safe_voice_turn(
+        agent,
         prompts.persona_wrap(instruction),
         model=agent.voice_model,
         system_prompt=prompts.reply_system_prompt(),
-        retry_on_preempt=True,
+        log_prefix="_notify_thread_change",
     )
-    if not body:
+    if body is None:
         # Genuinely empty after any preempt retries — post a plain-text
         # fallback so the reviewer still sees the status change, and so one
         # silent provider failure can't kill the caller thread.
-        log.warning(
-            "_notify_thread_change: empty voice reply for comment %s (%s) — "
-            "posting plain-text fallback",
-            comment_id,
-            kind,
-        )
         new_title = change.get("new_title", "")
         if kind == "completed":
             body = (
