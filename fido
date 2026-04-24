@@ -454,6 +454,21 @@ ci_images() {
   done
 }
 
+check_committed_model_mirrors() {
+  log INFO "checking committed model mirrors"
+  make_rocq_models
+  git -C "$repo_root" diff --exit-code -- src/fido/rocq/
+}
+
+check_generated_workflow_files() {
+  log INFO "checking generated workflow files"
+  (
+    cd "$repo_root"
+    "$repo_root/fido" gen-workflows
+  )
+  git -C "$repo_root" diff --exit-code -- .github/workflows/ci.yml tools/build_graph.sh
+}
+
 add_mount_if_exists() {
   local path=$1
   if [ -e "$path" ]; then
@@ -898,6 +913,8 @@ case "$command" in
     ;;
   ci)
     ci_images "${@:2}"
+    check_committed_model_mirrors
+    check_generated_workflow_files
     ;;
   gen-workflows)
     ensure_buildx_builder
