@@ -582,24 +582,202 @@ format_host_resources() {
 status_fast_path() {
   local port=${FIDO_PORT:-9000}
   local payload
+  local color_json=false
+  local esc_reset= esc_bold= esc_dim= esc_green= esc_red_bold=
+  local esc_cyan= esc_magenta= esc_yellow_bg= esc_green_bg= esc_dark_gray=
+  local jq_program
   payload=$(mktemp)
+  if ansi_enabled; then
+    color_json=true
+    esc_reset=$'\033[0m'
+    esc_bold=$'\033[1m'
+    esc_dim=$'\033[2m'
+    esc_green=$'\033[32m'
+    esc_red_bold=$'\033[1;31m'
+    esc_cyan=$'\033[36m'
+    esc_magenta=$'\033[35m'
+    esc_yellow_bg=$'\033[43m'
+    esc_green_bg=$'\033[42m'
+    esc_dark_gray=$'\033[90m'
+  fi
   if curl -fsS \
     --connect-timeout 1 \
     --max-time 1 \
     -H 'Accept: application/json' \
     "http://127.0.0.1:${port}/status.json" >"$payload" 2>/dev/null; then
-    printf '%s %s\n' "$(ansi_bold 'fido:')" "$(ansi_green 'UP')"
-    jq -r '
-      (.fido_uptime_seconds
-        | if . == null then empty else "uptime: \((floor|tostring))s" end),
-      (.activities[]? |
-        "  " + .repo_name + ": " + (.what // "idle")
-        + (if .issue == null then "" else " | issue #\(.issue)" end)
-        + (if (.current_task // null) == null then "" else " | task " + .current_task end)
-        + " | pending \((.pending // 0)|tostring)"
-        + " | completed \((.completed // 0)|tostring)"
-      )
-    ' "$payload"
+    jq -r \
+      --argjson color "$color_json" \
+      --arg reset "$esc_reset" \
+      --arg bold "$esc_bold" \
+      --arg dim "$esc_dim" \
+      --arg green "$esc_green" \
+      --arg red_bold "$esc_red_bold" \
+      --arg cyan "$esc_cyan" \
+      --arg magenta "$esc_magenta" \
+      --arg yellow_bg "$esc_yellow_bg" \
+      --arg green_bg "$esc_green_bg" \
+      --arg dark_gray "$esc_dark_gray" \
+      '
+      def style($code; $text): if $color then ($code + $text + $reset) else $text end;
+      def bold($text): style($bold; $text);
+      def dim($text): style($dim; $text);
+      def green($text): style($green; $text);
+      def red_bold($text): style($red_bold; $text);
+      def cyan($text): style($cyan; $text);
+      def magenta($text): style($magenta; $text);
+      def yellow_bg($text): style($yellow_bg; $text);
+      def green_bg($text): style($green_bg; $text);
+      def dark_gray($text): style($dark_gray; $text);
+      def uptime($seconds):
+        if $seconds == null then null
+        else ($seconds | floor) as $s
+        | if $s < 60 then "\($s)s"
+          elif $s < 3600 then "\(($s / 60)|floor)m"
+          else ((($s / 3600)|floor)|tostring) + "h"
+               + (if ((($s / 60)|floor) % 60) > 0
+                  then ((((($s / 60)|floor) % 60))|tostring) + "m"
+                  else ""
+                  end)
+          end
+        end;
+      def reset_at($raw):
+        if ($raw | type) != "string" then null
+        else ($raw | gsub("T"; " ") | sub("\\+00:00$"; " UTC"))
+        end;
+      def provider_status_style($ps; $text):
+        if $ps == null then $text
+        elif $ps.paused then dark_gray($text)
+        elif (($ps.warning // false) or ($ps.level == "unavailable")) then dim($text)
+        else $text
+        end;
+      def provider_summary($ps):
+        if $ps.unavailable_reason != null then "\($ps.provider) unavailable"
+        elif $ps.percent_used == null then "\($ps.provider) limits unknown"
+        else "\($ps.provider) \($ps.percent_used)%"
+             + ([(if $ps.window_name then ($ps.window_name | gsub("_"; " ")) else empty end),
+                 (if $ps.resets_at then "resets " + reset_at($ps.resets_at) else empty end)]
+                | map(select(. != null and . != ""))
+                | if length > 0 then " (" + join(", ") + ")" else "" end)
+        end;
+      def rate_window($w; $label):
+        if $w == null then empty
+        else "\($label) \($w.used)/\($w.limit)"
+             + (if $w.resets_at then " (" + reset_at($w.resets_at) + ")" else "" end)
+        end;
+      def worker_is_agent_talker($repo):
+        if $repo.claude_talker != null then ($repo.claude_talker.kind == "worker")
+        else (($repo.session_owner // "") | startswith("worker-"))
+        end;
+      def agent_pid($repo):
+        if $repo.claude_talker != null and $repo.claude_talker.claude_pid != null then $repo.claude_talker.claude_pid
+        else ($repo.session_pid // null)
+        end;
+      def cache_line($repo):
+        if $repo.issue_cache == null or ($repo.issue_cache.loaded // false | not) then empty
+        else "  " + bold("Cache:") + "  "
+             + ([dim("\($repo.issue_cache.open_issues) open"),
+                 dim("applied \($repo.issue_cache.events_applied)")]
+                + (if ($repo.issue_cache.events_dropped_stale // 0) > 0 then [dim("stale-dropped \($repo.issue_cache.events_dropped_stale)")] else [] end)
+                + (if $repo.issue_cache.last_reconcile_at != null then [dim("reconciled drift \($repo.issue_cache.last_reconcile_drift)")] else [] end)
+                | join(", "))
+        end;
+      def agent_line($repo):
+        if agent_pid($repo) == null and ($repo.session_alive // false | not) then empty
+        else "  " + bold("\($repo.provider):") + " "
+             + dim(if agent_pid($repo) != null then "pid \(agent_pid($repo))" else "agent" end)
+             + ([(if ($repo.session_alive // false) and (worker_is_agent_talker($repo) | not) and ($repo.claude_talker == null) then dim("session idle") else empty end),
+                 (if ($repo.session_dropped_count // 0) > 0
+                  then red_bold("dropped " + (if $repo.session_dropped_count == 1 then "session " else "sessions " end) + ($repo.session_dropped_count|tostring))
+                  else empty
+                  end)]
+                | map(select(. != null and . != ""))
+                | if length > 0 then " " + dim("(") + join(", ") + dim(")") else "" end)
+        end;
+      def worker_state($repo):
+        if $repo.provider_status != null and ($repo.provider_status.paused // false) then
+          dark_gray("paused for \($repo.provider_status.provider) reset"
+            + (if $repo.provider_status.resets_at then " until " + reset_at($repo.provider_status.resets_at) else "" end))
+        elif $repo.task_number != null and $repo.task_total != null then
+          bold("task \($repo.task_number)/\($repo.task_total)\(if ($repo.rescoping // false) then "?" else "" end)")
+          + (if $repo.current_task != null then " — " + $repo.current_task else "" end)
+        elif $repo.current_task != null then
+          "task: " + $repo.current_task
+        elif (($repo.what // "") | gsub("^\\s+|\\s+$"; "") | length) > 0 then
+          ($repo.what | gsub("^\\s+|\\s+$"; ""))
+        else
+          "waiting for work"
+        end;
+      def worker_line($repo):
+        (if $repo.current_task != null or worker_is_agent_talker($repo)
+         then (if $color then "" else "* " end) + green_bg("Worker:")
+         else "  " + bold("Worker:")
+         end)
+        + " " + worker_state($repo);
+      def webhook_lines($repo):
+        ($repo.webhook_activities // [])
+        | sort_by(if $repo.claude_talker != null and $repo.claude_talker.kind == "webhook" and .thread_id == $repo.claude_talker.thread_id then 0 else 1 end)
+        | . as $all
+        | ($all[:5]) as $shown
+        | (($all | length) - ($shown | length)) as $overflow
+        | [range(0; $shown|length) as $i
+            | $shown[$i] as $w
+            | "  "
+              + dim(if $overflow == 0 and $i == (($shown|length) - 1) then "└─" else "├─" end)
+              + " "
+              + (if $repo.claude_talker != null and $repo.claude_talker.kind == "webhook" and $w.thread_id == $repo.claude_talker.thread_id
+                 then yellow_bg("webhook:")
+                 else bold("webhook:")
+                 end)
+              + " " + $w.description
+              + " " + dim("(" + uptime($w.elapsed_seconds) + ")")
+          ]
+          + (if $overflow > 0 then [dim("  └─ +\($overflow) more webhook" + (if $overflow == 1 then "" else "s" end))] else [] end);
+      def repo_header($repo):
+        bold("\($repo.repo_name):")
+        + " "
+        + (if $repo.fido_running then green("fido running") else dim("fido waiting") end)
+        + " — "
+        + ([provider_status_style($repo.provider_status; ($repo.provider // "unknown")),
+            (if ($repo.crash_count // 0) > 0 then red_bold("crashes \($repo.crash_count)") else empty end),
+            (if $repo.worker_uptime_seconds != null then dim("up " + uptime($repo.worker_uptime_seconds)) else empty end),
+            (if ($repo.is_stuck // false) then red_bold("BUSY") else empty end),
+            (if ($repo.crash_count // 0) > 0 and $repo.last_crash_error != null then red_bold("last crash: " + $repo.last_crash_error) else empty end)]
+           | map(select(. != null and . != ""))
+           | join(", "));
+      def issue_line($repo):
+        "  " + bold("Issue:") + " " + cyan("#\($repo.issue)")
+        + (if $repo.issue_title != null then " " + dim("—") + " " + $repo.issue_title else "" end)
+        + (if $repo.issue_elapsed_seconds != null then " " + dim("(elapsed " + uptime($repo.issue_elapsed_seconds) + ")") else "" end);
+      def pr_line($repo):
+        if $repo.pr_number == null then empty
+        else "  " + bold("PR:") + "     " + magenta("#\($repo.pr_number)")
+             + (if $repo.pr_title != null then " " + dim("—") + " " + $repo.pr_title else "" end)
+        end;
+      [
+        bold("fido:") + " " + green("UP")
+        + (if .fido_uptime_seconds != null then " " + dim("(uptime " + uptime(.fido_uptime_seconds) + ")") else "" end),
+        (if .activities | map(.provider_status) | map(select(. != null)) | unique_by(.provider) | length > 0
+         then bold("limits:") + " "
+              + (.activities | map(.provider_status) | map(select(. != null)) | unique_by(.provider) | map(provider_status_style(.; provider_summary(.))) | join(" | "))
+         else empty
+         end),
+        (if .rate_limit != null
+         then bold("GitHub:") + " " + rate_window(.rate_limit.rest; "REST") + ", " + rate_window(.rate_limit.graphql; "GraphQL")
+         else empty
+         end)
+      ]
+      + (.activities // [] | map(
+          [repo_header(.),
+           agent_line(.),
+           cache_line(.),
+           (if .issue == null then "  no assigned issues" else issue_line(.) end),
+           pr_line(.),
+           (if .issue == null then empty else worker_line(.) end)]
+          + (if .issue == null then [] else webhook_lines(.) end)
+        ) | flatten)
+      | map(select(. != null and . != ""))
+      | .[]
+      ' "$payload"
   else
     printf '%s %s\n' "$(ansi_bold 'fido:')" "$(ansi_red_bold 'DOWN')"
   fi
