@@ -75,8 +75,8 @@ Record PromiseRow : Type := {
     Review comments aggregate per root thread; top-level PR comments aggregate
     in one PR-level lane. *)
 Inductive ConversationLane : Type :=
-| ReviewThreadLane : positive -> ConversationLane
-| PullRequestLane : positive -> ConversationLane.
+| ReviewThreadLane (thread_id : positive) : ConversationLane
+| PullRequestLane (pr_number : positive) : ConversationLane.
 
 (** [ReplyArtifact] is one visible GitHub comment that may discharge many
     promises in the same lane. *)

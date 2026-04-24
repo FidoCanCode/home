@@ -591,19 +591,19 @@ class RescopeOp:
 
 @dataclass(frozen=True)
 class KeepTask(RescopeOp):
-    arg0: int
+    task: int
 
 
 @dataclass(frozen=True)
 class RewriteTask(RescopeOp):
-    arg0: int
-    arg1: str
-    arg2: str
+    task: int
+    new_title: str
+    new_description: str
 
 
 @dataclass(frozen=True)
 class CompleteTask(RescopeOp):
-    arg0: int
+    task: int
 
 
 RescopeOpT = KeepTask | RewriteTask | CompleteTask
@@ -1005,7 +1005,7 @@ def rescope_task_id(op: RescopeOp) -> int:
     match op:
         case KeepTask(task):
             return task
-        case RewriteTask(task, s, s0):
+        case RewriteTask(task, new_title, new_description):
             return task
         case CompleteTask(task):
             return task
@@ -1069,7 +1069,7 @@ def apply_rescope_ops(
         )
     row = __option
     match op:
-        case KeepTask(p):
+        case KeepTask(task0):
             match task_status(row):
                 case StatusPending():
                     return apply_rescope_ops(
@@ -1094,7 +1094,7 @@ def apply_rescope_ops(
                     )
                 case __impossible:
                     assert_never(__impossible)
-        case RewriteTask(p, title, description):
+        case RewriteTask(task0, title, description):
             match task_status(row):
                 case StatusPending():
                     row_ = TaskRow(
@@ -1141,7 +1141,7 @@ def apply_rescope_ops(
                     )
                 case __impossible:
                     assert_never(__impossible)
-        case CompleteTask(p):
+        case CompleteTask(task0):
             match task_status(row):
                 case StatusPending():
                     row_ = TaskRow(
@@ -1431,19 +1431,19 @@ class TaskChange:
 
 @dataclass(frozen=True)
 class TaskCompleted(TaskChange):
-    arg0: int
+    task: int
 
 
 @dataclass(frozen=True)
 class TaskCancelled(TaskChange):
-    arg0: int
+    task: int
 
 
 @dataclass(frozen=True)
 class TaskModified(TaskChange):
-    arg0: int
-    arg1: str
-    arg2: str
+    task: int
+    new_title: str
+    new_description: str
 
 
 TaskChangeT = TaskCompleted | TaskCancelled | TaskModified

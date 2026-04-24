@@ -58,9 +58,9 @@ Record ExecutionLease : Type := {
     task.  The handwritten adapter can derive these from today's omission-based
     provider output before comparing against the model. *)
 Inductive RescopeOp : Type :=
-| KeepTask : positive -> RescopeOp
-| RewriteTask : positive -> string -> string -> RescopeOp
-| CompleteTask : positive -> RescopeOp.
+| KeepTask (task : positive) : RescopeOp
+| RewriteTask (task : positive) (new_title : string) (new_description : string) : RescopeOp
+| CompleteTask (task : positive) : RescopeOp.
 
 (** [task_executable] says whether a task kind may be selected for execution. *)
 Definition task_executable (kind : TaskKind) : bool :=
@@ -572,9 +572,9 @@ Definition complete_task_visible
     [TaskModified task new_title new_description] means the task's title or
     description changed; the commenter should be told of the updated plan. *)
 Inductive TaskChange : Type :=
-| TaskCompleted : positive -> TaskChange
-| TaskCancelled : positive -> TaskChange
-| TaskModified : positive -> string -> string -> TaskChange.
+| TaskCompleted (task : positive) : TaskChange
+| TaskCancelled (task : positive) : TaskChange
+| TaskModified (task : positive) (new_title : string) (new_description : string) : TaskChange.
 
 (** [task_change] computes the change record, if any, for one snapped
     task given the queue state before and after rescope.

@@ -20,7 +20,7 @@ open,1,0,1,0,task_queue_rescope.v,53,7,53,21,extraction,Build_ExecutionLease,Bui
 open,583,0,585,22,task_queue_rescope.v,54,2,54,12,extraction,lease_task,lease_task
 open,588,0,589,8,task_queue_rescope.v,60,10,60,19,extraction,RescopeOp,RescopeOp
 open,593,0,594,13,task_queue_rescope.v,61,2,61,10,extraction,KeepTask,KeepTask
-open,598,0,601,13,task_queue_rescope.v,62,2,62,13,extraction,RewriteTask,RewriteTask
+open,598,0,601,24,task_queue_rescope.v,62,2,62,13,extraction,RewriteTask,RewriteTask
 open,605,0,606,13,task_queue_rescope.v,63,2,63,14,extraction,CompleteTask,CompleteTask
 open,612,0,625,38,task_queue_rescope.v,66,11,66,26,extraction,task_executable,task_executable
 open,509,4,519,42,task_queue_rescope.v,76,11,76,30,extraction,task_row_executable,TaskRow.row_executable
@@ -53,7 +53,7 @@ open,1387,0,1389,29,task_queue_rescope.v,543,11,543,32,extraction,complete_task_
 open,1428,0,1429,8,task_queue_rescope.v,574,10,574,20,extraction,TaskChange,TaskChange
 open,1433,0,1434,13,task_queue_rescope.v,575,2,575,15,extraction,TaskCompleted,TaskCompleted
 open,1438,0,1439,13,task_queue_rescope.v,576,2,576,15,extraction,TaskCancelled,TaskCancelled
-open,1443,0,1446,13,task_queue_rescope.v,577,2,577,14,extraction,TaskModified,TaskModified
+open,1443,0,1446,24,task_queue_rescope.v,577,2,577,14,extraction,TaskModified,TaskModified
 open,1452,0,1455,35,task_queue_rescope.v,584,11,584,22,extraction,task_change,task_change
 open,1561,0,1565,29,task_queue_rescope.v,654,11,654,31,extraction,cleanup_aborted_task,cleanup_aborted_task
 open,1582,0,1584,29,task_queue_rescope.v,671,11,671,29,extraction,task_still_pending,task_still_pending

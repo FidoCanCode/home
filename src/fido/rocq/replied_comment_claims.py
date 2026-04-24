@@ -587,12 +587,12 @@ class ConversationLane:
 
 @dataclass(frozen=True)
 class ReviewThreadLane(ConversationLane):
-    arg0: int
+    thread_id: int
 
 
 @dataclass(frozen=True)
 class PullRequestLane(ConversationLane):
-    arg0: int
+    pr_number: int
 
 
 ConversationLaneT = ReviewThreadLane | PullRequestLane

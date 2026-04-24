@@ -1227,6 +1227,46 @@ let kn_of_ind r =
   | _              ->
       extraction_diagnostic_error "PYEX021"
 
+(** Extract constructor parameter names from the Rocq kernel.
+    Returns [string option list] of length [nargs]:
+    [Some name] for a named binder, [None] for an anonymous one.
+    Skips the [mind_nparams] leading products (type parameters) before
+    collecting the [nargs] argument binders from [mind_user_lc.(j)]. *)
+let cons_arg_names_from_kernel packet j nargs =
+  let open GlobRef in
+  match packet.ip_typename_ref.glob with
+  | IndRef (mut_kn, i_ind) ->
+      let env = Global.env () in
+      let mib = Environ.lookup_mind mut_kn env in
+      let oib = mib.mind_packets.(i_ind) in
+      let constr_ty = oib.mind_user_lc.(j) in
+      let rec skip n ty =
+        if n <= 0 then ty
+        else
+          match Constr.kind ty with
+          | Constr.Prod (_, _, body) -> skip (n - 1) body
+          | _                        -> ty
+      in
+      let arg_ty = skip mib.mind_nparams constr_ty in
+      let rec collect n ty acc =
+        if n <= 0 then List.rev acc
+        else
+          match Constr.kind ty with
+          | Constr.Prod (bnd, _, body) ->
+              let name_opt =
+                match Context.binder_name bnd with
+                | Name.Name id ->
+                    let s = Id.to_string id in
+                    let s = if Id.Set.mem id keywords then s ^ "_" else s in
+                    Some s
+                | Name.Anonymous -> None
+              in
+              collect (n - 1) body (name_opt :: acc)
+          | _ -> List.rev acc
+      in
+      collect nargs arg_ty []
+  | _ -> List.init nargs (fun _ -> None)
+
 (** Python keyword-argument name for record field at position [i].
     Uses [pp_global_with_key] for named fields, ["arg<i>"] for anonymous ones. *)
 let pp_field_name state r fds i =
@@ -3646,13 +3686,21 @@ let pp_one_cons state ?(typevar_shift=1) ?(pp_tvar=typevar_name)
   in
   let nargs  = List.length packet.ip_types.(j) in
   let ind_kn = kn_of_ind packet.ip_typename_ref in
+  let kernel_names =
+    match fields_opt with
+    | None   -> cons_arg_names_from_kernel packet j nargs
+    | Some _ -> []
+  in
   let field_name i =
     match fields_opt with
     | Some fds ->
         ( match List.nth fds i with
           | Some r' -> pp_global_with_key state Term ind_kn r'
           | None    -> Printf.sprintf "arg%d" i )
-    | None -> Printf.sprintf "arg%d" i
+    | None ->
+        ( match List.nth kernel_names i with
+          | Some name -> name
+          | None      -> Printf.sprintf "arg%d" i )
   in
   let pp_bases = match base_opt with
     | None      -> mt ()

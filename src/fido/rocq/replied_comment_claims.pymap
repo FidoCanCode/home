@@ -31,8 +31,8 @@ open,566,4,566,28,replied_comment_claims.v,68,2,68,17,extraction,promise_attempt
 open,568,4,568,31,replied_comment_claims.v,70,2,70,24,extraction,promise_anchor_comment,promise_anchor_comment
 open,569,4,569,39,replied_comment_claims.v,71,2,71,26,extraction,promise_covered_comments,promise_covered_comments
 open,584,0,585,8,replied_comment_claims.v,77,10,77,26,extraction,ConversationLane,ConversationLane
-open,589,0,590,13,replied_comment_claims.v,78,2,78,18,extraction,ReviewThreadLane,ReviewThreadLane
-open,594,0,595,13,replied_comment_claims.v,79,2,79,17,extraction,PullRequestLane,PullRequestLane
+open,589,0,590,18,replied_comment_claims.v,78,2,78,18,extraction,ReviewThreadLane,ReviewThreadLane
+open,594,0,595,18,replied_comment_claims.v,79,2,79,17,extraction,PullRequestLane,PullRequestLane
 open,602,0,605,32,replied_comment_claims.v,83,7,83,20,extraction,ReplyArtifact,ReplyArtifact
 open,608,0,609,8,replied_comment_claims.v,92,10,92,28,extraction,ReviewReplyOutcome,ReviewReplyOutcome
 open,613,0,614,8,replied_comment_claims.v,93,2,93,11,extraction,ReviewAct,ReviewAct
