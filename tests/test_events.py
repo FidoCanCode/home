@@ -4170,18 +4170,48 @@ class TestNotifyThreadChange:
         _notify_thread_change(change, cfg, mock_gh, agent=_client())
         mock_gh.comment_issue.assert_not_called()
 
-    def test_review_comment_empty_opus_raises_for_completed(
+    def test_review_comment_run_turn_uses_retry_on_preempt(
         self, tmp_path: Path
     ) -> None:
+        """run_turn must pass retry_on_preempt=True — #935.
+
+        A webhook handler arriving while this voice turn runs preempts it,
+        yielding result_len=0, cancelled=True.  Without retry_on_preempt,
+        that empty string was indistinguishable from a real provider
+        failure and used to raise ValueError, killing either the
+        reorder-<repo> daemon or the worker's rescope_before_pick path.
+        """
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         task = self._task()
         task["thread"]["comment_type"] = "pulls"
         change = {"task": task, "kind": "completed"}
-        with pytest.raises(ValueError, match="_notify_thread_change"):
-            _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
+        agent = _client("Reply text")
+        _notify_thread_change(change, cfg, mock_gh, agent=agent)
+        # _client wraps a MagicMock — capture the run_turn kwargs.
+        run_turn_kwargs = agent.run_turn.call_args.kwargs
+        assert run_turn_kwargs.get("retry_on_preempt") is True
 
-    def test_review_comment_empty_opus_raises_for_modified(
+    def test_review_comment_empty_opus_falls_back_for_completed(
+        self, tmp_path: Path
+    ) -> None:
+        """Empty Opus reply after any preempt retries falls back to a plain
+        text notification rather than raising.  Callers of _on_changes run
+        on threads without surrounding try/except, so a raise here kills
+        either the reorder daemon or the worker (see #935).
+        """
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        task = self._task()
+        task["thread"]["comment_type"] = "pulls"
+        change = {"task": task, "kind": "completed"}
+        _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
+        mock_gh.reply_to_review_comment.assert_called_once()
+        body = mock_gh.reply_to_review_comment.call_args.args[2]
+        assert "marked done" in body
+        assert task["title"] in body
+
+    def test_review_comment_empty_opus_falls_back_for_modified(
         self, tmp_path: Path
     ) -> None:
         cfg = self._cfg(tmp_path)
@@ -4194,8 +4224,11 @@ class TestNotifyThreadChange:
             "new_title": "New title",
             "new_description": "",
         }
-        with pytest.raises(ValueError, match="_notify_thread_change"):
-            _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
+        _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
+        mock_gh.reply_to_review_comment.assert_called_once()
+        body = mock_gh.reply_to_review_comment.call_args.args[2]
+        assert "rewritten" in body
+        assert "New title" in body
 
     def test_review_comment_uses_reply_to_review_comment(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
