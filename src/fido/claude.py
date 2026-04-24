@@ -632,7 +632,7 @@ class ClaudeSession(OwnedSession):
         ]
         if self._session_id:
             cmd += ["--resume", self._session_id]
-        return self._popen_fn(
+        proc = self._popen_fn(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -640,6 +640,41 @@ class ClaudeSession(OwnedSession):
             text=True,
             cwd=self._work_dir,
         )
+        self._start_stderr_pump(proc)
+        return proc
+
+    def _start_stderr_pump(self, proc: subprocess.Popen[str]) -> None:
+        """Drain the subprocess's stderr into the logger.
+
+        Without this drain, ``stderr=subprocess.PIPE`` leaves the pipe buffer
+        unread.  Once the buffer fills, the claude subprocess blocks on its
+        next stderr write and eventually deadlocks — symptom: the first
+        ``set_status`` prompt finds the session dead with no diagnostic.
+
+        Runs as a daemon thread so it terminates naturally when the
+        subprocess exits (stderr EOF) or when the process shuts down.
+        """
+        pid = proc.pid
+        stderr = proc.stderr
+        if stderr is None:  # pragma: no cover — Popen with PIPE always sets this
+            return
+
+        def pump() -> None:
+            try:
+                for raw in stderr:
+                    line = raw.rstrip()
+                    if line:
+                        log.info("ClaudeSession[pid=%d] stderr: %s", pid, line)
+            except OSError, ValueError:
+                # ValueError on closed file; OSError on broken pipe.
+                # Both mean the subprocess is gone — stop pumping.
+                pass
+
+        threading.Thread(
+            target=pump,
+            name=f"claude-stderr-pump-{pid}",
+            daemon=True,
+        ).start()
 
     def is_alive(self) -> bool:
         """Return True if the claude subprocess is still running."""
