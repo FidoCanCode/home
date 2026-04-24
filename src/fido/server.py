@@ -36,7 +36,6 @@ from fido.infra import (
     Clock,
     Filesystem,
     Infra,
-    OsProcess,
     ProcessRunner,
     real_infra,
 )
@@ -497,21 +496,6 @@ def preflight_gh_auth(gh: GitHub) -> None:
     except Exception as e:
         raise PreflightError(f"preflight: gh auth check failed: {e}") from e
     log.info("preflight: gh auth confirmed — bot user is %r", bot_user)
-
-
-def _get_head(runner_dir: Path, proc: ProcessRunner) -> str | None:
-    """Return the current HEAD commit hash of the runner clone, or None on error."""
-    try:
-        result = proc.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(runner_dir),
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError, FileNotFoundError:
-        return None
 
 
 def _pull_with_backoff(
@@ -1249,28 +1233,6 @@ def bootstrap_issue_caches(
             )
 
 
-def _startup_pull(proc: ProcessRunner, clock: Clock, os_proc: OsProcess) -> None:
-    """Sync the runner clone on startup and exit for host rebuild if HEAD changed."""
-    runner_dir = _runner_dir()
-    head_before = _get_head(runner_dir, proc)
-    if not _pull_with_backoff(runner_dir, proc, clock):
-        log.warning("startup: runner sync failed — continuing with current code")
-        return
-    head_after = _get_head(runner_dir, proc)
-    if head_before and head_after and head_before != head_after:
-        log.info(
-            "startup: runner updated %s → %s — exiting %d for host rebuild",
-            head_before[:12],
-            head_after[:12],
-            _RESTART_EXIT_CODE,
-        )
-        os_proc.exit(_RESTART_EXIT_CODE)
-    elif head_before and head_after:
-        log.info("startup: runner already up to date at %s", head_before[:12])
-    else:
-        log.info("startup: runner synced (could not compare HEAD)")
-
-
 def run(
     *,
     _from_args: Callable[..., Config] = Config.from_args,
@@ -1282,7 +1244,6 @@ def run(
     _populate_memberships: Callable[..., None] = populate_memberships,
     _signal: Callable[..., Any] = signal.signal,
     _kill_active_children: Callable[..., None] = kill_active_children,
-    _startup_pull: Callable[..., None] = _startup_pull,
     _Watchdog: type[Watchdog] = Watchdog,
     _ReconcileWatchdog: type[ReconcileWatchdog] = ReconcileWatchdog,
     _RateLimitMonitor: type[RateLimitMonitor] = RateLimitMonitor,
@@ -1329,7 +1290,6 @@ def run(
     WebhookHandler.infra = infra
 
     gh = _GitHub()
-    _startup_pull(infra.proc, infra.clock, infra.os_proc)
     try:
         _preflight_tools(infra.fs)
         _preflight_sub_dir(config, infra.fs)

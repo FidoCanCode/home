@@ -3063,7 +3063,6 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3089,7 +3088,6 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3120,7 +3118,6 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3151,7 +3148,6 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3192,7 +3188,6 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3223,7 +3218,6 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3252,7 +3246,6 @@ class TestRun:
             _basic_config=MagicMock(),
             _stderr=mock_stderr,
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3294,7 +3287,6 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3339,7 +3331,6 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3368,7 +3359,6 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3398,7 +3388,6 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3433,7 +3422,6 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3470,7 +3458,6 @@ class TestRun:
                 _path_home=lambda: tmp_path,
                 _basic_config=MagicMock(),
                 _populate_memberships=MagicMock(),
-                _startup_pull=MagicMock(),
                 _preflight_repo_identity=MagicMock(),
                 _preflight_tools=MagicMock(),
                 _preflight_sub_dir=MagicMock(),
@@ -3533,7 +3520,6 @@ class TestRun:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3770,7 +3756,6 @@ class TestPreflightRepoIdentity:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=mock_preflight,
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3802,7 +3787,6 @@ class TestPreflightRepoIdentity:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=mock_preflight,
             _preflight_sub_dir=MagicMock(),
@@ -3834,7 +3818,6 @@ class TestPreflightRepoIdentity:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=MagicMock(),
@@ -3866,7 +3849,6 @@ class TestPreflightRepoIdentity:
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
-            _startup_pull=MagicMock(),
             _preflight_repo_identity=MagicMock(),
             _preflight_tools=MagicMock(),
             _preflight_sub_dir=mock_preflight,
@@ -3897,7 +3879,6 @@ class TestPreflightRepoIdentity:
                 _path_home=lambda: tmp_path,
                 _basic_config=MagicMock(),
                 _populate_memberships=MagicMock(),
-                _startup_pull=MagicMock(),
                 _preflight_tools=MagicMock(
                     side_effect=PreflightError("something went wrong")
                 ),
@@ -4074,26 +4055,6 @@ class TestGetSelfRepo:
         assert _get_self_repo(tmp_path, proc) is None
 
 
-class TestGetHead:
-    def test_returns_sha(self, tmp_path: Path) -> None:
-        from fido.server import _get_head
-
-        proc = _FakeProcessRunner([MagicMock(stdout="abc123def456\n")])
-        assert _get_head(tmp_path, proc) == "abc123def456"
-
-    def test_returns_none_on_subprocess_error(self, tmp_path: Path) -> None:
-        from fido.server import _get_head
-
-        proc = _FakeProcessRunner([subprocess.CalledProcessError(128, [])])
-        assert _get_head(tmp_path, proc) is None
-
-    def test_returns_none_on_file_not_found(self, tmp_path: Path) -> None:
-        from fido.server import _get_head
-
-        proc = _FakeProcessRunner([FileNotFoundError()])
-        assert _get_head(tmp_path, proc) is None
-
-
 class TestRunnerDir:
     def test_returns_package_parent(self) -> None:
         from fido.server import _runner_dir
@@ -4190,66 +4151,6 @@ class TestPullWithBackoff:
         proc = _FakeProcessRunner(error=FileNotFoundError())
         clock = _FakeClock(times=[0.0, 1.0, 12.0, 43.0, 104.0])
         assert not _pull_with_backoff(tmp_path, proc, clock)
-
-
-class TestStartupPull:
-    def test_exits_for_supervisor_when_head_changes(self) -> None:
-        from fido.server import _startup_pull
-
-        # rev-parse before, fetch, reset, rev-parse after — different SHAs
-        proc = _FakeProcessRunner(
-            [
-                MagicMock(stdout="sha1\n"),
-                MagicMock(),
-                MagicMock(),
-                MagicMock(stdout="sha2\n"),
-            ]
-        )
-        clock = _FakeClock(times=[0.0, 0.0])  # start + success log
-        os_proc = _FakeOsProcess()
-        _startup_pull(proc, clock, os_proc)
-        assert os_proc.exit_calls == [75]
-
-    def test_skips_exit_when_head_unchanged(self) -> None:
-        from fido.server import _startup_pull
-
-        proc = _FakeProcessRunner(
-            [
-                MagicMock(stdout="same\n"),
-                MagicMock(),
-                MagicMock(),
-                MagicMock(stdout="same\n"),
-            ]
-        )
-        clock = _FakeClock(times=[0.0, 0.0])
-        os_proc = _FakeOsProcess()
-        _startup_pull(proc, clock, os_proc)
-        assert os_proc.exit_calls == []
-
-    def test_continues_on_pull_failure(self) -> None:
-        from fido.server import _startup_pull
-
-        # get_head fails → None; fetch fails with budget exhausted immediately
-        proc = _FakeProcessRunner(
-            [FileNotFoundError(), subprocess.CalledProcessError(1, [])]
-        )
-        clock = _FakeClock(times=[0.0, 601.0])  # budget exhausted on first attempt
-        os_proc = _FakeOsProcess()
-        _startup_pull(proc, clock, os_proc)
-        assert os_proc.exit_calls == []
-
-    def test_does_not_exit_when_head_unknown(self) -> None:
-        from fido.server import _startup_pull
-
-        # Both rev-parse calls fail → head_before and head_after are None
-        proc = _FakeProcessRunner(
-            [FileNotFoundError(), MagicMock(), MagicMock(), FileNotFoundError()]
-        )
-        clock = _FakeClock(times=[0.0, 0.0])
-        os_proc = _FakeOsProcess()
-        _startup_pull(proc, clock, os_proc)
-        # Can't compare HEAD — pull succeeded, log and continue without exit
-        assert os_proc.exit_calls == []
 
 
 class TestSelfRestart:
