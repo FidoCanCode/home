@@ -4113,11 +4113,21 @@ class TestWritePrDescription:
             )
         mock_lock.assert_called_once_with(Path("/tmp"))
 
-    def test_raises_when_opus_returns_empty(self) -> None:
+    def test_skips_write_when_provider_returns_empty(self, caplog) -> None:
+        import logging
+
         gh = MagicMock()
-        with pytest.raises(ValueError, match="no <body> content"):
+        with caplog.at_level(logging.WARNING, logger="fido.worker"):
             self._call(gh, print_return="", issue=7)
         gh.edit_pr_body.assert_not_called()
+        assert "skipping" in caplog.text
+
+    def test_uses_retry_on_preempt_via_safe_voice_turn(self) -> None:
+        """safe_voice_turn is called, which always passes retry_on_preempt=True."""
+        gh = MagicMock()
+        _, mock_cc = self._call(gh, print_return="<body>Desc.\n\nFixes #1.</body>")
+        _, kwargs = mock_cc.run_turn.call_args
+        assert kwargs.get("retry_on_preempt") is True
 
     def test_raises_when_no_divider_in_existing_body(self) -> None:
         gh = MagicMock()
@@ -4228,12 +4238,15 @@ class TestWritePrDescription:
         assert "The current body is short" not in body
         assert "Want me to update it directly" not in body
 
-    def test_raises_when_opus_returns_no_body_tags(self) -> None:
-        """No body tags = garbage output; raise instead of silently falling back."""
+    def test_skips_write_when_provider_returns_no_body_tags(self, caplog) -> None:
+        """No body tags = unusable output; skip write + warn instead of raising."""
+        import logging
+
         gh = MagicMock()
-        with pytest.raises(ValueError, match="no <body> content"):
+        with caplog.at_level(logging.WARNING, logger="fido.worker"):
             self._call(gh, print_return="Bare text with no body tags.", issue=42)
         gh.edit_pr_body.assert_not_called()
+        assert "skipping" in caplog.text
 
     def test_body_tag_match_is_case_insensitive(self) -> None:
         gh = MagicMock()
