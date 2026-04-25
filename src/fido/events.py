@@ -10,8 +10,8 @@ from typing import Any
 from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
-from fido.prompts import NO_TOOLS_CLAUSE, Prompts
-from fido.provider import ProviderAgent, safe_voice_turn, set_thread_repo
+from fido.prompts import Prompts
+from fido.provider import ProviderAgent, safe_toolless_turn, set_thread_repo
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.rocq import replied_comment_claims as oracle
@@ -672,7 +672,9 @@ def maybe_react(
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     reaction = (
-        agent.run_turn(prompts.react_prompt(comment_body), model=agent.voice_model)
+        agent.run_toolless_turn(
+            prompts.react_prompt(comment_body), model=agent.voice_model
+        )
         .lower()
         .split("\n")[0]
         .strip()
@@ -802,7 +804,7 @@ def reply_to_comment(
         info["pr"],
         info["comment_id"],
     )
-    body = safe_voice_turn(
+    body = safe_toolless_turn(
         agent,
         prompts.persona_wrap(instr),
         model=agent.voice_model,
@@ -958,7 +960,6 @@ def needs_more_context(
     if agent is None:
         raise ValueError("needs_more_context requires agent")
     prompt = (
-        f"{NO_TOOLS_CLAUSE}\n\n"
         "A reviewer left this comment on a pull request:\n\n"
         f"{comment_body!r}\n\n"
         "Does this comment need context from sibling review threads to be understood "
@@ -967,7 +968,7 @@ def needs_more_context(
         "Reply with exactly YES or NO."
     )
     log.info("needs-more-context check: requesting haiku")
-    answer = agent.run_turn(prompt, model=agent.brief_model).upper()
+    answer = agent.run_toolless_turn(prompt, model=agent.brief_model).upper()
     log.info(
         "needs-more-context check: returned %d chars (answer=%r)",
         len(answer),
@@ -990,13 +991,12 @@ def _summarize_as_action_item(
     if agent is None:
         raise ValueError("_summarize_as_action_item requires agent")
     prompt = (
-        f"{NO_TOOLS_CLAUSE}\n\n"
         "Convert this PR review comment into a short, imperative task title starting with a verb. "
         "Reply with ONLY the title — no category prefix, no punctuation at the end.\n\n"
         f"Comment: {comment_body}"
     )
     log.info("summarize-action-item: requesting initial title from opus")
-    raw = safe_voice_turn(
+    raw = safe_toolless_turn(
         agent, prompt, model=agent.voice_model, log_prefix="_summarize_as_action_item"
     )
     result = raw.strip()
@@ -1012,9 +1012,8 @@ def _summarize_as_action_item(
             "summarize-action-item: title too long (%d chars), requesting shorten",
             len(result),
         )
-        shortened = safe_voice_turn(
+        shortened = safe_toolless_turn(
             agent,
-            f"{NO_TOOLS_CLAUSE}\n\n"
             f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
             f"Reply with ONLY the shortened title.\n\nTitle: {result}",
             model=agent.voice_model,
@@ -1049,7 +1048,7 @@ def _triage(
         prompts = Prompts("")
     prompt = prompts.triage_prompt(comment_body, is_bot, context)
     log.info("triage classifier: requesting category from opus")
-    text = agent.run_turn(prompt, model=agent.voice_model)
+    text = agent.run_toolless_turn(prompt, model=agent.voice_model)
     log.info(
         "triage classifier: returned %d chars (preview=%r)",
         len(text or ""),
@@ -1166,7 +1165,7 @@ def reply_to_issue_comment(
     )
 
     log.info("generating %s reply for issue comment on PR #%s", category, number)
-    body = safe_voice_turn(
+    body = safe_toolless_turn(
         agent,
         prompts.persona_wrap(instr),
         model=agent.voice_model,
@@ -1367,7 +1366,7 @@ def _notify_thread_change(
             "has been updated. Reference the comment URL."
         )
 
-    body = safe_voice_turn(
+    body = safe_toolless_turn(
         agent,
         prompts.persona_wrap(instruction),
         model=agent.voice_model,

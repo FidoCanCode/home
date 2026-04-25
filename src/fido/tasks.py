@@ -526,7 +526,7 @@ def reorder_tasks(
 
     original_ids = frozenset(t["id"] for t in task_list)
     prompt = prompts.rescope_prompt(task_list, commit_summary)
-    raw = agent.run_turn(prompt, model=agent.voice_model)
+    raw = agent.run_toolless_turn(prompt, model=agent.voice_model)
     if not raw:
         log.warning("reorder_tasks: Opus returned empty response — skipping")
         return
