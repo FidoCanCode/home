@@ -207,6 +207,100 @@ def test_other_thread_blocks_while_held(tmp_path: Path) -> None:
     session.stop()
 
 
+def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
+    """End-to-end: webhook calling hold_for_handler(preempt_worker=True)
+    wakes a worker that is blocked inside iter_events, causing the worker to
+    exit its turn and release the lock so the webhook can acquire it (#955)."""
+    import time
+
+    system_file = tmp_path / "system.md"
+    system_file.write_text("sys")
+    proc = MagicMock()
+    proc.pid = 55555
+    proc.poll = MagicMock(return_value=None)
+    proc.wait = MagicMock(return_value=0)
+    proc.returncode = 0
+    proc.stdin = MagicMock()
+    proc.stdin.closed = False
+    proc.stdout = MagicMock()
+    proc.stderr = MagicMock()
+
+    # Worker turn: readline blocks until cancel fires, then returns EOF.
+    worker_blocked = threading.Event()
+    cancel_received = threading.Event()
+
+    def blocking_readline() -> str:
+        worker_blocked.set()
+        cancel_received.wait(timeout=5.0)
+        return ""  # EOF — worker exits iter_events
+
+    proc.stdout.readline = MagicMock(side_effect=blocking_readline)
+
+    # Selector: immediately returns stdout as ready so iter_events calls readline.
+    session = ClaudeSession(
+        system_file,
+        work_dir=tmp_path,
+        popen=MagicMock(return_value=proc),
+        selector=MagicMock(return_value=([proc.stdout], [], [])),
+        repo_name="owner/repo",
+        model="claude-opus-4-6",
+    )
+
+    worker_in_turn = threading.Event()
+    worker_done = threading.Event()
+    webhook_acquired = threading.Event()
+    webhook_done = threading.Event()
+
+    def worker() -> None:
+        provider.set_thread_kind("worker")
+        try:
+            with session:
+                worker_in_turn.set()
+                # consume_until_result drives iter_events; readline blocks
+                session.consume_until_result()
+            worker_done.set()
+        finally:
+            provider.set_thread_kind(None)
+
+    def webhook() -> None:
+        provider.set_thread_kind("webhook")
+        try:
+            # Wait until worker is actually blocked, then preempt.
+            worker_blocked.wait(timeout=2.0)
+            # Signal readline to unblock after cancel fires.
+            original_fire = session._fire_worker_cancel
+
+            def fire_and_unblock() -> None:
+                original_fire()
+                cancel_received.set()
+
+            session._fire_worker_cancel = fire_and_unblock  # type: ignore[method-assign]
+            t_start = time.monotonic()
+            with session.hold_for_handler(preempt_worker=True):
+                webhook_acquired.set()
+                elapsed = time.monotonic() - t_start
+                assert elapsed < 2.0, (
+                    f"webhook took too long to acquire: {elapsed:.2f}s"
+                )
+            webhook_done.set()
+        finally:
+            provider.set_thread_kind(None)
+
+    t_worker = threading.Thread(target=worker, daemon=True)
+    t_worker.start()
+    worker_in_turn.wait(timeout=2.0)
+
+    t_webhook = threading.Thread(target=webhook, daemon=True)
+    t_webhook.start()
+
+    assert webhook_acquired.wait(timeout=5.0), "webhook never acquired lock"
+    assert webhook_done.wait(timeout=5.0)
+    assert worker_done.wait(timeout=5.0)
+    t_worker.join(timeout=2.0)
+    t_webhook.join(timeout=2.0)
+    session.stop()
+
+
 def test_hold_reraises_leak_error_and_releases_lock(
     tmp_path: Path, monkeypatch
 ) -> None:
