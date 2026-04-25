@@ -1,6 +1,6 @@
 import inspect
 
-from wf_countdown import wf_countdown
+from wf_recursion import wf_countdown
 
 
 def test_wf_countdown_round_trip(build_default) -> None:
@@ -11,6 +11,6 @@ def test_wf_countdown_round_trip(build_default) -> None:
     sig = inspect.signature(wf_countdown)
     assert list(sig.parameters) == ["x"], "signature: got " + str(sig)
 
-    source = (build_default / "wf_countdown.py").read_text()
+    source = (build_default / "wf_recursion.py").read_text()
     for forbidden in ("_acc", "_dummy", "Acc", "accessibility", "recproof"):
-        assert forbidden not in source, forbidden + " leaked into wf_countdown.py"
+        assert forbidden not in source, forbidden + " leaked into wf_recursion.py"

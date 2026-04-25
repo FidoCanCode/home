@@ -1,10 +1,6 @@
 polymorphism.py
+strings_bytes.py
 ModuleLookupFixture.py
-github_key.py
-payload_fragment.py
-ascii_A.py
-byte_lf.py
-tail_or_empty.py
 nat_pred_or_zero.py
 positive_case.py
 n_case.py

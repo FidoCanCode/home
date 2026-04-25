@@ -37,7 +37,12 @@ Definition tree_root (t : cotree) : nat :=
     recursively forcing the whole infinite structure. *)
 Definition tree_root_of_repeat : nat := tree_root repeat_tree.
 
-Python Extraction zeros.
-Python Extraction zeros_pair.
-Python Extraction repeat_tree.
-Python Extraction tree_root_of_repeat.
+(* ------------------------------------------------------------------ *)
+(*  Grouped extraction                                                 *)
+(*  All definitions land in a single [coinductives.py] module.       *)
+(* ------------------------------------------------------------------ *)
+
+(** [coinductives.py]: covers [CoInductive] and [CoFixpoint] — lazy/cyclic
+    stream and binary tree representations, forced observation, and products
+    of coinductive values. *)
+Python File Extraction coinductives "zeros zeros_pair repeat_tree tree_root_of_repeat".

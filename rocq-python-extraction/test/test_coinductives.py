@@ -1,10 +1,18 @@
 from itertools import islice
 from typing import cast
 
-from repeat_tree import CNode, Cotree, coforce, repeat_tree
-from tree_root_of_repeat import tree_root_of_repeat
-from zeros import Stream, zeros
-from zeros_pair import coprefix_eq, coprefix_hash, zeros_pair
+from coinductives import (
+    CNode,
+    Cotree,
+    Stream,
+    coforce,
+    coprefix_eq,
+    coprefix_hash,
+    repeat_tree,
+    tree_root_of_repeat,
+    zeros,
+    zeros_pair,
+)
 
 
 def test_coinductive_round_trip() -> None:
