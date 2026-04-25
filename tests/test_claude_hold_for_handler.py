@@ -115,6 +115,27 @@ def test_hold_preempt_fires_cancel_when_worker_holds(
     assert cancel_calls == [1]
 
 
+def test_hold_preempt_no_fire_when_no_worker_holder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """preempt_worker=True with no current holder — try_preempt_worker returns
+    (False, None) and no cancel fires.  Exercises the ``else`` branch of the
+    new preempt outcome logging in hold_for_handler (#955)."""
+    session = _setup_session(tmp_path)
+    # No holder registered — try_preempt_worker sees current_kind=None.
+    monkeypatch.setattr(provider, "get_talker", lambda _repo: None)
+    cancel_calls = []
+    monkeypatch.setattr(session, "_fire_worker_cancel", lambda: cancel_calls.append(1))
+    provider.set_thread_kind("webhook")
+    try:
+        with session.hold_for_handler(preempt_worker=True):
+            pass
+    finally:
+        provider.set_thread_kind(None)
+        session.stop()
+    assert cancel_calls == []
+
+
 def test_hold_preempt_skipped_when_no_preempt_worker_flag(
     tmp_path: Path, monkeypatch
 ) -> None:
