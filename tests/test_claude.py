@@ -1515,6 +1515,15 @@ class TestClaudeSessionStop:
 
 
 class TestClaudeSessionSwitchModel:
+    _REQUEST_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def _make_response_line(self, request_id: str) -> str:
+        import json as _json
+
+        return (
+            _json.dumps({"type": "control_response", "request_id": request_id}) + "\n"
+        )
+
     def test_same_model_is_noop(self, tmp_path: Path) -> None:
         """When the target matches the current model, nothing happens."""
         proc = _make_session_proc([])
@@ -1522,79 +1531,45 @@ class TestClaudeSessionSwitchModel:
         current_proc = session._proc
         session.switch_model("claude-opus-4-6")
         assert session._proc is current_proc
-        # stdin.write should NOT have been called for a /model slash command.
+        # No control_request is written for a noop switch.
         assert proc.stdin.write.call_count == 0
 
-    def test_different_model_respawns_with_new_flag(self, tmp_path: Path) -> None:
-        """Switching model kills the old proc and spawns a new one with
-        --model <new>, passing --resume when session_id is known."""
-        system_file = tmp_path / "system.md"
-        system_file.write_text("sys")
-        old_proc = _make_session_proc([])
-        old_proc.pid = 1001
-        new_proc = _make_session_proc([])
-        new_proc.pid = 1002
-        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
-        session = ClaudeSession(
-            system_file,
-            work_dir=tmp_path,
-            popen=fake_popen,
-            selector=MagicMock(return_value=([], [], [])),
-            model="claude-opus-4-6",
-            repo_name="owner/repo",
-        )
-        # Prior turn established a session_id — switch_model must preserve
-        # conversation by passing --resume to the new subprocess.
-        session._session_id = "sid-123"
-        session.switch_model("claude-sonnet-4-6")
-        old_proc.kill.assert_called_once()
-        assert session._proc is new_proc
-        assert session._model == "claude-sonnet-4-6"
-        # Second spawn call had --model claude-sonnet-4-6 and --resume sid-123.
-        second_cmd = fake_popen.call_args_list[1].args[0]
-        assert "--model" in second_cmd
-        assert second_cmd[second_cmd.index("--model") + 1] == "claude-sonnet-4-6"
-        assert "--resume" in second_cmd
-        assert second_cmd[second_cmd.index("--resume") + 1] == "sid-123"
+    def test_different_model_sends_control_request(self, tmp_path: Path) -> None:
+        """Switching model writes a set_model control_request to stdin and
+        updates _model — no kill, no respawn."""
+        import json as _json
 
-    def test_switch_raises_when_kill_fails(self, tmp_path: Path) -> None:
-        """kill/wait failure during switch_model re-raises so the caller
-        can decide how to recover."""
-        import subprocess
+        response = self._make_response_line(self._REQUEST_ID)
+        proc = _make_session_proc([])
+        proc.stdout.readline = MagicMock(side_effect=[response, ""])
+        session = _make_session(tmp_path, proc)
+        original_proc = session._proc
 
-        system_file = tmp_path / "system.md"
-        system_file.write_text("sys")
-        old_proc = _make_session_proc([], poll_returns=None)
-        old_proc.kill = MagicMock()
-        old_proc.wait = MagicMock(side_effect=subprocess.TimeoutExpired("claude", 1.0))
-        fake_popen = MagicMock(side_effect=[old_proc, _make_session_proc([])])
-        session = ClaudeSession(
-            system_file,
-            work_dir=tmp_path,
-            popen=fake_popen,
-            selector=MagicMock(return_value=([], [], [])),
-            model="claude-opus-4-6",
-        )
-        with pytest.raises(subprocess.TimeoutExpired):
+        with patch(
+            "fido.claude.uuid.uuid4",
+            return_value=MagicMock(__str__=lambda _: self._REQUEST_ID),
+        ):
             session.switch_model("claude-sonnet-4-6")
 
-    def test_switch_with_no_prior_session_id_omits_resume(self, tmp_path: Path) -> None:
-        system_file = tmp_path / "system.md"
-        system_file.write_text("sys")
-        old_proc = _make_session_proc([])
-        new_proc = _make_session_proc([])
-        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
-        session = ClaudeSession(
-            system_file,
-            work_dir=tmp_path,
-            popen=fake_popen,
-            selector=MagicMock(return_value=([], [], [])),
-            model="claude-opus-4-6",
-        )
-        # No prior session_id (fresh session) — no --resume flag.
-        session.switch_model("claude-sonnet-4-6")
-        second_cmd = fake_popen.call_args_list[1].args[0]
-        assert "--resume" not in second_cmd
+        # Proc is unchanged — no kill, no respawn.
+        assert session._proc is original_proc
+        assert session._model == "claude-sonnet-4-6"
+        # stdin got a control_request with set_model subtype and correct model.
+        obj = _json.loads(proc.stdin.write.call_args.args[0].strip())
+        assert obj["type"] == "control_request"
+        assert obj["request"]["subtype"] == "set_model"
+        assert obj["request"]["model"] == "claude-sonnet-4-6"
+        session.stop()
+
+    def test_switch_propagates_stream_error(self, tmp_path: Path) -> None:
+        """ClaudeStreamError from _send_control_set_model propagates to the caller."""
+        # EOF immediately → _RETURNCODE_SET_MODEL_TIMEOUT
+        proc = _make_session_proc([])
+        proc.stdout.readline = MagicMock(return_value="")
+        session = _make_session(tmp_path, proc)
+        with pytest.raises(ClaudeStreamError) as exc_info:
+            session.switch_model("claude-sonnet-4-6")
+        assert exc_info.value.returncode == _RETURNCODE_SET_MODEL_TIMEOUT
 
 
 class TestClaudeSessionConsumeUntilResult:

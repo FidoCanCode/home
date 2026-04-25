@@ -1090,16 +1090,13 @@ class ClaudeSession(OwnedSession):
             self._preempt_pending.clear()
 
     def switch_model(self, model: ProviderModel | str) -> None:
-        """Switch the active model.  Restart-based — stream-json does not
-        accept ``/model`` or any slash command (claude echoes "Unknown
-        command" and never emits a turn boundary, hanging the reader).
+        """Switch the active model via a ``control_request`` ``set_model``
+        message — no kill, no respawn, no init-handshake delay, no
+        session-id loss.
 
-        Holds :attr:`_lock` for the full swap so callers waiting on
-        :meth:`__enter__` block gracefully until the new subprocess is
-        listening.  When a prior ``session_id`` is known we pass
-        ``--resume`` to the new subprocess so the conversation transcript
-        carries over across the swap — no context loss when phase
-        transitions flip opus → sonnet or vice versa.
+        Holds :attr:`_lock` for the duration so callers waiting on
+        :meth:`__enter__` block gracefully until the switch is complete.
+        Must be called between turns (``_in_turn`` must be ``False``).
 
         No-op when *model* equals the current model.
         """
@@ -1107,33 +1104,14 @@ class ClaudeSession(OwnedSession):
         if target_model == self._model:
             return
         log.info(
-            "switch_model: %s → %s (restart-based, resume=%s)",
+            "switch_model: %s → %s (control_request)",
             self._model,
             target_model,
-            self._session_id or "—",
         )
         with self._lock:
-            _unregister_child(self._proc)
-            if self._proc.poll() is None:
-                try:
-                    self._proc.kill()
-                    self._proc.wait(timeout=1.0)
-                except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
-                    log.warning(
-                        "switch_model: kill/wait of old subprocess failed: %s", exc
-                    )
-                    raise
+            self._send_control_set_model(target_model)
             self._model = target_model
-            # Fresh subprocess — any in-flight turn on the old one died
-            # with it, so next send() has nothing to drain.
-            self._in_turn = False
-            self._proc = self._spawn()
-            _register_child(self._proc)
-        log.info(
-            "switch_model: new pid %d ready (model=%s)",
-            self._proc.pid,
-            target_model,
-        )
+        log.info("switch_model: now on model=%s", target_model)
 
     def _log_event(self, obj: dict[str, Any]) -> None:
         """Emit a human-readable INFO log line for a stream-json *obj*.
