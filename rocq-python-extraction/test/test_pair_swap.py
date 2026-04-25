@@ -1,4 +1,4 @@
-from pair_swap import pair_swap
+from primitives import pair_swap
 
 
 def test_pair_swap_round_trip() -> None:
