@@ -202,6 +202,11 @@ _RETURNCODE_IDLE_TIMEOUT = -1
 """Sentinel returncode used in :class:`ClaudeStreamError` when the process is
 killed due to an idle timeout rather than exiting with a real non-zero code."""
 
+_RETURNCODE_SET_MODEL_TIMEOUT = -2
+"""Sentinel returncode used in :class:`ClaudeStreamError` when a
+``control_request`` ``set_model`` times out waiting for the matching
+``control_response``, or the subprocess exits unexpectedly during the wait."""
+
 
 class ClaudeStreamError(Exception):
     """Raised by _run_streaming when the subprocess exits with a non-zero code or times out."""
@@ -470,11 +475,10 @@ class ClaudeSession(OwnedSession):
         self._system_file = system_file
         self._work_dir = work_dir
         self._popen_fn = popen
-        # Reentrant so :meth:`switch_model` and :meth:`restart` can
-        # reacquire while called from inside a ``with session:`` block
-        # (e.g. ``prompt()`` acquires the lock, then calls switch_model
-        # which also needs to serialize with other sessions' access —
-        # a plain threading.Lock self-deadlocks).
+        # Reentrant so :meth:`switch_model` can reacquire while called from
+        # inside a ``with session:`` block (e.g. ``prompt()`` acquires the
+        # lock, then calls switch_model which also needs to serialize with
+        # other sessions' access — a plain threading.Lock self-deadlocks).
         self._lock = threading.RLock()
         self._cancel = threading.Event()
         self._repo_name = repo_name
@@ -482,9 +486,10 @@ class ClaudeSession(OwnedSession):
             ProviderModel("claude-opus-4-6") if model is None else model
         )
         # Latest session_id seen in a stream-json event.  Updated inside
-        # :meth:`iter_events` so a subsequent :meth:`switch_model` can
-        # restart with ``--resume <sid>`` and keep conversation context
-        # across the model swap.  Seeded from the *session_id* constructor
+        # :meth:`iter_events` and :meth:`_send_control_set_model` so
+        # :meth:`recover` and :meth:`reset` can pass ``--resume <sid>``
+        # to :meth:`_spawn` and keep conversation context across a
+        # subprocess restart.  Seeded from the *session_id* constructor
         # kwarg so the first :meth:`_spawn` can ``--resume`` a durable
         # claude conversation persisted across fido restarts (#649).
         # Empty until the first claude event with a session_id arrives.
@@ -610,12 +615,10 @@ class ClaudeSession(OwnedSession):
     def _spawn(self) -> subprocess.Popen[str]:
         """Spawn the claude subprocess with bidirectional stream-json I/O.
 
-        Model is set via ``--model`` at spawn time — the runtime ``/model``
-        slash command isn't honored in stream-json mode (claude echoes
-        "Unknown command: /model" and hangs without producing a turn
-        boundary).  When :attr:`_session_id` is non-empty the new process
-        resumes the prior conversation via ``--resume`` so context
-        survives a model swap.
+        Model is set via ``--model`` at spawn time.  When
+        :attr:`_session_id` is non-empty the new process resumes the
+        prior conversation via ``--resume`` so context survives a
+        subprocess restart (e.g. :meth:`recover` or :meth:`reset`).
         """
         cmd = [
             "claude",
@@ -951,6 +954,61 @@ class ClaudeSession(OwnedSession):
         self._proc.stdin.write(msg + "\n")
         self._proc.stdin.flush()
 
+    def _send_control_set_model(self, model: str) -> None:
+        """Write a ``control_request`` ``set_model`` to stdin and drain stdout
+        until the matching ``control_response`` arrives.
+
+        Switches the model on the running subprocess in-place — no kill, no
+        restart, no init-handshake delay, no session-id loss.  Call while
+        holding :attr:`_lock` and between turns (``_in_turn`` must be
+        ``False``).
+
+        Raises :class:`ClaudeStreamError` with
+        :data:`_RETURNCODE_SET_MODEL_TIMEOUT` if the subprocess exits or the
+        ``control_response`` is not received within :attr:`_idle_timeout`
+        seconds.
+        """
+        request_id = str(uuid.uuid4())
+        msg = json.dumps(
+            {
+                "type": "control_request",
+                "request_id": request_id,
+                "request": {"subtype": "set_model", "model": model},
+            }
+        )
+        assert self._proc.stdin is not None
+        assert self._proc.stdout is not None
+        self._proc.stdin.write(msg + "\n")
+        self._proc.stdin.flush()
+        deadline = time.monotonic() + self._idle_timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ClaudeStreamError(_RETURNCODE_SET_MODEL_TIMEOUT)
+            ready, _, _ = self._selector(
+                [self._proc.stdout], [], [], min(remaining, _SELECT_POLL_INTERVAL)
+            )
+            if self._proc.stdout not in ready:
+                if self._proc.poll() is not None:
+                    raise ClaudeStreamError(_RETURNCODE_SET_MODEL_TIMEOUT)
+                continue
+            line = self._proc.stdout.readline()
+            if not line:
+                raise ClaudeStreamError(_RETURNCODE_SET_MODEL_TIMEOUT)
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            self._log_event(obj)
+            sid = obj.get("session_id")
+            if isinstance(sid, str) and sid:
+                self._session_id = sid
+            if (
+                obj.get("type") == "control_response"
+                and obj.get("request_id") == request_id
+            ):
+                return
+
     def interrupt(self, content: str) -> None:
         """Interrupt the in-flight turn at the protocol level, then send *content*.
 
@@ -1030,16 +1088,13 @@ class ClaudeSession(OwnedSession):
             self._preempt_pending.clear()
 
     def switch_model(self, model: ProviderModel | str) -> None:
-        """Switch the active model.  Restart-based — stream-json does not
-        accept ``/model`` or any slash command (claude echoes "Unknown
-        command" and never emits a turn boundary, hanging the reader).
+        """Switch the active model via a ``control_request`` ``set_model``
+        message — no kill, no respawn, no init-handshake delay, no
+        session-id loss.
 
-        Holds :attr:`_lock` for the full swap so callers waiting on
-        :meth:`__enter__` block gracefully until the new subprocess is
-        listening.  When a prior ``session_id`` is known we pass
-        ``--resume`` to the new subprocess so the conversation transcript
-        carries over across the swap — no context loss when phase
-        transitions flip opus → sonnet or vice versa.
+        Holds :attr:`_lock` for the duration so callers waiting on
+        :meth:`__enter__` block gracefully until the switch is complete.
+        Must be called between turns (``_in_turn`` must be ``False``).
 
         No-op when *model* equals the current model.
         """
@@ -1047,33 +1102,14 @@ class ClaudeSession(OwnedSession):
         if target_model == self._model:
             return
         log.info(
-            "switch_model: %s → %s (restart-based, resume=%s)",
+            "switch_model: %s → %s (control_request)",
             self._model,
             target_model,
-            self._session_id or "—",
         )
         with self._lock:
-            _unregister_child(self._proc)
-            if self._proc.poll() is None:
-                try:
-                    self._proc.kill()
-                    self._proc.wait(timeout=1.0)
-                except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
-                    log.warning(
-                        "switch_model: kill/wait of old subprocess failed: %s", exc
-                    )
-                    raise
+            self._send_control_set_model(target_model)
             self._model = target_model
-            # Fresh subprocess — any in-flight turn on the old one died
-            # with it, so next send() has nothing to drain.
-            self._in_turn = False
-            self._proc = self._spawn()
-            _register_child(self._proc)
-        log.info(
-            "switch_model: new pid %d ready (model=%s)",
-            self._proc.pid,
-            target_model,
-        )
+        log.info("switch_model: now on model=%s", target_model)
 
     def _log_event(self, obj: dict[str, Any]) -> None:
         """Emit a human-readable INFO log line for a stream-json *obj*.
@@ -1173,9 +1209,9 @@ class ClaudeSession(OwnedSession):
                 obj = json.loads(line)
                 self._log_event(obj)
                 last_activity = time.monotonic()
-                # Track the latest session_id so :meth:`switch_model` can
-                # restart with ``--resume <sid>`` and keep conversation
-                # context across the swap.
+                # Track the latest session_id so :meth:`recover` and
+                # :meth:`reset` can resume via ``--resume <sid>`` on the
+                # next :meth:`_spawn`.
                 sid = obj.get("session_id")
                 if isinstance(sid, str) and sid:
                     self._session_id = sid
