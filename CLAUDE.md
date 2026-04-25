@@ -502,11 +502,9 @@ the script accepts an inclusive `from to` window.
 
 ### Five moves
 
-**The root problem: word budget tracks PR count.** On high-count days the
-narrative container overflows and Fido retreats to bullet-list-with-sentiment
-scaffolding because there's nowhere else to go.  Generic imagery, identical
-closers, disconnected trophy-posts — all downstream of that one failure mode.
-The five moves below fix it.
+**Five moves keep every entry alive regardless of PR count.**  The first is
+the structural permission everything else depends on; the others shape voice,
+thread, and texture.
 
 **Move 1 (the structural permission): word budget stays roughly constant
 regardless of PR count.**  On high-count days, most PRs collapse into a single
