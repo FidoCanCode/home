@@ -1078,6 +1078,39 @@ class TestRepoStatus:
         assert result.provider is ProviderID.CLAUDE_CODE
         assert result.provider_status == status
 
+    def test_in_progress_task_propagates_position(self, tmp_path: Path) -> None:
+        """repo_status() surfaces the in_progress task's position and total correctly.
+
+        When the worker marks a task in_progress, _task_position() picks it up
+        and the position is reflected in task_number / task_total on RepoStatus.
+        An in_progress task that is not first in the non-completed list must
+        still report its actual position, not 1.
+        """
+        git_dir = tmp_path / ".git"
+        fido_dir = git_dir / "fido"
+        fido_dir.mkdir(parents=True)
+        tasks = [
+            {"status": "completed", "title": "done", "type": "spec"},
+            {"status": "pending", "title": "first pending", "type": "spec"},
+            {"status": "in_progress", "title": "active task", "type": "spec"},
+            {"status": "pending", "title": "last pending", "type": "spec"},
+        ]
+        (fido_dir / "tasks.json").write_text(json.dumps(tasks))
+
+        cfg = self._make_config(tmp_path)
+        with (
+            patch("fido.status._git_dir", return_value=git_dir),
+            patch("fido.status._fido_running", return_value=True),
+            patch("fido.status._claude_pid", return_value=None),
+            patch("fido.status._process_uptime_seconds", return_value=None),
+        ):
+            result = repo_status(cfg)
+
+        # Non-completed: [pending, in_progress, pending] → 3 total; in_progress is #2.
+        assert result.current_task == "active task"
+        assert result.task_number == 2
+        assert result.task_total == 3
+
 
 class TestCollect:
     def _fake_repo_status(self, name: str = "owner/repo") -> RepoStatus:
