@@ -18,7 +18,7 @@ from fido.provider import (
 class DefaultProviderFactory:
     """Create repo-configured provider instances."""
 
-    def __init__(self, *, session_system_file: Path) -> None:
+    def __init__(self, *, session_system_file: Path | None = None) -> None:
         self._session_system_file = session_system_file
         self._api_lock = threading.Lock()
         self._apis: dict[ProviderID, ProviderAPI] = {}
@@ -46,6 +46,10 @@ class DefaultProviderFactory:
         repo_name: str,
         session: PromptSession | None,
     ) -> Provider:
+        if self._session_system_file is None:
+            raise ValueError(
+                "DefaultProviderFactory.create_provider requires session_system_file"
+            )
         match repo_cfg.provider:
             case ProviderID.CLAUDE_CODE:
                 return ClaudeCode(
@@ -81,3 +85,18 @@ class DefaultProviderFactory:
             repo_name=repo_name,
             session=None,
         ).agent
+
+    def create_toolless_agent(self, repo_cfg: RepoConfig) -> ProviderAgent:
+        """Create an agent for toolless one-shot turns — no persistent session possible.
+
+        Omits ``session_system_file`` and ``work_dir`` so the agent cannot
+        accidentally start a persistent interactive session via ``run_turn``.
+        Only ``run_toolless_turn`` works on the returned agent.
+        """
+        match repo_cfg.provider:
+            case ProviderID.CLAUDE_CODE:
+                return ClaudeCode(agent=ClaudeClient()).agent
+            case ProviderID.COPILOT_CLI:
+                return CopilotCLI(agent=CopilotCLIClient()).agent
+            case _:
+                raise ValueError(f"unsupported provider: {repo_cfg.provider}")

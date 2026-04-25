@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.prompts import Prompts
@@ -28,14 +27,8 @@ _reorder_coalesce: dict[str, dict[str, Any]] = {}
 _reorder_coalesce_lock = threading.Lock()
 
 
-def _configured_agent(config: Config, repo_cfg: RepoConfig) -> ProviderAgent:
-    return DefaultProviderFactory(
-        session_system_file=config.sub_dir / "persona.md"
-    ).create_agent(
-        repo_cfg,
-        work_dir=repo_cfg.work_dir,
-        repo_name=repo_cfg.name,
-    )
+def _configured_agent(repo_cfg: RepoConfig) -> ProviderAgent:
+    return DefaultProviderFactory().create_toolless_agent(repo_cfg)
 
 
 @dataclass
@@ -668,7 +661,7 @@ def maybe_react(
     comment_type: 'pulls' for review comments, 'issues' for issue comments.
     """
     if agent is None:
-        agent = _configured_agent(config, config.repos[repo])
+        agent = _configured_agent(config.repos[repo])
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     reaction = (
@@ -710,7 +703,7 @@ def reply_to_comment(
     Raises on reply-post failure so callers fail closed.
     """
     if agent is None:
-        agent = _configured_agent(config, repo_cfg)
+        agent = _configured_agent(repo_cfg)
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     info = action.reply_to
@@ -1094,7 +1087,7 @@ def reply_to_issue_comment(
     Raises on reply-post failure so callers fail closed.
     """
     if agent is None:
-        agent = _configured_agent(config, repo_cfg)
+        agent = _configured_agent(repo_cfg)
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     comment = action.comment_body or ""
@@ -1334,9 +1327,7 @@ def _notify_thread_change(
         return
 
     if agent is None:
-        agent = _configured_agent(
-            config, config.repos[change["task"]["thread"]["repo"]]
-        )
+        agent = _configured_agent(config.repos[change["task"]["thread"]["repo"]])
     if prompts is None:
         prompts = Prompts(_load_persona(config))
 
@@ -1569,11 +1560,11 @@ def _reorder_tasks_background(
     rewrite_fn = _rewrite_fn if _rewrite_fn is not None else _rewrite_pr_description
     state = _coalesce_state if _coalesce_state is not None else _reorder_coalesce
     if agent is None:
-        agent = (
-            _configured_agent(config, repo_cfg)
-            if repo_cfg is not None
-            else ClaudeClient()
-        )
+        if repo_cfg is None:
+            raise ValueError(
+                "_reorder_tasks_background: repo_cfg is required when agent is not provided"
+            )
+        agent = _configured_agent(repo_cfg)
     if prompts is None:
         prompts = Prompts(_load_persona(config))
 

@@ -152,16 +152,15 @@ class TestNeedsMoreContext:
             needs_more_context("some comment")
 
     def test_configured_agent_uses_provider_factory(self, tmp_path: Path) -> None:
-        cfg = _config(tmp_path)
-        cfg.repos["owner/repo"] = RepoConfig(
+        repo_cfg = RepoConfig(
             name="owner/repo",
             work_dir=tmp_path,
             provider=ProviderID.COPILOT_CLI,
         )
         sentinel = MagicMock()
         with patch("fido.events.DefaultProviderFactory") as factory_cls:
-            factory_cls.return_value.create_agent.return_value = sentinel
-            assert _configured_agent(cfg, cfg.repos["owner/repo"]) is sentinel
+            factory_cls.return_value.create_toolless_agent.return_value = sentinel
+            assert _configured_agent(repo_cfg) is sentinel
 
 
 class TestRecoverReplyPromises:
@@ -3534,6 +3533,10 @@ class TestReorderTasksBackground:
 
         return calls, mock_reorder
 
+    def _agent(self) -> MagicMock:
+        """Return a minimal mock agent for tests that don't need a real agent."""
+        return _client()
+
     def test_starts_daemon_thread(self, tmp_path: Path) -> None:
         started: list = []
         _, mock_reorder = self._capture_reorder_calls()
@@ -3544,6 +3547,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state={},
         )
         assert len(started) == 1
@@ -3560,6 +3564,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state={},
         )
         assert tmp_path.name in started[0].name
@@ -3576,6 +3581,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state={},
         )
         self._run_thread(started)
@@ -3594,6 +3600,7 @@ class TestReorderTasksBackground:
             mock_gh,
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state={},
         )
         self._run_thread(started)
@@ -3655,6 +3662,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state={},
         )
         self._run_thread(started)
@@ -3681,6 +3689,7 @@ class TestReorderTasksBackground:
             _rewrite_fn=mock_rewrite,
             _reorder_fn=mock_reorder,
             _sync_fn=mock_sync,
+            agent=self._agent(),
             _coalesce_state={},
         )
         self._run_thread(started)
@@ -3737,6 +3746,7 @@ class TestReorderTasksBackground:
             _rewrite_fn=mock_rewrite,
             _reorder_fn=mock_reorder,
             _sync_fn=mock_sync,
+            agent=self._agent(),
             _coalesce_state={},
         )
         self._run_thread(started)
@@ -3758,6 +3768,7 @@ class TestReorderTasksBackground:
             _start=lambda t: started.append(t),
             _rewrite_fn=lambda *a, **kw: None,
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state={},
         )
         self._run_thread(started)
@@ -3780,6 +3791,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state=state,
         )
         assert len(started) == 1
@@ -3793,6 +3805,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state=state,
         )
         assert len(started) == 1  # no second thread spawned
@@ -3812,6 +3825,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state=state,
         )
         # Simulate a second trigger arriving before the thread runs
@@ -3822,6 +3836,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state=state,
         )
         # Run the single thread — should execute reorder twice (cs1 then cs2)
@@ -3846,6 +3861,7 @@ class TestReorderTasksBackground:
                 MagicMock(),
                 _start=lambda t: started.append(t),
                 _reorder_fn=mock_reorder,
+                agent=self._agent(),
                 _coalesce_state=state,
             )
         # Only one thread spawned; pending holds cs4 (the latest)
@@ -3869,6 +3885,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state=state,
         )
         self._run_thread(started)
@@ -3889,6 +3906,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state=state,
         )
         self._run_thread(started)  # first thread completes
@@ -3900,6 +3918,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state=state,
         )
         assert len(started) == 2  # new thread spawned
@@ -3919,6 +3938,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state=state,
         )
         _reorder_tasks_background(
@@ -3928,6 +3948,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state=state,
         )
         assert len(started) == 2  # each dir gets its own thread
@@ -4016,6 +4037,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state={},
         )
         self._run_thread(started)
@@ -4110,6 +4132,7 @@ class TestReorderTasksBackground:
             MagicMock(),
             _start=lambda t: started.append(t),
             _reorder_fn=mock_reorder,
+            agent=self._agent(),
             _coalesce_state={},
         )
         self._run_thread(started)
