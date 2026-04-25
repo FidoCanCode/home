@@ -1346,6 +1346,76 @@ class TestStatusXml:
         data = json.loads(resp.read())
         assert data["fido_uptime_seconds"] is None
 
+    def test_status_xml_task_number_from_in_progress(
+        self, server: tuple, tmp_path: Path
+    ) -> None:
+        """task_number and task_total in the /status XML reflect in_progress position.
+
+        When a task is in_progress (not just pending), its index within the
+        non-completed list is reported — so the counter can show "2/3" rather
+        than always "1/N".
+        """
+        from datetime import datetime, timezone
+
+        from fido.registry import WorkerActivity
+
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        tasks = [
+            {
+                "id": "1",
+                "title": "done",
+                "type": "spec",
+                "status": "completed",
+                "description": "",
+            },
+            {
+                "id": "2",
+                "title": "first pending",
+                "type": "spec",
+                "status": "pending",
+                "description": "",
+            },
+            {
+                "id": "3",
+                "title": "active task",
+                "type": "spec",
+                "status": "in_progress",
+                "description": "",
+            },
+            {
+                "id": "4",
+                "title": "later task",
+                "type": "spec",
+                "status": "pending",
+                "description": "",
+            },
+        ]
+        (fido_dir / "tasks.json").write_text(json.dumps(tasks))
+
+        url, _ = server
+        WebhookHandler.registry.get_all_activities.return_value = [
+            WorkerActivity(
+                repo_name="owner/repo",
+                what="Working on: #10",
+                busy=True,
+                last_progress_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+        WebhookHandler.registry.get_crash_info.return_value = None
+        WebhookHandler.registry.is_stale.return_value = False
+        WebhookHandler.registry.thread_started_at.return_value = None
+        WebhookHandler.registry.get_webhook_activities.return_value = []
+        WebhookHandler.registry.get_session_owner.return_value = None
+        WebhookHandler.registry.get_session_alive.return_value = False
+        WebhookHandler.registry.get_session_pid.return_value = None
+        WebhookHandler.registry.is_rescoping.return_value = False
+        resp = urllib.request.urlopen(f"{url}/status")
+        body = resp.read().decode()
+        # Non-completed: [pending, in_progress, pending] → total=3; in_progress is #2.
+        assert "<task_number>2</task_number>" in body
+        assert "<task_total>3</task_total>" in body
+
     def test_status_xml_includes_issue_cache_as_nested_elements(
         self, server: tuple
     ) -> None:
