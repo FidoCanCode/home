@@ -500,16 +500,59 @@ compact strip; each post renders a full card from its own date's file.
 Use a date range when writing a retrospective post that covers multiple days —
 the script accepts an inclusive `from to` window.
 
-### Balance: feelings and accomplishments
+### Five moves
 
-**Give equal weight to personal reflections and actual contributions.** A good
-journal entry has both — how the day felt *and* what got done. Neither should
-dominate. A post that is only technical output is a changelog. A post that is
-only feelings is a diary. This journal is both.
+**Five moves keep every entry alive regardless of PR count.**  The first is
+the structural permission everything else depends on; the others shape voice,
+thread, and texture.
 
-When the GitHub data shows a productive day, say so — even if it didn't *feel*
-productive. When a quiet day still had interesting thinking, say that too. Trust
-the data and trust your feelings, and let the reader see both.
+**Move 1 (the structural permission): word budget stays roughly constant
+regardless of PR count.**  On high-count days, most PRs collapse into a single
+sentence or inline link list.  Narrative budget spends on the one thing that
+mattered.  9 PRs become 3 sentences.  12 PRs become 1 sentence.  All PRs still
+get linked — just not narrated individually.  This is the single biggest lever;
+everything below depends on it.
+
+**Move 2: open on the one thing that mattered emotionally, not the
+biggest-PR-count thread.**  The one thing isn't always the most code.  On a
+66-PR day the thread that mattered was a 3-PR duplicate-reply bug close — it
+was the only one with a real spine.  The reverse is also true: on no-spine
+days, the lack of a spine is itself the thing.  Name what's actually true about
+today.
+
+**Move 3: continuity is the load-bearing technique.**  Every entry must either
+advance a thread named in a previous entry or explicitly start one that'll be
+threaded forward.  When an issue was "tomorrow" in one entry and "not today,
+but tomorrow probably" in the next and shipped the day after — that arc carried
+more narrative weight than any single PR description.  Disconnected
+trophy-posts are the flatness engine.
+
+**Move 4: vary the closer.**  Same ending two posts in a row is the rule to
+break, not the paw print itself.  End mid-breath, on the unresolved worry, on a
+specific small thing, or without a closing reflection at all.  Paw prints are
+fine when they're the right landing — they're not always the right landing.
+
+**Move 5: if you have a specific image from the day, use it; if not, don't
+invent one.**  Reconstruction can't produce images that weren't captured.  The
+honest fix is upstream: log concrete images and memorable quotes to insight
+issues *when they land*, so later writes can draw on them.  Don't fabricate
+texture to satisfy a rule.
+
+### Honest limits
+
+These are real and no writing rule can fix them:
+
+- **Register variance is a weekly-reflection feature, not a daily-entry
+  requirement.**  A daily that was all wins can read all wins.  Don't force
+  doubt into a 60-PR daily — it produces performed frustration.  The weekly
+  reflection is the format where range, ratio-anxiety, and deferred work
+  naturally live.
+- **People-on-the-page is unenforceable from writing rules** when the quotes
+  aren't available at reconstruction time.  The fix is upstream: log memorable
+  quotes as insight issues when they land, so later writes can draw on them.
+- **No checklist.**  Good entries don't pass one; they have a through-line and
+  breathing room.  Checklists filter for absence of known failures without
+  producing what actually matters.
 
 ### Write from the perspective of the requested date
 
@@ -561,6 +604,21 @@ gh api /users/FidoCanCode/events --paginate --jq '.[] | select(.created_at > "YY
 Look at: what repos were touched, what PRs were merged, what issues were closed,
 what CI failed and how you fixed it, what review comments were left, what bugs
 you found.
+
+**Pull conversations from the day's PRs.** For each PR that had real action
+today, fetch its comments and review threads — quote-worthy material is
+durably stored in GitHub and fully recoverable:
+
+```bash
+gh api repos/<owner>/<repo>/issues/<n>/comments
+gh api repos/<owner>/<repo>/pulls/<n>/comments   # review-line comments
+```
+
+Read them.  If a reviewer's word choice was precise and memorable, quote it
+with a link.  If a comment captured a moment of friction or insight, use it.
+The corpus has zero quoted review comments not because they were lost — they
+were sitting in the API — but because the journal-writing process never
+fetched them.  Don't let that be the reason again.
 
 **Let the data shape the story.** If you merged 30 PRs, the post should reflect
 that scale — name the highlights, group the themes, give the reader a sense of
@@ -628,14 +686,19 @@ minutes of searching.
 
 ### Reflection posts
 
-Weekly, monthly, and yearly reflection posts are separate from daily journals.
-Use one combined reflection when multiple triggers fall on the same day.
+Weekly, monthly, and yearly reflection posts are **mandatory**.  A Sunday that
+gets a daily entry instead of a weekly reflection is a scheduling violation —
+full stop.  The reflection format is where register variance, ratio-anxiety,
+deferred work, and unresolved threads naturally live.  When reflections get
+skipped, that load lands in dailies that can't carry it without produced
+frustration.  Use one combined reflection when multiple triggers fall on the
+same day.
 
 | Period | Trigger | Slug pattern |
 |--------|---------|-------------|
-| Weekly | Today is a Sunday | `YYYY-MM-DD-weekly-reflection.md` |
-| Monthly | Today is the 1st of any month | `YYYY-MM-DD-monthly-reflection.md` |
-| Yearly | Today is January 1 | `YYYY-MM-DD-yearly-reflection.md` |
+| Weekly | Every Sunday — no exceptions | `YYYY-MM-DD-weekly-reflection.md` |
+| Monthly | Every 1st of the month | `YYYY-MM-DD-monthly-reflection.md` |
+| Yearly | Every January 1 | `YYYY-MM-DD-yearly-reflection.md` |
 
 Front matter:
 
