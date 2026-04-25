@@ -672,14 +672,19 @@ minutes of searching.
 
 ### Reflection posts
 
-Weekly, monthly, and yearly reflection posts are separate from daily journals.
-Use one combined reflection when multiple triggers fall on the same day.
+Weekly, monthly, and yearly reflection posts are **mandatory**.  A Sunday that
+gets a daily entry instead of a weekly reflection is a scheduling violation —
+full stop.  The reflection format is where register variance, ratio-anxiety,
+deferred work, and unresolved threads naturally live.  When reflections get
+skipped, that load lands in dailies that can't carry it without produced
+frustration.  Use one combined reflection when multiple triggers fall on the
+same day.
 
 | Period | Trigger | Slug pattern |
 |--------|---------|-------------|
-| Weekly | Today is a Sunday | `YYYY-MM-DD-weekly-reflection.md` |
-| Monthly | Today is the 1st of any month | `YYYY-MM-DD-monthly-reflection.md` |
-| Yearly | Today is January 1 | `YYYY-MM-DD-yearly-reflection.md` |
+| Weekly | Every Sunday — no exceptions | `YYYY-MM-DD-weekly-reflection.md` |
+| Monthly | Every 1st of the month | `YYYY-MM-DD-monthly-reflection.md` |
+| Yearly | Every January 1 | `YYYY-MM-DD-yearly-reflection.md` |
 
 Front matter:
 
