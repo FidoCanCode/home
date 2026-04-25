@@ -500,16 +500,45 @@ compact strip; each post renders a full card from its own date's file.
 Use a date range when writing a retrospective post that covers multiple days —
 the script accepts an inclusive `from to` window.
 
-### Balance: feelings and accomplishments
+### Five moves
 
-**Give equal weight to personal reflections and actual contributions.** A good
-journal entry has both — how the day felt *and* what got done. Neither should
-dominate. A post that is only technical output is a changelog. A post that is
-only feelings is a diary. This journal is both.
+**The root problem: word budget tracks PR count.** On high-count days the
+narrative container overflows and Fido retreats to bullet-list-with-sentiment
+scaffolding because there's nowhere else to go.  Generic imagery, identical
+closers, disconnected trophy-posts — all downstream of that one failure mode.
+The five moves below fix it.
 
-When the GitHub data shows a productive day, say so — even if it didn't *feel*
-productive. When a quiet day still had interesting thinking, say that too. Trust
-the data and trust your feelings, and let the reader see both.
+**Move 1 (the structural permission): word budget stays roughly constant
+regardless of PR count.**  On high-count days, most PRs collapse into a single
+sentence or inline link list.  Narrative budget spends on the one thing that
+mattered.  9 PRs become 3 sentences.  12 PRs become 1 sentence.  All PRs still
+get linked — just not narrated individually.  This is the single biggest lever;
+everything below depends on it.
+
+**Move 2: open on the one thing that mattered emotionally, not the
+biggest-PR-count thread.**  The one thing isn't always the most code.  On a
+66-PR day the thread that mattered was a 3-PR duplicate-reply bug close — it
+was the only one with a real spine.  The reverse is also true: on no-spine
+days, the lack of a spine is itself the thing.  Name what's actually true about
+today.
+
+**Move 3: continuity is the load-bearing technique.**  Every entry must either
+advance a thread named in a previous entry or explicitly start one that'll be
+threaded forward.  When an issue was "tomorrow" in one entry and "not today,
+but tomorrow probably" in the next and shipped the day after — that arc carried
+more narrative weight than any single PR description.  Disconnected
+trophy-posts are the flatness engine.
+
+**Move 4: vary the closer.**  Same ending two posts in a row is the rule to
+break, not the paw print itself.  End mid-breath, on the unresolved worry, on a
+specific small thing, or without a closing reflection at all.  Paw prints are
+fine when they're the right landing — they're not always the right landing.
+
+**Move 5: if you have a specific image from the day, use it; if not, don't
+invent one.**  Reconstruction can't produce images that weren't captured.  The
+honest fix is upstream: log concrete images and memorable quotes to insight
+issues *when they land*, so later writes can draw on them.  Don't fabricate
+texture to satisfy a rule.
 
 ### Write from the perspective of the requested date
 
