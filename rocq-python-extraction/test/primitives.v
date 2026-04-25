@@ -36,8 +36,6 @@ Extract Inductive bool => "bool" [ "True" "False" ].
     Extracted form: [False if b else True]. *)
 Definition bool_not (b : bool) : bool := if b then false else true.
 
-Python Extraction bool_not.
-
 (* ------------------------------------------------------------------ *)
 (*  nat → Python int                                                   *)
 (*                                                                     *)
@@ -63,8 +61,6 @@ Fixpoint nat_double (n : nat) : nat :=
   | O   => O
   | S m => S (S (nat_double m))
   end.
-
-Python Extraction nat_double.
 
 (* ------------------------------------------------------------------ *)
 (*  option → Python Optional                                           *)
@@ -92,8 +88,6 @@ Definition option_inc (o : option nat) : option nat :=
   | Some n => Some (S n)
   end.
 
-Python Extraction option_inc.
-
 (* ------------------------------------------------------------------ *)
 (*  prod → Python tuple                                                *)
 (*                                                                     *)
@@ -116,8 +110,6 @@ Definition pair_swap (p : nat * nat) : nat * nat :=
   match p with
   | (a, b) => (b, a)
   end.
-
-Python Extraction pair_swap.
 
 (* ------------------------------------------------------------------ *)
 (*  list → Python list                                                 *)
@@ -146,4 +138,4 @@ Fixpoint list_add_one (l : list nat) : list nat :=
   | h :: t => (S h) :: list_add_one t
   end.
 
-Python Extraction list_add_one.
+Python File Extraction primitives "bool_not nat_double option_inc pair_swap list_add_one".

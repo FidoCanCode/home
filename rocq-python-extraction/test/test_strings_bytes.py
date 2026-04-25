@@ -1,11 +1,13 @@
-from ascii_A import ascii_A
-from ascii_roundtrip import ascii_roundtrip
-from byte_label import byte_label
-from byte_lf import byte_lf
-from first_ascii_or_A import first_ascii_or_A
-from github_key import github_key
-from payload_fragment import payload_fragment
-from tail_or_empty import tail_or_empty
+from strings_bytes import (
+    ascii_A,
+    ascii_roundtrip,
+    byte_label,
+    byte_lf,
+    first_ascii_or_A,
+    github_key,
+    payload_fragment,
+    tail_or_empty,
+)
 
 
 def test_strings_and_bytes_are_native_python_values() -> None:

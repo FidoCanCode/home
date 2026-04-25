@@ -36,4 +36,11 @@ Program Fixpoint wf_countdown (n : nat) {measure n} : nat :=
   | S n' => S (wf_countdown n')
   end.
 
-Python Extraction wf_countdown.
+(* ------------------------------------------------------------------ *)
+(*  Grouped extraction                                                 *)
+(*  All definitions land in a single [wf_recursion.py] module.       *)
+(* ------------------------------------------------------------------ *)
+
+(** [wf_recursion.py]: covers [Program Fixpoint] accessibility erasure —
+    proof/Acc arguments must not appear in the generated Python signature. *)
+Python File Extraction wf_recursion "wf_countdown".

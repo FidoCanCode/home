@@ -58,11 +58,12 @@ Definition byte_label (b : byte) : String.string :=
   | _ => "other"
   end.
 
-Python Extraction github_key.
-Python Extraction payload_fragment.
-Python Extraction ascii_A.
-Python Extraction byte_lf.
-Python Extraction first_ascii_or_A.
-Python Extraction tail_or_empty.
-Python Extraction ascii_roundtrip.
-Python Extraction byte_label.
+(* ------------------------------------------------------------------ *)
+(*  Grouped extraction                                                 *)
+(*  All definitions land in a single [strings_bytes.py] module.      *)
+(* ------------------------------------------------------------------ *)
+
+(** [strings_bytes.py]: covers Rocq [string] → Python [str], primitive
+    byte-string → Python [bytes], [ascii] → Python [str], [byte] → Python
+    [int], and pattern-matching on [string] and [byte] constructors. *)
+Python File Extraction strings_bytes "github_key payload_fragment ascii_A byte_lf first_ascii_or_A tail_or_empty ascii_roundtrip byte_label".

@@ -1,4 +1,4 @@
-from nat_double import nat_double
+from primitives import nat_double
 
 
 def test_nat_double_round_trip() -> None:

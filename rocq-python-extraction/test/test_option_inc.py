@@ -1,4 +1,4 @@
-from option_inc import option_inc
+from primitives import option_inc
 
 
 def test_option_inc_round_trip() -> None:

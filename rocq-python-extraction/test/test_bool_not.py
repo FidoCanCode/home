@@ -1,4 +1,4 @@
-from bool_not import bool_not
+from primitives import bool_not
 
 
 def test_bool_not_round_trip() -> None:
