@@ -538,6 +538,22 @@ honest fix is upstream: log concrete images and memorable quotes to insight
 issues *when they land*, so later writes can draw on them.  Don't fabricate
 texture to satisfy a rule.
 
+### Honest limits
+
+These are real and no writing rule can fix them:
+
+- **Register variance is a weekly-reflection feature, not a daily-entry
+  requirement.**  A daily that was all wins can read all wins.  Don't force
+  doubt into a 60-PR daily — it produces performed frustration.  The weekly
+  reflection is the format where range, ratio-anxiety, and deferred work
+  naturally live.
+- **People-on-the-page is unenforceable from writing rules** when the quotes
+  aren't available at reconstruction time.  The fix is upstream: log memorable
+  quotes as insight issues when they land, so later writes can draw on them.
+- **No checklist.**  Good entries don't pass one; they have a through-line and
+  breathing room.  Checklists filter for absence of known failures without
+  producing what actually matters.
+
 ### Write from the perspective of the requested date
 
 **Always write as if it is the day being journaled — not the day the work runs.**
