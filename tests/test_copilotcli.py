@@ -1514,6 +1514,48 @@ class TestCopilotCLIClient:
         assert "copilot result >>>\ncli result\n<<< copilot result" in caplog.text
 
 
+class TestCopilotCLIClientRunToollessTurn:
+    """CopilotCLIClient.run_toolless_turn: uses _run_cli_prompt, no session."""
+
+    def test_returns_cli_output(self, tmp_path: Path) -> None:
+        runner = MagicMock(return_value=_completed(_copilot_output("triage: ACT")))
+        client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
+        result = client.run_toolless_turn("classify this", model=client.voice_model)
+        assert extract_result_text(result) == "triage: ACT"
+
+    def test_does_not_use_session(self, tmp_path: Path) -> None:
+        """run_toolless_turn must not touch a persistent session."""
+        session = MagicMock()
+        session.prompt.return_value = "session reply"
+        runner = MagicMock(return_value=_completed(_copilot_output("cli reply")))
+        client = CopilotCLIClient(
+            runner=runner, session=session, work_dir=tmp_path, repo_name="test/repo"
+        )
+        client.run_toolless_turn("hi", model=client.voice_model)
+        session.prompt.assert_not_called()
+
+    def test_system_prompt_prepended_to_content(self, tmp_path: Path) -> None:
+        captured: list[str] = []
+
+        def fake_runner(
+            cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            for i, arg in enumerate(cmd):
+                if arg == "-p" and i + 1 < len(cmd):
+                    captured.append(cmd[i + 1])
+            return _completed(_copilot_output("ok"))
+
+        client = CopilotCLIClient(
+            runner=fake_runner, work_dir=tmp_path, repo_name="test/repo"
+        )
+        client.run_toolless_turn(
+            "content", model=client.voice_model, system_prompt="sys"
+        )
+        assert captured, "prompt was not captured"
+        assert "sys" in captured[0]
+        assert "content" in captured[0]
+
+
 class TestCopilotCLI:
     def test_default_provider_id_and_injected_components(self) -> None:
         api = MagicMock()

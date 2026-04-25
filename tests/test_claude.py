@@ -2955,6 +2955,94 @@ class TestClaudeClientPrintPromptFromFile:
             client.print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
 
 
+class TestClaudeClientRunToollessTurn:
+    """ClaudeClient.run_toolless_turn: --print mode, no session, no tool access."""
+
+    def _client(
+        self, output: str = "result text"
+    ) -> tuple["ClaudeClient", "MagicMock"]:
+        mock_stream = MagicMock(return_value=iter([output]))
+        client = ClaudeClient(streaming_runner=mock_stream)
+        return client, mock_stream
+
+    def test_returns_output_text(self) -> None:
+        client, _ = self._client("triage: ACT")
+        assert client.run_toolless_turn("classify this") == "triage: ACT"
+
+    def test_command_includes_print_flag(self) -> None:
+        client, mock_stream = self._client("ok")
+        client.run_toolless_turn("hi", model="claude-opus-4-6")
+        cmd = mock_stream.call_args[0][0]
+        assert "--print" in cmd
+
+    def test_command_does_not_include_session_args(self) -> None:
+        """Toolless turns must not use --resume or session flags."""
+        client, mock_stream = self._client("ok")
+        client.run_toolless_turn("hi", model="claude-opus-4-6")
+        cmd = mock_stream.call_args[0][0]
+        assert "--resume" not in cmd
+        assert "--input-format" not in cmd
+
+    def test_command_includes_model(self) -> None:
+        client, mock_stream = self._client("ok")
+        client.run_toolless_turn("hi", model="claude-sonnet-4-6")
+        cmd = mock_stream.call_args[0][0]
+        assert "--model" in cmd
+        assert "claude-sonnet-4-6" in cmd
+
+    def test_system_prompt_passed_via_file(self) -> None:
+        client, mock_stream = self._client("ok")
+        client.run_toolless_turn(
+            "hi", model="claude-opus-4-6", system_prompt="be a dog"
+        )
+        cmd = mock_stream.call_args[0][0]
+        assert "--system-prompt-file" in cmd
+
+    def test_no_system_prompt_file_without_system_prompt(self) -> None:
+        client, mock_stream = self._client("ok")
+        client.run_toolless_turn("hi", model="claude-opus-4-6")
+        cmd = mock_stream.call_args[0][0]
+        assert "--system-prompt-file" not in cmd
+
+    def test_defaults_to_voice_model(self) -> None:
+        client, mock_stream = self._client("ok")
+        client.run_toolless_turn("hi")
+        cmd = mock_stream.call_args[0][0]
+        assert client.voice_model.model in cmd
+
+    def test_strips_whitespace_from_output(self) -> None:
+        client, _ = self._client("  trimmed  \n")
+        assert client.run_toolless_turn("hi", model="claude-opus-4-6") == "trimmed"
+
+    def test_raises_on_provider_error_output(self) -> None:
+        mock_stream = MagicMock(
+            return_value=iter(['API Error: 500 {"type":"error","message":"boom"}'])
+        )
+        client = ClaudeClient(streaming_runner=mock_stream)
+        with pytest.raises(ClaudeProviderError, match="500"):
+            client.run_toolless_turn("hi", model="claude-opus-4-6")
+
+    def test_raises_on_stream_error(self) -> None:
+        mock_stream = MagicMock(side_effect=ClaudeStreamError(1))
+        client = ClaudeClient(streaming_runner=mock_stream)
+        with pytest.raises(ClaudeStreamError):
+            client.run_toolless_turn("hi", model="claude-opus-4-6")
+
+    def test_content_written_to_stdin_file(self) -> None:
+        """The prompt content must reach the streaming runner as the stdin file arg."""
+        captured: list[str] = []
+
+        def fake_stream(
+            cmd: list[str], stdin_file: "Path", *args: object, **kwargs: object
+        ) -> object:
+            captured.append(stdin_file.read_text())
+            return iter(["ok"])
+
+        client = ClaudeClient(streaming_runner=fake_stream)
+        client.run_toolless_turn("my prompt text", model="claude-opus-4-6")
+        assert captured == ["my prompt text"]
+
+
 class TestRaiseForProviderErrorOutput:
     def test_parses_plain_text_api_error(self) -> None:
         with pytest.raises(ClaudeProviderError) as exc_info:

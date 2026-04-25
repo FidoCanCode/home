@@ -9,6 +9,7 @@ from fido.provider import (
     ProviderLimitWindow,
     ProviderModel,
     ProviderPressureStatus,
+    safe_toolless_turn,
     safe_voice_turn,
 )
 
@@ -258,3 +259,43 @@ class TestSafeVoiceTurn:
         _, kwargs = agent.run_turn.call_args
         assert kwargs["model"] == model
         assert kwargs["system_prompt"] == "be brief"
+
+
+class TestSafeToollessTurn:
+    """safe_toolless_turn: delegates to run_toolless_turn; raise-on-empty contract."""
+
+    def _agent(self, return_value: str = "ok") -> MagicMock:
+        agent = MagicMock()
+        agent.run_toolless_turn.return_value = return_value
+        agent.voice_model = "claude-opus-4-6"
+        return agent
+
+    def test_returns_result_on_non_empty_output(self) -> None:
+        agent = self._agent("Hello!")
+        result = safe_toolless_turn(agent, "prompt")
+        assert result == "Hello!"
+
+    def test_raises_on_empty_string(self) -> None:
+        agent = self._agent("")
+        with pytest.raises(ValueError, match="run_toolless_turn returned empty"):
+            safe_toolless_turn(agent, "prompt")
+
+    def test_error_includes_log_prefix(self) -> None:
+        agent = self._agent("")
+        with pytest.raises(ValueError, match="my_caller"):
+            safe_toolless_turn(agent, "prompt", log_prefix="my_caller")
+
+    def test_passes_model_and_system_prompt(self) -> None:
+        agent = self._agent("ok")
+        model = ProviderModel("claude-haiku-4-5")
+        safe_toolless_turn(agent, "prompt", model=model, system_prompt="be brief")
+        _, kwargs = agent.run_toolless_turn.call_args
+        assert kwargs["model"] == model
+        assert kwargs["system_prompt"] == "be brief"
+
+    def test_does_not_pass_retry_on_preempt(self) -> None:
+        """Toolless turns are one-shot and do not support preempt-retry."""
+        agent = self._agent("result")
+        safe_toolless_turn(agent, "prompt")
+        _, kwargs = agent.run_toolless_turn.call_args
+        assert "retry_on_preempt" not in kwargs

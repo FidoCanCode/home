@@ -6,6 +6,7 @@ import os
 import re
 import select
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -1549,6 +1550,45 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
             session.wait_for_pending_preempt()
             attempt += 1
             log.info("ClaudeClient.run_turn: preempted mid-flight — retry %d", attempt)
+
+    def run_toolless_turn(
+        self,
+        content: str,
+        *,
+        model: ProviderModel | None = None,
+        system_prompt: str | None = None,
+    ) -> str:
+        """Run a one-shot ``claude --print`` turn with no tool access.
+
+        Writes *content* (and optionally *system_prompt*) to temporary files and
+        invokes ``claude --print`` via :attr:`_streaming_runner`.  Because
+        ``--print`` mode has no tool access by design, the provider cannot use
+        Edit, Bash, or git tools regardless of prompt instructions.
+
+        Unlike :meth:`run_turn`, this does **not** touch the persistent session.
+        """
+        effective_model = self.voice_model if model is None else model
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            prompt_file = tmp / "prompt.txt"
+            prompt_file.write_text(content)
+            cmd = [
+                "claude",
+                "--model",
+                model_name(effective_model),
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions",
+                "--print",
+            ]
+            if system_prompt is not None:
+                system_file = tmp / "system.md"
+                system_file.write_text(system_prompt)
+                cmd += ["--system-prompt-file", str(system_file)]
+            output = "".join(self._streaming_runner(cmd, prompt_file)).strip()
+        raise_for_provider_error_output(output)
+        return output
 
     def generate_status(
         self,

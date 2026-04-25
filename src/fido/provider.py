@@ -735,6 +735,22 @@ class ProviderAgent(Protocol):
         """Run one interactive turn through the persistent session and return text."""
         ...
 
+    def run_toolless_turn(
+        self,
+        content: str,
+        *,
+        model: ProviderModel | None = None,
+        system_prompt: str | None = None,
+    ) -> str:
+        """Run a one-shot text-only turn without tool access and return the result.
+
+        Unlike :meth:`run_turn`, this method uses a one-shot subprocess invocation
+        (``claude --print`` for Claude, the CLI tool for Copilot) that has no tool
+        access by design.  Webhook handlers must use this method for triage and reply
+        generation so that Claude cannot use Edit, Bash, or git tools inline.
+        """
+        ...
+
     def print_prompt_from_file(
         self,
         system_file: Path,
@@ -843,6 +859,33 @@ def safe_voice_turn(
     )
     if not result:
         raise ValueError(f"{log_prefix}: run_turn returned empty after retries")
+    return result
+
+
+def safe_toolless_turn(
+    agent: ProviderAgent,
+    content: str,
+    *,
+    model: ProviderModel | None = None,
+    system_prompt: str | None = None,
+    log_prefix: str = "safe_toolless_turn",
+) -> str:
+    """Run a toolless one-shot turn; raise on empty.
+
+    Calls :meth:`~ProviderAgent.run_toolless_turn` which uses a one-shot subprocess
+    with no tool access (``claude --print`` for Claude).  Webhook handlers should use
+    this instead of :func:`safe_voice_turn` for triage and reply generation so that
+    the provider cannot use Edit, Bash, or git tools inline.
+
+    Raises :exc:`ValueError` if the provider returns an empty result.
+    """
+    result = agent.run_toolless_turn(
+        content,
+        model=model,
+        system_prompt=system_prompt,
+    )
+    if not result:
+        raise ValueError(f"{log_prefix}: run_toolless_turn returned empty")
     return result
 
 

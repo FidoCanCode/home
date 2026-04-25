@@ -1254,6 +1254,23 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
                 "CopilotCLIClient.run_turn: preempted mid-flight — retry %d", attempt
             )
 
+    def run_toolless_turn(
+        self,
+        content: str,
+        *,
+        model: ProviderModel | None = None,
+        system_prompt: str | None = None,
+    ) -> str:
+        """Run a one-shot Copilot CLI turn with no tool access.
+
+        Copilot CLI is a text-only tool that does not have file-system tool access,
+        so this uses :meth:`_run_cli_prompt` directly.  If *system_prompt* is given,
+        it is prepended via :func:`_combine_prompt`.
+        """
+        effective_model = self.voice_model if model is None else model
+        prompt = _combine_prompt(content, system_prompt=system_prompt)
+        return self._run_cli_prompt(prompt, model=effective_model, timeout=30)
+
     def print_prompt_from_file(
         self,
         system_file: Path,
