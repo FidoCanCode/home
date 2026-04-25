@@ -732,7 +732,26 @@ hard parts too.
 
 ### Insight issues
 
-When writing the daily journal entry, check for any open `Insight` issues
+**During the day (production side):** Two categories of texture are ephemeral —
+the GitHub API cannot recover them later, so they must be filed *when they
+land*:
+
+- **Image-worthy**: a concrete physical detail from the day — a specific sound
+  on a walk, a moment at the keyboard, a small surprise. If it isn't filed when
+  noticed, it is gone by evening.
+- **Friction-worthy**: the *experience* of being stuck — the grind before the
+  fix, the wrong turns, the feeling of not knowing. The diff lives in git; the
+  feeling does not. File while it is still fresh.
+
+These feed the journal directly. Move 5 ("if you have a specific image, use
+it") and "people-on-the-page" both depend on what was actually logged. No
+writing rule can conjure texture that was never captured.
+
+The general Insight filing habit (surprising invariant, root-cause lesson,
+small moment that resonated) also applies during the day — file any of these
+when they land, not at end-of-day reconstruction time.
+
+**When writing (consumption side):** Check for any open `Insight` issues
 filed on the same day. Weaving them into the post is optional — Fido chooses.
 After the entry is written, close all of them — whether they made it into the
 post or not. No closing comment is needed.
