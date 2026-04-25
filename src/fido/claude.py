@@ -202,6 +202,11 @@ _RETURNCODE_IDLE_TIMEOUT = -1
 """Sentinel returncode used in :class:`ClaudeStreamError` when the process is
 killed due to an idle timeout rather than exiting with a real non-zero code."""
 
+_RETURNCODE_SET_MODEL_TIMEOUT = -2
+"""Sentinel returncode used in :class:`ClaudeStreamError` when a
+``control_request`` ``set_model`` times out waiting for the matching
+``control_response``, or the subprocess exits unexpectedly during the wait."""
+
 
 class ClaudeStreamError(Exception):
     """Raised by _run_streaming when the subprocess exits with a non-zero code or times out."""
@@ -950,6 +955,61 @@ class ClaudeSession(OwnedSession):
         assert self._proc.stdin is not None
         self._proc.stdin.write(msg + "\n")
         self._proc.stdin.flush()
+
+    def _send_control_set_model(self, model: str) -> None:
+        """Write a ``control_request`` ``set_model`` to stdin and drain stdout
+        until the matching ``control_response`` arrives.
+
+        Switches the model on the running subprocess in-place — no kill, no
+        restart, no init-handshake delay, no session-id loss.  Call while
+        holding :attr:`_lock` and between turns (``_in_turn`` must be
+        ``False``).
+
+        Raises :class:`ClaudeStreamError` with
+        :data:`_RETURNCODE_SET_MODEL_TIMEOUT` if the subprocess exits or the
+        ``control_response`` is not received within :attr:`_idle_timeout`
+        seconds.
+        """
+        request_id = str(uuid.uuid4())
+        msg = json.dumps(
+            {
+                "type": "control_request",
+                "request_id": request_id,
+                "request": {"subtype": "set_model", "model": model},
+            }
+        )
+        assert self._proc.stdin is not None
+        assert self._proc.stdout is not None
+        self._proc.stdin.write(msg + "\n")
+        self._proc.stdin.flush()
+        deadline = time.monotonic() + self._idle_timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ClaudeStreamError(_RETURNCODE_SET_MODEL_TIMEOUT)
+            ready, _, _ = self._selector(
+                [self._proc.stdout], [], [], min(remaining, _SELECT_POLL_INTERVAL)
+            )
+            if self._proc.stdout not in ready:
+                if self._proc.poll() is not None:
+                    raise ClaudeStreamError(_RETURNCODE_SET_MODEL_TIMEOUT)
+                continue
+            line = self._proc.stdout.readline()
+            if not line:
+                raise ClaudeStreamError(_RETURNCODE_SET_MODEL_TIMEOUT)
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            self._log_event(obj)
+            sid = obj.get("session_id")
+            if isinstance(sid, str) and sid:
+                self._session_id = sid
+            if (
+                obj.get("type") == "control_response"
+                and obj.get("request_id") == request_id
+            ):
+                return
 
     def interrupt(self, content: str) -> None:
         """Interrupt the in-flight turn at the protocol level, then send *content*.
