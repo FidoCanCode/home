@@ -24,12 +24,13 @@ from fido.types import TaskStatus, TaskType
 
 
 def _client(run_turn_return: str = "") -> MagicMock:
-    """Create a mock ClaudeClient with a configurable run_turn return."""
+    """Create a mock ClaudeClient with a configurable run_toolless_turn return."""
     client = MagicMock(spec=ClaudeClient)
     client.voice_model = "claude-opus-4-6"
     client.work_model = "claude-sonnet-4-6"
     client.brief_model = "claude-haiku-4-5"
     client.run_turn.return_value = run_turn_return
+    client.run_toolless_turn.return_value = run_turn_return
     return client
 
 
@@ -545,7 +546,7 @@ class TestReorderTasks:
     def test_skips_when_no_tasks(self, tmp_path: Path) -> None:
         client = _client("")
         reorder_tasks(tmp_path, "", agent=client)
-        client.run_turn.assert_not_called()
+        client.run_toolless_turn.assert_not_called()
 
     def test_creates_default_client_when_none(self, tmp_path: Path) -> None:
         from unittest.mock import patch
@@ -648,7 +649,7 @@ class TestReorderTasks:
             )
 
         client = _client()
-        client.run_turn.side_effect = slow_run_turn
+        client.run_toolless_turn.side_effect = slow_run_turn
         reorder_tasks(tmp_path, "", agent=client)
         result = list_tasks(tmp_path)
         ids = [t["id"] for t in result]

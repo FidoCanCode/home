@@ -76,15 +76,17 @@ def _payload(repo_owner: str = "owner") -> dict:
 
 
 def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
-    """Build a mock ClaudeClient with run_turn configured."""
+    """Build a mock ClaudeClient with run_turn and run_toolless_turn configured."""
     client = MagicMock(spec=ClaudeClient)
     client.voice_model = "claude-opus-4-6"
     client.work_model = "claude-sonnet-4-6"
     client.brief_model = "claude-haiku-4-5"
     if side_effect is not None:
         client.run_turn.side_effect = side_effect
+        client.run_toolless_turn.side_effect = side_effect
     else:
         client.run_turn.return_value = return_value
+        client.run_toolless_turn.return_value = return_value
     return client
 
 
@@ -143,7 +145,7 @@ class TestNeedsMoreContext:
     def test_uses_haiku_model(self) -> None:
         client = _client("YES")
         needs_more_context("same", agent=client)
-        assert client.run_turn.call_args.kwargs["model"] == "claude-haiku-4-5"
+        assert client.run_toolless_turn.call_args.kwargs["model"] == "claude-haiku-4-5"
 
     def test_requires_agent(self) -> None:
         with pytest.raises(ValueError, match="needs_more_context requires agent"):
@@ -1428,7 +1430,7 @@ class TestSummarizeAsActionItem:
         client = _client(short_title)
         result = _summarize_as_action_item("add some tests", agent=client)
         assert result == short_title
-        client.run_turn.assert_called_once()  # no retry needed
+        client.run_toolless_turn.assert_called_once()  # no retry needed
 
     def test_retries_when_result_too_long(self) -> None:
         long_title = "a" * 81
@@ -1436,35 +1438,35 @@ class TestSummarizeAsActionItem:
         client = _client(side_effect=[long_title, short_title])
         result = _summarize_as_action_item("add some tests", agent=client)
         assert result == short_title
-        assert client.run_turn.call_count == 2
+        assert client.run_toolless_turn.call_count == 2
 
     def test_retries_up_to_three_times_then_truncates(self) -> None:
         long_title = "a" * 81
         client = _client(long_title)
         result = _summarize_as_action_item("add some tests", agent=client)
         assert result == long_title[:80]
-        assert client.run_turn.call_count == 4  # 1 initial + 3 retries
+        assert client.run_toolless_turn.call_count == 4  # 1 initial + 3 retries
 
     def test_stops_retrying_once_short_enough(self) -> None:
         titles = ["a" * 81, "b" * 81, "short title"]
         client = _client(side_effect=titles)
         result = _summarize_as_action_item("add some tests", agent=client)
         assert result == "short title"
-        assert client.run_turn.call_count == 3  # 1 initial + 2 retries
+        assert client.run_toolless_turn.call_count == 3  # 1 initial + 2 retries
 
-    def test_uses_retry_on_preempt_via_safe_voice_turn(self) -> None:
-        """safe_voice_turn always passes retry_on_preempt=True to run_turn."""
+    def test_uses_toolless_turn_not_run_turn(self) -> None:
+        """Summarize runs via run_toolless_turn — no tool access in webhook context."""
         client = _client("add tests")
         _summarize_as_action_item("add some tests", agent=client)
-        _, kwargs = client.run_turn.call_args
-        assert kwargs.get("retry_on_preempt") is True
+        client.run_toolless_turn.assert_called()
+        client.run_turn.assert_not_called()
 
     def test_shorten_empty_raises(self) -> None:
-        """If shorten returns empty, safe_voice_turn raises ValueError."""
+        """If shorten returns empty, safe_toolless_turn raises ValueError."""
         long_title = "a" * 81
         # Initial returns long_title; shorten returns ""
         client = _client(side_effect=[long_title, ""])
-        with pytest.raises(ValueError, match="run_turn returned empty"):
+        with pytest.raises(ValueError, match="run_toolless_turn returned empty"):
             _summarize_as_action_item("add some tests", agent=client)
 
 
@@ -2058,7 +2060,7 @@ class TestReplyToComment:
                 return "Do something"
             return ""
 
-        with pytest.raises(ValueError, match="run_turn returned empty"):
+        with pytest.raises(ValueError, match="run_toolless_turn returned empty"):
             reply_to_comment(
                 action,
                 cfg,
@@ -2330,10 +2332,8 @@ class TestReplyToComment:
         assert "fido:reply-promise:" in reply_args[2]
         mock_gh.edit_review_comment.assert_not_called()
 
-    def test_reply_run_turn_uses_retry_on_preempt(self, tmp_path: Path) -> None:
-        """Reply generation run_turn must pass retry_on_preempt=True so a
-        session preemption mid-generation retries rather than silently
-        returning an empty or truncated body."""
+    def test_reply_uses_toolless_turn(self, tmp_path: Path) -> None:
+        """Reply generation uses run_toolless_turn — no tool access in webhook context."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2341,10 +2341,8 @@ class TestReplyToComment:
             comment_body="please add logging",
             is_bot=False,
         )
-        all_run_turn_kwargs: list[dict] = []
 
         def fake_pp(prompt, model, **kwargs):
-            all_run_turn_kwargs.append(kwargs)
             if model == "claude-haiku-4-5":
                 return "NO"
             if "Triage" in prompt:
@@ -2353,16 +2351,16 @@ class TestReplyToComment:
                 return "Add logging"
             return "I will add logging."
 
+        agent = _client(side_effect=fake_pp)
         reply_to_comment(
             action,
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            agent=_client(side_effect=fake_pp),
+            agent=agent,
         )
-        # At least one run_turn call must carry retry_on_preempt=True — that is
-        # the reply generation call, which must survive session preemption.
-        assert any(kw.get("retry_on_preempt") is True for kw in all_run_turn_kwargs)
+        agent.run_toolless_turn.assert_called()
+        agent.run_turn.assert_not_called()
 
 
 class TestReplyToReview:
@@ -2549,7 +2547,7 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return ""
 
-        with pytest.raises(ValueError, match="run_turn returned empty"):
+        with pytest.raises(ValueError, match="run_toolless_turn returned empty"):
             reply_to_issue_comment(
                 self._action(),
                 cfg,
@@ -2708,29 +2706,25 @@ class TestReplyToIssueComment:
         assert cat == "ACT"
         assert titles == ["add unit tests", "update documentation"]
 
-    def test_reply_run_turn_uses_retry_on_preempt(self, tmp_path: Path) -> None:
-        """Reply generation run_turn must pass retry_on_preempt=True so a
-        session preemption mid-generation retries rather than silently
-        returning an empty or truncated body."""
+    def test_reply_uses_toolless_turn(self, tmp_path: Path) -> None:
+        """Reply generation uses run_toolless_turn — no tool access in webhook context."""
         cfg = self._cfg(tmp_path)
-        all_run_turn_kwargs: list[dict] = []
 
         def fake_pp(prompt, model, **kwargs):
-            all_run_turn_kwargs.append(kwargs)
             if "Triage" in prompt:
                 return "ACT: fix the bug"
             return "I'll fix that."
 
+        agent = _client(side_effect=fake_pp)
         reply_to_issue_comment(
             self._action(),
             cfg,
             self._repo_cfg(tmp_path),
             MagicMock(),
-            agent=_client(side_effect=fake_pp),
+            agent=agent,
         )
-        # At least one run_turn call must carry retry_on_preempt=True — that is
-        # the reply generation call, which must survive session preemption.
-        assert any(kw.get("retry_on_preempt") is True for kw in all_run_turn_kwargs)
+        agent.run_toolless_turn.assert_called()
+        agent.run_turn.assert_not_called()
 
     def test_writes_durable_claim_after_reply(self, tmp_path: Path) -> None:
         """After posting a reply, the comment id is completed in SQLite."""
@@ -4185,17 +4179,8 @@ class TestNotifyThreadChange:
         _notify_thread_change(change, cfg, mock_gh, agent=_client())
         mock_gh.comment_issue.assert_not_called()
 
-    def test_review_comment_run_turn_uses_retry_on_preempt(
-        self, tmp_path: Path
-    ) -> None:
-        """run_turn must pass retry_on_preempt=True — #935.
-
-        A webhook handler arriving while this voice turn runs preempts it,
-        yielding result_len=0, cancelled=True.  Without retry_on_preempt,
-        that empty string was indistinguishable from a real provider
-        failure and used to raise ValueError, killing either the
-        reorder-<repo> daemon or the worker's rescope_before_pick path.
-        """
+    def test_notify_uses_toolless_turn(self, tmp_path: Path) -> None:
+        """Notification reply uses run_toolless_turn — no tool access in webhook context."""
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         task = self._task()
@@ -4203,19 +4188,17 @@ class TestNotifyThreadChange:
         change = {"task": task, "kind": "completed"}
         agent = _client("Reply text")
         _notify_thread_change(change, cfg, mock_gh, agent=agent)
-        # _client wraps a MagicMock — capture the run_turn kwargs.
-        run_turn_kwargs = agent.run_turn.call_args.kwargs
-        assert run_turn_kwargs.get("retry_on_preempt") is True
+        agent.run_toolless_turn.assert_called()
+        agent.run_turn.assert_not_called()
 
     def test_review_comment_empty_opus_raises(self, tmp_path: Path) -> None:
-        """Empty Opus reply after retries raises — session reconnect handles
-        recovery (#935)."""
+        """Empty toolless reply raises — no silent swallowing."""
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         task = self._task()
         task["thread"]["comment_type"] = "pulls"
         change = {"task": task, "kind": "completed"}
-        with pytest.raises(ValueError, match="run_turn returned empty"):
+        with pytest.raises(ValueError, match="run_toolless_turn returned empty"):
             _notify_thread_change(change, cfg, mock_gh, agent=_client(""))
 
     def test_review_comment_uses_reply_to_review_comment(self, tmp_path: Path) -> None:
