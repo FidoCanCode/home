@@ -591,6 +591,21 @@ Look at: what repos were touched, what PRs were merged, what issues were closed,
 what CI failed and how you fixed it, what review comments were left, what bugs
 you found.
 
+**Pull conversations from the day's PRs.** For each PR that had real action
+today, fetch its comments and review threads — quote-worthy material is
+durably stored in GitHub and fully recoverable:
+
+```bash
+gh api repos/<owner>/<repo>/issues/<n>/comments
+gh api repos/<owner>/<repo>/pulls/<n>/comments   # review-line comments
+```
+
+Read them.  If a reviewer's word choice was precise and memorable, quote it
+with a link.  If a comment captured a moment of friction or insight, use it.
+The corpus has zero quoted review comments not because they were lost — they
+were sitting in the API — but because the journal-writing process never
+fetched them.  Don't let that be the reason again.
+
 **Let the data shape the story.** If you merged 30 PRs, the post should reflect
 that scale — name the highlights, group the themes, give the reader a sense of
 what was built. If you merged zero, don't invent output. The stats card will
