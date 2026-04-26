@@ -477,19 +477,7 @@ class ClaudeSession(OwnedSession):
         self._system_file = system_file
         self._work_dir = work_dir
         self._popen_fn = popen
-        # Reentrant so :meth:`switch_model` can reacquire while called from
-        # inside a ``with session:`` block (e.g. ``prompt()`` acquires the
-        # lock, then calls switch_model which also needs to serialize with
-        # other sessions' access — a plain threading.Lock self-deadlocks).
-        self._lock = threading.RLock()
         self._cancel = threading.Event()
-        # Thread id that most recently fired :attr:`_cancel` via
-        # :meth:`_fire_worker_cancel`.  Used by :meth:`__enter__` to clear
-        # the signal when the firing thread itself acquires the lock — that
-        # cancel was meant for the previous holder (who has since released),
-        # not for the firer's own first turn (#973).  ``None`` when no
-        # outstanding firing.
-        self._cancel_fired_by_tid: int | None = None
         self._repo_name = repo_name
         self._model = model_name(
             ProviderModel("claude-opus-4-6") if model is None else model
@@ -524,21 +512,6 @@ class ClaudeSession(OwnedSession):
         # Set by :meth:`prompt` right after :attr:`_cancel` and before it
         # blocks on :attr:`_lock`.  Cleared inside :meth:`__enter__` once the
         # preempter actually acquires the lock.  Workers check this in their
-        # retry loop to yield fairly: without it, a freshly-released worker
-        # thread can re-acquire :attr:`_lock` before the waiting webhook
-        # gets scheduled, and the next :meth:`iter_events` clears
-        # :attr:`_cancel` — starving the preempter for a full worker turn.
-        # See yield-starvation discussion in #499 comments.
-        self._preempt_pending = threading.Event()
-        # Condition that serializes the "set pending → check pending → acquire
-        # lock" handshake between webhook (priority) and worker (yields)
-        # threads at lock-handoff time.  Webhooks set ``_preempt_pending`` and
-        # ``notify_all`` under this mutex; workers ``wait_for(not pending)``
-        # under it.  After acquiring the lock, workers re-check pending under
-        # this mutex and yield (release+retry) if a webhook arrived during
-        # the gap — closes the race that #983 reported (worker won the lock
-        # handoff between two webhooks because RLock isn't FIFO).
-        self._preempt_cond = threading.Condition()
         # Per-thread reentrance counter for the ``with self:`` context so
         # :meth:`hold_for_handler` can nest inner :meth:`prompt` calls
         # without double-registering the talker (fix for #658).
@@ -558,45 +531,15 @@ class ClaudeSession(OwnedSession):
         _register_child(self._proc)
 
     def wait_for_pending_preempt(self, timeout: float = 30.0) -> bool:
-        """Block for up to *timeout* seconds while a preempter holds the
-        lock queue.  Returns ``True`` if the preemption completed within the
-        window, ``False`` on timeout (no preempter pending in the first place
-        returns immediately with ``False``).
+        """Compatibility stub — the FSM handles priority ordering; always returns False.
 
-        Workers call this after their cancelled-turn exit to let the
-        preempter actually acquire :attr:`_lock` before the worker retries —
-        Python's :class:`threading.RLock` isn't FIFO-fair under contention
-        so the worker can otherwise race ahead and starve the preempter for
-        a full turn.
+        The old :class:`threading.RLock`-based implementation polled
+        ``_preempt_pending`` to let webhook callers win the lock before the
+        worker retried.  The FSM's handler-priority queue makes that polling
+        unnecessary: workers already yield to any queued handler inside
+        :meth:`~provider.OwnedSession._fsm_acquire_worker`.
         """
-        if not self._preempt_pending.is_set():
-            return False
-        # Wait for the preempter's __enter__ to clear the event, meaning they
-        # hold the lock now.  If they don't manage within the deadline, bail.
-        # is_set() -> wait for clear: threading.Event has no "wait-for-clear",
-        # so poll with short sleeps.
-        import time as _time
-
-        started = _time.monotonic()
-        deadline = started + timeout
-        log.info(
-            "session: worker ceding lock to pending preempter (tid=%d)",
-            threading.get_ident(),
-        )
-        while self._preempt_pending.is_set():
-            if _time.monotonic() >= deadline:
-                log.warning(
-                    "session: preempter still pending after %.2fs — worker "
-                    "proceeding anyway",
-                    timeout,
-                )
-                return False
-            _time.sleep(0.01)
-        log.info(
-            "session: preempter acquired lock after %.3fs yield",
-            _time.monotonic() - started,
-        )
-        return True
+        return False
 
     def _wake(self) -> None:
         """Write a byte to the wakeup pipe to kick select() awake."""
@@ -744,25 +687,24 @@ class ClaudeSession(OwnedSession):
     def _respawn(self, *, clear_session_id: bool, reason: str) -> None:
         """Stop the current subprocess and spawn a replacement."""
         log.info("ClaudeSession: %s (model=%s)", reason, self._model)
-        with self._lock:
-            _unregister_child(self._proc)
-            if self._proc.poll() is None:
-                try:
-                    self._proc.kill()
-                    self._proc.wait(timeout=1.0)
-                except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
-                    log.warning("ClaudeSession._respawn: kill/wait failed: %s", exc)
-                    raise
-            if clear_session_id:
-                self._session_id = ""
-            # Fresh subprocess has no in-flight turn, so next send() skips
-            # the drain path.
-            self._in_turn = False
-            # Message counters are cumulative since boot — do NOT reset on
-            # respawn.  Per-subprocess counts would bounce to zero on every
-            # model switch or recovery, making wedge detection meaningless.
-            self._proc = self._spawn()
-            _register_child(self._proc)
+        _unregister_child(self._proc)
+        if self._proc.poll() is None:
+            try:
+                self._proc.kill()
+                self._proc.wait(timeout=1.0)
+            except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as exc:
+                log.warning("ClaudeSession._respawn: kill/wait failed: %s", exc)
+                raise
+        if clear_session_id:
+            self._session_id = ""
+        # Fresh subprocess has no in-flight turn, so next send() skips
+        # the drain path.
+        self._in_turn = False
+        # Message counters are cumulative since boot — do NOT reset on
+        # respawn.  Per-subprocess counts would bounce to zero on every
+        # model switch or recovery, making wedge detection meaningless.
+        self._proc = self._spawn()
+        _register_child(self._proc)
         log.info("ClaudeSession: respawn complete, new pid %d", self._proc.pid)
 
     def recover(self) -> None:
@@ -796,16 +738,16 @@ class ClaudeSession(OwnedSession):
         """Acquire the session lock, serializing send/receive across threads.
 
         On the outermost entry (via the :class:`OwnedSession`
-        reentrance counter), registers a :class:`provider.SessionTalker`
-        whose ``kind`` is read directly from the calling thread's
-        thread-local in :func:`provider.current_thread_kind` — never via
-        any session-shared attribute.  This is load-bearing: a shared
-        attribute would let a worker's ``"worker"`` write get clobbered
-        by a webhook's ``"webhook"`` write (or vice versa) in the window
-        between writing and lock-acquire, leading to a worker registered
-        with ``kind="webhook"`` and a broken ``preempt_worker`` check
-        (#981).  Nested entries (from :meth:`hold_for_handler`) re-acquire
-        the RLock and skip the talker re-registration.
+        reentrance counter), delegates to :meth:`_fsm_acquire_worker` or
+        :meth:`_fsm_acquire_handler` based on the calling thread's kind
+        (read from :func:`provider.current_thread_kind` — never via any
+        session-shared attribute).  Handler acquires queue behind any
+        current holder and are served FIFO; worker acquires yield to any
+        queued handler.
+
+        Registers a :class:`provider.SessionTalker` after acquiring.
+        Nested entries (from :meth:`hold_for_handler`) re-enter the
+        reentrance counter and skip the FSM acquire.
 
         Does *not* clear the cancel event — that is deferred to
         :meth:`iter_events` so a signal that lands between one holder's
@@ -814,85 +756,46 @@ class ClaudeSession(OwnedSession):
 
         Raises :class:`provider.SessionLeakError` on the outermost entry if another
         thread is already registered as the talker for this repo.  The
-        session lock is released before raising so the prior holder isn't
+        FSM lock is released before raising so the prior holder isn't
         deadlocked.
         """
-        is_worker = provider.current_thread_kind() == "worker"
-        # Webhook-priority handoff (#983): worker threads yield to any
-        # queued webhook by waiting on _preempt_cond before acquiring
-        # _lock, AND re-checking under the cond mutex after acquiring —
-        # if a webhook set _preempt_pending during the gap, release the
-        # lock and retry.  Webhook callers skip the wait (they're the
-        # priority lane).
-        while True:
-            if is_worker:
-                with self._preempt_cond:
-                    self._preempt_cond.wait_for(
-                        lambda: not self._preempt_pending.is_set(),
-                        timeout=30.0,
+        depth = getattr(self._reentry_tls, "depth", 0)
+        if depth > 0:
+            self._bump_entry_depth()
+            return self
+        kind = provider.current_thread_kind()
+        if kind == "worker":
+            self._fsm_acquire_worker()
+        else:
+            self._fsm_acquire_handler()
+        self._bump_entry_depth()
+        if self._repo_name is not None:
+            try:
+                provider.register_talker(
+                    provider.SessionTalker(
+                        repo_name=self._repo_name,
+                        thread_id=threading.get_ident(),
+                        kind=kind,
+                        description="persistent session turn",
+                        claude_pid=self._proc.pid,
+                        started_at=provider.talker_now(),
                     )
-            self._lock.acquire()
-            if is_worker:
-                with self._preempt_cond:
-                    if self._preempt_pending.is_set():
-                        # A webhook arrived between our wait and acquire —
-                        # let it in.  Release and re-wait.
-                        self._lock.release()
-                        continue
-            break
-        # We hold the lock now; clear the pending flag — but only on the
-        # outermost acquire for this thread.  A reentrant acquire (e.g.
-        # prompt() called inside hold_for_handler, depth already ≥ 1) must
-        # not stomp on a pending signal that a second webhook set while the
-        # outer hold_for_handler is still running: clearing it here would
-        # let the worker's re-check see False and win the lock over the
-        # queued webhook (#1017).
-        if getattr(self._reentry_tls, "depth", 0) == 0:
-            with self._preempt_cond:
-                self._preempt_pending.clear()
-                self._preempt_cond.notify_all()
-        # If the entering thread is the same one that fired the most recent
-        # cancel, that signal was meant for the previous holder (who has
-        # since released the lock).  Clear it so the firer's own first turn
-        # is not aborted by it (#973).  When the cancel was fired by some
-        # other thread (the #786 lock-handoff race), leave it set —
-        # iter_events will gate on _preempt_pending and consume it.
-        if self._cancel_fired_by_tid == threading.get_ident():
-            self._cancel.clear()
-            self._cancel_fired_by_tid = None
-        depth = self._bump_entry_depth()
-        if depth == 1:
-            kind = provider.current_thread_kind()
-            if self._repo_name is not None:
-                try:
-                    provider.register_talker(
-                        provider.SessionTalker(
-                            repo_name=self._repo_name,
-                            thread_id=threading.get_ident(),
-                            kind=kind,
-                            description="persistent session turn",
-                            claude_pid=self._proc.pid,
-                            started_at=provider.talker_now(),
-                        )
-                    )
-                except provider.SessionLeakError:
-                    self._drop_entry_depth()
-                    self._lock.release()
-                    raise
-            self._oracle_on_acquire(kind)
+                )
+            except provider.SessionLeakError:
+                self._drop_entry_depth()
+                self._fsm_release()
+                raise
         return self
 
     def __exit__(self, *args: object) -> None:
         """Release the session lock.  Unregisters the :class:`provider.SessionTalker`
-        before releasing the lock on the outermost exit so no other thread
-        can race in and see our stale talker entry.
+        before releasing so no other thread can race in and see a stale talker entry.
         """
         depth = self._drop_entry_depth()
         if depth == 0:
             if self._repo_name is not None:
                 provider.unregister_talker(self._repo_name, threading.get_ident())
-            self._oracle_on_release()
-        self._lock.release()
+            self._fsm_release()
 
     def send(self, content: str) -> None:
         """Write a user message to the session stdin, flushing immediately.
@@ -1001,30 +904,9 @@ class ClaudeSession(OwnedSession):
         turn, then exits the turn with ``_in_turn=False``.  Only then
         does the worker release the lock — handing the webhook a fully
         settled session.
-
-        Also sets :attr:`_preempt_pending` so :meth:`iter_events` does
-        not clobber the cancel signal at the start of the very next
-        turn (fix for #786) and so workers waiting in :meth:`__enter__`
-        yield priority to the queued webhook (#983).
         """
         self._cancel.set()
-        self._cancel_fired_by_tid = threading.get_ident()
-        self._signal_pending_preempt()
         self._wake()
-
-    def _signal_pending_preempt(self) -> None:
-        """Set :attr:`_preempt_pending` and wake any worker waiting in
-        :meth:`__enter__` so the worker yields to the queued webhook.
-
-        Held under :attr:`_preempt_cond` so the worker's wait+acquire
-        handshake sees a coherent state (closes #983 — RLock isn't FIFO,
-        so a webhook arriving while another webhook is the holder needs
-        an explicit signal to make the next worker re-acquire wait its
-        turn).
-        """
-        with self._preempt_cond:
-            self._preempt_pending.set()
-            self._preempt_cond.notify_all()
 
     def _send_control_interrupt(self) -> str:
         """Write a stream-json ``control_request`` interrupt to subprocess
@@ -1071,7 +953,7 @@ class ClaudeSession(OwnedSession):
         """
         self._cancel.set()
         self._wake()
-        with self._lock:
+        with self:
             self._send_control_interrupt()
             self.consume_until_result()
             self.send(content)
@@ -1099,43 +981,29 @@ class ClaudeSession(OwnedSession):
         """
         tid = threading.get_ident()
         t_start = time.monotonic()
-        _entered = False
-        try:
-            with self:
-                _entered = True
-                log.info(
-                    "session.prompt: lock acquired (tid=%d, waited=%.2fs)",
-                    tid,
-                    time.monotonic() - t_start,
-                )
-                if model is not None:
-                    self.switch_model(model)
-                if system_prompt:
-                    body = f"{system_prompt}\n\n---\n\n{content}"
-                else:
-                    body = content
-                self.send(body)
-                result = self.consume_until_result()
-                log.info(
-                    "session.prompt: turn complete (tid=%d, total=%.2fs, "
-                    "result_len=%d, cancelled=%s)",
-                    tid,
-                    time.monotonic() - t_start,
-                    len(result or ""),
-                    self._last_turn_cancelled,
-                )
-                return result
-        finally:
-            # Safety net: if __enter__ raised before it could clear
-            # _preempt_pending, do it here so workers aren't stuck waiting.
-            # Skip on normal return (_entered=True) — __enter__ already
-            # cleared the flag, and re-clearing would stomp on a pending
-            # signal that a later-arriving webhook set while this prompt()
-            # was running inside hold_for_handler (#1017).
-            if not _entered:
-                with self._preempt_cond:
-                    self._preempt_pending.clear()
-                    self._preempt_cond.notify_all()
+        with self:
+            log.info(
+                "session.prompt: lock acquired (tid=%d, waited=%.2fs)",
+                tid,
+                time.monotonic() - t_start,
+            )
+            if model is not None:
+                self.switch_model(model)
+            if system_prompt:
+                body = f"{system_prompt}\n\n---\n\n{content}"
+            else:
+                body = content
+            self.send(body)
+            result = self.consume_until_result()
+            log.info(
+                "session.prompt: turn complete (tid=%d, total=%.2fs, "
+                "result_len=%d, cancelled=%s)",
+                tid,
+                time.monotonic() - t_start,
+                len(result or ""),
+                self._last_turn_cancelled,
+            )
+            return result
 
     def switch_model(self, model: ProviderModel | str) -> None:
         """Switch the active model by respawning the claude subprocess
@@ -1164,12 +1032,11 @@ class ClaudeSession(OwnedSession):
             self._model,
             target_model,
         )
-        with self._lock:
-            self._model = target_model
-            self._respawn(
-                clear_session_id=False,
-                reason=f"switching model to {target_model}",
-            )
+        self._model = target_model
+        self._respawn(
+            clear_session_id=False,
+            reason=f"switching model to {target_model}",
+        )
         log.info("switch_model: now on model=%s", target_model)
 
     def _log_event(self, obj: dict[str, Any]) -> None:
@@ -1237,12 +1104,11 @@ class ClaudeSession(OwnedSession):
         should not be silently swallowed.
         """
         assert self._proc.stdout is not None
-        # Clear the cancel event only when no preempter is actively waiting
-        # (fix for #786).  Otherwise the signal fired by the preempter is
-        # meant for the current holder — clobbering it here lets the turn
-        # run to completion before the preempter ever gets the lock.
-        if not self._preempt_pending.is_set():
-            self._cancel.clear()
+        # Clear the cancel event at the start of each turn.  Any cancel signal
+        # that was set before this holder acquired the lock was meant for the
+        # previous holder — the FSM's FIFO handler queue ensures the next
+        # holder's turn starts clean without needing a separate pending flag.
+        self._cancel.clear()
         self._last_turn_cancelled = False
         last_activity = time.monotonic()
         cancelled_at: float | None = None

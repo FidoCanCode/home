@@ -41,6 +41,8 @@ def _setup_session(tmp_path: Path, repo: str = "owner/repo") -> ClaudeSession:
 
 
 def test_hold_acquires_lock_and_registers_talker(tmp_path: Path) -> None:
+    from fido.rocq.transition import Free, OwnedByHandler
+
     session = _setup_session(tmp_path)
     provider.set_thread_kind("webhook")
     try:
@@ -48,10 +50,10 @@ def test_hold_acquires_lock_and_registers_talker(tmp_path: Path) -> None:
             talker = provider.get_talker("owner/repo")
             assert talker is not None
             assert talker.kind == "webhook"
-            assert session._lock._is_owned()  # type: ignore[attr-defined]
-        # After exit, talker unregistered, lock released.
+            assert isinstance(session._fsm_state, OwnedByHandler)
+        # After exit, talker unregistered, FSM back to Free.
         assert provider.get_talker("owner/repo") is None
-        assert not session._lock._is_owned()  # type: ignore[attr-defined]
+        assert isinstance(session._fsm_state, Free)
     finally:
         provider.set_thread_kind(None)
         session.stop()
@@ -309,8 +311,8 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
     the new design the prior turn's boundary is drained inside iter_events
     itself (cancel no longer breaks early), so by the time the handler
     enters the stream is clean.  The cancel signal that was set for the
-    previous holder is consumed at the start of the handler's iter_events
-    via the existing ``_preempt_pending`` gate."""
+    previous holder is unconditionally cleared at the start of the handler's
+    iter_events call."""
     session = _setup_session(tmp_path)
 
     def fake_talker(kind: str) -> SessionTalker:
@@ -353,54 +355,19 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
     assert result == "triage-reply", f"handler prompt got wrong result — got {result!r}"
 
 
-def test_inner_prompt_preserves_queued_webhook_pending_flag(
-    tmp_path: Path,
-) -> None:
-    """Regression for #1017: _preempt_pending set by a second webhook
-    queuing behind an active hold_for_handler must survive inner prompt()
-    calls made by the holder.
-
-    The old code had two paths that unconditionally cleared _preempt_pending:
-    (1) reentrant __enter__ inside hold_for_handler, and (2) prompt()'s
-    finally block.  Either path wiped the second webhook's pending signal
-    while the first webhook's hold was still active.  When the hold released,
-    the worker saw _preempt_pending=False and won the lock over the queued
-    webhook, leaving the reviewer's comment unanswered."""
-    session = _setup_session(tmp_path)
-    provider.set_thread_kind("webhook")
-    try:
-        with session.hold_for_handler(preempt_worker=False):
-            # Simulate webhook B queuing behind this hold_for_handler.
-            session._signal_pending_preempt()
-            assert session._preempt_pending.is_set(), "sanity: pending set"
-            # Inner prompt() — old code cleared _preempt_pending here.
-            session.prompt("triage this issue")
-            # After returning, pending must still be set so the worker
-            # blocks in __enter__'s wait_for and yields to webhook B.
-            assert session._preempt_pending.is_set(), (
-                "_preempt_pending cleared by inner prompt() inside "
-                "hold_for_handler — worker would win lock over queued "
-                "webhook (bug #1017 regression)"
-            )
-    finally:
-        provider.set_thread_kind(None)
-        session.stop()
-
-
 def test_queued_webhook_acquires_lock_before_worker_after_inner_prompt(
     tmp_path: Path,
 ) -> None:
-    """Regression for #1017 (threading): webhook B queuing behind an active
-    hold_for_handler acquires the lock before the worker, even after the
-    holder makes inner prompt() calls while B's pending signal is live.
+    """Handler (webhook B) queuing behind an active hold_for_handler acquires
+    before the worker, even after the holder makes inner prompt() calls.
 
-    Timing is made deterministic by ensuring _preempt_pending is already set
-    before the worker thread enters __enter__ — this forces the worker into
-    _preempt_cond.wait_for() rather than racing directly on _lock.acquire()."""
+    The FSM handler queue provides structural priority: workers yield to any
+    queued handler regardless of when they entered _fsm_acquire_worker.
+    """
     session = _setup_session(tmp_path)
 
     webhook_a_holding = threading.Event()
-    webhook_b_queued = threading.Event()
+    webhook_b_queuing = threading.Event()
     order: list[str] = []
     errors: list[Exception] = []
 
@@ -409,11 +376,13 @@ def test_queued_webhook_acquires_lock_before_worker_after_inner_prompt(
         try:
             with session.hold_for_handler(preempt_worker=False):
                 webhook_a_holding.set()
-                # Wait until webhook B has queued (pending set) before
-                # making the inner prompt — this is the ordering that
-                # triggers the bug: B sets pending, then A's inner prompt
-                # used to clear it.
-                assert webhook_b_queued.wait(timeout=2.0), "webhook_b_queued timed out"
+                assert webhook_b_queuing.wait(timeout=2.0), (
+                    "webhook_b_queuing timed out"
+                )
+                # Small sleep to let webhook_b actually block in _fsm_acquire_handler
+                import time as _time
+
+                _time.sleep(0.05)
                 session.prompt("inner turn from webhook A")
         except Exception as exc:
             errors.append(exc)
@@ -424,11 +393,8 @@ def test_queued_webhook_acquires_lock_before_worker_after_inner_prompt(
         provider.set_thread_kind("webhook")
         try:
             assert webhook_a_holding.wait(timeout=2.0), "webhook_a_holding timed out"
-            # Queue behind webhook A — sets _preempt_pending so the worker
-            # yields priority.
-            session._signal_pending_preempt()
-            webhook_b_queued.set()
-            # Now block waiting for webhook A's hold to release.
+            webhook_b_queuing.set()
+            # Queue behind webhook A via the FSM handler queue.
             with session:
                 order.append("webhook_b")
         except Exception as exc:
@@ -439,10 +405,10 @@ def test_queued_webhook_acquires_lock_before_worker_after_inner_prompt(
     def worker() -> None:
         provider.set_thread_kind("worker")
         try:
-            # Wait until B has set _preempt_pending before entering __enter__.
-            # This guarantees the worker hits _preempt_cond.wait_for() instead
-            # of racing on _lock.acquire() — making the handoff deterministic.
-            assert webhook_b_queued.wait(timeout=2.0), "webhook_b_queued timed out"
+            assert webhook_b_queuing.wait(timeout=2.0), "webhook_b_queuing timed out"
+            import time as _time
+
+            _time.sleep(0.05)  # give webhook_b time to actually queue
             with session:
                 order.append("worker")
         except Exception as exc:
@@ -461,14 +427,12 @@ def test_queued_webhook_acquires_lock_before_worker_after_inner_prompt(
     t_a.join(timeout=5.0)
     t_b.join(timeout=5.0)
     t_w.join(timeout=5.0)
+    session.stop()
 
     assert not errors, f"thread errors: {errors}"
-    assert len(order) == 2, f"not all threads completed: {order}"
-    assert order[0] == "webhook_b", (
-        f"worker won lock over queued webhook — got order {order} "
-        f"(bug #1017 regression)"
+    assert order == ["webhook_b", "worker"], (
+        f"webhook_b should acquire before worker — got {order}"
     )
-    session.stop()
 
 
 def test_hold_reraises_leak_error_and_releases_lock(
@@ -494,10 +458,10 @@ def test_hold_reraises_leak_error_and_releases_lock(
         with pytest.raises(provider.SessionLeakError):
             with session.hold_for_handler():
                 pass  # should not reach here
-        # Lock must be released so other threads can acquire.
-        acquired = session._lock.acquire(blocking=False)
-        assert acquired
-        session._lock.release()
+        # FSM must be Free so other threads aren't deadlocked.
+        from fido.rocq.transition import Free
+
+        assert isinstance(session._fsm_state, Free)
     finally:
         provider.set_thread_kind(None)
         provider.unregister_talker("owner/repo", 111_111)
