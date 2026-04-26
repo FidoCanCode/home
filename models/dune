@@ -11,4 +11,5 @@
   coord_index
   concurrency_primitives
   replied_comment_claims
-  task_queue_rescope))
+  task_queue_rescope
+  session_ownership_fifo))
