@@ -2271,8 +2271,32 @@ let rec pp_return_body state env indent = function
               let body_pfx = String.make (indent + 8) ' ' in
               let pp_branch (ids, pat, body) =
                 let _ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
-                let pp_pat  = pp_pattern state env' (expand_pusual (List.length ids) pat) in
-                str case_pfx ++ str "case " ++ pp_pat ++ str ":" ++ fnl () ++
+                let expanded_pat = expand_pusual (List.length ids) pat in
+                let pp_pat  = pp_pattern state env' expanded_pat in
+                let pat_str = Pp.string_of_ppcmds pp_pat in
+                let case_line = case_pfx ^ "case " ^ pat_str ^ ":" in
+                (* When a constructor pattern's argument list makes the [case]
+                   line exceed 88 characters, wrap each argument onto its own
+                   line.  This keeps the generated file ruff-formatted without
+                   any post-extraction reformatting step. *)
+                let pp_case =
+                  if String.length case_line <= 88 then
+                    str case_line ++ fnl ()
+                  else
+                    match expanded_pat with
+                    | Pcons (r, ((_ :: _) as pats)) ->
+                        let cons_name = str_cons state r in
+                        let arg_pfx = case_pfx ^ "    " in
+                        str case_pfx ++ str "case " ++ str cons_name ++ str "(" ++ fnl () ++
+                        prlist_with_sep
+                          (fun () -> str "," ++ fnl ())
+                          (fun p -> str arg_pfx ++ pp_pattern state env' p)
+                          pats ++
+                        str "," ++ fnl () ++
+                        str case_pfx ++ str "):" ++ fnl ()
+                    | _ -> str case_line ++ fnl ()
+                in
+                pp_case ++
                 str body_pfx ++ pp_return_body state env' (indent + 8) body
               in
               (* Same catch-all logic as the expression-context path: append
@@ -3467,9 +3491,27 @@ let pp_ind_decl state (ind : ml_ind) =
               if String.length alias <= 88 then
                 str alias ++ fnl ()
               else
-                str (tname ^ "T = (") ++ fnl () ++
-                str ("    " ^ union_text) ++ fnl () ++
-                str ")" ++ fnl ()
+                let indented = "    " ^ union_text in
+                (* When all constructors fit on one indented line, use the
+                   compact parenthesised form.  When even that exceeds 88
+                   characters, emit one constructor per line in ruff's
+                   preferred style:
+                     TypeT = (
+                         Con1
+                         | Con2
+                         | …
+                     ) *)
+                if String.length indented <= 88 then
+                  str (tname ^ "T = (") ++ fnl () ++
+                  str indented ++ fnl () ++
+                  str ")" ++ fnl ()
+                else
+                  str (tname ^ "T = (") ++ fnl () ++
+                  str ("    " ^ List.hd cons_names) ++ fnl () ++
+                  prlist_with_sep fnl
+                    (fun name -> str ("    | " ^ name))
+                    (List.tl cons_names) ++
+                  fnl () ++ str ")" ++ fnl ()
             else
               mt ()
           in

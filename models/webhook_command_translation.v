@@ -321,6 +321,9 @@ Definition wev_delivery_id (ev : WebhookEvent) : DeliveryId :=
   | WevReviewSubmitted d _ _ _   => d
   end.
 
+Python File Extraction webhook_command_translation
+  "translate same_delivery cmd_to_contender cmd_delivery_id wev_delivery_id".
+
 (** * Proved invariants
 
     All lemmas follow by computation ([reflexivity], [destruct] +
