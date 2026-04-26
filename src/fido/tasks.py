@@ -383,11 +383,15 @@ def _apply_reorder(
       appended at the end so they are never silently dropped.
     - Completed tasks are always preserved at the end in their original order.
     - Title/description are updated from Opus's output; all other fields kept.
+    - If Opus proposes a title already used by an earlier task in the output,
+      the duplicate rewrite is rejected and the original title is kept (first
+      occurrence wins).  A warning is logged.
     - Opus-returned IDs absent from *current* or duplicated are ignored.
     """
     by_id = {t["id"]: t for t in current}
     merged: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    seen_titles: set[str] = set()
 
     for item in ordered_items:
         tid = item.get("id", "")
@@ -397,10 +401,20 @@ def _apply_reorder(
             continue
         seen_ids.add(tid)
         orig = dict(by_id[tid])
-        if item.get("title"):
-            orig["title"] = item["title"]
+        proposed_title = item.get("title") or ""
+        if proposed_title:
+            if proposed_title in seen_titles:
+                log.warning(
+                    "_apply_reorder: rejecting rewrite — title %r would duplicate "
+                    "another task; preserving original title for %s",
+                    proposed_title,
+                    tid,
+                )
+            else:
+                orig["title"] = proposed_title
         if "description" in item:
             orig["description"] = item["description"]
+        seen_titles.add(orig["title"])
         merged.append(orig)
 
     ci = [t for t in merged if t.get("type") == TaskType.CI]
