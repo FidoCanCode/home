@@ -20,6 +20,7 @@ from fido.provider import (
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.rocq import replied_comment_claims as oracle
+from fido.rocq import webhook_command_translation as wct_oracle
 from fido.state import State
 from fido.store import FidoStore, append_reply_promise_markers
 from fido.tasks import Tasks
@@ -510,6 +511,9 @@ def dispatch(
         if not number:
             return None
         log.info("issue #%s assigned to %s: %s", number, assignee, title)
+        wev = wct_oracle.WevIssueAssigned(1, number, assignee)
+        cmd = wct_oracle.translate(wev)
+        assert isinstance(cmd, wct_oracle.CmdIssueAssigned), "translate_total"
         return Action(prompt=f"New issue #{number} assigned to {assignee}: {title}")
 
     if event == "pull_request_review" and action == "submitted":
@@ -525,6 +529,10 @@ def dispatch(
             log.debug("ignoring review on PR #%s by %s (not allowed)", number, user)
             return None
         log.info("review on PR #%s: %s by %s", number, state, user)
+        if review_id is not None:
+            wev = wct_oracle.WevReviewSubmitted(1, number, review_id, user)
+            cmd = wct_oracle.translate(wev)
+            assert isinstance(cmd, wct_oracle.CmdReviewSubmitted), "translate_total"
         return Action(
             prompt=f"Review on PR #{number}: {state} by {user}",
             review_comments={"repo": repo, "pr": number, "review_id": review_id}
@@ -549,6 +557,11 @@ def dispatch(
         comment_body = comment.get("body", "") or ""
         log.info("comment on PR #%s by %s: %s", number, user, comment_body[:80])
         is_bot = user.endswith("[bot]")
+        if comment_id is not None:
+            wev = wct_oracle.WevReviewComment(1, number, comment_id, user, is_bot)
+            cmd = wct_oracle.translate(wev)
+            assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
+            assert isinstance(cmd.cmd_kind, wct_oracle.ReviewLine), "translate_total"
         return Action(
             prompt=f"Review comment on PR #{number} by {user} ({'bot' if is_bot else 'human/owner'}):\n\n{comment_body}",
             reply_to={
@@ -589,6 +602,11 @@ def dispatch(
         comment_id = comment.get("id")
         is_bot = user.endswith("[bot]")
         log.info("PR comment on #%s by %s: %s", number, user, comment_body[:80])
+        if number is not None and comment_id is not None:
+            wev = wct_oracle.WevIssueComment(1, number, comment_id, user, is_bot)
+            cmd = wct_oracle.translate(wev)
+            assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
+            assert isinstance(cmd.cmd_kind, wct_oracle.TopLevelPR), "translate_total"
         return Action(
             prompt=f"PR top-level comment on #{number} by {user}:\n\n{comment_body}",
             reply_to=None,  # top-level comments use issues API, not pulls
@@ -621,6 +639,14 @@ def dispatch(
         prs = check.get("pull_requests", [])
         pr_nums = [pr.get("number") for pr in prs if pr.get("number")]
         log.info("CI failure: %s (%s) on PRs %s", name, conclusion, pr_nums)
+        _ci_conclusion = (
+            wct_oracle.CIFailure()
+            if conclusion == "failure"
+            else wct_oracle.CITimedOut()
+        )
+        wev = wct_oracle.WevCIFailure(1, name, _ci_conclusion, pr_nums)
+        cmd = wct_oracle.translate(wev)
+        assert isinstance(cmd, wct_oracle.CmdCIFailure), "translate_total"
         pr_str = ", ".join(f"#{n}" for n in pr_nums) if pr_nums else "unknown PR"
         return Action(prompt=f"CI failure on {pr_str}: {name} ({conclusion})")
 
@@ -631,6 +657,10 @@ def dispatch(
             return None
         number = pr.get("number")
         log.info("PR #%s merged", number)
+        if number is not None:
+            wev = wct_oracle.WevPRMerged(1, number)
+            cmd = wct_oracle.translate(wev)
+            assert isinstance(cmd, wct_oracle.CmdPRMerged), "translate_total"
         return Action(prompt=f"PR #{number} merged — cleanup")
 
     log.debug("ignored event: %s (action=%s)", event, action)
