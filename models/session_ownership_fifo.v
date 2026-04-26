@@ -19,7 +19,7 @@
     path blocks the HTTP thread for the full turn duration
     ([server.py:776-782]); the instant-exit [Enqueue]/[Dequeue] split is a
     future alignment tracked in D5 #743.  Six theorems over [transition]
-    are proved in a later commit in this PR. *)
+    are proved below. *)
 
 Declare ML Module "rocq-python-extraction".
 Declare ML Module "rocq-runtime.plugins.extraction".
@@ -175,3 +175,89 @@ Definition transition (s : FifoState) (event : Event) : option FifoState :=
   end.
 
 Python File Extraction session_ownership_fifo "transition".
+
+(** * Proved invariants
+
+    All six lemmas follow by computation ([reflexivity] or [destruct] +
+    [reflexivity]): [transition] reduces on the concrete constructor shapes,
+    and Rocq's kernel verifies the equalities by normalisation.
+
+    These names surface in the runtime oracle: when the Python implementation
+    diverges from [transition], the crash message includes the theorem name so
+    the engineer knows exactly which invariant was violated. *)
+
+(** [no_dual_ownership]: when a slot is occupied — either by a FIFO contender
+    ([HolderActive]) or by the background worker ([WorkerActive]) — neither
+    [Dequeue] nor [WorkerResume] can hand the session to a second caller.
+    Ownership is always singular. *)
+Lemma no_dual_ownership :
+  forall c q d,
+    transition {| fifo_queue := q; fifo_active_slot := HolderActive c;
+                  fifo_worker_deferred := d |} Dequeue     = None /\
+    transition {| fifo_queue := q; fifo_active_slot := HolderActive c;
+                  fifo_worker_deferred := d |} WorkerResume = None /\
+    transition {| fifo_queue := q; fifo_active_slot := WorkerActive;
+                  fifo_worker_deferred := d |} Dequeue     = None /\
+    transition {| fifo_queue := q; fifo_active_slot := WorkerActive;
+                  fifo_worker_deferred := d |} WorkerResume = None.
+Proof.
+  intros c q d; repeat split; reflexivity.
+Qed.
+
+(** [release_only_by_owner]: [Release] is rejected from [Idle].  Nobody can
+    relinquish a session that is not held — the D3 invariant extended to the
+    D4 FIFO model. *)
+Lemma release_only_by_owner :
+  forall q d outcome,
+    transition {| fifo_queue := q; fifo_active_slot := Idle;
+                  fifo_worker_deferred := d |} (Release outcome) = None.
+Proof.
+  intros q d outcome; reflexivity.
+Qed.
+
+(** [fifo_order_preserved]: [Enqueue c] always appends [c] to the tail of
+    the queue.  When [transition] succeeds (which it always does for [Enqueue]),
+    the resulting queue is the old queue with [c] appended.  This is the
+    formal statement that FIFO order is maintained on every arrival. *)
+Lemma fifo_order_preserved :
+  forall s c,
+    match transition s (Enqueue c) with
+    | Some s' => fifo_queue s' = fifo_queue s ++ [c]
+    | None    => True
+    end.
+Proof.
+  intros [q a d] c; destruct a; reflexivity.
+Qed.
+
+(** [worker_resume_requires_empty]: [WorkerResume] is rejected when the queue
+    is non-empty.  The worker may only re-activate after every queued contender
+    has been drained — preventing the worker from stealing turns ahead of
+    waiting handlers. *)
+Lemma worker_resume_requires_empty :
+  forall c rest d,
+    transition {| fifo_queue := c :: rest; fifo_active_slot := Idle;
+                  fifo_worker_deferred := d |} WorkerResume = None.
+Proof.
+  intros c rest d; reflexivity.
+Qed.
+
+(** [worker_singleton]: [WorkerResume] is rejected when the worker is already
+    [WorkerActive].  The model enforces at most one active worker slot at a
+    time — a second [WorkerResume] while already active is always refused. *)
+Lemma worker_singleton :
+  forall q d,
+    transition {| fifo_queue := q; fifo_active_slot := WorkerActive;
+                  fifo_worker_deferred := d |} WorkerResume = None.
+Proof.
+  intros q d; reflexivity.
+Qed.
+
+(** [enqueue_total]: [Enqueue] always returns [Some _] — it never fails.  This
+    is the formal statement that webhooks exit instantly: no matter who holds
+    the session or what is in the queue, a new contender can always be
+    appended. *)
+Lemma enqueue_total :
+  forall s c, exists s', transition s (Enqueue c) = Some s'.
+Proof.
+  intros [q a d] c; destruct a; eexists; reflexivity.
+Qed.
