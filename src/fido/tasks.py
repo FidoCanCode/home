@@ -26,6 +26,9 @@ from fido.types import TaskStatus, TaskType
 
 log = logging.getLogger(__name__)
 
+# Maximum number of nudge retries when Opus proposes duplicate task titles.
+_RESCOPE_MAX_NUDGES = 3
+
 
 def _task_file(work_dir: Path) -> Path:
     return work_dir / ".git" / "fido" / "tasks.json"
@@ -366,6 +369,24 @@ def _parse_reorder_response(raw: str) -> list[dict[str, Any]] | None:
     return None
 
 
+def _find_duplicate_titles(ordered_items: list[dict[str, Any]]) -> list[str]:
+    """Return non-empty titles that appear more than once in *ordered_items*.
+
+    Each duplicated title is listed exactly once in the result, in the order
+    of its first repeated occurrence.
+    """
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for item in ordered_items:
+        title = item.get("title") or ""
+        if not title:
+            continue
+        if title in seen and title not in duplicates:
+            duplicates.append(title)
+        seen.add(title)
+    return duplicates
+
+
 def _apply_reorder(
     current: list[dict[str, Any]],
     ordered_items: list[dict[str, Any]],
@@ -383,11 +404,15 @@ def _apply_reorder(
       appended at the end so they are never silently dropped.
     - Completed tasks are always preserved at the end in their original order.
     - Title/description are updated from Opus's output; all other fields kept.
+    - If Opus proposes a title already used by an earlier task in the output,
+      the duplicate rewrite is rejected and the original title is kept (first
+      occurrence wins).  A warning is logged.
     - Opus-returned IDs absent from *current* or duplicated are ignored.
     """
     by_id = {t["id"]: t for t in current}
     merged: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    seen_titles: set[str] = set()
 
     for item in ordered_items:
         tid = item.get("id", "")
@@ -397,10 +422,20 @@ def _apply_reorder(
             continue
         seen_ids.add(tid)
         orig = dict(by_id[tid])
-        if item.get("title"):
-            orig["title"] = item["title"]
+        proposed_title = item.get("title") or ""
+        if proposed_title:
+            if proposed_title in seen_titles:
+                log.warning(
+                    "_apply_reorder: rejecting rewrite — title %r would duplicate "
+                    "another task; preserving original title for %s",
+                    proposed_title,
+                    tid,
+                )
+            else:
+                orig["title"] = proposed_title
         if "description" in item:
             orig["description"] = item["description"]
+        seen_titles.add(orig["title"])
         merged.append(orig)
 
     ci = [t for t in merged if t.get("type") == TaskType.CI]
@@ -535,6 +570,43 @@ def reorder_tasks(
     if ordered_items is None:
         log.warning("reorder_tasks: could not parse Opus response — skipping")
         return
+
+    # Nudge Opus up to _RESCOPE_MAX_NUDGES times if it proposed duplicate
+    # titles.  Each turn runs in the same conversation so the model sees its
+    # prior responses and the remaining-attempt count in each nudge.
+    # If duplicates remain after all nudges, _apply_reorder's silent fallback
+    # handles them as a last resort.
+    for nudge_attempt in range(_RESCOPE_MAX_NUDGES):
+        duplicates = _find_duplicate_titles(ordered_items)
+        if not duplicates:
+            break
+        attempts_remaining = _RESCOPE_MAX_NUDGES - nudge_attempt - 1
+        log.warning(
+            "reorder_tasks: Opus proposed duplicate titles %r — nudging "
+            "(attempt %d/%d, %d remaining after this)",
+            duplicates,
+            nudge_attempt + 1,
+            _RESCOPE_MAX_NUDGES,
+            attempts_remaining,
+        )
+        nudge = prompts.rescope_duplicate_nudge(
+            duplicates, attempts_remaining=attempts_remaining
+        )
+        nudge_raw = agent.run_turn(nudge, model=agent.voice_model)
+        if not nudge_raw:
+            log.warning(
+                "reorder_tasks: empty response after duplicate nudge — "
+                "proceeding with fallback"
+            )
+            break
+        nudge_items = _parse_reorder_response(nudge_raw)
+        if nudge_items is None:
+            log.warning(
+                "reorder_tasks: unparseable response after duplicate nudge — "
+                "proceeding with fallback"
+            )
+            break
+        ordered_items = nudge_items
 
     path = _task_file(work_dir)
     inprogress_affected = False

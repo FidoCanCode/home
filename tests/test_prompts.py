@@ -760,6 +760,44 @@ class TestRescopePrompt:
         assert "(none)" in result  # both completed and commit summary
 
 
+# ── Prompts.rescope_duplicate_nudge ──────────────────────────────────────────
+
+
+class TestRescopeDuplicateNudge:
+    def test_includes_duplicate_titles(self) -> None:
+        result = Prompts("").rescope_duplicate_nudge(
+            ["Same name"], attempts_remaining=0
+        )
+        assert "Same name" in result
+
+    def test_includes_multiple_duplicate_titles(self) -> None:
+        result = Prompts("").rescope_duplicate_nudge(
+            ["Title A", "Title B"], attempts_remaining=0
+        )
+        assert "Title A" in result
+        assert "Title B" in result
+
+    def test_asks_for_unique_titles(self) -> None:
+        result = Prompts("").rescope_duplicate_nudge(["Dup"], attempts_remaining=0)
+        assert "unique" in result.lower()
+
+    def test_includes_json_format_instruction(self) -> None:
+        result = Prompts("").rescope_duplicate_nudge(["Dup"], attempts_remaining=0)
+        assert '{"tasks": [...]}' in result
+
+    def test_no_other_text_instruction_present(self) -> None:
+        result = Prompts("").rescope_duplicate_nudge(["Dup"], attempts_remaining=0)
+        assert "No other text" in result
+
+    def test_final_attempt_message_when_zero_remaining(self) -> None:
+        result = Prompts("").rescope_duplicate_nudge(["Dup"], attempts_remaining=0)
+        assert "final attempt" in result.lower()
+
+    def test_remaining_count_when_nonzero(self) -> None:
+        result = Prompts("").rescope_duplicate_nudge(["Dup"], attempts_remaining=2)
+        assert "2" in result
+
+
 # ── Prompts.stores_persona ────────────────────────────────────────────────────
 
 
