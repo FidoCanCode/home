@@ -1113,10 +1113,10 @@ class TestCopilotCLISession:
                 session.__enter__()
             # FSM must be back to Free on the leak path so a later
             # legitimate enter (after the squatter clears) still works.
-            from fido.rocq.transition import Free as _FsmFree
+            from fido.rocq.transition import Free
 
             with session._fsm_lock:
-                assert isinstance(session._fsm_state, _FsmFree)
+                assert isinstance(session._fsm_state, Free)
         finally:
             provider.unregister_talker("owner/repo", 999_999)
 

@@ -20,15 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol, TypeAlias
 
-from fido.rocq.transition import Free as _FsmFree
-from fido.rocq.transition import HandlerAcquire as _FsmHandlerAcquire
-from fido.rocq.transition import HandlerRelease as _FsmHandlerRelease
-from fido.rocq.transition import OwnedByHandler as _FsmOwnedByHandler
-from fido.rocq.transition import OwnedByWorker as _FsmOwnedByWorker
-from fido.rocq.transition import State as _FsmState
-from fido.rocq.transition import WorkerAcquire as _FsmWorkerAcquire
-from fido.rocq.transition import WorkerRelease as _FsmWorkerRelease
-from fido.rocq.transition import transition as _fsm_transition
+import fido.rocq.transition as fsm
 
 log = logging.getLogger(__name__)
 
@@ -581,7 +573,7 @@ class OwnedSession:
     _repo_name: str | None
     _fsm_lock: threading.Lock
     _fsm_cond: threading.Condition
-    _fsm_state: _FsmState
+    _fsm_state: fsm.State
     _handler_queue: list[threading.Event]
 
     def _init_handler_reentry(self) -> None:
@@ -594,7 +586,7 @@ class OwnedSession:
         # Protected by _fsm_lock; threads wait on _fsm_cond for state changes.
         self._fsm_lock = threading.Lock()
         self._fsm_cond = threading.Condition(self._fsm_lock)
-        self._fsm_state: _FsmState = _FsmFree()
+        self._fsm_state: fsm.State = fsm.Free()
         # FIFO queue of threading.Event waiters for handler threads that could
         # not acquire immediately.  _fsm_release pops from the front and sets
         # the event to hand ownership to the next handler.
@@ -627,8 +619,8 @@ class OwnedSession:
         """
         with self._fsm_cond:
             while True:
-                if isinstance(self._fsm_state, _FsmFree) and not self._handler_queue:
-                    new = _fsm_transition(self._fsm_state, _FsmWorkerAcquire())
+                if isinstance(self._fsm_state, fsm.Free) and not self._handler_queue:
+                    new = fsm.transition(self._fsm_state, fsm.WorkerAcquire())
                     assert new is not None  # Free + WorkerAcquire always succeeds
                     self._fsm_state = new  # → OwnedByWorker
                     return
@@ -649,7 +641,7 @@ class OwnedSession:
         """
         waiter: threading.Event | None = None
         with self._fsm_cond:
-            new = _fsm_transition(self._fsm_state, _FsmHandlerAcquire())
+            new = fsm.transition(self._fsm_state, fsm.HandlerAcquire())
             if new is not None:
                 # Free → OwnedByHandler: immediate acquisition.
                 self._fsm_state = new
@@ -685,11 +677,11 @@ class OwnedSession:
         """
         with self._fsm_cond:
             ev = (
-                _FsmWorkerRelease()
-                if isinstance(self._fsm_state, _FsmOwnedByWorker)
-                else _FsmHandlerRelease()
+                fsm.WorkerRelease()
+                if isinstance(self._fsm_state, fsm.OwnedByWorker)
+                else fsm.HandlerRelease()
             )
-            new_state = _fsm_transition(self._fsm_state, ev)
+            new_state = fsm.transition(self._fsm_state, ev)
             if new_state is None:
                 raise RuntimeError(
                     f"session-lock FSM: release_only_by_owner violated — "
@@ -699,7 +691,7 @@ class OwnedSession:
             if self._handler_queue:
                 # Hand ownership directly to the next waiting handler.
                 waiter = self._handler_queue.pop(0)
-                self._fsm_state = _FsmOwnedByHandler()
+                self._fsm_state = fsm.OwnedByHandler()
                 waiter.set()
             else:
                 # No handlers waiting; transition to Free and wake workers.
