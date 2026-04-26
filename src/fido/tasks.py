@@ -366,6 +366,24 @@ def _parse_reorder_response(raw: str) -> list[dict[str, Any]] | None:
     return None
 
 
+def _find_duplicate_titles(ordered_items: list[dict[str, Any]]) -> list[str]:
+    """Return non-empty titles that appear more than once in *ordered_items*.
+
+    Each duplicated title is listed exactly once in the result, in the order
+    of its first repeated occurrence.
+    """
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for item in ordered_items:
+        title = item.get("title") or ""
+        if not title:
+            continue
+        if title in seen and title not in duplicates:
+            duplicates.append(title)
+        seen.add(title)
+    return duplicates
+
+
 def _apply_reorder(
     current: list[dict[str, Any]],
     ordered_items: list[dict[str, Any]],
@@ -549,6 +567,33 @@ def reorder_tasks(
     if ordered_items is None:
         log.warning("reorder_tasks: could not parse Opus response — skipping")
         return
+
+    # Nudge Opus once if it proposed duplicate titles.  The next turn runs in
+    # the same conversation so the model sees its previous (flawed) response.
+    # If the nudge still yields duplicates, _apply_reorder's silent fallback
+    # handles them as a last resort.
+    duplicates = _find_duplicate_titles(ordered_items)
+    if duplicates:
+        log.warning(
+            "reorder_tasks: Opus proposed duplicate titles %r — nudging",
+            duplicates,
+        )
+        nudge = prompts.rescope_duplicate_nudge(duplicates)
+        nudge_raw = agent.run_turn(nudge, model=agent.voice_model)
+        if not nudge_raw:
+            log.warning(
+                "reorder_tasks: empty response after duplicate nudge — "
+                "proceeding with fallback"
+            )
+        else:
+            nudge_items = _parse_reorder_response(nudge_raw)
+            if nudge_items is None:
+                log.warning(
+                    "reorder_tasks: unparseable response after duplicate nudge — "
+                    "proceeding with fallback"
+                )
+            else:
+                ordered_items = nudge_items
 
     path = _task_file(work_dir)
     inprogress_affected = False

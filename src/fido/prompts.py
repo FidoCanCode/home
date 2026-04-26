@@ -554,6 +554,25 @@ class Prompts:
             "No other text before or after the JSON."
         )
 
+    def rescope_duplicate_nudge(self, duplicate_titles: list[str]) -> str:
+        """Build a follow-up nudge when Opus proposed duplicate task titles.
+
+        Sent as the next turn in the same conversation so Opus sees its previous
+        (flawed) response and can correct it.  The original rescope rules still
+        apply; this turn adds only the uniqueness constraint.
+        """
+        quoted = ", ".join(f'"{t}"' for t in duplicate_titles)
+        return (
+            f"Your previous response proposed the same title for multiple different "
+            f"tasks: {quoted}.\n\n"
+            "Task titles must be unique — each task needs a distinct title that "
+            "clearly describes what that specific task does. Resubmit the full task "
+            "list with a unique title for every task.\n\n"
+            'Reply with ONLY a JSON object in the form {"tasks": [...]}.\n'
+            'Each element: {"id": "...", "title": "...", "description": "..."}.\n'
+            "No other text before or after the JSON."
+        )
+
     def rewrite_description_prompt(
         self,
         pr_body: str,

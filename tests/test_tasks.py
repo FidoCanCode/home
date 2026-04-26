@@ -10,6 +10,7 @@ from fido.tasks import (
     Tasks,
     _apply_reorder,
     _compute_thread_changes,
+    _find_duplicate_titles,
     _parse_reorder_response,
     add_task,
     complete_by_id,
@@ -562,6 +563,46 @@ class TestApplyReorder:
         assert "Shared name" in caplog.text
 
 
+# ── _find_duplicate_titles ────────────────────────────────────────────────────
+
+
+class TestFindDuplicateTitles:
+    def _item(self, title: str) -> dict:
+        return {"id": "x", "title": title}
+
+    def test_returns_empty_when_all_unique(self) -> None:
+        items = [self._item("A"), self._item("B"), self._item("C")]
+        assert _find_duplicate_titles(items) == []
+
+    def test_returns_duplicate_title(self) -> None:
+        items = [self._item("Same"), self._item("Other"), self._item("Same")]
+        assert _find_duplicate_titles(items) == ["Same"]
+
+    def test_each_duplicate_listed_once(self) -> None:
+        items = [self._item("X"), self._item("X"), self._item("X")]
+        assert _find_duplicate_titles(items) == ["X"]
+
+    def test_multiple_distinct_duplicates(self) -> None:
+        items = [
+            self._item("A"),
+            self._item("B"),
+            self._item("A"),
+            self._item("B"),
+        ]
+        assert _find_duplicate_titles(items) == ["A", "B"]
+
+    def test_ignores_empty_titles(self) -> None:
+        items = [{"id": "1", "title": ""}, {"id": "2", "title": ""}]
+        assert _find_duplicate_titles(items) == []
+
+    def test_ignores_missing_title_key(self) -> None:
+        items = [{"id": "1"}, {"id": "2"}]
+        assert _find_duplicate_titles(items) == []
+
+    def test_returns_empty_list_when_no_items(self) -> None:
+        assert _find_duplicate_titles([]) == []
+
+
 # ── reorder_tasks ─────────────────────────────────────────────────────────────
 
 
@@ -903,6 +944,117 @@ class TestReorderTasks:
             _on_done=lambda: done_calls.append(1),
         )
         assert done_calls == []
+
+    def test_nudges_when_opus_proposes_duplicate_titles(self, tmp_path: Path) -> None:
+        t1 = self._add(tmp_path, "Alpha")
+        t2 = self._add(tmp_path, "Beta")
+        # First response has duplicate titles
+        dup_response = self._response(
+            [
+                {"id": t1["id"], "title": "Shared name", "description": ""},
+                {"id": t2["id"], "title": "Shared name", "description": ""},
+            ]
+        )
+        # Nudge response has unique titles
+        fixed_response = self._response(
+            [
+                {"id": t1["id"], "title": "Fixed Alpha", "description": ""},
+                {"id": t2["id"], "title": "Fixed Beta", "description": ""},
+            ]
+        )
+        client = _client()
+        client.run_turn.side_effect = [dup_response, fixed_response]
+        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts.rescope_prompt.return_value = "prompt"
+        mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
+        reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        mock_prompts.rescope_duplicate_nudge.assert_called_once_with(["Shared name"])
+        assert client.run_turn.call_count == 2
+        tasks = list_tasks(tmp_path)
+        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Fixed Alpha"
+        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Fixed Beta"
+
+    def test_falls_back_silently_when_nudge_still_has_duplicates(
+        self, tmp_path: Path
+    ) -> None:
+        t1 = self._add(tmp_path, "Alpha")
+        t2 = self._add(tmp_path, "Beta")
+        dup_response = self._response(
+            [
+                {"id": t1["id"], "title": "Shared name", "description": ""},
+                {"id": t2["id"], "title": "Shared name", "description": ""},
+            ]
+        )
+        client = _client()
+        client.run_turn.side_effect = [dup_response, dup_response]
+        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts.rescope_prompt.return_value = "prompt"
+        mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
+        reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        # _apply_reorder's silent fallback: first occurrence wins, second keeps original
+        tasks = list_tasks(tmp_path)
+        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Shared name"
+        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
+
+    def test_proceeds_with_original_when_nudge_returns_empty(
+        self, tmp_path: Path
+    ) -> None:
+        t1 = self._add(tmp_path, "Alpha")
+        t2 = self._add(tmp_path, "Beta")
+        dup_response = self._response(
+            [
+                {"id": t1["id"], "title": "Shared name", "description": ""},
+                {"id": t2["id"], "title": "Shared name", "description": ""},
+            ]
+        )
+        client = _client()
+        client.run_turn.side_effect = [dup_response, ""]
+        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts.rescope_prompt.return_value = "prompt"
+        mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
+        reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        # Falls back to original dup_response with silent correction
+        tasks = list_tasks(tmp_path)
+        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Shared name"
+        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
+
+    def test_proceeds_with_original_when_nudge_response_unparseable(
+        self, tmp_path: Path
+    ) -> None:
+        t1 = self._add(tmp_path, "Alpha")
+        t2 = self._add(tmp_path, "Beta")
+        dup_response = self._response(
+            [
+                {"id": t1["id"], "title": "Shared name", "description": ""},
+                {"id": t2["id"], "title": "Shared name", "description": ""},
+            ]
+        )
+        client = _client()
+        client.run_turn.side_effect = [dup_response, "not json"]
+        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts.rescope_prompt.return_value = "prompt"
+        mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
+        reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        # Falls back to original dup_response with silent correction
+        tasks = list_tasks(tmp_path)
+        assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Shared name"
+        assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
+
+    def test_no_nudge_when_titles_all_unique(self, tmp_path: Path) -> None:
+        t1 = self._add(tmp_path, "Alpha")
+        t2 = self._add(tmp_path, "Beta")
+        raw = self._response(
+            [
+                {"id": t1["id"], "title": "New Alpha", "description": ""},
+                {"id": t2["id"], "title": "New Beta", "description": ""},
+            ]
+        )
+        client = _client(raw)
+        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts.rescope_prompt.return_value = "prompt"
+        reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        mock_prompts.rescope_duplicate_nudge.assert_not_called()
+        assert client.run_turn.call_count == 1
 
 
 # ── _compute_thread_changes ───────────────────────────────────────────────────

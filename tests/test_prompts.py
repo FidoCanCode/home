@@ -760,6 +760,32 @@ class TestRescopePrompt:
         assert "(none)" in result  # both completed and commit summary
 
 
+# ── Prompts.rescope_duplicate_nudge ──────────────────────────────────────────
+
+
+class TestRescopeDuplicateNudge:
+    def test_includes_duplicate_titles(self) -> None:
+        result = Prompts("").rescope_duplicate_nudge(["Same name"])
+        assert "Same name" in result
+
+    def test_includes_multiple_duplicate_titles(self) -> None:
+        result = Prompts("").rescope_duplicate_nudge(["Title A", "Title B"])
+        assert "Title A" in result
+        assert "Title B" in result
+
+    def test_asks_for_unique_titles(self) -> None:
+        result = Prompts("").rescope_duplicate_nudge(["Dup"])
+        assert "unique" in result.lower()
+
+    def test_includes_json_format_instruction(self) -> None:
+        result = Prompts("").rescope_duplicate_nudge(["Dup"])
+        assert '{"tasks": [...]}' in result
+
+    def test_no_other_text_instruction_present(self) -> None:
+        result = Prompts("").rescope_duplicate_nudge(["Dup"])
+        assert "No other text" in result
+
+
 # ── Prompts.stores_persona ────────────────────────────────────────────────────
 
 
