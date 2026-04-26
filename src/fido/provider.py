@@ -20,14 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol, TypeAlias
 
-from fido.rocq.transition import Free as _FsmFree
-from fido.rocq.transition import HandlerAcquire as _FsmHandlerAcquire
-from fido.rocq.transition import HandlerRelease as _FsmHandlerRelease
-from fido.rocq.transition import OwnedByWorker as _FsmOwnedByWorker
-from fido.rocq.transition import State as _FsmState
-from fido.rocq.transition import WorkerAcquire as _FsmWorkerAcquire
-from fido.rocq.transition import WorkerRelease as _FsmWorkerRelease
-from fido.rocq.transition import transition as _fsm_transition
+import fido.rocq.transition as fsm
 
 log = logging.getLogger(__name__)
 
@@ -295,10 +288,6 @@ class PromptSession(Protocol):
         """Report whether the most recent turn was cancelled by preemption."""
         ...
 
-    def wait_for_pending_preempt(self, timeout: float = 30.0) -> bool:
-        """Wait for any queued preemption work to drain before retrying a turn."""
-        ...
-
     def switch_model(self, model: ProviderModel) -> None:
         """Switch the live session to *model* in-place without kill, respawn,
         or session-state loss."""
@@ -555,37 +544,53 @@ def current_repo_session() -> PromptSession:
 class OwnedSession:
     """Base class for :class:`~fido.claude.ClaudeSession` and
     :class:`~fido.copilotcli.CopilotCLISession` providing the shared
-    reentrance counter and :meth:`hold_for_handler` context manager
-    (fix for #658).
+    reentrance counter, FSM-driven lock coordination, and the
+    :meth:`hold_for_handler` context manager (fix for #658).
 
-    Subclasses own their own lock (must be a :class:`threading.RLock` so
-    nested acquires by the same thread are free) and implement the
-    session-specific first-enter / last-exit work in their own ``__enter__``
-    and ``__exit__``.  This base only handles the per-thread depth
-    bookkeeping and the shared ``hold_for_handler`` wrapper so the two
-    providers don't drift apart.
+    The FSM extracted from ``models/session_lock.v`` is the **authoritative**
+    lock coordinator.  :attr:`_fsm_state` is the single source of truth for
+    which role currently holds the session.  :meth:`_fsm_acquire_worker`,
+    :meth:`_fsm_acquire_handler`, and :meth:`_fsm_release` are the
+    provider-neutral acquire/release primitives; subclasses call them at the
+    outermost entry/exit boundary (depth 0 → 1 and 1 → 0).
 
-    Required subclass attributes:
+    Handler threads have priority over the worker: :meth:`_fsm_acquire_worker`
+    yields to any handler registered in :attr:`_handler_queue`, even when the
+    state is :class:`~fido.rocq.transition.Free`.  Handler-on-handler ordering
+    is FIFO — the queue preserves the order in which handlers called
+    :meth:`_fsm_acquire_handler`.
 
-    - ``self._lock`` — :class:`threading.RLock`
+    Subclasses must set:
+
     - ``self._repo_name`` — ``str | None`` (fed to
       :func:`try_preempt_worker` for the preempt decision)
     - ``self._fire_worker_cancel()`` — method that aborts whatever turn the
       current lock-holder's provider subprocess is running
+
     """
 
     _reentry_tls: threading.local
     _repo_name: str | None
-    _oracle_state: _FsmState
+    _fsm_lock: threading.Lock
+    _fsm_cond: threading.Condition
+    _fsm_state: fsm.State
+    _handler_queue: list[threading.Event]
 
     def _init_handler_reentry(self) -> None:
         """Subclasses call this from their ``__init__`` to set up the
-        thread-local reentrance counter and the session-lock FSM oracle.
+        thread-local reentrance counter and the FSM-driven lock coordinator.
         Separate method (not ``__init__``) so the base doesn't compete
         with the subclass constructor signature."""
         self._reentry_tls = threading.local()
-        # Oracle initial state: nobody holds the session lock.
-        self._oracle_state: _FsmState = _FsmFree()
+        # Authoritative FSM state — which role holds the session.
+        # Protected by _fsm_lock; threads wait on _fsm_cond for state changes.
+        self._fsm_lock = threading.Lock()
+        self._fsm_cond = threading.Condition(self._fsm_lock)
+        self._fsm_state: fsm.State = fsm.Free()
+        # FIFO queue of threading.Event waiters for handler threads that could
+        # not acquire immediately.  _fsm_release pops from the front and sets
+        # the event to hand ownership to the next handler.
+        self._handler_queue: list[threading.Event] = []
 
     def _bump_entry_depth(self) -> int:
         """Increment and return the new per-thread entry depth (1 at
@@ -601,75 +606,102 @@ class OwnedSession:
         self._reentry_tls.depth = depth
         return depth
 
-    def _oracle_on_acquire(self, kind: str) -> None:
-        """Assert the session-lock FSM oracle accepts an outermost acquire.
+    def _fsm_acquire_worker(self) -> None:
+        """Block until the worker can acquire the session.
 
-        Called by subclasses from ``__enter__`` when the entry depth
-        transitions 0 → 1.  *kind* is ``"worker"`` for the background
-        worker thread or ``"webhook"`` for a webhook handler holding the
-        session via :meth:`hold_for_handler`.
+        Waits on :attr:`_fsm_cond` until :attr:`_fsm_state` is
+        :class:`~fido.rocq.transition.Free` **and** :attr:`_handler_queue`
+        is empty.  Handlers have priority: if any handler is registered in
+        the queue, the worker yields even when the state is ``Free``.
 
-        Crashes with theorem name ``no_dual_ownership`` if the model
-        rejects the event — i.e. the session is already owned and a
-        second acquire arrived without an intervening release.
-
-        The session RLock is held by the caller, so the oracle state
-        update is implicitly serialized.
+        Fires the ``WorkerAcquire`` FSM transition and updates
+        :attr:`_fsm_state` atomically under :attr:`_fsm_lock`.
         """
-        ev = _FsmWorkerAcquire() if kind == "worker" else _FsmHandlerAcquire()
-        new_state = _fsm_transition(self._oracle_state, ev)
-        if new_state is None:
-            raise RuntimeError(
-                f"session-lock FSM oracle: no_dual_ownership violated — "
-                f"{type(ev).__name__} rejected in state "
-                f"{type(self._oracle_state).__name__}"
-            )
-        self._oracle_state = new_state
+        with self._fsm_cond:
+            while True:
+                if isinstance(self._fsm_state, fsm.Free) and not self._handler_queue:
+                    new = fsm.transition(self._fsm_state, fsm.WorkerAcquire())
+                    assert new is not None  # Free + WorkerAcquire always succeeds
+                    self._fsm_state = new  # → OwnedByWorker
+                    return
+                self._fsm_cond.wait()
 
-    def _oracle_on_release(self) -> None:
-        """Assert the session-lock FSM oracle accepts the outermost release.
+    def _fsm_acquire_handler(self) -> None:
+        """Block until the handler can acquire the session.
 
-        Called by subclasses from ``__exit__`` when the entry depth
-        transitions 1 → 0.  Derives the release event from the current
-        FSM state so the caller does not need to track the holder kind
-        separately: :class:`_FsmOwnedByWorker` → ``WorkerRelease``,
-        anything else → ``HandlerRelease``.
+        If :attr:`_fsm_state` is :class:`~fido.rocq.transition.Free`, fires
+        ``HandlerAcquire`` and returns immediately.  Otherwise appends a
+        :class:`threading.Event` waiter to the back of :attr:`_handler_queue`
+        and blocks until :meth:`_fsm_release` transfers ownership here.
 
-        Crashes with theorem name ``release_only_by_owner`` if the
-        model rejects the event — i.e. the session is not owned by the
-        releasing role (cross-release or spurious release from Free).
-
-        The session RLock is held by the caller, so the oracle state
-        update is implicitly serialized.
+        Handler-on-handler ordering is FIFO: the queue preserves the order in
+        which handlers registered.  When the worker is the current holder,
+        the caller must have already fired :meth:`_fire_worker_cancel` so the
+        worker drains its turn and calls :meth:`_fsm_release`.
         """
-        ev = (
-            _FsmWorkerRelease()
-            if isinstance(self._oracle_state, _FsmOwnedByWorker)
-            else _FsmHandlerRelease()
-        )
-        new_state = _fsm_transition(self._oracle_state, ev)
-        if new_state is None:
-            raise RuntimeError(
-                f"session-lock FSM oracle: release_only_by_owner violated — "
-                f"{type(ev).__name__} rejected in state "
-                f"{type(self._oracle_state).__name__}"
+        waiter: threading.Event | None = None
+        with self._fsm_cond:
+            new = fsm.transition(self._fsm_state, fsm.HandlerAcquire())
+            if new is not None:
+                # Free → OwnedByHandler: immediate acquisition.
+                self._fsm_state = new
+                return
+            # Occupied; register in the FIFO handler queue and wait.
+            waiter = threading.Event()
+            self._handler_queue.append(waiter)
+        # Wait outside the Condition so _fsm_release can acquire _fsm_lock.
+        assert waiter is not None
+        waiter.wait()
+        # _fsm_release set _fsm_state = OwnedByHandler and signalled us.
+        # Nothing more to do here.
+
+    def _fsm_release(self) -> None:
+        """Release the FSM lock.
+
+        Fires the appropriate release event for the current holder
+        (``WorkerRelease`` from
+        :class:`~fido.rocq.transition.OwnedByWorker`,
+        ``HandlerRelease`` from
+        :class:`~fido.rocq.transition.OwnedByHandler`).
+
+        If :attr:`_handler_queue` is non-empty, ownership transfers directly
+        to the next queued handler: the handler's :class:`threading.Event` is
+        set and :attr:`_fsm_state` becomes
+        :class:`~fido.rocq.transition.OwnedByHandler`.  Otherwise
+        :attr:`_fsm_state` transitions to :class:`~fido.rocq.transition.Free`
+        and worker threads waiting on :attr:`_fsm_cond` are notified.
+
+        Raises :class:`RuntimeError` if the current state is
+        :class:`~fido.rocq.transition.Free` (``release_only_by_owner``
+        invariant).
+        """
+        with self._fsm_cond:
+            ev = (
+                fsm.WorkerRelease()
+                if isinstance(self._fsm_state, fsm.OwnedByWorker)
+                else fsm.HandlerRelease()
             )
-        self._oracle_state = new_state
+            new_state = fsm.transition(self._fsm_state, ev)
+            if new_state is None:
+                raise RuntimeError(
+                    f"session-lock FSM: release_only_by_owner violated — "
+                    f"{type(ev).__name__} rejected in state "
+                    f"{type(self._fsm_state).__name__}"
+                )
+            if self._handler_queue:
+                # Hand ownership directly to the next waiting handler.
+                waiter = self._handler_queue.pop(0)
+                self._fsm_state = fsm.OwnedByHandler()
+                waiter.set()
+            else:
+                # No handlers waiting; transition to Free and wake workers.
+                self._fsm_state = new_state  # → Free
+                self._fsm_cond.notify_all()
 
     def _fire_worker_cancel(self) -> None:
         """Abort the current lock-holder's turn.  Subclasses override
         with their provider-specific cancel mechanism."""
         raise NotImplementedError  # pragma: no cover — abstract hook
-
-    def _signal_pending_preempt(self) -> None:
-        """Signal that a webhook caller is queued for the lock so workers
-        contending for the same lock yield (#983).  Distinct from
-        :meth:`_fire_worker_cancel`, which only fires when there is an
-        active worker to interrupt — this signal also covers the case
-        where the current holder is itself a webhook and a second webhook
-        is queueing behind it.  Subclasses with priority-aware locking
-        override; default is a no-op for backends that don't need it."""
-        return
 
     def preempt_worker(self) -> bool:
         """Fire the cancel signal synchronously if a worker currently holds
@@ -715,8 +747,8 @@ class OwnedSession:
         Webhook handlers wrap their entire body in this so the worker
         can't acquire the lock between individual turns (triage → reply
         → reaction) and stall the reply behind a long worker turn (#658).
-        Inner ``with session:`` / ``session.prompt`` calls re-acquire the
-        RLock and skip the first-enter setup via the reentrance counter.
+        Inner ``with session:`` / ``session.prompt`` calls re-enter via the
+        reentrance counter and skip the FSM acquire.
 
         When *preempt_worker* is true, fires the caller's
         :meth:`_fire_worker_cancel` once upfront (via
@@ -737,11 +769,6 @@ class OwnedSession:
                     self._repo_name,
                 )
             else:
-                # No worker to cancel (holder is another webhook, or no
-                # one).  Still signal pending preempt so worker threads
-                # contending for the same lock yield to this webhook
-                # (#983 — webhook→webhook handoff has to skip the worker).
-                self._signal_pending_preempt()
                 log.info(
                     "hold_for_handler: queuing behind %s holder (tid=%d, repo=%s)",
                     current_kind or "none",

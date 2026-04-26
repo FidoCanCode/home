@@ -1030,13 +1030,10 @@ class TestCopilotCLISession:
                     break
                 time.sleep(0.01)
             assert runtime.cancel_calls == ["sess-created"]
-            assert session.wait_for_pending_preempt(timeout=0.01) is False
             session.__exit__(None, None, None)
             acquired.wait(timeout=1.0)
-            assert session.wait_for_pending_preempt(timeout=0.01) is False
             release.set()
             thread.join(timeout=1.0)
-            assert session.wait_for_pending_preempt(timeout=1.0) is True
         finally:
             provider.set_thread_kind(None)
 
@@ -1114,10 +1111,12 @@ class TestCopilotCLISession:
         try:
             with pytest.raises(provider.SessionLeakError):
                 session.__enter__()
-            # Lock must have been released on the leak path so a later
+            # FSM must be back to Free on the leak path so a later
             # legitimate enter (after the squatter clears) still works.
-            assert session._lock.acquire(blocking=False) is True
-            session._lock.release()
+            from fido.rocq.transition import Free
+
+            with session._fsm_lock:
+                assert isinstance(session._fsm_state, Free)
         finally:
             provider.unregister_talker("owner/repo", 999_999)
 
@@ -1394,7 +1393,6 @@ class TestCopilotCLIClient:
         session.prompt.side_effect = prompt
         client = CopilotCLIClient(session=session)
         assert client.run_turn("fetch", retry_on_preempt=True) == "done"
-        session.wait_for_pending_preempt.assert_called_once_with()
 
     def test_run_turn_recovers_and_retries_after_connection_loss(self) -> None:
         session = MagicMock()

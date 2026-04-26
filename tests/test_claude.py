@@ -1000,7 +1000,6 @@ class TestClaudeSessionDrainToBoundary:
         session._selector = MagicMock(return_value=([], [], []))
         # Set cancel immediately — simulates preempt arriving during drain
         session._cancel.set()
-        session._preempt_pending.set()
         with patch.object(session, "recover") as mock_recover:
             session._drain_to_boundary(deadline=5.0)
         # _in_turn stays True so send() knows not to write
@@ -1168,40 +1167,6 @@ class TestClaudeSessionLogEvent:
         assert "claude error: kaboom" in caplog.text
 
 
-class TestClaudeSessionWaitForPendingPreempt:
-    def test_returns_false_when_not_pending(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        # _preempt_pending starts cleared
-        assert session.wait_for_pending_preempt(timeout=0.01) is False
-
-    def test_returns_true_when_pending_clears(self, tmp_path: Path) -> None:
-        import threading as _t
-
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        session._preempt_pending.set()
-
-        # Clear the event from another thread after a brief delay.
-        def _clearer() -> None:
-            import time as _time
-
-            _time.sleep(0.02)
-            session._preempt_pending.clear()
-
-        t = _t.Thread(target=_clearer)
-        t.start()
-        assert session.wait_for_pending_preempt(timeout=1.0) is True
-        t.join()
-
-    def test_returns_false_on_timeout(self, tmp_path: Path) -> None:
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        session._preempt_pending.set()
-        # Never cleared → waits out the deadline.
-        assert session.wait_for_pending_preempt(timeout=0.05) is False
-
-
 class TestClaudeSessionIterEvents:
     def test_yields_parsed_json_events(self, tmp_path: Path) -> None:
         import json as _json
@@ -1333,7 +1298,6 @@ class TestClaudeSessionIterEvents:
         proc = _make_session_proc(lines)
         session = _make_session(tmp_path, proc)
         session._cancel.set()
-        session._preempt_pending.set()
         events = list(session.iter_events())
         # Both events were consumed — pipe is clean for the next holder.
         assert len(events) == 2
@@ -1344,29 +1308,18 @@ class TestClaudeSessionIterEvents:
         assert session._in_turn is False
         session.stop()
 
-    def test_cancel_still_cleared_when_no_preempt_pending(self, tmp_path: Path) -> None:
-        """Symmetry check: with no preempter waiting, a stale cancel from a
-        previous turn is still cleared at iter_events' start (preserves the
-        existing ``test_cancel_cleared_at_iter_events_start`` semantics)."""
+    def test_cancel_still_cleared_at_iter_events_start(self, tmp_path: Path) -> None:
+        """Cancel is always unconditionally cleared at the start of iter_events.
+
+        The FSM's FIFO handler queue ensures the next holder's turn starts clean.
+        A stale cancel set before this holder acquired the lock is cleared here
+        so the new turn runs.
+        """
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
         session._cancel.set()
-        # _preempt_pending intentionally NOT set — cancel is stale.
         list(session.iter_events())
         assert not session._cancel.is_set()
-        session.stop()
-
-    def test_fire_worker_cancel_sets_preempt_pending(self, tmp_path: Path) -> None:
-        """Regression guard for #786: the cancel fire path must mark a
-        preempter as pending, not just set the cancel event, so the race
-        with iter_events' clear is defused."""
-        proc = _make_session_proc([])
-        session = _make_session(tmp_path, proc)
-        assert not session._cancel.is_set()
-        assert not session._preempt_pending.is_set()
-        session._fire_worker_cancel()
-        assert session._cancel.is_set()
-        assert session._preempt_pending.is_set()
         session.stop()
 
     def test_recovers_when_cancel_drain_times_out(self, tmp_path: Path) -> None:
@@ -1851,27 +1804,16 @@ class TestClaudeSessionLock:
     def test_enter_returns_self(self, tmp_path: Path) -> None:
         session = _make_session(tmp_path, _make_session_proc([]))
         assert session.__enter__() is session
-        session._lock.release()
+        session.__exit__(None, None, None)
         session.stop()
 
-    def test_hold_for_handler_signals_pending_when_queueing_behind_webhook(
-        self, tmp_path: Path
-    ) -> None:
-        """Regression for #983: when ``hold_for_handler(preempt_worker=True)``
-        finds the current holder is itself a webhook (no worker to cancel),
-        it must still call ``_signal_pending_preempt`` to set
-        ``_preempt_pending``.  Without this signal, a worker thread
-        contending for the same lock would freely re-acquire between
-        webhook A and webhook B, breaking the webhook→webhook handoff.
+    def test_hold_for_handler_enters_fsm_owned_by_handler(self, tmp_path: Path) -> None:
+        """hold_for_handler acquires FSM ownership as handler.
 
-        Deterministic: drives ``hold_for_handler`` synchronously with
-        ``try_preempt_worker`` patched to return ``(False, "webhook")``
-        (the queueing case) and the session's ``__enter__``/``__exit__``
-        no-op'd so we don't actually contend for a lock.  Asserts:
-
-        - ``_signal_pending_preempt`` was called exactly once.
-        - ``_preempt_pending`` is set after the call.
+        Verifies the FSM state reflects OwnedByHandler while the hold is active.
         """
+        from fido.rocq.transition import OwnedByHandler
+
         proc = _make_session_proc([])
         session = _make_session(tmp_path, proc)
         provider.set_thread_kind("webhook")
@@ -1879,27 +1821,8 @@ class TestClaudeSessionLock:
             with patch(
                 "fido.provider.try_preempt_worker", return_value=(False, "webhook")
             ):
-                with patch.object(
-                    session,
-                    "_signal_pending_preempt",
-                    wraps=session._signal_pending_preempt,
-                ) as mock_signal:
-                    # __enter__/__exit__ no-op'd so the test doesn't depend
-                    # on real lock contention.
-                    with (
-                        patch.object(type(session), "__enter__", return_value=session),
-                        patch.object(type(session), "__exit__", return_value=False),
-                    ):
-                        with session.hold_for_handler(preempt_worker=True):
-                            pass
-                    assert mock_signal.call_count == 1, (
-                        f"_signal_pending_preempt called {mock_signal.call_count}x "
-                        "— expected 1 (hold_for_handler queueing branch must "
-                        "signal pending so workers yield, #983)"
-                    )
-                    assert session._preempt_pending.is_set(), (
-                        "_preempt_pending should be set after queueing"
-                    )
+                with session.hold_for_handler(preempt_worker=True):
+                    assert isinstance(session._fsm_state, OwnedByHandler)
         finally:
             provider.set_thread_kind(None)
             session.stop()
@@ -1952,7 +1875,7 @@ class TestClaudeSessionLock:
         session._cancel.set()
         session.__enter__()
         assert session._cancel.is_set()  # still set; iter_events() will clear it
-        session._lock.release()
+        session.__exit__(None, None, None)
         session.stop()
 
     def test_cancel_survives_lock_handoff(self, tmp_path: Path) -> None:
@@ -1965,13 +1888,11 @@ class TestClaudeSessionLock:
         session = _make_session(tmp_path, proc)
 
         cancel_set_after_exit = _threading.Event()
-        new_holder_entered = _threading.Event()
         new_holder_cancel_was_set: list[bool] = []
 
         def first_holder() -> None:
-            session._lock.acquire()
-            # Release without calling iter_events; then interrupt() sets cancel
-            session._lock.release()
+            with session:
+                pass  # Release lock, then set cancel below
             # Simulate interrupt arriving right after release
             session._cancel.set()
             cancel_set_after_exit.set()
@@ -1981,8 +1902,7 @@ class TestClaudeSessionLock:
             session.__enter__()
             # Record whether cancel is still set before iter_events clears it
             new_holder_cancel_was_set.append(session._cancel.is_set())
-            new_holder_entered.set()
-            session._lock.release()
+            session.__exit__(None, None, None)
 
         t1 = _threading.Thread(target=first_holder)
         t2 = _threading.Thread(target=second_holder)
@@ -1995,11 +1915,12 @@ class TestClaudeSessionLock:
         session.stop()
 
     def test_exit_releases_lock(self, tmp_path: Path) -> None:
+        from fido.rocq.transition import Free
+
         session = _make_session(tmp_path, _make_session_proc([]))
         session.__enter__()
         session.__exit__(None, None, None)
-        assert session._lock.acquire(blocking=False)
-        session._lock.release()
+        assert isinstance(session._fsm_state, Free)
         session.stop()
 
     def test_owner_none_when_lock_free(self, tmp_path: Path) -> None:
@@ -2140,9 +2061,10 @@ class TestClaudeSessionLock:
         )
         with pytest.raises(SessionLeakError):
             session.__enter__()
-        # Session lock must be released so we don't deadlock future callers.
-        assert session._lock.acquire(blocking=False)
-        session._lock.release()
+        # FSM must be Free so future callers aren't deadlocked.
+        from fido.rocq.transition import Free
+
+        assert isinstance(session._fsm_state, Free)
         with provider._talkers_lock:
             provider._talkers.clear()
         session.stop()
@@ -2150,10 +2072,12 @@ class TestClaudeSessionLock:
     def test_context_manager_blocks_second_thread(self, tmp_path: Path) -> None:
         import threading as _threading
 
+        from fido.rocq.transition import Free, OwnedByWorker
+
         session = _make_session(tmp_path, _make_session_proc([]))
         entered = _threading.Event()
         done_checking = _threading.Event()
-        could_not_acquire = _threading.Event()
+        fsm_was_owned: list[bool] = []
 
         def first_thread() -> None:
             with session:
@@ -2162,11 +2086,8 @@ class TestClaudeSessionLock:
 
         def second_thread() -> None:
             entered.wait()  # t1 holds the lock and is blocked on done_checking
-            acquired = session._lock.acquire(blocking=False)
-            if not acquired:
-                could_not_acquire.set()
-            else:
-                session._lock.release()
+            # FSM state should be OwnedByWorker — not Free — while t1 holds it.
+            fsm_was_owned.append(isinstance(session._fsm_state, OwnedByWorker))
             done_checking.set()  # let t1 exit the context manager
 
         t1 = _threading.Thread(target=first_thread)
@@ -2175,7 +2096,8 @@ class TestClaudeSessionLock:
         t2.start()
         t1.join(timeout=2)
         t2.join(timeout=2)
-        assert could_not_acquire.is_set()
+        assert fsm_was_owned == [True]
+        assert isinstance(session._fsm_state, Free)
         session.stop()
 
 
@@ -2360,11 +2282,10 @@ class TestClaudeSessionInterrupt:
         cancel_seen: list[bool] = []
 
         def holder() -> None:
-            session._lock.acquire()
-            lock_held.set()
-            release.wait()
-            cancel_seen.append(session._cancel.is_set())
-            session._lock.release()
+            with session:
+                lock_held.set()
+                release.wait()
+                cancel_seen.append(session._cancel.is_set())
 
         t_holder = _threading.Thread(target=holder)
         t_holder.start()
@@ -2392,10 +2313,9 @@ class TestClaudeSessionInterrupt:
         release = _threading.Event()
 
         def holder() -> None:
-            session._lock.acquire()
-            acquired.set()
-            release.wait()
-            session._lock.release()
+            with session:
+                acquired.set()
+                release.wait()
 
         t_holder = _threading.Thread(target=holder)
         t_holder.start()
@@ -2404,7 +2324,7 @@ class TestClaudeSessionInterrupt:
         t_interrupt = _threading.Thread(target=lambda: session.interrupt("msg"))
         t_interrupt.start()
 
-        # interrupt is blocked on lock.acquire(); stdin must not be written yet
+        # interrupt is blocked on FSM acquire; stdin must not be written yet
         assert proc.stdin.write.call_count == 0
 
         release.set()
@@ -2653,7 +2573,6 @@ class TestClaudeClientSessionAttachment:
         session.prompt.side_effect = prompt
         client = ClaudeClient(session=session)
         assert client.run_turn("fetch", retry_on_preempt=True) == "done"
-        session.wait_for_pending_preempt.assert_called_once_with()
 
 
 class TestClaudeOAuthState:
