@@ -90,7 +90,22 @@ class Watchdog:
         return new_state
 
     def run(self) -> int:
-        """Run one watchdog iteration. Returns 0."""
+        """Run one watchdog iteration. Returns 0.
+
+        Current design — oracle mode: the hand-written ``if is_alive`` branch
+        drives the restart logic; ``_fsm_transition`` fires alongside each
+        decision as a crash-loud assertion.  A rejected FSM transition means the
+        code diverged from the formal model and surfaces immediately.
+
+        **E1 flip point**: when the E-band work lands, this method can be
+        rewritten as a thin driver that feeds one of ``{WatchdogDetectAlive,
+        WatchdogDetectDead}`` into the extracted ``watchdog_fsm.transition``
+        and dispatches on the returned state — replacing the hand-written
+        ``if not is_alive → start`` conditional entirely.  The oracle assertions
+        become the control flow; the formal model drives the code rather than
+        checking it from the side.  See ``models/watchdog_transitions.v`` for
+        the full flip-point note.
+        """
         for repo_name, repo_cfg in self.repos.items():
             if self.registry.is_alive(repo_name):
                 # Thread alive: assert the FSM accepts the alive-observation
