@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import ProviderID
 from fido.registry import (
@@ -13,6 +15,7 @@ from fido.registry import (
     _make_thread,
     make_registry,
 )
+from fido.rocq import worker_registry_crash as registry_fsm
 
 
 class RepoConfig(_RepoConfig):
@@ -568,6 +571,10 @@ class TestWorkerRegistry:
         reg = WorkerRegistry(factory)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
+        # Simulate a crash so the FSM accepts the second start
+        # (no_start_while_active: start() on a live thread is rejected).
+        threads[0].is_alive.return_value = False
+        threads[0]._stop = False
         reg.start(cfg)
         assert factory.call_count == 2
         # Second start — latest thread is in registry
@@ -823,3 +830,171 @@ class TestRescoping:
         for t in threads:
             t.join(timeout=5)
         assert not errors
+
+
+class TestRegistryFsmOracle:
+    """Tests for the worker_registry_crash FSM oracle wired into WorkerRegistry.
+
+    Each test section maps to a proved invariant from
+    ``models/worker_registry_crash.v``.  The tests verify that
+    ``_registry_fsm_transition`` raises ``AssertionError`` on rejected
+    transitions (fail-closed contract) and that ``start()`` advances the
+    FSM correctly on each lifecycle path.
+    """
+
+    def _reg(self) -> WorkerRegistry:
+        return WorkerRegistry(MagicMock())
+
+    def _cfg(self, tmp_path: Path, name: str = "foo/bar") -> RepoConfig:
+        return _repo(name, tmp_path)
+
+    # ── _registry_fsm_transition fail-closed behaviour ──────────────────
+
+    def test_fsm_transition_crashes_on_rejected_event(self, tmp_path: Path) -> None:
+        """_registry_fsm_transition raises AssertionError on a rejected event.
+
+        Initial state is Absent; Rescue is rejected from Absent
+        (rescue_requires_prior_crash).  The oracle must raise immediately.
+        """
+        reg = self._reg()
+        with pytest.raises(AssertionError, match="worker_registry_crash FSM"):
+            reg._registry_fsm_transition(  # pyright: ignore[reportPrivateUsage]
+                "foo/bar", registry_fsm.Rescue()
+            )
+
+    def test_fsm_transition_error_includes_repo_name(self, tmp_path: Path) -> None:
+        """AssertionError message names the repo so the violation is easy to locate."""
+        reg = self._reg()
+        with pytest.raises(AssertionError, match="myorg/myrepo"):
+            reg._registry_fsm_transition(  # pyright: ignore[reportPrivateUsage]
+                "myorg/myrepo", registry_fsm.Rescue()
+            )
+
+    def test_fsm_transition_error_includes_state_and_event(self) -> None:
+        """AssertionError message names the rejected state and event."""
+        reg = self._reg()
+        with pytest.raises(AssertionError, match="Absent") as exc_info:
+            reg._registry_fsm_transition(  # pyright: ignore[reportPrivateUsage]
+                "foo/bar", registry_fsm.Rescue()
+            )
+        assert "Rescue" in str(exc_info.value)
+
+    def test_fsm_transition_initialises_state_to_absent(self) -> None:
+        """First successful transition uses Absent as the implicit starting state."""
+        reg = self._reg()
+        new_state = reg._registry_fsm_transition(  # pyright: ignore[reportPrivateUsage]
+            "foo/bar", registry_fsm.Launch()
+        )
+        assert isinstance(new_state, registry_fsm.Active)
+        assert isinstance(
+            reg._registry_fsm_states.get("foo/bar"),  # pyright: ignore[reportPrivateUsage]
+            registry_fsm.Active,
+        )
+
+    def test_fsm_transition_persists_state_between_calls(self) -> None:
+        """_registry_fsm_transition updates _registry_fsm_states; subsequent calls see the new state."""
+        reg = self._reg()
+        # Absent → Launch → Active
+        reg._registry_fsm_transition("foo/bar", registry_fsm.Launch())  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(
+            reg._registry_fsm_states.get("foo/bar"),
+            registry_fsm.Active,  # pyright: ignore[reportPrivateUsage]
+        )
+        # Active → ThreadDies → Crashed
+        reg._registry_fsm_transition("foo/bar", registry_fsm.ThreadDies())  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(
+            reg._registry_fsm_states.get("foo/bar"),
+            registry_fsm.Crashed,  # pyright: ignore[reportPrivateUsage]
+        )
+        # Crashed → Rescue → Active
+        reg._registry_fsm_transition("foo/bar", registry_fsm.Rescue())  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(
+            reg._registry_fsm_states.get("foo/bar"),
+            registry_fsm.Active,  # pyright: ignore[reportPrivateUsage]
+        )
+
+    # ── start() oracle integration ───────────────────────────────────────
+
+    def test_start_fresh_advances_fsm_absent_to_active(self, tmp_path: Path) -> None:
+        """start() with no prior thread fires Launch: Absent → Active."""
+        reg = self._reg()
+        reg.start(self._cfg(tmp_path))
+        assert isinstance(
+            reg._registry_fsm_states.get("foo/bar"),
+            registry_fsm.Active,  # pyright: ignore[reportPrivateUsage]
+        )
+
+    def test_start_crash_rescue_advances_fsm_through_crash(
+        self, tmp_path: Path
+    ) -> None:
+        """start() after crash fires ThreadDies then Rescue: Active → Crashed → Active."""
+        threads = [MagicMock(), MagicMock()]
+        factory = MagicMock(side_effect=threads)
+        reg = WorkerRegistry(factory)
+        cfg = self._cfg(tmp_path)
+        reg.start(cfg)
+        assert isinstance(
+            reg._registry_fsm_states.get("foo/bar"),
+            registry_fsm.Active,  # pyright: ignore[reportPrivateUsage]
+        )
+        # Simulate crash
+        threads[0].is_alive.return_value = False
+        threads[0]._stop = False
+        reg.start(cfg)
+        assert isinstance(
+            reg._registry_fsm_states.get("foo/bar"),
+            registry_fsm.Active,  # pyright: ignore[reportPrivateUsage]
+        )
+
+    def test_start_after_orderly_stop_advances_fsm_through_stopped(
+        self, tmp_path: Path
+    ) -> None:
+        """start() after orderly stop fires ThreadStops then Launch: Active → Stopped → Active."""
+        threads = [MagicMock(), MagicMock()]
+        factory = MagicMock(side_effect=threads)
+        reg = WorkerRegistry(factory)
+        cfg = self._cfg(tmp_path)
+        reg.start(cfg)
+        # Simulate orderly stop
+        threads[0].is_alive.return_value = False
+        threads[0]._stop = True
+        reg.start(cfg)
+        assert isinstance(
+            reg._registry_fsm_states.get("foo/bar"),
+            registry_fsm.Active,  # pyright: ignore[reportPrivateUsage]
+        )
+
+    def test_start_with_alive_predecessor_raises_assertion(
+        self, tmp_path: Path
+    ) -> None:
+        """start() on a live thread raises AssertionError (no_start_while_active).
+
+        An alive thread means the slot is Active; Launch is rejected from Active.
+        This surfaces the coordination violation immediately rather than silently
+        replacing the live thread.
+        """
+        threads = [MagicMock(), MagicMock()]
+        factory = MagicMock(side_effect=threads)
+        reg = WorkerRegistry(factory)
+        cfg = self._cfg(tmp_path)
+        reg.start(cfg)
+        # Leave thread alive (is_alive() returns a truthy MagicMock by default)
+        threads[0].is_alive.return_value = True
+        with pytest.raises(AssertionError, match="worker_registry_crash FSM"):
+            reg.start(cfg)
+
+    def test_fsm_state_is_tracked_per_repo(self, tmp_path: Path) -> None:
+        """FSM state is independent for each repo — no cross-repo contamination."""
+        threads = [MagicMock(), MagicMock()]
+        factory = MagicMock(side_effect=threads)
+        reg = WorkerRegistry(factory)
+        reg.start(_repo("org/a", tmp_path))
+        reg.start(_repo("org/b", tmp_path))
+        assert isinstance(
+            reg._registry_fsm_states.get("org/a"),
+            registry_fsm.Active,  # pyright: ignore[reportPrivateUsage]
+        )
+        assert isinstance(
+            reg._registry_fsm_states.get("org/b"),
+            registry_fsm.Active,  # pyright: ignore[reportPrivateUsage]
+        )
