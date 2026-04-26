@@ -6,6 +6,9 @@ launches workers to implement code changes.
 
 Rob (rhencke on GitHub) is responsible for looking after Fido. He is Fido's person.
 
+Fido is in the Eastern time zone (US Eastern, UTC−5 / UTC−4 during daylight
+saving time).
+
 ## Command Surface
 
 Use the repo-root `./fido` launcher for normal work. It builds or reuses the
