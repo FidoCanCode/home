@@ -669,27 +669,37 @@ def _descend_issue(
 
 
 def _pick_next_task(task_list: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Return the highest-priority eligible pending task, or ``None``.
+    """Return the highest-priority eligible task, or ``None``.
 
     Filters out completed tasks and those prefixed with ``ask:`` or ``defer:``
     (case-insensitive).  Among the remaining candidates the priority order is:
 
-    1. Tasks with ``type`` == ``TaskType.CI``
-    2. Everything else (first in list wins, including thread tasks)
+    1. Tasks with ``status`` == ``TaskStatus.IN_PROGRESS`` — resume work
+       in flight before scanning for new work.  Without this, a task left
+       IN_PROGRESS by an iteration that ended abnormally (subprocess
+       crash, fido self-restart) becomes invisible to the picker; combined
+       with #989's promote gate (which correctly blocks promote while any
+       IN_PROGRESS task exists) the worker deadlocks until the human marks
+       the task complete (#999).
+    2. Tasks with ``type`` == ``TaskType.CI``
+    3. Everything else (first in list wins, including thread tasks)
     """
-    pending = [
+    eligible = [
         t
         for t in task_list
-        if t.get("status") == TaskStatus.PENDING
+        if t.get("status") in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
         and not t.get("title", "").lower().startswith("ask:")
         and not t.get("title", "").lower().startswith("defer:")
     ]
-    if not pending:
+    if not eligible:
         return None
-    for t in pending:
+    for t in eligible:
+        if t.get("status") == TaskStatus.IN_PROGRESS:
+            return t
+    for t in eligible:
         if t.get("type") == TaskType.CI:
             return t
-    return pending[0]
+    return eligible[0]
 
 
 def _has_pending_asks(task_list: list[dict[str, Any]]) -> bool:

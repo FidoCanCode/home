@@ -7636,6 +7636,34 @@ class TestPickNextTask:
         result = _pick_next_task([spec])
         assert result is spec  # returned via fallthrough, not thread path
 
+    def test_resumes_in_progress_task_over_pending(self) -> None:
+        """An IN_PROGRESS task wins over later PENDING work — resume what
+        we already started before scanning for new tasks (#999)."""
+        in_progress = self._task("Mid-flight", status="in_progress")
+        pending = self._task("Next up")
+        assert _pick_next_task([pending, in_progress]) is in_progress
+
+    def test_resumes_in_progress_over_pending_ci(self) -> None:
+        """Even a CI task does not preempt resumption of an IN_PROGRESS
+        task — finishing what we started keeps tasks.json honest before
+        we reach for new work (#999)."""
+        in_progress = self._task("Mid-flight", status="in_progress")
+        ci = self._task("Fix lint", task_type="ci")
+        assert _pick_next_task([ci, in_progress]) is in_progress
+
+    def test_in_progress_alone_is_returned(self) -> None:
+        """A lone IN_PROGRESS task is picked — without this, the worker
+        deadlocks because the picker sees no candidates while the promote
+        gate (added in #989) refuses to promote past it (#999)."""
+        in_progress = self._task("Mid-flight", status="in_progress")
+        assert _pick_next_task([in_progress]) is in_progress
+
+    def test_in_progress_skipped_when_ask_prefixed(self) -> None:
+        """ASK/DEFER prefixes still suppress IN_PROGRESS — they're a
+        signal the task is awaiting a human, not a signal to resume."""
+        ask_in_progress = self._task("ask: clarify", status="in_progress")
+        assert _pick_next_task([ask_in_progress]) is None
+
 
 class TestRescopeBeforePick:
     """Tests for Worker.rescope_before_pick."""
