@@ -129,6 +129,19 @@ Markdown instruction files passed to sub-Claude as system prompts:
 | `ci.md` | CI failure fixing |
 | `resume.md` | PR resumption |
 
+### Coordination models (`models/`)
+
+Rocq source files (`.v`) that formally specify Fido's coordination
+invariants.  Each model is extracted to Python and run as a runtime oracle
+that crashes loudly when the invariant is violated.  Generated Python lives
+in `src/fido/rocq/`.
+
+**Survey:** `models/BUG_MINED_INVARIANTS.md` — a structured analysis of 23+
+closed `Bug:` issues mapped to 15 coordination invariant clusters (A–O).
+Each cluster names the invariant, the bugs that motivated it, the Rocq
+model that will prove it, and the D-series issue tracking the work.  Start
+here when investigating a coordination bug or planning a new model.
+
 ## Task type system
 
 Tasks have a mandatory `type` field using the `TaskType` enum (`fido.types`):
