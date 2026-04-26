@@ -874,7 +874,8 @@ class TestClaudeSessionMessageCounts:
         list(session.iter_events())
         assert session.received_count == 3
 
-    def test_counters_reset_on_respawn(self, tmp_path: Path) -> None:
+    def test_counters_accumulate_across_respawn(self, tmp_path: Path) -> None:
+        """Counts are cumulative since boot — not reset on respawn."""
         import json as _json
 
         system_file = tmp_path / "system.md"
@@ -893,8 +894,9 @@ class TestClaudeSessionMessageCounts:
         assert session.sent_count == 1
         assert session.received_count == 1
         session.reset()
-        assert session.sent_count == 0
-        assert session.received_count == 0
+        # Counts must survive the respawn — they accumulate since boot.
+        assert session.sent_count == 1
+        assert session.received_count == 1
 
 
 class TestClaudeSessionDrainToBoundary:

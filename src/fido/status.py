@@ -148,6 +148,8 @@ class RepoStatus:
     session_owner: str | None = None
     session_alive: bool = False
     session_dropped_count: int = 0
+    session_sent_count: int = 0
+    session_received_count: int = 0
     claude_talker: ClaudeTalkerInfo | None = None
     rescoping: bool = False  # True while a background Opus reorder is in flight
     issue_cache: IssueCacheInfo | None = None
@@ -476,6 +478,8 @@ def _fetch_activities(
                 "session_alive": item.get("session_alive", False),
                 "session_pid": item.get("session_pid"),
                 "session_dropped_count": item.get("session_dropped_count", 0),
+                "session_sent_count": item.get("session_sent_count", 0),
+                "session_received_count": item.get("session_received_count", 0),
                 "claude_talker": item.get("claude_talker"),
                 "provider_status": _parse_provider_status(item.get("provider_status")),
                 "rescoping": item.get("rescoping", False),
@@ -629,6 +633,8 @@ def repo_status(
     session_alive: bool = False,
     session_pid: int | None = None,
     session_dropped_count: int = 0,
+    session_sent_count: int = 0,
+    session_received_count: int = 0,
     claude_talker: ClaudeTalkerInfo | None = None,
     rescoping: bool = False,
     provider_status: ProviderPressureStatus | None = None,
@@ -664,6 +670,8 @@ def repo_status(
             session_owner=session_owner,
             session_alive=session_alive,
             session_dropped_count=session_dropped_count,
+            session_sent_count=session_sent_count,
+            session_received_count=session_received_count,
             claude_talker=claude_talker,
             rescoping=rescoping,
             issue_cache=issue_cache,
@@ -720,6 +728,8 @@ def repo_status(
         session_owner=session_owner,
         session_alive=session_alive,
         session_dropped_count=session_dropped_count,
+        session_sent_count=session_sent_count,
+        session_received_count=session_received_count,
         claude_talker=claude_talker,
         rescoping=rescoping,
         issue_cache=issue_cache,
@@ -788,6 +798,12 @@ def collect() -> FidoStatus:
                 session_alive=bool(info.get("session_alive")) if info else False,
                 session_pid=session_pid_val,
                 session_dropped_count=int(info.get("session_dropped_count", 0))
+                if info
+                else 0,
+                session_sent_count=int(info.get("session_sent_count", 0))
+                if info
+                else 0,
+                session_received_count=int(info.get("session_received_count", 0))
                 if info
                 else 0,
                 claude_talker=talker_info,
