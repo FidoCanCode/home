@@ -4,10 +4,15 @@
 [FidoCanCode/home](https://github.com/FidoCanCode/home),
 2026-04-08 → 2026-04-26.
 **Filed as:** [#1040](https://github.com/FidoCanCode/home/issues/1040)
+**PR:** [#1043](https://github.com/FidoCanCode/home/pull/1043)
 
 Each cluster maps a class of bugs to one invariant, the subsystem that
 should enforce it, the proposed Rocq model, and the existing D-series
 issue (if any) that should absorb the work.
+
+**Status (2026-04-26):** Empirical bug citations added to all listed
+D-series issues: D1 (#739), D2 (#740), D3 (#741), D9 (#747), D10 (#748),
+D11 (#749), D13 (#751), D16 (#888), D18 (#890).
 
 ---
 
