@@ -625,7 +625,7 @@ class OwnedSession:
                     new = fsm.transition(self._fsm_state, fsm.WorkerAcquire())
                     assert new is not None  # Free + WorkerAcquire always succeeds
                     self._fsm_state = new  # → OwnedByWorker
-                    log.info(
+                    log.debug(
                         "fsm[%s]: WorkerAcquire (tid=%d, waited=%s, queue=%d)",
                         self._repo_name or "?",
                         tid,
@@ -633,7 +633,7 @@ class OwnedSession:
                         len(self._handler_queue),
                     )
                     return
-                log.info(
+                log.debug(
                     "fsm[%s]: WorkerAcquire blocked — state=%s, queue=%d (tid=%d)",
                     self._repo_name or "?",
                     type(self._fsm_state).__name__,
@@ -663,7 +663,7 @@ class OwnedSession:
             if new is not None:
                 # Free → OwnedByHandler: immediate acquisition.
                 self._fsm_state = new
-                log.info(
+                log.debug(
                     "fsm[%s]: HandlerAcquire immediate (tid=%d)",
                     self._repo_name or "?",
                     tid,
@@ -672,7 +672,7 @@ class OwnedSession:
             # Occupied; register in the FIFO handler queue and wait.
             waiter = threading.Event()
             self._handler_queue.append(waiter)
-            log.info(
+            log.debug(
                 "fsm[%s]: HandlerAcquire queued — state=%s, position=%d (tid=%d)",
                 self._repo_name or "?",
                 type(self._fsm_state).__name__,
@@ -683,7 +683,7 @@ class OwnedSession:
         assert waiter is not None
         waiter.wait()
         # _fsm_release set _fsm_state = OwnedByHandler and signalled us.
-        log.info(
+        log.debug(
             "fsm[%s]: HandlerAcquire dequeued (tid=%d)",
             self._repo_name or "?",
             tid,
@@ -728,7 +728,7 @@ class OwnedSession:
                 waiter = self._handler_queue.pop(0)
                 self._fsm_state = fsm.OwnedByHandler()
                 waiter.set()
-                log.info(
+                log.debug(
                     "fsm[%s]: %s → OwnedByHandler (tid=%d, queue=%d remaining)",
                     self._repo_name or "?",
                     type(ev).__name__,
@@ -739,7 +739,7 @@ class OwnedSession:
                 # No handlers waiting; transition to Free and wake workers.
                 self._fsm_state = new_state  # → Free
                 self._fsm_cond.notify_all()
-                log.info(
+                log.debug(
                     "fsm[%s]: %s → Free (tid=%d)",
                     self._repo_name or "?",
                     type(ev).__name__,
