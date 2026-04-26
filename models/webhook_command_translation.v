@@ -1,0 +1,210 @@
+(** Webhook-to-command translation types.
+
+    Models GitHub webhook payloads as typed event descriptors and the typed
+    commands they translate to.  The [translate] function lives in a later
+    commit; this file defines the shapes that the translation boundary
+    consumes and produces.
+
+    Design boundary: raw GitHub webhook JSON enters [dispatch] in
+    [events.py] and exits as a typed [WebhookCommand].  [WebhookCommand]
+    is what the D4 session-ownership FIFO [Enqueue]s; its payload is what
+    the handler acts on when it [Dequeue]s.
+
+    D5 lands as specification ahead of implementation.  Today's [dispatch]
+    returns a loosely-typed [Action] dataclass; the model is the intended
+    typed-command contract and will later serve as an oracle around the
+    current Fido path, crashing with theorem names on divergence.
+
+    Six handled (event-type, action) pairs map to five command kinds.
+    Unknown or silently-filtered events — wrong action, missing required
+    fields, self-comment, non-allowed author, non-PR issue comments,
+    non-failure CI conclusion, non-merged PR close — produce [None] from
+    [translate] (Task 2).  This is the fail-closed contract: unrecognised
+    shapes never yield commands. *)
+
+Declare ML Module "rocq-python-extraction".
+Declare ML Module "rocq-runtime.plugins.extraction".
+
+From Stdlib Require Import
+  Lists.List
+  Numbers.BinNums
+  Strings.String.
+
+Open Scope string_scope.
+Import ListNotations.
+
+(* Prevent sort-polymorphism so nullary-constructor extraction is clean.
+   See the note in [rocq-python-extraction/test/datatypes.v] for context. *)
+Unset Universe Polymorphism.
+
+(* Remap [option] so [Some x] erases to [x] and [None] stays [None].
+   This makes [translate] return the [WebhookCommand] directly on success
+   and [None] on rejection — a natural Python return type. *)
+Extract Inductive option => ""
+  [ "" "None" ]
+  "(lambda fSome, fNone, x: fNone() if x is None else fSome(x))".
+
+(** * DeliveryId
+
+    Opaque identifier for one webhook delivery.  GitHub sends a unique
+    [X-GitHub-Delivery] UUID header per attempt; Fido models it as a
+    [positive] for dedup comparisons.  Two arrivals with the same
+    [DeliveryId] are the same delivery redelivered — the translate oracle
+    and handler must produce identical commands for identical delivery ids.
+    The dedup predicate is formalised in Task 2. *)
+Definition DeliveryId := positive.
+
+(** * CheckConclusion
+
+    The CI check outcomes that Fido acts on.  GitHub also sends [success],
+    [neutral], [cancelled], [skipped], [stale], and [action_required];
+    those conclusions never cross the translation boundary — only
+    [CIFailure] and [CITimedOut] produce a [WebhookCommand].
+    ([events.py:617-619]: conclusion not in ("failure", "timed_out") → None.) *)
+Inductive CheckConclusion : Type :=
+| CIFailure  : CheckConclusion
+| CITimedOut : CheckConclusion.
+
+(** * CommentKind
+
+    Distinguishes the two PR comment surfaces Fido handles.  [ReviewLine]
+    comments attach to specific file lines and are posted via the pulls
+    review API; [TopLevelPR] comments appear on the issue thread and are
+    posted via the issues API.  Both produce a [CmdComment] — the kind
+    field routes the reply to the correct GitHub endpoint.
+
+    ([events.py:535-611]: review comment → reply_to with comment_type "pulls";
+     issue comment → thread with comment_type "issues".) *)
+Inductive CommentKind : Type :=
+| ReviewLine : CommentKind
+| TopLevelPR : CommentKind.
+
+(** * WebhookEvent
+
+    Typed event descriptors extracted from raw GitHub webhook JSON.  One
+    constructor per (event-type, action) pair that Fido may act on.
+
+    The [wev_delivery] field is the idempotence key shared by every
+    constructor.  It uniquely identifies one GitHub delivery attempt and
+    is the dedup anchor for detecting redeliveries.
+
+    Constructors match the six branches of [events.py:dispatch]:
+      [WevReviewComment]    — pull_request_review_comment / created
+      [WevIssueComment]     — issue_comment / created (on PR)
+      [WevCIFailure]        — check_run / completed (failure or timed_out)
+      [WevPRMerged]         — pull_request / closed (merged)
+      [WevIssueAssigned]    — issues / assigned
+      [WevReviewSubmitted]  — pull_request_review / submitted *)
+Inductive WebhookEvent : Type :=
+
+| WevReviewComment
+    (wev_delivery   : DeliveryId)
+    (wev_pr         : positive)
+    (wev_comment_id : positive)
+    (wev_author     : string)
+    (wev_is_bot     : bool)
+    : WebhookEvent
+
+| WevIssueComment
+    (wev_delivery   : DeliveryId)
+    (wev_pr         : positive)
+    (wev_comment_id : positive)
+    (wev_author     : string)
+    (wev_is_bot     : bool)
+    : WebhookEvent
+
+| WevCIFailure
+    (wev_delivery   : DeliveryId)
+    (wev_check_name : string)
+    (wev_conclusion : CheckConclusion)
+    (wev_pr_numbers : list positive)
+    : WebhookEvent
+
+| WevPRMerged
+    (wev_delivery : DeliveryId)
+    (wev_pr       : positive)
+    : WebhookEvent
+
+| WevIssueAssigned
+    (wev_delivery : DeliveryId)
+    (wev_issue    : positive)
+    (wev_assignee : string)
+    : WebhookEvent
+
+| WevReviewSubmitted
+    (wev_delivery  : DeliveryId)
+    (wev_pr        : positive)
+    (wev_review_id : positive)
+    (wev_author    : string)
+    : WebhookEvent.
+
+(** * WebhookCommand
+
+    Typed commands produced by translating a [WebhookEvent].  Each
+    constructor carries the payload the session-ownership FIFO handler
+    needs after [Dequeue].
+
+    [cmd_delivery] is the idempotence key inherited from the originating
+    [WebhookEvent].  A handler that sees the same [cmd_delivery] twice
+    must not double-act — the dedup predicate (Task 2) formalises this
+    obligation.
+
+    [CmdComment] covers both [WevReviewComment] and [WevIssueComment];
+    [cmd_kind] routes the reply to the correct GitHub API surface.
+
+    [CmdReviewSubmitted] is kept separate from [CmdComment] because the
+    review-level event is handled per-comment today ([events.py:528-533])
+    and is a stub ([reply_to_review] is a no-op); the command exists to
+    record the arrival and support future per-review triage.
+
+    The mapping from [WebhookCommand] to a D4 [Contender] (for [Enqueue])
+    is added in Task 3 once the cross-model import is wired up. *)
+Inductive WebhookCommand : Type :=
+
+| CmdComment
+    (cmd_delivery   : DeliveryId)
+    (cmd_pr         : positive)
+    (cmd_comment_id : positive)
+    (cmd_author     : string)
+    (cmd_is_bot     : bool)
+    (cmd_kind       : CommentKind)
+    : WebhookCommand
+
+| CmdCIFailure
+    (cmd_delivery   : DeliveryId)
+    (cmd_check_name : string)
+    (cmd_conclusion : CheckConclusion)
+    (cmd_pr_numbers : list positive)
+    : WebhookCommand
+
+| CmdPRMerged
+    (cmd_delivery : DeliveryId)
+    (cmd_pr       : positive)
+    : WebhookCommand
+
+| CmdIssueAssigned
+    (cmd_delivery : DeliveryId)
+    (cmd_issue    : positive)
+    (cmd_assignee : string)
+    : WebhookCommand
+
+| CmdReviewSubmitted
+    (cmd_delivery  : DeliveryId)
+    (cmd_pr        : positive)
+    (cmd_review_id : positive)
+    (cmd_author    : string)
+    : WebhookCommand.
+
+(** * cmd_delivery_id
+
+    Accessor that extracts the [DeliveryId] from any [WebhookCommand].
+    Used by the dedup predicate (Task 2) to compare two commands for
+    idempotence without pattern-matching on the full command shape. *)
+Definition cmd_delivery_id (cmd : WebhookCommand) : DeliveryId :=
+  match cmd with
+  | CmdComment         d _ _ _ _ _ => d
+  | CmdCIFailure       d _ _ _     => d
+  | CmdPRMerged        d _         => d
+  | CmdIssueAssigned   d _ _       => d
+  | CmdReviewSubmitted d _ _ _     => d
+  end.
