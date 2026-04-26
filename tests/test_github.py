@@ -430,9 +430,14 @@ class TestGitHubClass:
         mock_s.get.return_value = mock_resp
         result = gh.fetch_comment_thread("o/r", 7, 10)
         assert result == [
-            {"id": 10, "author": "alice", "body": "root comment"},
-            {"id": 11, "author": "fido", "body": "reply one"},
-            {"id": 12, "author": "alice", "body": "reply two"},
+            {
+                "id": 10,
+                "author": "alice",
+                "body": "root comment",
+                "in_reply_to_id": None,
+            },
+            {"id": 11, "author": "fido", "body": "reply one", "in_reply_to_id": 10},
+            {"id": 12, "author": "alice", "body": "reply two", "in_reply_to_id": 10},
         ]
 
     def test_fetch_comment_thread_finds_thread_by_reply_id(self) -> None:
@@ -458,8 +463,8 @@ class TestGitHubClass:
         mock_s.get.return_value = mock_resp
         result = gh.fetch_comment_thread("o/r", 7, 11)
         assert result == [
-            {"id": 10, "author": "alice", "body": "root"},
-            {"id": 11, "author": "fido", "body": "reply"},
+            {"id": 10, "author": "alice", "body": "root", "in_reply_to_id": None},
+            {"id": 11, "author": "fido", "body": "reply", "in_reply_to_id": 10},
         ]
 
     def test_fetch_comment_thread_returns_empty_when_not_found(self) -> None:
