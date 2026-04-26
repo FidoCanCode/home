@@ -26,9 +26,19 @@
 
     Six proved invariants capture which events are valid in which states. *)
 
+Declare ML Module "rocq-python-extraction".
+Declare ML Module "rocq-runtime.plugins.extraction".
+
 (* Prevent sort-polymorphism so nullary-constructor extraction is clean.
    See the note in [rocq-python-extraction/test/datatypes.v] for context. *)
 Unset Universe Polymorphism.
+
+(* Remap [option] so [Some x] erases to [x] and [None] stays [None].
+   This makes [transition] return the new [WorkerState] directly on success
+   and [None] on rejection — a natural Python return type. *)
+Extract Inductive option => ""
+  [ "" "None" ]
+  "(lambda fSome, fNone, x: fNone() if x is None else fSome(x))".
 
 (** * WorkerState
 
@@ -81,6 +91,8 @@ Definition transition (w : WorkerState) (ev : WorkerEvent) : option WorkerState 
   | Deferred, Shutdown => Some Absent
   | _,        _        => None
   end.
+
+Python File Extraction worker_claude_lifecycle "transition".
 
 (** * Proved invariants
 
