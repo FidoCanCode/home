@@ -4257,11 +4257,48 @@ class TestWritePrDescription:
             "## Work queue\n\n<!-- WORK_QUEUE_START -->\n"
             "- [ ] do a thing\n<!-- WORK_QUEUE_END -->"
         )
-        self._call(gh, existing_body=existing)
+        task_list = [
+            {"id": "1", "title": "do a thing", "status": "pending", "type": "spec"}
+        ]
+        self._call(gh, existing_body=existing, task_list=task_list)
         body = gh.edit_pr_body.call_args[0][2]
         assert "do a thing" in body
         assert "<!-- WORK_QUEUE_START -->" in body
         assert "Old description." not in body
+
+    def test_rewrite_refreshes_work_queue_from_task_list(self) -> None:
+        """Regression: stale pending task in PR body must not survive a rewrite.
+
+        Reproduces the race from #1013: PR body was fetched before the Opus
+        call with a task still showing as pending; sync_tasks then marked it
+        completed in tasks.json; the description rewrite must write the
+        current state from task_list, not the stale body snapshot.
+        """
+        gh = MagicMock()
+        # Existing body has "Rename Wev" as pending — this is the stale snapshot.
+        existing = (
+            "Some description.\n\nFixes #1.\n\n---\n\n"
+            "## Work queue\n\n<!-- WORK_QUEUE_START -->\n"
+            "- [ ] Rename Wev prefix <!-- type:thread -->\n"
+            "<!-- WORK_QUEUE_END -->"
+        )
+        # task_list reflects the true state: task is completed.
+        task_list = [
+            {
+                "id": "1",
+                "title": "Rename Wev prefix",
+                "status": "completed",
+                "type": "thread",
+            }
+        ]
+        self._call(gh, existing_body=existing, task_list=task_list)
+        body = gh.edit_pr_body.call_args[0][2]
+        # The completed task must appear in the completed section, not as pending.
+        assert "- [ ] Rename Wev prefix" not in body
+        assert "- [x] Rename Wev prefix" in body
+        # Structural markers must still be present.
+        assert "<!-- WORK_QUEUE_START -->" in body
+        assert "<!-- WORK_QUEUE_END -->" in body
 
     def test_rewrite_raises_when_no_divider(self) -> None:
         gh = MagicMock()

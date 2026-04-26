@@ -858,6 +858,15 @@ def _write_pr_description(
     # Preserve the existing rest section or build the work-queue from scratch.
     if divider in existing_body:
         rest = existing_body.split(divider, 1)[1]
+        # Re-apply the work queue from task_list so a stale PR body snapshot
+        # fetched before the Opus call cannot clobber a sync_tasks update that
+        # landed while Opus was running (fixes #1013).
+        queue = tasks._format_work_queue(  # pyright: ignore[reportPrivateUsage]
+            task_list
+        )
+        rest = tasks._apply_queue_to_body(  # pyright: ignore[reportPrivateUsage]
+            rest, queue
+        )
     else:
         pending = [t for t in task_list if t.get("status") == TaskStatus.PENDING]
         next_task = _pick_next_task(task_list)
