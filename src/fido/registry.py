@@ -11,6 +11,7 @@ from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
 from fido.provider import PromptSession, Provider
+from fido.rocq import worker_registry_crash as registry_fsm
 from fido.worker import WorkerThread
 
 log = logging.getLogger(__name__)
@@ -110,6 +111,36 @@ class WorkerRegistry:
         # that don't exercise the cache path don't pay setup cost.
         self._issue_caches: dict[str, IssueTreeCache] = {}
         self._issue_cache_lock = threading.Lock()
+        # Per-repo FSM state from worker_registry_crash.v.  Only written by
+        # start(), which is called sequentially during startup and from the
+        # single watchdog daemon thread during crash recovery — no lock needed.
+        self._registry_fsm_states: dict[str, registry_fsm.State] = {}
+
+    def _registry_fsm_transition(
+        self, repo_name: str, event: registry_fsm.Event
+    ) -> registry_fsm.State:
+        """Fire *event* for *repo_name*, raising ``AssertionError`` if rejected.
+
+        Single oracle for every FSM transition in :meth:`start`, so a
+        coordination bug surfaces as a crash rather than silent drift.
+        Initialises the repo's FSM state to ``Absent`` on first access.
+        """
+        prev = self._registry_fsm_states.get(repo_name, registry_fsm.Absent())
+        new_state = registry_fsm.transition(prev, event)
+        if new_state is None:
+            raise AssertionError(
+                f"worker_registry_crash FSM: {type(event).__name__} rejected in "
+                f"state {type(prev).__name__} for repo {repo_name!r}"
+            )
+        self._registry_fsm_states[repo_name] = new_state
+        log.debug(
+            "registry[%s]: FSM %s →%s via %s",
+            repo_name,
+            type(prev).__name__,
+            type(new_state).__name__,
+            type(event).__name__,
+        )
+        return new_state
 
     def start(self, repo_cfg: RepoConfig) -> None:
         """Create and start a WorkerThread for *repo_cfg*.
@@ -117,18 +148,51 @@ class WorkerRegistry:
         If a previous thread for this repo crashed (dead but not stopped
         orderly), its live session is rescued and handed to the replacement so
         the persistent :class:`~fido.claude.ClaudeSession` survives the crash.
+
+        FSM oracle — the :mod:`fido.rocq.worker_registry_crash` extracted
+        model is asserted on every call so a coordination violation surfaces
+        as an immediate crash rather than silent state divergence:
+
+        - Fresh start (no prior thread):  ``Absent → Launch → Active``
+        - Crash recovery with rescue:     ``Active → ThreadDies → Crashed →
+                                            Rescue → Active``
+        - Re-enable after orderly stop:   ``Active → ThreadStops → Stopped →
+                                            Launch → Active``
+        - Live predecessor (bug):         ``Launch`` rejected from ``Active``
+                                          → ``AssertionError``
+                                          (``no_start_while_active`` invariant)
+
+        E1 flip point: when the E-band work lands, :meth:`start` can be
+        split at the boundary — a thin entry point feeds the right event
+        (``Launch`` vs ``Rescue``) into the extracted ``registry_fsm.transition``
+        and dispatches on the returned state, replacing the hand-written
+        ``old_thread is not None and not old_thread.is_alive() and not
+        old_thread._stop`` guard entirely.
         """
         provider = None
         session_issue = None
         old_thread = self._threads.get(repo_cfg.name)
-        if (
-            old_thread is not None
-            and not old_thread.is_alive()
-            and not old_thread._stop  # pyright: ignore[reportPrivateUsage]
+        if old_thread is None:
+            # No predecessor — initial start: Absent → Active.
+            self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
+        elif (
+            not old_thread.is_alive() and not old_thread._stop  # pyright: ignore[reportPrivateUsage]
         ):
-            # Crashed thread — rescue the live provider before replacing it
+            # Crashed predecessor — rescue the live provider:
+            # Active → Crashed (ThreadDies) → Active (Rescue).
+            self._registry_fsm_transition(repo_cfg.name, registry_fsm.ThreadDies())
+            self._registry_fsm_transition(repo_cfg.name, registry_fsm.Rescue())
             provider = old_thread.detach_provider()
             session_issue, old_thread._session_issue = old_thread._session_issue, None  # pyright: ignore[reportPrivateUsage]
+        elif not old_thread.is_alive():
+            # Orderly-stopped predecessor (_stop is True):
+            # Active → Stopped (ThreadStops) → Active (Launch).
+            self._registry_fsm_transition(repo_cfg.name, registry_fsm.ThreadStops())
+            self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
+        else:
+            # Alive predecessor — the FSM rejects Launch from Active, surfacing
+            # the no_start_while_active violation as an immediate AssertionError.
+            self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
         thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
         self._threads[repo_cfg.name] = thread
         with self._started_at_lock:
