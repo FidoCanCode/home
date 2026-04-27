@@ -293,6 +293,16 @@ class PromptSession(Protocol):
         or session-state loss."""
         ...
 
+    def switch_tools(self, tools: str | None) -> None:
+        """Restrict or restore available tools for the continued session.
+
+        *tools* is passed as ``--tools`` to the subprocess on respawn while
+        preserving ``--resume`` so conversation context carries across the
+        mode boundary.  ``None`` = no restriction (worker mode); ``""`` = no
+        tools (handler mode, enforcing #1042).  No-op if unchanged.
+        """
+        ...
+
     def recover(self) -> None:
         """Reattach or revive the underlying session after an interruption."""
         ...

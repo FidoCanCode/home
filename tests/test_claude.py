@@ -1669,6 +1669,107 @@ class TestClaudeSessionSwitchModel:
                 session.switch_model("claude-sonnet-4-6")
 
 
+class TestClaudeSessionSwitchTools:
+    """switch_tools respawns the subprocess with ``--tools <value> --resume``
+    so the continued session can vary its allowed tool set per turn without
+    losing conversation context.  This is the enforcement mechanism for #1042:
+    handler turns use ``tools=""`` (no tools) and worker turns use ``tools=None``
+    (unrestricted).
+    """
+
+    def test_same_tools_is_noop(self, tmp_path: Path) -> None:
+        """When tools already match, no respawn happens."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)  # default _tools=None
+        with patch.object(session, "_respawn") as mock_respawn:
+            session.switch_tools(None)
+        mock_respawn.assert_not_called()
+
+    def test_restrict_to_no_tools_respawns_preserving_session_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Switching to empty-string tools updates ``_tools`` and triggers
+        ``_respawn`` with ``clear_session_id=False`` so ``--resume <sid>``
+        keeps conversation context (continued session, not fresh)."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        with patch.object(session, "_respawn") as mock_respawn:
+            session.switch_tools("")
+        assert session._tools == ""
+        mock_respawn.assert_called_once()
+        kwargs = mock_respawn.call_args.kwargs
+        assert kwargs["clear_session_id"] is False
+
+    def test_restore_unrestricted_tools_respawns_preserving_session_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Switching from restricted back to None respawns with resume."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        session._tools = ""  # pretend we're already in handler mode
+        with patch.object(session, "_respawn") as mock_respawn:
+            session.switch_tools(None)
+        assert session._tools is None
+        mock_respawn.assert_called_once()
+        kwargs = mock_respawn.call_args.kwargs
+        assert kwargs["clear_session_id"] is False
+
+    def test_switch_propagates_respawn_error(self, tmp_path: Path) -> None:
+        """Errors raised by ``_respawn`` (e.g. kill timeout) propagate."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        boom = OSError("kill failed")
+        with patch.object(session, "_respawn", side_effect=boom):
+            with pytest.raises(OSError, match="kill failed"):
+                session.switch_tools("")
+
+
+class TestClaudeSessionSpawnTools:
+    """Verify that ``_spawn`` includes ``--tools`` only when ``_tools`` is set."""
+
+    def test_no_tools_flag_when_unrestricted(self, tmp_path: Path) -> None:
+        """Default construction (tools=None) must NOT include ``--tools``."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([], [], []))
+        ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
+        cmd = fake_popen.call_args.args[0]
+        assert "--tools" not in cmd
+
+    def test_tools_flag_included_when_restricted(self, tmp_path: Path) -> None:
+        """When ``tools=""`` is passed, spawn includes ``--tools ""``."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([], [], []))
+        ClaudeSession(system_file, popen=fake_popen, selector=fake_selector, tools="")
+        cmd = fake_popen.call_args.args[0]
+        assert "--tools" in cmd
+        assert cmd[cmd.index("--tools") + 1] == ""
+
+    def test_tools_flag_appears_before_resume(self, tmp_path: Path) -> None:
+        """``--tools`` is placed before ``--resume`` in the command."""
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        proc = _make_session_proc([])
+        fake_popen = MagicMock(return_value=proc)
+        fake_selector = MagicMock(return_value=([], [], []))
+        ClaudeSession(
+            system_file,
+            popen=fake_popen,
+            selector=fake_selector,
+            tools="",
+            session_id="sess-123",
+        )
+        cmd = fake_popen.call_args.args[0]
+        assert "--tools" in cmd
+        assert "--resume" in cmd
+        assert cmd.index("--tools") < cmd.index("--resume")
+
+
 class TestClaudeSessionConsumeUntilResult:
     def test_returns_result_text(self, tmp_path: Path) -> None:
         import json as _json

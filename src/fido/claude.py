@@ -472,6 +472,7 @@ class ClaudeSession(OwnedSession):
         selector: Callable[..., tuple[list[Any], list[Any], list[Any]]] = select.select,
         repo_name: str | None = None,
         session_id: str | None = None,
+        tools: str | None = None,
     ) -> None:
         self._idle_timeout = idle_timeout
         self._selector = selector
@@ -483,6 +484,12 @@ class ClaudeSession(OwnedSession):
         self._model = model_name(
             ProviderModel("claude-opus-4-6") if model is None else model
         )
+        # Allowed-tools restriction passed as ``--tools`` to the subprocess.
+        # ``None`` = no restriction (worker mode, default); ``""`` = no tools
+        # (handler mode).  Changed via :meth:`switch_tools`, which respawns
+        # the subprocess while keeping ``--resume`` so conversation context
+        # survives the mode transition (#1042).
+        self._tools: str | None = tools
         # Latest session_id seen in a stream-json event.  Updated inside
         # :meth:`iter_events` so :meth:`recover`, :meth:`reset`, and
         # :meth:`switch_model` can pass ``--resume <sid>``
@@ -617,6 +624,8 @@ class ClaudeSession(OwnedSession):
             "--system-prompt-file",
             str(self._system_file),
         ]
+        if self._tools is not None:
+            cmd += ["--tools", self._tools]
         if self._session_id:
             cmd += ["--resume", self._session_id]
         proc = self._popen_fn(
@@ -1087,6 +1096,35 @@ class ClaudeSession(OwnedSession):
             reason=f"switching model to {target_model}",
         )
         log.info("switch_model: now on model=%s", target_model)
+
+    def switch_tools(self, tools: str | None) -> None:
+        """Restrict or restore available tools by respawning with a different
+        ``--tools`` value.
+
+        When *tools* is ``""`` the subprocess is spawned with ``--tools ""``
+        so the model cannot invoke any tools — this is the handler mode that
+        enforces the invariant from #1042: webhook handlers must not perform
+        implementation work inline.  When *tools* is ``None``, the subprocess
+        uses the default tool set (no ``--tools`` flag) — this is the normal
+        worker mode.
+
+        A change triggers a subprocess respawn with ``--resume`` so
+        conversation context is preserved across the mode boundary.  No-op
+        when *tools* already matches the current value.
+        """
+        if tools == self._tools:
+            return
+        log.info(
+            "switch_tools: %r → %r (respawn-with-resume)",
+            self._tools,
+            tools,
+        )
+        self._tools = tools
+        self._respawn(
+            clear_session_id=False,
+            reason=f"switching tools to {tools!r}",
+        )
+        log.info("switch_tools: complete, tools=%r", self._tools)
 
     def _log_event(self, obj: dict[str, Any]) -> None:
         """Emit a human-readable INFO log line for a stream-json *obj*.
