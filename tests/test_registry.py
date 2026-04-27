@@ -1088,6 +1088,70 @@ class TestPreemptionFsmOracle:
         reg.assert_worker_turn_ok("foo/bar")
         reg.assert_worker_turn_ok("foo/bar")  # all should succeed
 
+    def test_interleaved_enter_exit_with_worker_turns(self) -> None:
+        """Full interleaved lifecycle: enters, exits, worker turns."""
+        reg = self._reg()
+        # Worker turn ok while empty
+        reg.assert_worker_turn_ok("foo/bar")
+        # Two webhooks arrive
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        # Worker blocked
+        with pytest.raises(AssertionError):
+            reg.assert_worker_turn_ok("foo/bar")
+        # First handler finishes — still blocked
+        reg.exit_untriaged("foo/bar")
+        with pytest.raises(AssertionError):
+            reg.assert_worker_turn_ok("foo/bar")
+        # Second handler finishes — now clear
+        reg.exit_untriaged("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
+    def test_concurrent_enter_exit_with_oracle(self) -> None:
+        """Concurrent enter/exit preserves FSM consistency.
+
+        After equal enters and exits, the FSM must be back in Empty
+        so assert_worker_turn_ok succeeds.
+        """
+        reg = self._reg()
+        n = 50
+        errors: list[Exception] = []
+
+        def enter_batch() -> None:
+            try:
+                for _ in range(n):
+                    reg.enter_untriaged("foo/bar")
+            except Exception as exc:
+                errors.append(exc)
+
+        def exit_batch() -> None:
+            try:
+                for _ in range(n):
+                    reg.exit_untriaged("foo/bar")
+            except Exception as exc:
+                errors.append(exc)
+
+        # Pre-fill so exits don't underflow
+        for _ in range(n):
+            reg.enter_untriaged("foo/bar")
+
+        threads = [
+            threading.Thread(target=enter_batch),
+            threading.Thread(target=exit_batch),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"concurrent errors: {errors}"
+        # Drain the remaining enters
+        remaining = reg._untriaged.get("foo/bar", 0)  # pyright: ignore[reportPrivateUsage]
+        for _ in range(remaining):
+            reg.exit_untriaged("foo/bar")
+        # After full drain, worker turn should be ok
+        reg.assert_worker_turn_ok("foo/bar")
+
 
 class TestRegistryFsmOracle:
     """Tests for the worker_registry_crash FSM oracle wired into WorkerRegistry.
