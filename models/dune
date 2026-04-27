@@ -17,4 +17,5 @@
   webhook_command_translation
   claude_session
   watchdog_transitions
-  worker_registry_crash))
+  worker_registry_crash
+  self_restart))
