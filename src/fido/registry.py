@@ -106,6 +106,13 @@ class WorkerRegistry:
         self._webhook_lock = threading.Lock()
         self._rescoping: dict[str, bool] = {}
         self._rescoping_lock = threading.Lock()
+        # Per-repo untriaged-webhook inbox (#1067).  Counts model-needing
+        # webhook handlers that have arrived but not yet finished processing.
+        # Protected by _untriaged_lock; _untriaged_drained events are set when
+        # the count hits 0 so the worker can wait efficiently at turn boundaries.
+        self._untriaged: dict[str, int] = {}
+        self._untriaged_drained: dict[str, threading.Event] = {}
+        self._untriaged_lock = threading.Lock()
         # Per-repo issue tree caches shared between worker + webhook
         # threads (closes #812).  Lazily created on first lookup so tests
         # that don't exercise the cache path don't pay setup cost.
@@ -440,6 +447,81 @@ class WorkerRegistry:
         """
         with self._rescoping_lock:
             return self._rescoping.get(repo_name, False)
+
+    # ── untriaged-webhook inbox (#1067) ──────────────────────────────────
+
+    def enter_untriaged(self, repo_name: str) -> None:
+        """Record that one model-needing webhook handler has started for *repo_name*.
+
+        Called synchronously on the HTTP handler thread when a webhook that
+        requires model processing is dispatched — before the background worker
+        thread is spawned.  Increments the per-repo untriaged count and clears
+        the drained event so any waiting worker knows the inbox is non-empty.
+        """
+        with self._untriaged_lock:
+            old = self._untriaged.get(repo_name, 0)
+            self._untriaged[repo_name] = old + 1
+            ev = self._untriaged_drained.get(repo_name)
+            if ev is None:
+                ev = threading.Event()
+                self._untriaged_drained[repo_name] = ev
+            ev.clear()
+        log.debug("untriaged inbox[%s]: +1 → %d", repo_name, old + 1)
+
+    def exit_untriaged(self, repo_name: str) -> None:
+        """Record that one model-needing webhook handler has finished for *repo_name*.
+
+        Called at the end of ``_process_action``.  Decrements the count; when
+        it reaches zero, sets the drained event so a waiting worker can resume.
+        Logs a warning (but does not raise) if called when the count is already
+        zero — the accounting should balance, but a stray call is safer to log
+        than to crash.
+        """
+        with self._untriaged_lock:
+            old = self._untriaged.get(repo_name, 0)
+            if old <= 0:
+                log.warning(
+                    "untriaged inbox[%s]: exit_untriaged called but count is already %d",
+                    repo_name,
+                    old,
+                )
+                return
+            new = old - 1
+            self._untriaged[repo_name] = new
+            if new == 0:
+                ev = self._untriaged_drained.get(repo_name)
+                if ev is not None:
+                    ev.set()
+        log.debug("untriaged inbox[%s]: -1 → %d", repo_name, new)
+
+    def has_untriaged(self, repo_name: str) -> bool:
+        """Return True if any model-needing webhooks are waiting to be processed.
+
+        Used by the worker at turn boundaries to decide whether to yield before
+        starting the next provider turn.
+        """
+        with self._untriaged_lock:
+            return self._untriaged.get(repo_name, 0) > 0
+
+    def wait_for_inbox_drain(
+        self, repo_name: str, timeout: float | None = None
+    ) -> bool:
+        """Block until the untriaged inbox for *repo_name* empties, or *timeout* elapses.
+
+        Returns ``True`` when the inbox is empty (drained), ``False`` on
+        timeout.  Safe to call even if ``enter_untriaged`` has never been
+        called for the repo — returns ``True`` immediately.
+
+        The caller acquires the event reference under the lock and then waits
+        outside it so the lock is not held during the blocking wait.
+        """
+        with self._untriaged_lock:
+            if self._untriaged.get(repo_name, 0) == 0:
+                return True
+            ev = self._untriaged_drained.get(repo_name)
+            if ev is None:
+                return True
+        return ev.wait(timeout=timeout)
 
     def get_session(self, repo_name: str) -> PromptSession | None:
         """Return the live persistent session for *repo_name*.

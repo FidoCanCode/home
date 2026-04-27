@@ -832,6 +832,175 @@ class TestRescoping:
         assert not errors
 
 
+class TestUntriagedInbox:
+    """Tests for the per-repo untriaged-webhook inbox (fix #1067)."""
+
+    def _reg(self) -> WorkerRegistry:
+        return WorkerRegistry(MagicMock())
+
+    # ── has_untriaged ─────────────────────────────────────────────────────
+
+    def test_has_untriaged_false_for_unknown_repo(self) -> None:
+        reg = self._reg()
+        assert reg.has_untriaged("unknown/repo") is False
+
+    def test_has_untriaged_false_before_any_enter(self) -> None:
+        reg = self._reg()
+        assert reg.has_untriaged("foo/bar") is False
+
+    def test_has_untriaged_true_after_enter(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        assert reg.has_untriaged("foo/bar") is True
+
+    def test_has_untriaged_false_after_enter_then_exit(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        assert reg.has_untriaged("foo/bar") is False
+
+    def test_has_untriaged_true_while_multiple_pending(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        assert reg.has_untriaged("foo/bar") is True
+
+    def test_has_untriaged_false_after_all_exits(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        assert reg.has_untriaged("foo/bar") is False
+
+    def test_inbox_is_per_repo(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        assert reg.has_untriaged("foo/bar") is True
+        assert reg.has_untriaged("foo/baz") is False
+
+    # ── exit_untriaged underflow ──────────────────────────────────────────
+
+    def test_exit_untriaged_when_count_zero_does_not_raise(self) -> None:
+        reg = self._reg()
+        reg.exit_untriaged("foo/bar")  # must not raise
+
+    def test_exit_untriaged_underflow_leaves_count_zero(self) -> None:
+        reg = self._reg()
+        reg.exit_untriaged("foo/bar")
+        assert reg.has_untriaged("foo/bar") is False
+
+    # ── wait_for_inbox_drain ──────────────────────────────────────────────
+
+    def test_wait_returns_true_when_empty(self) -> None:
+        reg = self._reg()
+        result = reg.wait_for_inbox_drain("foo/bar", timeout=0.1)
+        assert result is True
+
+    def test_wait_returns_true_after_drain(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        result = reg.wait_for_inbox_drain("foo/bar", timeout=0.1)
+        assert result is True
+
+    def test_wait_blocks_until_exit(self) -> None:
+        """wait_for_inbox_drain blocks while the inbox is non-empty, then unblocks."""
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        drained = threading.Event()
+
+        def drainer() -> None:
+            result = reg.wait_for_inbox_drain("foo/bar", timeout=2.0)
+            if result:
+                drained.set()
+
+        t = threading.Thread(target=drainer)
+        t.start()
+        # Give the waiter a moment to start blocking
+        time.sleep(0.01)
+        assert not drained.is_set(), "should still be waiting"
+        reg.exit_untriaged("foo/bar")
+        t.join(timeout=2.0)
+        assert drained.is_set(), "should have been unblocked by exit"
+
+    def test_wait_returns_false_on_timeout(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        result = reg.wait_for_inbox_drain("foo/bar", timeout=0.02)
+        assert result is False
+        # Clean up so the event doesn't linger
+        reg.exit_untriaged("foo/bar")
+
+    def test_wait_for_unknown_repo_returns_true_immediately(self) -> None:
+        reg = self._reg()
+        result = reg.wait_for_inbox_drain("ghost/repo", timeout=0.1)
+        assert result is True
+
+    def test_wait_unblocks_when_last_of_multiple_exits(self) -> None:
+        """Drain fires only when the last of several enters is exited."""
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        drained = threading.Event()
+
+        def waiter() -> None:
+            if reg.wait_for_inbox_drain("foo/bar", timeout=2.0):
+                drained.set()
+
+        t = threading.Thread(target=waiter)
+        t.start()
+        time.sleep(0.01)
+        reg.exit_untriaged("foo/bar")
+        time.sleep(0.01)
+        assert not drained.is_set(), "one exit should not drain"
+        reg.exit_untriaged("foo/bar")
+        t.join(timeout=2.0)
+        assert drained.is_set(), "second exit should drain"
+
+    # ── thread-safety ─────────────────────────────────────────────────────
+
+    def test_concurrent_enter_exit_is_threadsafe(self) -> None:
+        """Concurrent enter_untriaged and exit_untriaged calls must not corrupt state."""
+        reg = self._reg()
+        errors: list[Exception] = []
+        n = 200
+
+        def worker_enter() -> None:
+            try:
+                for _ in range(n):
+                    reg.enter_untriaged("foo/bar")
+            except Exception as exc:
+                errors.append(exc)
+
+        def worker_exit() -> None:
+            try:
+                for _ in range(n):
+                    reg.exit_untriaged("foo/bar")
+            except Exception as exc:
+                errors.append(exc)
+
+        # Pre-fill to avoid underflow warnings in the test
+        for _ in range(n * 2):
+            reg.enter_untriaged("foo/bar")
+
+        threads = [
+            threading.Thread(target=worker_enter),
+            threading.Thread(target=worker_enter),
+            threading.Thread(target=worker_exit),
+            threading.Thread(target=worker_exit),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"concurrent errors: {errors}"
+        # After equal enters and exits, count returns to the pre-filled value
+        assert reg.has_untriaged("foo/bar") is True
+
+
 class TestRegistryFsmOracle:
     """Tests for the worker_registry_crash FSM oracle wired into WorkerRegistry.
 
