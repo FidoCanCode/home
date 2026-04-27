@@ -2040,6 +2040,60 @@ class TestClaudeSessionLock:
             provider.set_thread_kind(None)
             session.stop()
 
+    def test_hold_for_handler_switches_to_read_only_tools_and_restores(
+        self, tmp_path: Path
+    ) -> None:
+        """hold_for_handler calls switch_tools(HANDLER_ALLOWED_TOOLS) on entry
+        and switch_tools(None) on exit so handler turns are automatically
+        restricted to the read-only allowlist (#1042)."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        calls: list[str | None] = []
+        original_switch = session.switch_tools
+
+        def recording_switch(tools: str | None) -> None:
+            calls.append(tools)
+            original_switch(tools)
+
+        session.switch_tools = recording_switch  # type: ignore[method-assign]
+        provider.set_thread_kind("webhook")
+        try:
+            with patch("fido.provider.try_preempt_worker", return_value=(False, None)):
+                with session.hold_for_handler():
+                    pass
+        finally:
+            provider.set_thread_kind(None)
+            session.stop()
+
+        assert len(calls) == 2
+        assert calls[0] == HANDLER_ALLOWED_TOOLS  # restricted on entry
+        assert calls[1] is None  # restored on exit
+
+    def test_hold_for_handler_restores_tools_on_exception(self, tmp_path: Path) -> None:
+        """hold_for_handler restores tools even when the body raises."""
+        proc = _make_session_proc([])
+        session = _make_session(tmp_path, proc)
+        calls: list[str | None] = []
+        original_switch = session.switch_tools
+
+        def recording_switch(tools: str | None) -> None:
+            calls.append(tools)
+            original_switch(tools)
+
+        session.switch_tools = recording_switch  # type: ignore[method-assign]
+        provider.set_thread_kind("webhook")
+        try:
+            with patch("fido.provider.try_preempt_worker", return_value=(False, None)):
+                with pytest.raises(RuntimeError, match="boom"):
+                    with session.hold_for_handler():
+                        raise RuntimeError("boom")
+        finally:
+            provider.set_thread_kind(None)
+            session.stop()
+
+        assert calls[0] == HANDLER_ALLOWED_TOOLS
+        assert calls[-1] is None  # always restored
+
     def test_enter_uses_thread_kind_not_shared_attribute(self, tmp_path: Path) -> None:
         """Regression for #981: __enter__ must read the talker kind from
         the calling thread's thread-local (provider.current_thread_kind()),

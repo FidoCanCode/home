@@ -528,6 +528,12 @@ class ClaudeSession(OwnedSession):
         # :meth:`hold_for_handler` can nest inner :meth:`prompt` calls
         # without double-registering the talker (fix for #658).
         self._init_handler_reentry()
+        # Activate the read-only allowlist for handler turns: override the
+        # OwnedSession default (None = no restriction) with the Claude Code
+        # handler allowlist so hold_for_handler automatically switches the
+        # subprocess into read-only mode on entry and back to full tools on
+        # exit (#1042).
+        self._handler_tools = HANDLER_ALLOWED_TOOLS
         # Wakeup pipe: writing a byte to _wakeup_w kicks select() out of its
         # blocking wait in iter_events() so the cancel signal is noticed
         # immediately instead of waiting up to _SELECT_POLL_INTERVAL.
