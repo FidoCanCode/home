@@ -163,6 +163,8 @@ class ActivityReporter(Protocol):
         self, repo_name: str, timeout: float | None = None
     ) -> bool: ...
 
+    def assert_worker_turn_ok(self, repo_name: str) -> None: ...
+
 
 class LockHeld(Exception):
     """Raised when the fido lock is already held by another process."""
@@ -2336,6 +2338,17 @@ class Worker:
         )
         self._registry.wait_for_inbox_drain(self._repo_name, timeout=30.0)
 
+    def _assert_worker_turn_ok(self) -> None:
+        """Fire the handler-preemption oracle before each ``provider_run()``.
+
+        Validates via the extracted ``handler_preemption.v`` FSM that the inbox
+        is empty — the worker must not start a new turn while untriaged webhooks
+        are pending.  No-op when the registry is absent (standalone tests).
+        """
+        if self._registry is None:
+            return
+        self._registry.assert_worker_turn_ok(self._repo_name)
+
     def execute_task(
         self,
         fido_dir: Path,
@@ -2403,6 +2416,7 @@ class Worker:
         with State(fido_dir).modify() as state:
             state["current_task_id"] = task["id"]
         self._tasks.update(task["id"], TaskStatus.IN_PROGRESS)
+        self._assert_worker_turn_ok()
         session_id, _output = provider_run(
             fido_dir,
             agent=self._provider_agent,
@@ -2482,6 +2496,7 @@ class Worker:
                 if pending_session_mode == TurnSessionMode.FRESH or use_fresh_session
                 else TurnSessionMode.REUSE
             )
+            self._assert_worker_turn_ok()
             session_id, _output = provider_run(
                 fido_dir,
                 agent=self._provider_agent,

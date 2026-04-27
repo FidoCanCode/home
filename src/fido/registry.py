@@ -11,6 +11,7 @@ from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.issue_cache import IssueTreeCache
 from fido.provider import PromptSession, Provider
+from fido.rocq import handler_preemption as preemption_fsm
 from fido.rocq import worker_registry_crash as registry_fsm
 from fido.worker import WorkerThread
 
@@ -113,6 +114,9 @@ class WorkerRegistry:
         self._untriaged: dict[str, int] = {}
         self._untriaged_drained: dict[str, threading.Event] = {}
         self._untriaged_lock = threading.Lock()
+        # Per-repo handler-preemption FSM state from handler_preemption.v.
+        # Protected by _untriaged_lock (same lock as the inbox counter).
+        self._preemption_fsm_states: dict[str, preemption_fsm.State] = {}
         # Per-repo issue tree caches shared between worker + webhook
         # threads (closes #812).  Lazily created on first lookup so tests
         # that don't exercise the cache path don't pay setup cost.
@@ -450,6 +454,34 @@ class WorkerRegistry:
 
     # ── untriaged-webhook inbox (#1067) ──────────────────────────────────
 
+    def _preemption_fsm_transition(
+        self, repo_name: str, event: preemption_fsm.Event
+    ) -> preemption_fsm.State:
+        """Fire *event* for *repo_name*'s handler-preemption FSM.
+
+        Raises ``AssertionError`` if the transition is rejected — same pattern
+        as :meth:`_registry_fsm_transition`.  Must be called under
+        ``_untriaged_lock``.
+
+        Initialises the repo's FSM state to ``Empty`` on first access.
+        """
+        prev = self._preemption_fsm_states.get(repo_name, preemption_fsm.Empty())
+        new_state = preemption_fsm.transition(prev, event)
+        if new_state is None:
+            raise AssertionError(
+                f"handler_preemption FSM: {type(event).__name__} rejected in "
+                f"state {type(prev).__name__} for repo {repo_name!r}"
+            )
+        self._preemption_fsm_states[repo_name] = new_state
+        log.debug(
+            "preemption[%s]: FSM %s →%s via %s",
+            repo_name,
+            type(prev).__name__,
+            type(new_state).__name__,
+            type(event).__name__,
+        )
+        return new_state
+
     def enter_untriaged(self, repo_name: str) -> None:
         """Record that one model-needing webhook handler has started for *repo_name*.
 
@@ -461,6 +493,7 @@ class WorkerRegistry:
         with self._untriaged_lock:
             old = self._untriaged.get(repo_name, 0)
             self._untriaged[repo_name] = old + 1
+            self._preemption_fsm_transition(repo_name, preemption_fsm.WebhookArrives())
             ev = self._untriaged_drained.get(repo_name)
             if ev is None:
                 ev = threading.Event()
@@ -488,7 +521,16 @@ class WorkerRegistry:
                 return
             new = old - 1
             self._untriaged[repo_name] = new
+            # The FSM models {Empty, NonEmpty} — HandlerDone stays NonEmpty.
+            # When the count reaches 0, reset the FSM to Empty directly so
+            # WorkerTurnStart is accepted on the next worker turn.
+            self._preemption_fsm_transition(repo_name, preemption_fsm.HandlerDone())
             if new == 0:
+                self._preemption_fsm_states[repo_name] = preemption_fsm.Empty()
+                log.debug(
+                    "preemption[%s]: FSM NonEmpty →Empty (count reached 0)",
+                    repo_name,
+                )
                 ev = self._untriaged_drained.get(repo_name)
                 if ev is not None:
                     ev.set()
@@ -522,6 +564,19 @@ class WorkerRegistry:
             if ev is None:
                 return True
         return ev.wait(timeout=timeout)
+
+    def assert_worker_turn_ok(self, repo_name: str) -> None:
+        """Assert that the worker may start a provider turn for *repo_name*.
+
+        Fires ``WorkerTurnStart`` through the handler-preemption FSM oracle.
+        If the inbox is non-empty (FSM state ``NonEmpty``), the transition is
+        rejected and an ``AssertionError`` surfaces the coordination violation.
+
+        Called by the worker before each ``provider_run()`` — after the
+        yield-for-untriaged wait has drained the inbox.
+        """
+        with self._untriaged_lock:
+            self._preemption_fsm_transition(repo_name, preemption_fsm.WorkerTurnStart())
 
     def get_session(self, repo_name: str) -> PromptSession | None:
         """Return the live persistent session for *repo_name*.

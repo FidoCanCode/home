@@ -9401,6 +9401,7 @@ class TestYieldForUntriaged:
             worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
 
         registry.wait_for_inbox_drain.assert_called_with("owner/repo", timeout=30.0)
+        registry.assert_worker_turn_ok.assert_called_with("owner/repo")
 
     def test_no_yield_after_initial_provider_run_when_inbox_empty(
         self, tmp_path: Path
@@ -9465,6 +9466,32 @@ class TestYieldForUntriaged:
 
         # Called at least twice: once after initial run, once in retry loop
         assert registry.wait_for_inbox_drain.call_count >= 2
+
+
+class TestAssertWorkerTurnOk:
+    """Tests for Worker._assert_worker_turn_ok — the handler-preemption
+    oracle call before each provider_run (#1067)."""
+
+    def test_no_op_when_registry_is_none(self, tmp_path: Path) -> None:
+        """_assert_worker_turn_ok must not crash when _registry is None."""
+        gh = MagicMock()
+        worker = Worker(tmp_path, gh, repo_name="owner/repo")
+        worker._assert_worker_turn_ok()  # pyright: ignore[reportPrivateUsage]
+
+    def test_delegates_to_registry(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        registry = MagicMock()
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+        worker._assert_worker_turn_ok()  # pyright: ignore[reportPrivateUsage]
+        registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
+
+    def test_propagates_assertion_error(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok.side_effect = AssertionError("boom")
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+        with pytest.raises(AssertionError, match="boom"):
+            worker._assert_worker_turn_ok()  # pyright: ignore[reportPrivateUsage]
 
 
 class TestRunExecuteTaskIntegration:

@@ -1001,6 +1001,94 @@ class TestUntriagedInbox:
         assert reg.has_untriaged("foo/bar") is True
 
 
+class TestPreemptionFsmOracle:
+    """Tests for the handler_preemption FSM oracle wired into WorkerRegistry.
+
+    Each test maps to a proved invariant from ``models/handler_preemption.v``.
+    The FSM oracle validates that WorkerTurnStart is rejected when the inbox
+    is non-empty — the core preemption guarantee from #1067.
+    """
+
+    def _reg(self) -> WorkerRegistry:
+        return WorkerRegistry(MagicMock())
+
+    # ── worker_blocked_when_nonempty ─────────────────────────────────────
+
+    def test_assert_worker_turn_ok_raises_when_inbox_nonempty(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
+            reg.assert_worker_turn_ok("foo/bar")
+
+    def test_assert_worker_turn_ok_raises_with_multiple_pending(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
+            reg.assert_worker_turn_ok("foo/bar")
+
+    # ── worker_turn_proceeds_when_empty ──────────────────────────────────
+
+    def test_assert_worker_turn_ok_succeeds_when_empty(self) -> None:
+        reg = self._reg()
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
+    def test_assert_worker_turn_ok_succeeds_after_drain(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
+    def test_assert_worker_turn_ok_succeeds_after_full_drain(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        reg.enter_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
+    # ── per-repo isolation ───────────────────────────────────────────────
+
+    def test_assert_worker_turn_ok_is_per_repo(self) -> None:
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        # Different repo is still empty — worker turn should be accepted
+        reg.assert_worker_turn_ok("foo/baz")  # must not raise
+        # But the repo with a pending webhook should reject
+        with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
+            reg.assert_worker_turn_ok("foo/bar")
+
+    # ── handler_done_rejected_from_empty (underflow) ─────────────────────
+
+    def test_exit_untriaged_underflow_does_not_corrupt_fsm(self) -> None:
+        """An underflow exit_untriaged logs a warning but doesn't crash the FSM.
+
+        After the underflow, the FSM should still be in Empty so
+        assert_worker_turn_ok works.
+        """
+        reg = self._reg()
+        reg.exit_untriaged("foo/bar")  # underflow — logs warning, no FSM change
+        reg.assert_worker_turn_ok("foo/bar")  # still Empty — should work
+
+    # ── full lifecycle ───────────────────────────────────────────────────
+
+    def test_full_enter_assert_fails_drain_assert_succeeds(self) -> None:
+        """enter → assert (fails) → exit → assert (succeeds)."""
+        reg = self._reg()
+        reg.enter_untriaged("foo/bar")
+        with pytest.raises(AssertionError):
+            reg.assert_worker_turn_ok("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")  # must not raise
+
+    def test_repeated_worker_turns_while_empty(self) -> None:
+        """Multiple WorkerTurnStart calls are fine when inbox stays empty."""
+        reg = self._reg()
+        reg.assert_worker_turn_ok("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")  # all should succeed
+
+
 class TestRegistryFsmOracle:
     """Tests for the worker_registry_crash FSM oracle wired into WorkerRegistry.
 
