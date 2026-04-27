@@ -761,10 +761,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # still fires a second preempt in case the worker starts a new turn in
         # the window between this cancel and the background thread acquiring
         # the session lock.
+        #
+        # Also enter the untriaged inbox (#1067) synchronously here — before
+        # the background thread spawns — so the worker sees a non-empty inbox
+        # at its next turn boundary and yields rather than starting another
+        # provider turn.  exit_untriaged is called in _process_action's finally
+        # block when the handler finishes.
         if action and self._action_uses_model(action):
             session = self.registry.get_session(repo_cfg.name)
             if session is not None:
                 session.preempt_worker()
+            self.registry.enter_untriaged(repo_cfg.name)
 
         # Process in background thread so we don't block the server.
         if action:
@@ -845,6 +852,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 repo_cfg.name,
                 tid,
             )
+            if needs_model:
+                # Mirror the enter_untriaged called synchronously in
+                # _do_post_inner — decrement now that this handler is done so
+                # the worker can resume its next turn (#1067).
+                self.registry.exit_untriaged(repo_cfg.name)
             provider.set_thread_kind(None)
             provider.set_thread_repo(None)
 
