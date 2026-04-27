@@ -357,9 +357,13 @@ class Prompts:
         """Build the reaction-decision prompt for Fido.
 
         Asks the model whether to react to *comment_body* and which emoji to use.
+        The NO_TOOLS_CLAUSE guard is required: without it a comment that looks
+        like a directive ("fix this") can cause Opus to fire Bash/Edit calls
+        during what should be a one-shot reaction decision.
         """
         return (
             f"{self.persona}\n\n"
+            f"{NO_TOOLS_CLAUSE}\n\n"
             f"You just saw this comment on a PR:\n\n{comment_body}\n\n"
             "Would you react to this with a GitHub emoji reaction? Not every comment needs one — "
             "use your dog instincts. Pick from: 👍 (+1), 👎 (-1), 😄 (laugh), 😕 (confused), "
