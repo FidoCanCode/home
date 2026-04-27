@@ -51,6 +51,21 @@ _CLAUDE_USAGE_BETA = "oauth-2025-04-20"
 _CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.110"
 _CLAUDE_USAGE_CACHE_SECONDS = 300.0
 
+# Read-only tool allowlist for handler turns (#1042).  Handler prompts
+# (triage, reply, status, rescope) must never perform implementation work —
+# they may *inspect* the codebase but not modify it.  Passed as
+# ``--allowedTools`` to the claude subprocess when switching into handler mode.
+# Format: space-separated tool specs per ``claude --help``.
+HANDLER_ALLOWED_TOOLS = (
+    "Read"
+    " Grep"
+    " Glob"
+    " Bash(git log *,git show *,git diff *,git status *,git branch *,"
+    "git rev-parse *,git describe *,git tag *,git ls-files *,"
+    "git blame *,git remote *,git shortlog *,git cat-file *,"
+    "git rev-list *)"
+)
+
 
 class _Trunc:
     """Lazy-truncating wrapper for log arguments.
@@ -484,11 +499,12 @@ class ClaudeSession(OwnedSession):
         self._model = model_name(
             ProviderModel("claude-opus-4-6") if model is None else model
         )
-        # Allowed-tools restriction passed as ``--tools`` to the subprocess.
-        # ``None`` = no restriction (worker mode, default); ``""`` = no tools
-        # (handler mode).  Changed via :meth:`switch_tools`, which respawns
-        # the subprocess while keeping ``--resume`` so conversation context
-        # survives the mode transition (#1042).
+        # Allowed-tools restriction passed as ``--allowedTools`` to the
+        # subprocess.  ``None`` = no restriction (worker mode, default);
+        # any string = read-only allowlist (handler mode, typically
+        # :data:`HANDLER_ALLOWED_TOOLS`).  Changed via :meth:`switch_tools`,
+        # which respawns the subprocess while keeping ``--resume`` so
+        # conversation context survives the mode transition (#1042).
         self._tools: str | None = tools
         # Latest session_id seen in a stream-json event.  Updated inside
         # :meth:`iter_events` so :meth:`recover`, :meth:`reset`, and
@@ -625,7 +641,7 @@ class ClaudeSession(OwnedSession):
             str(self._system_file),
         ]
         if self._tools is not None:
-            cmd += ["--tools", self._tools]
+            cmd += ["--allowedTools", self._tools]
         if self._session_id:
             cmd += ["--resume", self._session_id]
         proc = self._popen_fn(
@@ -1099,13 +1115,15 @@ class ClaudeSession(OwnedSession):
 
     def switch_tools(self, tools: str | None) -> None:
         """Restrict or restore available tools by respawning with a different
-        ``--tools`` value.
+        ``--allowedTools`` value.
 
-        When *tools* is ``""`` the subprocess is spawned with ``--tools ""``
-        so the model cannot invoke any tools — this is the handler mode that
-        enforces the invariant from #1042: webhook handlers must not perform
-        implementation work inline.  When *tools* is ``None``, the subprocess
-        uses the default tool set (no ``--tools`` flag) — this is the normal
+        When *tools* is a non-None string (typically
+        :data:`HANDLER_ALLOWED_TOOLS`), the subprocess is spawned with
+        ``--allowedTools <value>`` so only read-only tools are available —
+        this is the handler mode that enforces the invariant from #1042:
+        webhook handlers may inspect the codebase but must not perform
+        implementation work.  When *tools* is ``None``, the subprocess uses
+        the full tool set (no ``--allowedTools`` flag) — this is the normal
         worker mode.
 
         A change triggers a subprocess respawn with ``--resume`` so

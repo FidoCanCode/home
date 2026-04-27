@@ -3,7 +3,7 @@
 import pytest
 
 from fido.prompts import (
-    NO_TOOLS_CLAUSE,
+    READ_ONLY_CLAUSE,
     Prompts,
     reply_context_block,
     triage_categories,
@@ -534,12 +534,12 @@ class TestPromptsReactPrompt:
         assert "hi" in result
         assert "emoji" in result
 
-    def test_includes_no_tools_clause(self) -> None:
-        # react_prompt runs through session.prompt — must include NO_TOOLS_CLAUSE
+    def test_includes_read_only_clause(self) -> None:
+        # react_prompt runs through session.prompt — must include READ_ONLY_CLAUSE
         # so a comment that looks like a directive doesn't cause Opus to fire
-        # Bash/Edit calls during what should be a one-shot reaction decision.
+        # Edit/Write calls during what should be a one-shot reaction decision.
         result = Prompts("persona").react_prompt("fix this please")
-        assert NO_TOOLS_CLAUSE in result
+        assert READ_ONLY_CLAUSE in result
 
 
 class TestPromptsStatusPrompt:
