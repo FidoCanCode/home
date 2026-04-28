@@ -43,6 +43,11 @@ Definition positive_case (p : positive) : nat :=
   | xI _ => S O
   end.
 
+(** [positive_eq] lowers [Pos.eqb] to native Python equality without retaining
+    a generated [Pos] protocol module. *)
+Definition positive_eq (left right : positive) : bool :=
+  Pos.eqb left right.
+
 (** [n_seven] checks [N] literals become Python non-negative ints. *)
 Definition n_seven : N := Npos (xI (xI xH)).
 
@@ -84,6 +89,7 @@ Python Extraction nat_pred_or_zero.
 Python Extraction nat_roundtrip.
 Python Extraction positive_five.
 Python Extraction positive_case.
+Python Extraction positive_eq.
 Python Extraction n_seven.
 Python Extraction n_case.
 Python Extraction z_neg_three.

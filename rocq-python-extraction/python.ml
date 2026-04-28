@@ -425,6 +425,9 @@ let is_std_collection_module_name name =
   has_suffix name ".PositiveMap" || has_suffix name ".PositiveSet" ||
   has_suffix name ".StringMap" || has_suffix name ".StringSet"
 
+let is_std_remapped_module_name name =
+  is_std_collection_module_name name || name = "Pos" || has_suffix name ".Pos"
+
 let is_std_collection_term_ref r =
   let names = ["empty"; "add"; "remove"; "find"; "mem"; "cardinal"; "elements"; "fold";
                "union"; "inter"; "diff"] in
@@ -3835,7 +3838,7 @@ and pp_module_structure_elem_into state indent target = function
       pp_decl_exports target (decl_export_names state d) indent
   | (l, SEmodule m) ->
       let name = module_binding_name state l in
-      if is_std_collection_module_name name then mt ()
+      if is_std_remapped_module_name name then mt ()
       else
         pp_named_module_binding state indent name m ++
         str (indent_string indent) ++ str target ++ str "." ++ str name ++ str " = " ++ str name ++ fnl ()
@@ -3878,7 +3881,7 @@ let pp_structure_elem state = function
       pp_decl state d
   | (l, SEmodule m) ->
       let name = module_binding_name state l in
-      if is_std_collection_module_name name then mt ()
+      if is_std_remapped_module_name name then mt ()
       else pp_named_module_binding state 0 name m ++ fnl ()
   | (l, SEmodtype mt) ->
       let name = module_binding_name state l in
@@ -3966,7 +3969,7 @@ let pp_structure_sel state sel =
                | None -> mt ()))
       | (l, SEmodule m) ->
           let name = module_binding_name state l in
-          if is_std_collection_module_name name then mt ()
+          if is_std_remapped_module_name name then mt ()
           else pp_named_module_binding state 0 name m ++ fnl ()
       | (l, SEmodtype mt) ->
           let name = module_binding_name state l in

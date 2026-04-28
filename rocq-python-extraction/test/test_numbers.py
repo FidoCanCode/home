@@ -7,6 +7,7 @@ from nat_pred_or_zero import nat_pred_or_zero
 from nat_roundtrip import nat_roundtrip
 from nat_three import nat_three
 from positive_case import positive_case
+from positive_eq import positive_eq
 from positive_five import positive_five
 from q_den import q_den
 from q_half import q_half
@@ -24,6 +25,8 @@ def test_nat_positive_n_and_z_are_native_ints() -> None:
     assert positive_case(1) == 0
     assert positive_case(4) == 2
     assert positive_case(5) == 1
+    assert positive_eq(1, 1) is True
+    assert positive_eq(1, 5) is False
     assert n_seven == 7
     assert n_case(0) == 0
     assert n_case(9) == 1
@@ -46,3 +49,11 @@ def test_q_extracts_to_fraction_with_normalized_fields() -> None:
     assert q_half == Fraction(1, 2)
     assert q_num(Fraction(2, 4)) == 1
     assert q_den(Fraction(2, 4)) == 2
+
+
+def test_positive_equality_lowers_without_pos_protocol(build_default) -> None:
+    source = (build_default / "positive_eq.py").read_text()
+
+    assert "class Pos_Module" not in source
+    assert "Pos:" not in source
+    assert "return left == right" in source
