@@ -2338,6 +2338,23 @@ class Worker:
         )
         self._registry.wait_for_inbox_drain(self._repo_name, timeout=30.0)
 
+    def _admit_worker_turn(self) -> None:
+        """Wait until webhook/rescope work drains, then validate turn admission.
+
+        This is the pre-provider gate.  A webhook can arrive after task pickup
+        but before ``provider_run()`` starts; in that case the worker must wait
+        rather than fire the oracle while the inbox is intentionally non-empty.
+        """
+        if self._registry is None:
+            return
+        if self._registry.has_untriaged(self._repo_name):
+            log.info(
+                "inbox non-empty for %s before provider turn — waiting",
+                self._repo_name,
+            )
+            self._registry.wait_for_inbox_drain(self._repo_name, timeout=None)
+        self._registry.assert_worker_turn_ok(self._repo_name)
+
     def _assert_worker_turn_ok(self) -> None:
         """Fire the handler-preemption oracle before each ``provider_run()``.
 
@@ -2348,6 +2365,18 @@ class Worker:
         if self._registry is None:
             return
         self._registry.assert_worker_turn_ok(self._repo_name)
+
+    def _task_still_current(self, fido_dir: Path, task_id: str) -> bool:
+        """Return true when *task_id* is still the worker's active task."""
+        state_data = State(fido_dir).load()
+        if state_data.get("current_task_id") != task_id:
+            return False
+        current_task_list = self._tasks.list()
+        return any(
+            t["id"] == task_id
+            and t.get("status") not in {TaskStatus.COMPLETED, TaskStatus.BLOCKED}
+            for t in current_task_list
+        )
 
     def execute_task(
         self,
@@ -2416,7 +2445,15 @@ class Worker:
         with State(fido_dir).modify() as state:
             state["current_task_id"] = task["id"]
         self._tasks.update(task["id"], TaskStatus.IN_PROGRESS)
-        self._assert_worker_turn_ok()
+        self._admit_worker_turn()
+        if self._abort_task.is_set():
+            self._cleanup_aborted_task(fido_dir, task["id"], task_title)
+            return True
+        if not self._task_still_current(fido_dir, task["id"]):
+            log.info(
+                "task no longer current after webhook turn admission — restarting loop"
+            )
+            return True
         session_id, _output = provider_run(
             fido_dir,
             agent=self._provider_agent,
@@ -2496,7 +2533,16 @@ class Worker:
                 if pending_session_mode == TurnSessionMode.FRESH or use_fresh_session
                 else TurnSessionMode.REUSE
             )
-            self._assert_worker_turn_ok()
+            self._admit_worker_turn()
+            if self._abort_task.is_set():
+                self._cleanup_aborted_task(fido_dir, task["id"], task_title)
+                return True
+            if not self._task_still_current(fido_dir, task["id"]):
+                log.info(
+                    "task no longer current after webhook turn admission — "
+                    "stopping retry"
+                )
+                return True
             session_id, _output = provider_run(
                 fido_dir,
                 agent=self._provider_agent,

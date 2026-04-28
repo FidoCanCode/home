@@ -3194,6 +3194,17 @@ class TestUntriagedInboxWiring:
             },
         }
 
+    def _check_run_failure_payload(self) -> dict:
+        return {
+            **self._payload(),
+            "action": "completed",
+            "check_run": {
+                "name": "ci",
+                "conclusion": "failure",
+                "pull_requests": [{"number": 80}],
+            },
+        }
+
     def test_enter_untriaged_called_for_model_action(self, server: tuple) -> None:
         """enter_untriaged must be called synchronously for a model-needing action."""
         url, cfg = server
@@ -3206,6 +3217,17 @@ class TestUntriagedInboxWiring:
         status = _post_webhook(url, cfg, "issue_comment", self._issue_comment_payload())
         assert status == 200
         WebhookHandler.registry.enter_untriaged.assert_called_with("owner/repo")
+
+    def test_enter_untriaged_called_for_ci_failure(self, server: tuple) -> None:
+        """CI failures do not use the model, but they still preempt workers."""
+        url, cfg = server
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        status = _post_webhook(url, cfg, "check_run", self._check_run_failure_payload())
+
+        assert status == 200
+        WebhookHandler.registry.enter_untriaged.assert_called_with("owner/repo")
+        WebhookHandler.registry.exit_untriaged.assert_called_with("owner/repo")
 
     def test_enter_untriaged_not_called_for_non_model_action(
         self, server: tuple

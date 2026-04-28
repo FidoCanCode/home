@@ -322,29 +322,31 @@ Crashed | Stopped`; events `Launch | Rescue | ThreadDies | ThreadStops`.
 
 ---
 
-## Q. Handler preemption — untriaged inbox yield
+## Q. Handler preemption — webhook interrupt turn admission
 
-**Invariant.** When the untriaged-webhook inbox for a repo is non-empty,
-the worker must not start a new provider turn for that repo. Formally:
-`untriaged_inbox(r) ≠ ∅ ⟹ next_turn(r) ∈ Handler`. The worker yields
-at every turn boundary when untriaged webhooks are waiting, blocking
-until the inbox drains (or a timeout fires).
+**Invariant.** When webhook interrupt work for a repo is non-empty, the
+worker must not start a new provider turn for that repo. Formally:
+`interrupt_work(r) ≠ ∅ ⟹ next_turn(r) ∈ Handler`. The worker yields at
+every turn boundary when comments, review feedback, CI failures, or
+handler-owned rescope work are waiting, blocking until the interrupt
+work drains.
 
 **Bugs.** [#1067](https://github.com/FidoCanCode/home/issues/1067)
 (worker grinds through in-progress task without checking for pending
 webhooks — fresh comments and CI events are starved).
 
-**Proposed model.** `handler_preemption.v` — states `{Empty, NonEmpty}`
-× `{Worker, Handler}`; events `WebhookArrives`, `HandlerDone`,
-`WorkerTurnStart`. Theorem: `WorkerTurnStart` is rejected when inbox
-is `NonEmpty`.
+**Model.** `handler_preemption.v` — states `{Empty, NonEmpty}`; events
+`WebhookArrives`, `HandlerDone`, `WorkerTurnStart`. Theorem:
+`WorkerTurnStart` is rejected when interrupt work is `NonEmpty`. The
+current runtime still uses a migration-era registry counter; D22 (#894)
+is the durable command-queue target.
 
 **Status.** Runtime implementation live
 ([#1070](https://github.com/FidoCanCode/home/pull/1070)): per-repo
 `enter_untriaged` / `exit_untriaged` counter on `WorkerRegistry`,
-turn-boundary yield in `Worker.execute_task`, server-side wiring in
-`_do_post_inner` / `_process_action`. Rocq model and extracted oracle
-pending.
+pre-provider turn admission in `Worker.execute_task`, server-side wiring
+in `_do_post_inner` / `_process_action`, CI-failure interrupts, and
+handler-owned rescope blocking. Rocq model and extracted oracle live.
 
 ---
 

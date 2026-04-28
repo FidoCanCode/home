@@ -1,18 +1,20 @@
-(** Handler-preemption FSM: per-repo untriaged-webhook inbox yield.
+(** Handler-preemption FSM: per-repo webhook-interrupt turn admission.
 
-    Models the coordination contract between the webhook handler
-    (untriaged inbox) and the worker turn boundary.  When untriaged
-    webhooks are waiting, the worker must not start a new provider
-    turn — it yields until the inbox drains.
+    Models the coordination contract between webhook-triggered interrupt
+    work (comment/review triage, CI failure handling, and any rescope
+    launched by that triage) and the worker turn boundary.  When interrupt
+    work is waiting, the worker must not start a new provider turn — it
+    yields until the interrupt blocker drains.
 
-    [Empty]    — no untriaged webhooks pending for this repo.
+    [Empty]    — no webhook interrupt work pending for this repo.
                   The worker may start its next provider turn.
-    [NonEmpty] — one or more untriaged webhooks are pending.
+    [NonEmpty] — one or more webhook interrupt units are pending.
                   The worker must yield; only handlers may run.
 
     Three events name the observable transitions:
 
-    [WebhookArrives]  — [enter_untriaged()] called on the HTTP thread.
+    [WebhookArrives]  — [enter_untriaged()] called on the HTTP thread
+                        or by handler-owned rescope work.
                         [Empty] → [NonEmpty], [NonEmpty] → [NonEmpty].
     [HandlerDone]     — [exit_untriaged()] called when the handler
                         finishes processing.
@@ -54,7 +56,7 @@ From FidoModels Require Import preamble.
 
 (** * State
 
-    Two phases of the per-repo untriaged-webhook inbox. *)
+    Two phases of the per-repo webhook interrupt blocker. *)
 Inductive State : Type :=
 | Empty    : State
 | NonEmpty : State.
@@ -77,7 +79,7 @@ Inductive Event : Type :=
     valid in [current], or [None] when it is rejected.
 
     Key rejection: [WorkerTurnStart] from [NonEmpty] — the core
-    invariant.  The worker must yield when untriaged webhooks are
+    invariant.  The worker must yield when webhook interrupt work is
     pending.
 
     [HandlerDone] from [NonEmpty] stays [NonEmpty] in the FSM; the
@@ -100,10 +102,11 @@ Python File Extraction handler_preemption "transition".
 
 (** [worker_blocked_when_nonempty]: [WorkerTurnStart] is rejected from
     [NonEmpty].  This is the core guarantee — a worker must not start
-    a new provider turn while the untriaged-webhook inbox is non-empty.
+    a new provider turn while the webhook interrupt blocker is non-empty.
     The worker yields at every turn boundary when [has_untriaged()]
     returns true, blocking until [wait_for_inbox_drain()] signals
-    that all pending handlers have finished. *)
+    that all pending handlers and handler-owned rescope work have
+    finished. *)
 Lemma worker_blocked_when_nonempty :
   transition NonEmpty WorkerTurnStart = None.
 Proof.

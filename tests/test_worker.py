@@ -9307,6 +9307,7 @@ class TestYieldForUntriaged:
     ) -> tuple[Worker, MagicMock, MagicMock]:
         gh = MagicMock()
         registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
         worker = Worker(
             tmp_path,
             gh,
@@ -9481,6 +9482,7 @@ class TestAssertWorkerTurnOk:
     def test_delegates_to_registry(self, tmp_path: Path) -> None:
         gh = MagicMock()
         registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
         worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
         worker._assert_worker_turn_ok()  # pyright: ignore[reportPrivateUsage]
         registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
@@ -9488,10 +9490,41 @@ class TestAssertWorkerTurnOk:
     def test_propagates_assertion_error(self, tmp_path: Path) -> None:
         gh = MagicMock()
         registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
         registry.assert_worker_turn_ok.side_effect = AssertionError("boom")
         worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
         with pytest.raises(AssertionError, match="boom"):
             worker._assert_worker_turn_ok()  # pyright: ignore[reportPrivateUsage]
+
+
+class TestAdmitWorkerTurn:
+    """Tests for Worker._admit_worker_turn — the pre-provider gate."""
+
+    def test_waits_before_asserting_when_inbox_non_empty(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = True
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+
+        worker._admit_worker_turn()  # pyright: ignore[reportPrivateUsage]
+
+        registry.wait_for_inbox_drain.assert_called_once_with(
+            "owner/repo", timeout=None
+        )
+        registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
+
+    def test_does_not_wait_when_inbox_empty(self, tmp_path: Path) -> None:
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = False
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+
+        worker._admit_worker_turn()  # pyright: ignore[reportPrivateUsage]
+
+        registry.wait_for_inbox_drain.assert_not_called()
+        registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
 
 
 class TestRunExecuteTaskIntegration:
