@@ -128,6 +128,15 @@ PR body without going through sync_tasks).
 invariant**. These bugs are the empirical motivation; cite them in the
 issue body.
 
+**E1 flip point.** Today, `tasks.json` and the PR body are migration
+surfaces: Python writes the durable task list, renders the work-queue
+projection, and the extracted D10 oracle checks that returned states match
+that projection. When the scheduler/reducer boundary becomes authoritative,
+`task_add`, `task_complete`, and `rescope_tasks` should become reducer
+transitions that commit the durable task store first, then run the PR-body
+update as an outbox effect. At that point the handwritten sync choreography in
+`sync_tasks` becomes replaceable glue rather than the source of the invariant.
+
 ---
 
 ## F. Reply / claim dedup — exactly-once per anchor
