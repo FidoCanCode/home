@@ -12,6 +12,8 @@ from primitives import (
     bool_or_and,
     lambda_call_head,
     list_append_left_nested,
+    list_append_let_child,
+    list_append_match_child,
     list_append_right_nested,
     list_cons_append,
 )
@@ -93,6 +95,12 @@ def test_list_cons_append_round_trip() -> None:
 def test_nested_list_append_round_trip() -> None:
     assert list_append_left_nested([1], [2], [3]) == [1, 2, 3]
     assert list_append_right_nested([1], [2], [3]) == [1, 2, 3]
+
+
+def test_low_precedence_list_append_children_round_trip() -> None:
+    assert list_append_let_child(1, [2, 3]) == [1, 2, 3]
+    assert list_append_match_child(True, [2, 3]) == [0, 2, 3]
+    assert list_append_match_child(False, [2, 3]) == [1, 2, 3]
 
 
 def test_lambda_call_head_round_trip() -> None:
@@ -179,6 +187,16 @@ def test_nested_list_append_expressions_stay_flat(build_default) -> None:
     assert "return left + middle + right" in source
     assert "return (left + middle) + right" not in source
     assert "return left + (middle + right)" not in source
+
+
+def test_list_append_low_precedence_children_are_parenthesized(
+    build_default,
+) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "return (lambda prefix: prefix)([h] + []) + right" in source
+    assert "return [0] + [] if flag else [0 + 1] + [] + right" not in source
+    assert "return ([0] + [] if flag else [0 + 1] + []) + right" in source
 
 
 def test_lambda_call_head_is_parenthesized(build_default) -> None:
