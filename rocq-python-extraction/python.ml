@@ -651,6 +651,16 @@ let py_call head args =
   py_rendered ~precedence:py_prec_call
     (pp_head ++ str "(" ++ args ++ str ")")
 
+let py_attr receiver field =
+  let pp_receiver =
+    pp_py_child py_prec_call PyAssocLeft PyLeftChild receiver
+  in
+  py_rendered ~precedence:py_prec_call
+    (pp_receiver ++ str "." ++ str field)
+
+let py_method_call receiver method_name args =
+  py_call (py_attr receiver method_name) args
+
 type diagnostic = {
   code : string;
   title : string;
@@ -1283,8 +1293,20 @@ let rec pp_expr state env expr =
              | MLglob r, [_; _]
                when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
                  py_prec_add
-             | _ ->
-                 py_prec_call)
+             | MLglob r, [_; _]
+               when is_positive_map_ref r "mem" || is_string_map_ref r "mem" ||
+                    is_positive_set_ref r "mem" || is_string_set_ref r "mem" ->
+                 py_prec_compare
+             | _, _ ->
+                 (match marker_of_ast app_head with
+                  | Some marker
+                    when String.equal marker marker_reader_pure ||
+                         String.equal marker marker_reader_bind ||
+                         String.equal marker marker_reader_ask ->
+                      py_prec_lambda
+                  | _ ->
+                      py_prec_call)
+            )
         | MLcase _ ->
             py_prec_conditional
         | MLfix _ ->
@@ -1292,17 +1314,23 @@ let rec pp_expr state env expr =
         | MLexn _ | MLaxiom _ | MLmagic _ | MLparray _ ->
             py_prec_atom
       in
+      let rendered_args args =
+        prlist_with_sep
+          (fun () -> str ", ")
+          (fun arg -> pp_py_rendered (rendered_expr arg))
+          args
+      in
+      let runtime_call name args =
+        py_call (py_rendered (str name)) (rendered_args args)
+      in
       let pp_method_call_expr =
         match head, all_args with
         | MLglob r, self_arg :: method_args -> (
             match lookup_active_method_target (pp_global state Term r) with
             | Some (_class_name, method_name) ->
                 Some
-                  (pp_py_rendered (rendered_expr self_arg) ++
-                   str "." ++ str method_name ++ str "(" ++
-                   prlist_with_sep (fun () -> str ", ")
-                     (fun arg -> pp_py_rendered (rendered_expr arg)) method_args ++
-                   str ")")
+                  (py_method_call (rendered_expr self_arg) method_name
+                     (rendered_args method_args))
             | None -> None)
         | _ -> None
       in
@@ -1316,8 +1344,7 @@ let rec pp_expr state env expr =
             in
             match lookup_active_record_field_target head_name with
             | Some field_name ->
-                Some (pp_py_rendered (rendered_expr self_arg) ++
-                      str "." ++ str field_name)
+                Some (py_attr (rendered_expr self_arg) field_name)
             | None -> None)
         | _ -> None
       in
@@ -1327,100 +1354,109 @@ let rec pp_expr state env expr =
       let pp_map_app kind r =
         match all_args with
         | [] when is_positive_map_ref r "empty" || is_string_map_ref r "empty" ->
-            Some (str "{}")
+            Some (py_rendered (str "{}"))
         | [key; value; mapping] when is_positive_map_ref r "add" || is_string_map_ref r "add" ->
-            Some (str "_rocq_map_add(" ++ collection_key kind key ++ str ", " ++
-                  pp_expr state env value ++ str ", " ++ pp_expr state env mapping ++ str ")")
+            Some
+              (py_call (py_rendered (str "_rocq_map_add"))
+                 (collection_key kind key ++ str ", " ++
+                  rendered_args [value; mapping]))
         | [key; mapping] when is_positive_map_ref r "remove" || is_string_map_ref r "remove" ->
-            Some (str "_rocq_map_remove(" ++ collection_key kind key ++ str ", " ++
-                  pp_expr state env mapping ++ str ")")
+            Some
+              (py_call (py_rendered (str "_rocq_map_remove"))
+                 (collection_key kind key ++ str ", " ++
+                  pp_py_rendered (rendered_expr mapping)))
         | [key; mapping] when is_positive_map_ref r "find" || is_string_map_ref r "find" ->
-            Some (pp_expr state env mapping ++ str ".get(" ++ collection_key kind key ++ str ")")
+            Some
+              (py_method_call (rendered_expr mapping) "get"
+                 (collection_key kind key))
         | [key; mapping] when is_positive_map_ref r "mem" || is_string_map_ref r "mem" ->
-            Some (collection_key kind key ++ str " in " ++ pp_expr state env mapping)
+            Some
+              (py_infix ~associativity:PyAssocNone "in"
+                 py_prec_compare
+                 (py_rendered (collection_key kind key))
+                 (rendered_expr mapping))
         | [mapping] when is_positive_map_ref r "cardinal" || is_string_map_ref r "cardinal" ->
-            Some (str "len(" ++ pp_expr state env mapping ++ str ")")
+            Some (runtime_call "len" [mapping])
         | [mapping] when is_positive_map_ref r "elements" || is_string_map_ref r "elements" ->
-            Some (str "_rocq_map_elements(" ++ pp_expr state env mapping ++ str ")")
+            Some (runtime_call "_rocq_map_elements" [mapping])
         | [fn; mapping; initial] when is_positive_map_ref r "fold" || is_string_map_ref r "fold" ->
-            Some (str "_rocq_map_fold(" ++ pp_expr state env fn ++ str ", " ++
-                  pp_expr state env mapping ++ str ", " ++ pp_expr state env initial ++ str ")")
+            Some (runtime_call "_rocq_map_fold" [fn; mapping; initial])
         | _ -> None
       in
       let pp_set_app kind r =
         match all_args with
         | [] when is_positive_set_ref r "empty" || is_string_set_ref r "empty" ->
-            Some (str "frozenset()")
+            Some (py_call (py_rendered (str "frozenset")) (mt ()))
         | [key; values] when is_positive_set_ref r "add" || is_string_set_ref r "add" ->
-            Some (str "_rocq_set_add(" ++ collection_key kind key ++ str ", " ++
-                  pp_expr state env values ++ str ")")
+            Some
+              (py_call (py_rendered (str "_rocq_set_add"))
+                 (collection_key kind key ++ str ", " ++
+                  pp_py_rendered (rendered_expr values)))
         | [key; values] when is_positive_set_ref r "remove" || is_string_set_ref r "remove" ->
-            Some (str "_rocq_set_remove(" ++ collection_key kind key ++ str ", " ++
-                  pp_expr state env values ++ str ")")
+            Some
+              (py_call (py_rendered (str "_rocq_set_remove"))
+                 (collection_key kind key ++ str ", " ++
+                  pp_py_rendered (rendered_expr values)))
         | [key; values] when is_positive_set_ref r "mem" || is_string_set_ref r "mem" ->
-            Some (collection_key kind key ++ str " in " ++ pp_expr state env values)
+            Some
+              (py_infix ~associativity:PyAssocNone "in"
+                 py_prec_compare
+                 (py_rendered (collection_key kind key))
+                 (rendered_expr values))
         | [left; right] when is_positive_set_ref r "union" || is_string_set_ref r "union" ->
             Some
-              (pp_py_rendered
-                 (py_infix ~wrap:true "|"
-                    py_prec_bit_or
-                    (rendered_expr left)
-                    (rendered_expr right)))
+              (py_infix ~wrap:true "|"
+                 py_prec_bit_or
+                 (rendered_expr left)
+                 (rendered_expr right))
         | [left; right] when is_positive_set_ref r "inter" || is_string_set_ref r "inter" ->
             Some
-              (pp_py_rendered
-                 (py_infix ~wrap:true "&"
-                    py_prec_bit_and
-                    (rendered_expr left)
-                    (rendered_expr right)))
+              (py_infix ~wrap:true "&"
+                 py_prec_bit_and
+                 (rendered_expr left)
+                 (rendered_expr right))
         | [left; right] when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
             Some
-              (pp_py_rendered
-                 (py_infix ~associativity:PyAssocNone ~wrap:true "-"
-                    py_prec_add
-                    (rendered_expr left)
-                    (rendered_expr right)))
+              (py_infix ~associativity:PyAssocNone ~wrap:true "-"
+                 py_prec_add
+                 (rendered_expr left)
+                 (rendered_expr right))
         | [values] when is_positive_set_ref r "cardinal" || is_string_set_ref r "cardinal" ->
-            Some (str "len(" ++ pp_expr state env values ++ str ")")
+            Some (runtime_call "len" [values])
         | [values] when is_positive_set_ref r "elements" || is_string_set_ref r "elements" ->
-            Some (str "_rocq_set_elements(" ++ pp_expr state env values ++ str ")")
+            Some (runtime_call "_rocq_set_elements" [values])
         | [fn; values; initial] when is_positive_set_ref r "fold" || is_string_set_ref r "fold" ->
-            Some (str "_rocq_set_fold(" ++ pp_expr state env fn ++ str ", " ++
-                  pp_expr state env values ++ str ", " ++ pp_expr state env initial ++ str ")")
+            Some (runtime_call "_rocq_set_fold" [fn; values; initial])
         | _ -> None
       in
       let pp_list_app r =
         match all_args with
         | [left; right] when is_std_list_app_ref r ->
             Some
-              (pp_py_rendered
-                 (py_infix "+"
-                    py_prec_add
-                    (rendered_expr left)
-                    (rendered_expr right)))
+              (py_infix "+"
+                 py_prec_add
+                 (rendered_expr left)
+                 (rendered_expr right))
         | _ -> None
       in
       let pp_std_bool_app r =
         match all_args with
         | [value] when is_std_bool_ref r "negb" ->
             Some
-              (pp_py_rendered
-                 (py_prefix ~wrap_operand:true "not " py_prec_not
-                    (rendered_expr value)))
+              (py_prefix ~wrap_operand:true "not " py_prec_not
+                 (rendered_expr value))
         | [left; right] when is_std_bool_ref r "andb" ->
             Some
-              (pp_py_rendered
-                 (py_infix "and"
-                    py_prec_and
-                    (rendered_expr left)
-                    (rendered_expr right)))
+              (py_infix "and"
+                 py_prec_and
+                 (rendered_expr left)
+                 (rendered_expr right))
         | [left; right] when is_std_bool_ref r "eqb" ->
             Some
-              (pp_py_rendered
-                 (py_infix ~associativity:PyAssocNone "=="
-                    py_prec_compare
-                    (rendered_expr left)
-                    (rendered_expr right)))
+              (py_infix ~associativity:PyAssocNone "=="
+                 py_prec_compare
+                 (rendered_expr left)
+                 (rendered_expr right))
         | _ ->
             None
       in
@@ -1430,29 +1466,26 @@ let rec pp_expr state env expr =
           when is_std_nat_ref r "eqb" || is_std_positive_ref r "eqb" ||
                is_std_ascii_ref r "eqb" || is_std_string_ref r "eqb" ->
             Some
-              (pp_py_rendered
-                 (py_infix ~associativity:PyAssocNone "=="
-                    py_prec_compare
-                    (rendered_expr left)
-                    (rendered_expr right)))
+              (py_infix ~associativity:PyAssocNone "=="
+                 py_prec_compare
+                 (rendered_expr left)
+                 (rendered_expr right))
         | [left; right]
           when is_std_nat_ref r "leb" || is_std_positive_ref r "leb" ||
                is_std_ascii_ref r "leb" || is_std_string_ref r "leb" ->
             Some
-              (pp_py_rendered
-                 (py_infix ~associativity:PyAssocNone "<="
-                    py_prec_compare
-                    (rendered_expr left)
-                    (rendered_expr right)))
+              (py_infix ~associativity:PyAssocNone "<="
+                 py_prec_compare
+                 (rendered_expr left)
+                 (rendered_expr right))
         | [left; right]
           when is_std_nat_ref r "ltb" || is_std_positive_ref r "ltb" ||
                is_std_ascii_ref r "ltb" || is_std_string_ref r "ltb" ->
             Some
-              (pp_py_rendered
-                 (py_infix ~associativity:PyAssocNone "<"
-                    py_prec_compare
-                    (rendered_expr left)
-                    (rendered_expr right)))
+              (py_infix ~associativity:PyAssocNone "<"
+                 py_prec_compare
+                 (rendered_expr left)
+                 (rendered_expr right))
         | _ ->
             None
       in
@@ -1490,43 +1523,50 @@ let rec pp_expr state env expr =
         | _ -> None
       in
       let pp_option_bind_expr opt_expr fn_expr =
-        str "(lambda __option_value: None if __option_value is None else (" ++
-        pp_expr state env fn_expr ++ str ")(__option_value))(" ++
-        pp_expr state env opt_expr ++
-        str ")"
+        py_rendered ~precedence:py_prec_call
+          (str "(lambda __option_value: None if __option_value is None else (" ++
+           pp_py_rendered (rendered_expr fn_expr) ++
+           str ")(__option_value))(" ++
+           pp_py_rendered (rendered_expr opt_expr) ++
+           str ")")
       in
       let pp_reader_pure_expr value =
-        str "lambda __reader_env: " ++ pp_expr state env value
+        py_rendered ~precedence:py_prec_lambda
+          (str "lambda __reader_env: " ++
+           pp_py_rendered (rendered_expr value))
       in
       let pp_reader_bind_expr reader_expr fn_expr =
-        str "lambda __reader_env: (" ++
-        pp_expr state env fn_expr ++
-        str ")(" ++
-        pp_expr state env reader_expr ++
-        str "(__reader_env))(__reader_env)"
+        py_rendered ~precedence:py_prec_lambda
+          (str "lambda __reader_env: (" ++
+           pp_py_rendered (rendered_expr fn_expr) ++
+           str ")(" ++
+           pp_py_rendered (rendered_expr reader_expr) ++
+           str "(__reader_env))(__reader_env)")
       in
       let pp_concurrency_expr =
         match marker_of_ast head, all_args with
         | Some marker, [] when String.equal marker marker_new_mutex ->
-            Some (str "Mutex.new()")
+            Some (py_method_call (py_rendered (str "Mutex")) "new" (mt ()))
         | Some marker, [] when String.equal marker marker_new_channel ->
-            Some (str "Channel.new()")
+            Some (py_method_call (py_rendered (str "Channel")) "new" (mt ()))
         | Some marker, [] when String.equal marker marker_new_future ->
-            Some (str "Future.new()")
+            Some (py_method_call (py_rendered (str "Future")) "new" (mt ()))
         | Some marker, [mutex] when String.equal marker marker_mutex_acquire ->
-            Some (pp_expr state env mutex ++ str ".acquire()")
+            Some (py_method_call (rendered_expr mutex) "acquire" (mt ()))
         | Some marker, [mutex] when String.equal marker marker_mutex_release ->
-            Some (pp_expr state env mutex ++ str ".release()")
+            Some (py_method_call (rendered_expr mutex) "release" (mt ()))
         | Some marker, [channel; value] when String.equal marker marker_channel_send ->
-            Some (pp_expr state env channel ++ str ".send(" ++ pp_expr state env value ++ str ")")
+            Some (py_method_call (rendered_expr channel) "send"
+                    (rendered_args [value]))
         | Some marker, [channel] when String.equal marker marker_channel_receive ->
-            Some (pp_expr state env channel ++ str ".receive()")
+            Some (py_method_call (rendered_expr channel) "receive" (mt ()))
         | Some marker, [future; value] when String.equal marker marker_future_set ->
-            Some (pp_expr state env future ++ str ".set_result(" ++ pp_expr state env value ++ str ")")
+            Some (py_method_call (rendered_expr future) "set_result"
+                    (rendered_args [value]))
         | Some marker, [future] when String.equal marker marker_future_result ->
-            Some (pp_expr state env future ++ str ".result()")
+            Some (py_method_call (rendered_expr future) "result" (mt ()))
         | Some marker, [future] when String.equal marker marker_future_done ->
-            Some (pp_expr state env future ++ str ".done()")
+            Some (py_method_call (rendered_expr future) "done" (mt ()))
         | Some marker, _ when String.equal marker marker_interleave ->
             extraction_diagnostic_error ~detail:marker "PYEX043"
         | Some marker, _ when is_concurrency_marker_string marker ->
@@ -1537,26 +1577,34 @@ let rec pp_expr state env expr =
       let pp_monad_expr =
         match marker_of_ast head, all_args with
         | Some marker, [value] when String.equal marker marker_state_pure ->
-            Some (str "StateT.pure(" ++ pp_expr state env value ++ str ")")
+            Some (py_method_call (py_rendered (str "StateT")) "pure"
+                    (rendered_args [value]))
         | Some marker, [m; f] when String.equal marker marker_state_bind ->
-            Some (pp_expr state env m ++ str ".bind(" ++ pp_expr state env f ++ str ")")
+            Some (py_method_call (rendered_expr m) "bind"
+                    (rendered_args [f]))
         | Some marker, [] when String.equal marker marker_state_get ->
-            Some (str "StateT.get_state()")
+            Some (py_method_call (py_rendered (str "StateT")) "get_state"
+                    (mt ()))
         | Some marker, [new_state] when String.equal marker marker_state_put ->
-            Some (str "StateT.put_state(" ++ pp_expr state env new_state ++ str ")")
+            Some (py_method_call (py_rendered (str "StateT")) "put_state"
+                    (rendered_args [new_state]))
         | Some marker, [value] when String.equal marker marker_reader_pure ->
             Some (pp_reader_pure_expr value)
         | Some marker, [reader_expr; fn_expr] when String.equal marker marker_reader_bind ->
             Some (pp_reader_bind_expr reader_expr fn_expr)
         | Some marker, [] when String.equal marker marker_reader_ask ->
-            Some (str "lambda __reader_env: __reader_env")
+            Some
+              (py_rendered ~precedence:py_prec_lambda
+                 (str "lambda __reader_env: __reader_env"))
         | Some marker, [value] when String.equal marker marker_io_pure ->
-            Some (str "IO.pure(" ++ pp_expr state env value ++ str ")")
+            Some (py_method_call (py_rendered (str "IO")) "pure"
+                    (rendered_args [value]))
         | Some marker, [m; f] when String.equal marker marker_io_bind ->
-            Some (pp_expr state env m ++ str ".bind(" ++ pp_expr state env f ++ str ")")
+            Some (py_method_call (rendered_expr m) "bind"
+                    (rendered_args [f]))
         | Some marker, [acquire; release; use] when String.equal marker marker_io_bracket ->
-            Some (str "IO.bracket(" ++ pp_expr state env acquire ++ str ", " ++
-                  pp_expr state env release ++ str ", " ++ pp_expr state env use ++ str ")")
+            Some (py_method_call (py_rendered (str "IO")) "bracket"
+                    (rendered_args [acquire; release; use]))
         | Some marker, _ when String.equal marker marker_io_run ->
             extraction_diagnostic_error ~detail:marker "PYEX042"
         | Some marker, [opt_expr; fn_expr] when String.equal marker marker_option_bind ->
@@ -1595,7 +1643,7 @@ let rec pp_expr state env expr =
                        | None -> pp_monad_expr)))
       in
       (match pp_special with
-       | Some pp -> pp
+       | Some pp -> pp_py_rendered pp
        | None -> pp_default_app)
   | MLlam _ as a ->
       (* Collect consecutive lambdas: MLlam(x, MLlam(y, body)) → lambda x, y: body.
