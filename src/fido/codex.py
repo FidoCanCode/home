@@ -497,8 +497,10 @@ def _rate_limit_window(
     )
 
 
-def _credits_depleted(payload: object) -> bool:
-    if not isinstance(payload, dict):
+def _credits_depleted(payload: object, reached_type: object) -> bool:
+    if not isinstance(payload, dict) or not isinstance(reached_type, str):
+        return False
+    if "credits_depleted" not in reached_type:
         return False
     has_credits = payload.get("hasCredits")
     unlimited = payload.get("unlimited")
@@ -524,9 +526,12 @@ def _codex_limit_windows(payload: dict[str, Any]) -> tuple[ProviderLimitWindow, 
         raw_limits = [rate_limits_by_id[key] for key in sorted(rate_limits_by_id)]
     else:
         rate_limits = payload["rateLimits"]
-        if not isinstance(rate_limits, list):
-            raise ValueError("Codex rateLimits must be a list")
-        raw_limits = list(rate_limits)
+        if isinstance(rate_limits, list):
+            raw_limits = list(rate_limits)
+        elif isinstance(rate_limits, dict):
+            raw_limits = [rate_limits]
+        else:
+            raise ValueError("Codex rateLimits must be an object or list")
 
     windows: list[ProviderLimitWindow] = []
     for index, raw_limit in enumerate(raw_limits):
@@ -540,11 +545,12 @@ def _codex_limit_windows(payload: dict[str, Any]) -> tuple[ProviderLimitWindow, 
                 windows.append(window)
                 if window.pressure is not None and window.pressure >= 1.0:
                     reached_names.add(window.name)
-        if _credits_depleted(raw_limit.get("credits")):
+        reached_type = raw_limit.get("rateLimitReachedType")
+        if _credits_depleted(raw_limit.get("credits"), reached_type):
             credit_name = f"{limit_id}_credits"
             windows.append(ProviderLimitWindow(name=credit_name, used=100, limit=100))
             reached_names.add(credit_name)
-        reached_name = _reached_window_name(raw_limit.get("rateLimitReachedType"))
+        reached_name = _reached_window_name(reached_type)
         full_reached_name = f"{limit_id}_{reached_name}" if reached_name else None
         if full_reached_name is not None and full_reached_name not in reached_names:
             windows.append(
@@ -700,12 +706,14 @@ class CodexSession(OwnedSession):
             "turn/start",
             {
                 "threadId": thread_id,
-                "input": {"type": "text", "text": content, "text_elements": []},
+                "input": [
+                    {"type": "text", "text": content, "text_elements": []},
+                ],
                 "model": self._model.model,
                 "effort": self._model.efforts[0] if self._model.efforts else None,
                 "cwd": str(self._work_dir),
                 "approvalPolicy": "never",
-                "sandboxPolicy": {"mode": "danger-full-access"},
+                "sandboxPolicy": {"type": "dangerFullAccess"},
             },
         )
         turn = result.get("turn") if isinstance(result, dict) else None
@@ -744,13 +752,15 @@ class CodexSession(OwnedSession):
             if (
                 method == "item/completed"
                 and isinstance(item, dict)
-                and item.get("type") == "agent_message"
+                and item.get("type") in {"agent_message", "agentMessage"}
             ):
                 text = item.get("text")
                 if isinstance(text, str):
                     final_text = text
                     self._received_count += 1
-            completed = _extract_completed_turn(params)
+            completed = (
+                _extract_completed_turn(params) if method == "turn/completed" else None
+            )
             if completed is None and method == "item/completed":
                 completed = self._poll_completed_turn(thread_id, active_turn_id)
             if completed is not None:
@@ -781,6 +791,10 @@ class CodexSession(OwnedSession):
 
     def stop(self) -> None:
         self._client.stop()
+
+    def interrupt_active_turn(self) -> None:
+        """Interrupt the currently active turn, if one is in flight."""
+        self._fire_worker_cancel()
 
     def _fire_worker_cancel(self) -> None:
         with self._turn_lock:
@@ -847,7 +861,7 @@ class CodexSession(OwnedSession):
             "model": self._model.model,
             "cwd": str(self._work_dir),
             "approvalPolicy": "never",
-            "sandbox": {"mode": "danger-full-access"},
+            "sandbox": "danger-full-access",
             "developerInstructions": self._base_system_prompt,
         }
         if session_id is not None:

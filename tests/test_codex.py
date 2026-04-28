@@ -319,6 +319,25 @@ class TestCodexAPI:
         assert [window.name for window in snapshot.windows] == ["workspace_credits"]
         assert snapshot.closest_to_exhaustion().pressure == 1.0
 
+    def test_does_not_mark_zero_credit_balance_depleted_without_reached_type(
+        self,
+    ) -> None:
+        fake = _FakeAppServer()
+        fake.responses["account/rateLimits/read"] = {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 1},
+                "secondary": {"usedPercent": 0},
+                "credits": {"balance": "0", "hasCredits": False, "unlimited": False},
+                "rateLimitReachedType": None,
+            }
+        }
+        snapshot = CodexAPI(client_factory=lambda: fake).get_limit_snapshot()
+        assert [window.name for window in snapshot.windows] == [
+            "codex_primary",
+            "codex_secondary",
+        ]
+
     def test_malformed_response_is_unavailable_snapshot(self) -> None:
         fake = _FakeAppServer()
         fake.responses["account/rateLimits/read"] = {"rateLimits": "bad"}
@@ -349,11 +368,18 @@ class TestCodexSession:
         fake.notifications.extend(
             [
                 {
+                    "method": "turn/started",
+                    "params": {
+                        "threadId": "thread-new",
+                        "turn": {"id": "turn-1", "status": "inProgress"},
+                    },
+                },
+                {
                     "method": "item/completed",
                     "params": {
                         "threadId": "thread-new",
                         "turnId": "turn-1",
-                        "item": {"type": "agent_message", "text": "reply"},
+                        "item": {"type": "agentMessage", "text": "reply"},
                     },
                 },
                 {
@@ -378,7 +404,10 @@ class TestCodexSession:
         turn_params = fake.requests[1][1]
         assert turn_params["model"] == "gpt-5.5"
         assert turn_params["effort"] == "medium"
-        assert "base\n\nhello" == turn_params["input"]["text"]
+        assert turn_params["sandboxPolicy"] == {"type": "dangerFullAccess"}
+        assert turn_params["input"] == [
+            {"type": "text", "text": "base\n\nhello", "text_elements": []}
+        ]
         assert session.sent_count == 1
         assert session.received_count == 1
 
@@ -400,7 +429,7 @@ class TestCodexSession:
                 "model": "gpt-5.5",
                 "cwd": str(tmp_path.resolve()),
                 "approvalPolicy": "never",
-                "sandbox": {"mode": "danger-full-access"},
+                "sandbox": "danger-full-access",
                 "developerInstructions": "",
                 "threadId": "persisted",
                 "excludeTurns": True,

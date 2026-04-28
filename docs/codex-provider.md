@@ -45,6 +45,18 @@ sandbox policy because container and branch isolation happen outside Codex.
 The live worker-provider factory is still intentionally gated until the final
 Codex epic issue wires Codex into `CodexClient`/provider selection.
 
+For bootstrap validation against the local Codex install, run:
+
+```bash
+PYTHONPATH=src ./pyproject .venv/bin/python tools/codex_appserver_smoke.py --turn
+PYTHONPATH=src ./pyproject .venv/bin/python tools/codex_appserver_smoke.py \
+  --interrupt --prompt 'Run `sleep 20` in the shell, then reply done.'
+```
+
+The smoke driver is intentionally outside CI. It is for reconciling Fido's
+fixtures with live app-server behavior before codifying that behavior in unit
+tests.
+
 Pinned app-server schemas:
 
 - `codex-rs/app-server-protocol/schema/json/v2/ThreadStartParams.json`
