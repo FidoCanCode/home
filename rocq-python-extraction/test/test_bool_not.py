@@ -1,6 +1,72 @@
-from primitives import bool_not
+from primitives import bool_and, bool_eq, bool_neg, bool_neg_and, bool_not
 
 
 def test_bool_not_round_trip() -> None:
     assert bool_not(True) is False, "bool_not(True): got " + repr(bool_not(True))
     assert bool_not(False) is True, "bool_not(False): got " + repr(bool_not(False))
+
+
+def test_bool_and_round_trip() -> None:
+    assert bool_and(True, True) is True
+    assert bool_and(True, False) is False
+    assert bool_and(False, True) is False
+    assert bool_and(False, False) is False
+
+
+def test_bool_neg_round_trip() -> None:
+    assert bool_neg(True) is False
+    assert bool_neg(False) is True
+
+
+def test_bool_neg_and_round_trip() -> None:
+    assert bool_neg_and(True, True) is False
+    assert bool_neg_and(True, False) is True
+    assert bool_neg_and(False, True) is True
+    assert bool_neg_and(False, False) is True
+
+
+def test_bool_eq_round_trip() -> None:
+    assert bool_eq(True, True) is True
+    assert bool_eq(True, False) is False
+    assert bool_eq(False, True) is False
+    assert bool_eq(False, False) is True
+
+
+def test_bool_and_lowers_to_native_and(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "return b1 and b2" in source
+
+
+def test_bool_neg_lowers_to_native_not(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "def negb(" not in source
+    assert "return not b" in source
+
+
+def test_bool_neg_and_preserves_precedence(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "return not (b1 and b2)" in source
+    assert "return not b1 and b2" not in source
+
+
+def test_bool_eq_lowers_to_native_equality(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "def eqb(" not in source
+    assert "return b1 == b2" in source
+
+
+def test_remapped_primitives_do_not_emit_unused_typevars(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert '_A = TypeVar("_A")' not in source
+    assert '_B = TypeVar("_B")' not in source
+
+
+def test_remapped_primitives_do_not_emit_section_comments(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "remapped to Python primitive" not in source

@@ -212,6 +212,24 @@ let active_method_targets : (string * (string * string)) list ref = ref []
 let lookup_active_method_target source_name =
   List.assoc_opt source_name !active_method_targets
 
+let active_record_field_targets : (string * string) list ref = ref []
+
+let source_name_tail source_name =
+  match String.rindex_opt source_name '.' with
+  | Some index ->
+      String.sub source_name (index + 1) (String.length source_name - index - 1)
+  | None -> source_name
+
+let lookup_active_record_field_target source_name =
+  match List.assoc_opt source_name !active_record_field_targets with
+  | Some _ as result -> result
+  | None -> List.assoc_opt (source_name_tail source_name) !active_record_field_targets
+
+let is_active_record_field_target source_name =
+  match lookup_active_record_field_target source_name with
+  | Some _ -> true
+  | None -> false
+
 let pp_collection_key kind pp_key =
   match kind with
   | `Positive -> str "_rocq_positive_key(" ++ pp_key ++ str ")"
@@ -368,6 +386,10 @@ let is_std_prod_pair_ref r =
 let is_std_bool_type_ref r =
   global_path_has_suffix r ".Init.Datatypes.bool"
 
+let is_std_bool_ref r name =
+  global_path_has_suffix r (".Init.Datatypes." ^ name) ||
+  global_path_has_suffix r (".Bool.Bool." ^ name)
+
 let is_std_nat_ref r name =
   global_path_has_suffix r (".Init.Nat." ^ name)
 
@@ -420,6 +442,9 @@ let is_std_collection_module_name name =
   name = "StringMap" || name = "StringSet" ||
   has_suffix name ".PositiveMap" || has_suffix name ".PositiveSet" ||
   has_suffix name ".StringMap" || has_suffix name ".StringSet"
+
+let is_std_remapped_module_name name =
+  is_std_collection_module_name name || name = "Pos" || has_suffix name ".Pos"
 
 let is_std_collection_term_ref r =
   let names = ["empty"; "add"; "remove"; "find"; "mem"; "cardinal"; "elements"; "fold";
@@ -1129,6 +1154,20 @@ let rec pp_expr state env expr =
             | None -> None)
         | _ -> None
       in
+      let pp_record_field_expr =
+        match List.rev all_args with
+        | self_arg :: _ -> (
+            let head_name =
+              match head with
+              | MLglob r -> pp_global state Term r
+              | _ -> Pp.string_of_ppcmds (pp_expr state env head)
+            in
+            match lookup_active_record_field_target head_name with
+            | Some field_name ->
+                Some (pp_expr state env self_arg ++ str "." ++ str field_name)
+            | None -> None)
+        | _ -> None
+      in
       let collection_key kind key =
         pp_collection_key kind (pp_expr state env key)
       in
@@ -1188,6 +1227,25 @@ let rec pp_expr state env expr =
             Some (pp_expr state env left ++ str " + " ++ pp_expr state env right)
         | _ -> None
       in
+      let pp_std_bool_app r =
+        let pp_atomic_or_parenthesized_operand operand =
+          match operand with
+          | MLrel _ | MLglob _ | MLdummy _ | MLuint _ | MLfloat _ | MLstring _ ->
+              pp_expr state env operand
+          | _ ->
+              str "(" ++ pp_expr state env operand ++ str ")"
+        in
+        match all_args with
+        | [value] when is_std_bool_ref r "negb" ->
+            Some (str "not " ++ pp_atomic_or_parenthesized_operand value)
+        | [left; right] when is_std_bool_ref r "andb" ->
+            Some (pp_expr state env left ++ str " and " ++ pp_expr state env right)
+        | [left; right] when is_std_bool_ref r "eqb" ->
+            Some (pp_atomic_or_parenthesized_operand left ++ str " == " ++
+                  pp_atomic_or_parenthesized_operand right)
+        | _ ->
+            None
+      in
       let pp_std_primitive_compare r =
         match all_args with
         | [left; right]
@@ -1207,6 +1265,9 @@ let rec pp_expr state env expr =
       in
       let pp_collection_expr =
         match head with
+        | MLglob r when is_std_bool_ref r "andb" || is_std_bool_ref r "negb" ||
+                        is_std_bool_ref r "eqb" ->
+            pp_std_bool_app r
         | MLglob r when is_std_primitive_compare_ref r ->
             pp_std_primitive_compare r
         | MLglob r when is_std_list_app_ref r ->
@@ -1330,15 +1391,18 @@ let rec pp_expr state env expr =
           str ")"
       in
       let pp_special =
-        match pp_method_call_expr with
+        match pp_record_field_expr with
         | Some _ as pp -> pp
         | None ->
-            (match pp_collection_expr with
+            (match pp_method_call_expr with
              | Some _ as pp -> pp
              | None ->
-                 (match pp_concurrency_expr with
+                 (match pp_collection_expr with
                   | Some _ as pp -> pp
-                  | None -> pp_monad_expr))
+                  | None ->
+                      (match pp_concurrency_expr with
+                       | Some _ as pp -> pp
+                       | None -> pp_monad_expr)))
       in
       (match pp_special with
        | Some pp -> pp
@@ -3298,6 +3362,29 @@ let record_field_names_of_decl state = function
       | _ -> None)
   | _ -> None
 
+let record_field_targets_of_decl state = function
+  | Dind ind -> (
+      match ind.ind_kind with
+      | Record fields when Array.length ind.ind_packets > 0 ->
+          let packet = ind.ind_packets.(0) in
+          let ind_kn = kn_of_ind packet.ip_typename_ref in
+          Some
+            (List.filter_map
+               (function
+                 | Some r' ->
+                     let source_name = pp_global state Term r' in
+                     let field_name = pp_global_with_key state Term ind_kn r' in
+                     Some
+                       (if String.equal source_name field_name then
+                          [(source_name, field_name)]
+                        else
+                          [(source_name, field_name); (field_name, field_name)])
+                 | None -> None)
+               fields
+            |> List.concat)
+      | _ -> None)
+  | _ -> None
+
 let record_class_prefix_of_decl state decl =
   match record_class_name_of_decl state decl, record_field_names_of_decl state decl with
   | Some class_name, Some field_names -> Option.map (fun prefix -> (class_name, prefix)) (consistent_field_prefix field_names)
@@ -3412,8 +3499,7 @@ let pp_ind_decl state (ind : ml_ind) =
       if p.ip_logical then
         str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
       else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
-        str "# " ++ Id.print p.ip_typename ++
-        str ": remapped to Python primitive" ++ fnl ()
+        mt ()
       else
         str "# " ++ Id.print p.ip_typename ++
         str ": singleton inductive, constructor was " ++
@@ -3423,8 +3509,7 @@ let pp_ind_decl state (ind : ml_ind) =
       if p.ip_logical then
         str "# " ++ Id.print p.ip_typename ++ str ": logical record" ++ fnl ()
       else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
-        str "# " ++ Id.print p.ip_typename ++
-        str ": remapped to Python primitive" ++ fnl ()
+        mt ()
       else
         let tvars = List.init ind.ind_nparams typevar_name in
         (* Emit TypeVar declarations once, before the dataclass. *)
@@ -3441,16 +3526,25 @@ let pp_ind_decl state (ind : ml_ind) =
         pp_one_cons state ~typevar_shift:2 p (Some fields) base_opt 0
   | Standard ->
       let tvars = List.init ind.ind_nparams typevar_name in
+      let packet_needs_typevars p =
+        not p.ip_logical &&
+        not (is_custom p.ip_typename_ref) &&
+        not (is_std_remapped_type_ref p.ip_typename_ref)
+      in
       (* TypeVar declarations are emitted once, before all packets, because
          mutual inductives share the same type parameters.  For example,
          [tree A] and [forest A] in a mutual definition both use [_A]. *)
-      let pp_typevars = pp_typevar_decls (List.init ind.ind_nparams Fun.id) in
+      let pp_typevars =
+        if Array.exists packet_needs_typevars ind.ind_packets then
+          pp_typevar_decls (List.init ind.ind_nparams Fun.id)
+        else
+          mt ()
+      in
       let pp_packet p =
         if p.ip_logical then
           str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
         else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
-          str "# " ++ Id.print p.ip_typename ++
-          str ": remapped to Python primitive" ++ fnl ()
+          mt ()
         else
           let tname = capitalize_first (pp_global state Term p.ip_typename_ref) in
           let n = Array.length p.ip_types in
@@ -3528,8 +3622,7 @@ let pp_ind_decl state (ind : ml_ind) =
         if p.ip_logical then
           str "# " ++ Id.print p.ip_typename ++ str ": logical coinductive" ++ fnl ()
         else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
-          str "# " ++ Id.print p.ip_typename ++
-          str ": remapped to Python primitive" ++ fnl ()
+          mt ()
         else
           let tname = packet_name state p in
           let local_tvar_name i =
@@ -3590,8 +3683,11 @@ let pp_decl state = function
       if is_prop_type typ then mt ()
       else if is_runtime_marker_ref r then mt ()
       else if is_inline_custom r then mt ()
+      else if is_std_bool_ref r "andb" || is_std_bool_ref r "negb" ||
+              is_std_bool_ref r "eqb" then mt ()
       else if is_std_primitive_compare_ref r then mt ()
       else if is_std_collection_term_ref r then mt ()
+      else if is_active_record_field_target (pp_global state Term r) then mt ()
       else if is_custom r then
         str (pp_global state Term r) ++ str " = " ++
         str (find_custom r) ++ fnl ()
@@ -3607,6 +3703,8 @@ let pp_decl state = function
         if is_prop_type typs.(i) then mt ()
         else if is_runtime_marker_ref rv.(i) then mt ()
         else if is_inline_custom rv.(i) then mt ()
+        else if is_std_bool_ref rv.(i) "andb" || is_std_bool_ref rv.(i) "negb" ||
+                is_std_bool_ref rv.(i) "eqb" then mt ()
         else if is_std_primitive_compare_ref rv.(i) then mt ()
         else if is_std_collection_term_ref rv.(i) then mt ()
         else if is_custom rv.(i) then
@@ -3646,7 +3744,8 @@ let rec module_type_annotation state = function
 let decl_export_names state = function
   | Dterm (r, _, typ) ->
       if is_prop_type typ || is_inline_custom r || is_runtime_marker_ref r ||
-         is_std_collection_term_ref r || is_std_primitive_compare_ref r then []
+         is_std_collection_term_ref r || is_std_primitive_compare_ref r ||
+         is_active_record_field_target (pp_global state Term r) then []
       else [pp_global state Term r]
   | Dfix (rv, _, typs) ->
       List.init (Array.length rv) Fun.id
@@ -3805,7 +3904,7 @@ and pp_module_structure_elem_into state indent target = function
       pp_decl_exports target (decl_export_names state d) indent
   | (l, SEmodule m) ->
       let name = module_binding_name state l in
-      if is_std_collection_module_name name then mt ()
+      if is_std_remapped_module_name name then mt ()
       else
         pp_named_module_binding state indent name m ++
         str (indent_string indent) ++ str target ++ str "." ++ str name ++ str " = " ++ str name ++ fnl ()
@@ -3848,7 +3947,7 @@ let pp_structure_elem state = function
       pp_decl state d
   | (l, SEmodule m) ->
       let name = module_binding_name state l in
-      if is_std_collection_module_name name then mt ()
+      if is_std_remapped_module_name name then mt ()
       else pp_named_module_binding state 0 name m ++ fnl ()
   | (l, SEmodtype mt) ->
       let name = module_binding_name state l in
@@ -3875,6 +3974,14 @@ let pp_structure_sel state sel =
       (List.filter_map
          (function
            | (_, SEdecl d) -> record_field_names_of_decl state d
+           | (_, SEmodule _) | (_, SEmodtype _) -> None)
+         sel)
+  in
+  let record_field_targets =
+    List.concat
+      (List.filter_map
+         (function
+           | (_, SEdecl d) -> record_field_targets_of_decl state d
            | (_, SEmodule _) | (_, SEmodtype _) -> None)
          sel)
   in
@@ -3908,6 +4015,7 @@ let pp_structure_sel state sel =
   in
   let prior_method_targets = !active_method_targets in
   active_method_targets := method_targets;
+  active_record_field_targets := record_field_targets @ !active_record_field_targets;
   let rendered =
   let pp_record_methods class_name =
     match Hashtbl.find_opt methods_by_class class_name with
@@ -3936,7 +4044,7 @@ let pp_structure_sel state sel =
                | None -> mt ()))
       | (l, SEmodule m) ->
           let name = module_binding_name state l in
-          if is_std_collection_module_name name then mt ()
+          if is_std_remapped_module_name name then mt ()
           else pp_named_module_binding state 0 name m ++ fnl ()
       | (l, SEmodtype mt) ->
           let name = module_binding_name state l in

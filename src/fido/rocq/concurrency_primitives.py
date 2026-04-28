@@ -14,20 +14,6 @@ from typing import (
 )
 
 
-# unit: remapped to Python primitive
-# nat: remapped to Python primitive
-
-_A = TypeVar("_A")
-
-
-# option: remapped to Python primitive
-
-_A = TypeVar("_A")
-
-
-# list: remapped to Python primitive
-
-
 def _io_roundtrip_message(message: int) -> IO[int]:
     def __io_bind_next(mutex):
         def __io_bracket_release(x):

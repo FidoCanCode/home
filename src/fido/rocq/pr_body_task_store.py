@@ -76,64 +76,6 @@ class TaskRow:
     task_status: TaskStatus
     task_source_comment: int | None
 
-    def row_executable(self) -> bool:
-        row = self
-        match row.task_status:
-            case StatusPending():
-                return task_executable(row.task_kind)
-            case StatusCompleted():
-                return False
-            case StatusBlocked():
-                return False
-            case __impossible:
-                assert_never(__impossible)
-
-    def requires_abort(
-        self,
-        current_row: TaskRow,
-    ) -> bool:
-        new_row = self
-        __option = task_preempt_rank(new_row.task_kind)
-        if __option is None:
-            return False
-        new_rank = __option
-        __option = task_preempt_rank(current_row.task_kind)
-        if __option is None:
-            return False
-        current_rank = __option
-        return new_rank < current_rank
-
-    def title_changed(
-        self,
-        after_row: TaskRow,
-    ) -> bool:
-        before_row = self
-        return not (before_row.task_title == after_row.task_title)
-
-    def description_changed(
-        self,
-        after_row: TaskRow,
-    ) -> bool:
-        before_row = self
-        return not (before_row.task_description == after_row.task_description)
-
-    def metadata_changed(
-        self,
-        after_row: TaskRow,
-    ) -> bool:
-        before_row = self
-        if before_row.title_changed(after_row):
-            return True
-        return before_row.description_changed(after_row)
-
-
-# ExecutionLease: singleton inductive, constructor was Build_ExecutionLease
-
-
-def lease_task(e: ExecutionLease) -> int:
-    lease_task0 = e
-    return lease_task0
-
 
 class RescopeOp:
     pass
@@ -159,22 +101,6 @@ class CompleteTask(RescopeOp):
 RescopeOpT = KeepTask | RewriteTask | CompleteTask
 
 
-def task_executable(kind: TaskKind) -> bool:
-    match kind:
-        case TaskCI():
-            return True
-        case TaskThread():
-            return True
-        case TaskSpec():
-            return True
-        case TaskAsk():
-            return False
-        case TaskDefer():
-            return False
-        case __impossible:
-            assert_never(__impossible)
-
-
 def task_kind_is_ci(kind: TaskKind) -> bool:
     match kind:
         case TaskCI():
@@ -193,22 +119,6 @@ def task_kind_is_ci(kind: TaskKind) -> bool:
 
 def task_kind_is_non_ci(kind: TaskKind) -> bool:
     return not (task_kind_is_ci(kind))
-
-
-def task_preempt_rank(kind: TaskKind) -> int | None:
-    match kind:
-        case TaskCI():
-            return 0
-        case TaskThread():
-            return 0 + 1
-        case TaskSpec():
-            return (0 + 1) + 1
-        case TaskAsk():
-            return None
-        case TaskDefer():
-            return None
-        case __impossible:
-            assert_never(__impossible)
 
 
 def positive_eqb(
@@ -363,127 +273,6 @@ def enqueue_task(
     )
 
 
-def pick_first_ci(
-    order: list[int],
-    rows: dict[int, TaskRow],
-) -> int | None:
-    __list = order
-    if __list == []:
-        return None
-    task = __list[0]
-    rest = __list[1:]
-    __option = rows.get(_rocq_positive_key(task))
-    if __option is None:
-        return pick_first_ci(rest, rows)
-    row = __option
-    if row.row_executable() and task_kind_is_ci(row.task_kind):
-        return task
-    return pick_first_ci(rest, rows)
-
-
-def pick_first_non_ci(
-    order: list[int],
-    rows: dict[int, TaskRow],
-) -> int | None:
-    __list = order
-    if __list == []:
-        return None
-    task = __list[0]
-    rest = __list[1:]
-    __option = rows.get(_rocq_positive_key(task))
-    if __option is None:
-        return pick_first_non_ci(rest, rows)
-    row = __option
-    if row.row_executable() and task_kind_is_non_ci(row.task_kind):
-        return task
-    return pick_first_non_ci(rest, rows)
-
-
-def pick_next_task(
-    order: list[int],
-    rows: dict[int, TaskRow],
-) -> int | None:
-    __option = pick_first_ci(order, rows)
-    if __option is None:
-        return pick_first_non_ci(order, rows)
-    task = __option
-    return task
-
-
-def begin_task(
-    task: int,
-    lease: ExecutionLease | None,
-    rows: dict[int, TaskRow],
-) -> ExecutionLease | None:
-    __option = lease
-    if __option is None:
-        __option = rows.get(_rocq_positive_key(task))
-        if __option is None:
-            return None
-        row = __option
-        if row.row_executable():
-            return task
-        return None
-    e = __option
-    return None
-
-
-def clear_matching_lease(
-    task: int,
-    lease: ExecutionLease | None,
-) -> ExecutionLease | None:
-    __option = lease
-    if __option is None:
-        return None
-    active = __option
-    if positive_eqb(lease_task(active), task):
-        return None
-    return lease
-
-
-def complete_task(
-    task: int,
-    lease: ExecutionLease | None,
-    rows: dict[int, TaskRow],
-) -> tuple[ExecutionLease | None, dict[int, TaskRow]]:
-    lease_ = clear_matching_lease(task, lease)
-    __option = rows.get(_rocq_positive_key(task))
-    if __option is None:
-        return (
-            lease_,
-            rows,
-        )
-    row = __option
-    row_ = TaskRow(
-        task_title=row.task_title,
-        task_description=row.task_description,
-        task_kind=row.task_kind,
-        task_status=StatusCompleted(),
-        task_source_comment=row.task_source_comment,
-    )
-    return (
-        lease_,
-        _rocq_map_add(
-            _rocq_positive_key(task),
-            row_,
-            rows,
-        ),
-    )
-
-
-def abort_task(
-    task: int,
-    lease: ExecutionLease | None,
-) -> ExecutionLease | None:
-    __option = lease
-    if __option is None:
-        return None
-    active = __option
-    if positive_eqb(lease_task(active), task):
-        return None
-    return lease
-
-
 def row_with_status(
     row: TaskRow,
     status: TaskStatus,
@@ -497,60 +286,6 @@ def row_with_status(
     )
 
 
-def unblock_task_row(
-    task: int,
-    row: TaskRow,
-    rows: dict[int, TaskRow],
-) -> dict[int, TaskRow]:
-    match row.task_status:
-        case StatusPending():
-            return rows
-        case StatusCompleted():
-            return rows
-        case StatusBlocked():
-            return _rocq_map_add(
-                _rocq_positive_key(task),
-                row_with_status(row, StatusPending()),
-                rows,
-            )
-        case __impossible:
-            assert_never(__impossible)
-
-
-def unblock_task_if_present(
-    task: int,
-    rows: dict[int, TaskRow],
-) -> dict[int, TaskRow]:
-    __option = rows.get(_rocq_positive_key(task))
-    if __option is None:
-        return rows
-    row = __option
-    return unblock_task_row(
-        task,
-        row,
-        rows,
-    )
-
-
-def unblock_task_rows(
-    order: list[int],
-    rows: dict[int, TaskRow],
-) -> dict[int, TaskRow]:
-    __list = order
-    if __list == []:
-        return rows
-    task = __list[0]
-    rest = __list[1:]
-    return unblock_task_rows(rest, unblock_task_if_present(task, rows))
-
-
-def unblock_tasks(
-    order: list[int],
-    rows: dict[int, TaskRow],
-) -> dict[int, TaskRow]:
-    return unblock_task_rows(order, rows)
-
-
 def rescope_task_id(op: RescopeOp) -> int:
     match op:
         case KeepTask(task):
@@ -561,34 +296,6 @@ def rescope_task_id(op: RescopeOp) -> int:
             return task
         case __impossible:
             assert_never(__impossible)
-
-
-def op_covers_task(
-    task: int,
-    ops: list[RescopeOp],
-) -> bool:
-    __list = ops
-    if __list == []:
-        return False
-    op = __list[0]
-    rest = __list[1:]
-    if positive_eqb(rescope_task_id(op), task):
-        return True
-    return op_covers_task(task, rest)
-
-
-def rescope_ops_cover_snapshot(
-    snapshot_order: list[int],
-    ops: list[RescopeOp],
-) -> bool:
-    __list = snapshot_order
-    if __list == []:
-        return True
-    task = __list[0]
-    rest = __list[1:]
-    if op_covers_task(task, ops):
-        return rescope_ops_cover_snapshot(rest, ops)
-    return False
 
 
 def apply_rescope_ops(
@@ -884,56 +591,6 @@ def apply_rescope(
     )
 
 
-def rescope_affects_active_task(
-    lease: ExecutionLease | None,
-    rows_before: dict[int, TaskRow],
-    rows_after: dict[int, TaskRow],
-) -> bool:
-    __option = lease
-    if __option is None:
-        return False
-    active = __option
-    __option = rows_before.get(_rocq_positive_key(lease_task(active)))
-    if __option is None:
-        return False
-    before_row = __option
-    __option = rows_after.get(_rocq_positive_key(lease_task(active)))
-    if __option is None:
-        return True
-    after_row = __option
-    match after_row.task_status:
-        case StatusPending():
-            return before_row.metadata_changed(after_row)
-        case StatusCompleted():
-            return True
-        case StatusBlocked():
-            return before_row.metadata_changed(after_row)
-        case __impossible:
-            assert_never(__impossible)
-
-
-def should_abort_for_new_task(
-    new_task: int,
-    lease: ExecutionLease | None,
-    rows: dict[int, TaskRow],
-) -> bool:
-    __option = lease
-    if __option is None:
-        return False
-    active = __option
-    if positive_eqb(new_task, lease_task(active)):
-        return False
-    __option = rows.get(_rocq_positive_key(new_task))
-    if __option is None:
-        return False
-    new_row = __option
-    __option = rows.get(_rocq_positive_key(lease_task(active)))
-    if __option is None:
-        return False
-    current_row = __option
-    return new_row.requires_abort(current_row)
-
-
 def complete_task_visible(
     task: int,
     rows: dict[int, TaskRow],
@@ -975,174 +632,388 @@ def complete_task_visible(
             assert_never(__impossible)
 
 
-class TaskChange:
+model_version: int = 0
+
+
+@dataclass(frozen=True)
+class TaskStore:
+    task_store_order: list[int]
+    task_store_rows: dict[int, TaskRow]
+
+
+class PRBodyStatus:
     pass
 
 
 @dataclass(frozen=True)
-class TaskCompleted(TaskChange):
-    task: int
+class PRPending(PRBodyStatus):
+    pass
 
 
 @dataclass(frozen=True)
-class TaskCancelled(TaskChange):
-    task: int
+class PRCompleted(PRBodyStatus):
+    pass
+
+
+PRBodyStatusT = PRPending | PRCompleted
 
 
 @dataclass(frozen=True)
-class TaskModified(TaskChange):
-    task: int
-    new_title: str
-    new_description: str
+class PRBodyRow:
+    pr_body_task: int
+    pr_body_title: str
+    pr_body_description: str
+    pr_body_kind: TaskKind
+    pr_body_status: PRBodyStatus
+
+    def body_row_eqb(
+        self,
+        right: PRBodyRow,
+    ) -> bool:
+        left = self
+        same_task = positive_eqb(left.pr_body_task, right.pr_body_task)
+        same_title = left.pr_body_title == right.pr_body_title
+        same_description = left.pr_body_description == right.pr_body_description
+        same_kind = task_kind_eqb(left.pr_body_kind, right.pr_body_kind)
+        same_status = pr_body_status_eqb(left.pr_body_status, right.pr_body_status)
+        same_text = same_title and same_description
+        same_metadata = same_kind and same_status
+        return same_task and same_text and same_metadata
 
 
-TaskChangeT = TaskCompleted | TaskCancelled | TaskModified
-
-
-def task_change(
+def projected_row(
     task: int,
-    rows_before: dict[int, TaskRow],
-    rows_after: dict[int, TaskRow],
-) -> TaskChange | None:
-    __option = rows_before.get(_rocq_positive_key(task))
+    row: TaskRow,
+    status: PRBodyStatus,
+) -> PRBodyRow:
+    return PRBodyRow(
+        pr_body_task=task,
+        pr_body_title=row.task_title,
+        pr_body_description=row.task_description,
+        pr_body_kind=row.task_kind,
+        pr_body_status=status,
+    )
+
+
+def pending_ci_projection(
+    task: int,
+    rows: dict[int, TaskRow],
+) -> list[PRBodyRow]:
+    __option = rows.get(_rocq_positive_key(task))
     if __option is None:
-        return None
-    before_row = __option
-    __option = before_row.task_source_comment
-    if __option is None:
-        return None
-    p = __option
-    match before_row.task_status:
+        return []
+    row = __option
+    match row.task_status:
         case StatusPending():
-            __option = rows_after.get(_rocq_positive_key(task))
-            if __option is None:
-                return TaskCancelled(task)
-            after_row = __option
-            match after_row.task_status:
-                case StatusPending():
-                    if before_row.metadata_changed(after_row):
-                        return TaskModified(
-                            task,
-                            after_row.task_title,
-                            after_row.task_description,
-                        )
-                    return None
-                case StatusCompleted():
-                    return TaskCompleted(task)
-                case StatusBlocked():
-                    if before_row.metadata_changed(after_row):
-                        return TaskModified(
-                            task,
-                            after_row.task_title,
-                            after_row.task_description,
-                        )
-                    return None
-                case __impossible:
-                    assert_never(__impossible)
+            if task_kind_is_ci(row.task_kind):
+                return [projected_row(task, row, PRPending())] + []
+            return []
         case StatusCompleted():
-            return None
+            return []
         case StatusBlocked():
-            __option = rows_after.get(_rocq_positive_key(task))
-            if __option is None:
-                return TaskCancelled(task)
-            after_row = __option
-            match after_row.task_status:
-                case StatusPending():
-                    if before_row.metadata_changed(after_row):
-                        return TaskModified(
-                            task,
-                            after_row.task_title,
-                            after_row.task_description,
-                        )
-                    return None
-                case StatusCompleted():
-                    return TaskCompleted(task)
-                case StatusBlocked():
-                    if before_row.metadata_changed(after_row):
-                        return TaskModified(
-                            task,
-                            after_row.task_title,
-                            after_row.task_description,
-                        )
-                    return None
-                case __impossible:
-                    assert_never(__impossible)
+            return []
         case __impossible:
             assert_never(__impossible)
 
 
-def compute_task_changes(
-    snapshot_order: list[int],
-    rows_before: dict[int, TaskRow],
-    rows_after: dict[int, TaskRow],
-) -> list[TaskChange]:
-    __list = snapshot_order
+def pending_non_ci_projection(
+    task: int,
+    rows: dict[int, TaskRow],
+) -> list[PRBodyRow]:
+    __option = rows.get(_rocq_positive_key(task))
+    if __option is None:
+        return []
+    row = __option
+    match row.task_status:
+        case StatusPending():
+            if task_kind_is_non_ci(row.task_kind):
+                return [projected_row(task, row, PRPending())] + []
+            return []
+        case StatusCompleted():
+            return []
+        case StatusBlocked():
+            return []
+        case __impossible:
+            assert_never(__impossible)
+
+
+def completed_projection(
+    task: int,
+    rows: dict[int, TaskRow],
+) -> list[PRBodyRow]:
+    __option = rows.get(_rocq_positive_key(task))
+    if __option is None:
+        return []
+    row = __option
+    match row.task_status:
+        case StatusPending():
+            return []
+        case StatusCompleted():
+            return [projected_row(task, row, PRCompleted())] + []
+        case StatusBlocked():
+            return []
+        case __impossible:
+            assert_never(__impossible)
+
+
+def project_pending_ci(
+    order: list[int],
+    rows: dict[int, TaskRow],
+) -> list[PRBodyRow]:
+    __list = order
     if __list == []:
         return []
     task = __list[0]
     rest = __list[1:]
-    rest_ = compute_task_changes(
-        rest,
-        rows_before,
-        rows_after,
-    )
-    __option = task_change(task, rows_before, rows_after)
-    if __option is None:
-        return rest_
-    change = __option
-    return [change] + rest_
+    return pending_ci_projection(task, rows) + project_pending_ci(rest, rows)
 
 
-def remove_from_order(
-    task: int,
+def project_pending_non_ci(
     order: list[int],
-) -> list[int]:
+    rows: dict[int, TaskRow],
+) -> list[PRBodyRow]:
     __list = order
     if __list == []:
         return []
-    t0 = __list[0]
+    task = __list[0]
     rest = __list[1:]
-    rest_ = remove_from_order(task, rest)
-    if positive_eqb(t0, task):
-        return rest_
-    return [t0] + rest_
+    return pending_non_ci_projection(task, rows) + project_pending_non_ci(rest, rows)
 
 
-def cleanup_aborted_task(
-    task: int,
-    lease: ExecutionLease | None,
+def project_completed(
     order: list[int],
     rows: dict[int, TaskRow],
-) -> tuple[tuple[ExecutionLease | None, list[int]], dict[int, TaskRow]]:
-    lease_ = clear_matching_lease(task, lease)
-    order_ = remove_from_order(task, order)
-    rows_ = _rocq_map_remove(
-        _rocq_positive_key(task),
-        rows,
-    )
-    return (
-        (
-            lease_,
-            order_,
-        ),
-        rows_,
-    )
+) -> list[PRBodyRow]:
+    __list = order
+    if __list == []:
+        return []
+    task = __list[0]
+    rest = __list[1:]
+    return completed_projection(task, rows) + project_completed(rest, rows)
 
 
-def task_still_pending(
-    task: int,
-    rows: dict[int, TaskRow],
+def project_task_store(store: TaskStore) -> list[PRBodyRow]:
+    order = store.task_store_order
+    rows = store.task_store_rows
+    pending_ci = project_pending_ci(order, rows)
+    pending_non_ci = project_pending_non_ci(order, rows)
+    completed = project_completed(order, rows)
+    return pending_ci + pending_non_ci + completed
+
+
+def task_kind_eqb(
+    left: TaskKind,
+    right: TaskKind,
 ) -> bool:
-    __option = rows.get(_rocq_positive_key(task))
-    if __option is None:
-        return False
-    row = __option
-    match row.task_status:
-        case StatusPending():
-            return True
-        case StatusCompleted():
-            return False
-        case StatusBlocked():
-            return False
+    match left:
+        case TaskCI():
+            match right:
+                case TaskCI():
+                    return True
+                case TaskThread():
+                    return False
+                case TaskSpec():
+                    return False
+                case TaskAsk():
+                    return False
+                case TaskDefer():
+                    return False
+                case __impossible:
+                    assert_never(__impossible)
+        case TaskThread():
+            match right:
+                case TaskCI():
+                    return False
+                case TaskThread():
+                    return True
+                case TaskSpec():
+                    return False
+                case TaskAsk():
+                    return False
+                case TaskDefer():
+                    return False
+                case __impossible:
+                    assert_never(__impossible)
+        case TaskSpec():
+            match right:
+                case TaskCI():
+                    return False
+                case TaskThread():
+                    return False
+                case TaskSpec():
+                    return True
+                case TaskAsk():
+                    return False
+                case TaskDefer():
+                    return False
+                case __impossible:
+                    assert_never(__impossible)
+        case TaskAsk():
+            match right:
+                case TaskCI():
+                    return False
+                case TaskThread():
+                    return False
+                case TaskSpec():
+                    return False
+                case TaskAsk():
+                    return True
+                case TaskDefer():
+                    return False
+                case __impossible:
+                    assert_never(__impossible)
+        case TaskDefer():
+            match right:
+                case TaskCI():
+                    return False
+                case TaskThread():
+                    return False
+                case TaskSpec():
+                    return False
+                case TaskAsk():
+                    return False
+                case TaskDefer():
+                    return True
+                case __impossible:
+                    assert_never(__impossible)
         case __impossible:
             assert_never(__impossible)
+
+
+def pr_body_status_eqb(
+    left: PRBodyStatus,
+    right: PRBodyStatus,
+) -> bool:
+    match left:
+        case PRPending():
+            match right:
+                case PRPending():
+                    return True
+                case PRCompleted():
+                    return False
+                case __impossible:
+                    assert_never(__impossible)
+        case PRCompleted():
+            match right:
+                case PRPending():
+                    return False
+                case PRCompleted():
+                    return True
+                case __impossible:
+                    assert_never(__impossible)
+        case __impossible:
+            assert_never(__impossible)
+
+
+def pr_body_eqb(
+    left: list[PRBodyRow],
+    right: list[PRBodyRow],
+) -> bool:
+    __list = left
+    if __list == []:
+        __list = right
+        if __list == []:
+            return True
+        p = __list[0]
+        l = __list[1:]
+        return False
+    left_row = __list[0]
+    left_rest = __list[1:]
+    __list = right
+    if __list == []:
+        return False
+    right_row = __list[0]
+    right_rest = __list[1:]
+    return left_row.body_row_eqb(right_row) and pr_body_eqb(left_rest, right_rest)
+
+
+@dataclass(frozen=True)
+class SystemState:
+    durable_task_store: TaskStore
+    visible_pr_body: list[PRBodyRow]
+
+
+def pr_body_matches_store_bool(state: SystemState) -> bool:
+    visible = state.visible_pr_body
+    projected = project_task_store(state.durable_task_store)
+    return pr_body_eqb(visible, projected)
+
+
+def synced_state(store: TaskStore) -> SystemState:
+    return SystemState(
+        durable_task_store=store,
+        visible_pr_body=project_task_store(store),
+    )
+
+
+class TaskWrite:
+    pass
+
+
+@dataclass(frozen=True)
+class WriteTaskAdd(TaskWrite):
+    task: int
+    row: TaskRow
+
+
+@dataclass(frozen=True)
+class WriteTaskComplete(TaskWrite):
+    task: int
+
+
+@dataclass(frozen=True)
+class WriteTaskRescope(TaskWrite):
+    snapshot_order: list[int]
+    ops: list[RescopeOp]
+
+
+TaskWriteT = WriteTaskAdd | WriteTaskComplete | WriteTaskRescope
+
+
+def apply_task_write(
+    write: TaskWrite,
+    store: TaskStore,
+) -> TaskStore:
+    match write:
+        case WriteTaskAdd(task, row):
+            order = store.task_store_order
+            rows = store.task_store_rows
+            __pair = enqueue_task(task, row, order, rows)
+            p = __pair[0]
+            p0 = __pair[1]
+            __pair = p
+            order_ = __pair[0]
+            rows_ = __pair[1]
+            return TaskStore(
+                task_store_order=order_,
+                task_store_rows=rows_,
+            )
+        case WriteTaskComplete(task):
+            __pair = complete_task_visible(task, store.task_store_rows)
+            rows_ = __pair[0]
+            o = __pair[1]
+            return TaskStore(
+                task_store_order=store.task_store_order,
+                task_store_rows=rows_,
+            )
+        case WriteTaskRescope(snapshot_order, ops):
+            order = store.task_store_order
+            rows = store.task_store_rows
+            __pair = apply_rescope(snapshot_order, order, rows, ops)
+            order_ = __pair[0]
+            rows_ = __pair[1]
+            return TaskStore(
+                task_store_order=order_,
+                task_store_rows=rows_,
+            )
+        case __impossible:
+            assert_never(__impossible)
+
+
+def transition(
+    state: SystemState,
+    write: TaskWrite,
+) -> SystemState | None:
+    if pr_body_matches_store_bool(state):
+        return synced_state(apply_task_write(write, state.durable_task_store))
+    return None

@@ -128,6 +128,23 @@ PR body without going through sync_tasks).
 invariant**. These bugs are the empirical motivation; cite them in the
 issue body.
 
+**E1 flip point.** Today, `tasks.json` and the PR body are migration
+surfaces: Python writes the durable task list, renders the work-queue
+projection, and the extracted D10 oracle checks that returned states match
+that projection. When the scheduler/reducer boundary becomes authoritative,
+`task_complete` should stay an explicit reducer transition, while new reviewer
+input should arrive as a `change_request(request : str)` command whose rescope
+step lets the LLM rewrite the PR description and remaining tasks to fit the
+new ask. A rescoped task may carry zero to many origin comments because later,
+broader asks can absorb earlier ones. The rescope transition must preserve
+that provenance so same-author absorbed asks can receive one final reply
+instead of repeated pings, while tasks absorbed from other authors still get an
+outbox notification that their task was folded into a larger one. Grouping a
+task with another one should not count as a material deletion. The reducer
+commits the durable task store first, then runs the PR-body update and any
+notifications as outbox effects, making the handwritten sync choreography in
+`sync_tasks` replaceable glue rather than the source of the invariant.
+
 ---
 
 ## F. Reply / claim dedup — exactly-once per anchor

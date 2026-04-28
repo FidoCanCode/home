@@ -14,19 +14,6 @@ from typing import (
 )
 
 
-# bool: remapped to Python primitive
-
-_A = TypeVar("_A")
-
-
-# option: remapped to Python primitive
-
-_A = TypeVar("_A")
-
-
-# list: remapped to Python primitive
-
-
 class ReviewReplyOutcome:
     pass
 
@@ -112,18 +99,6 @@ class FifoState:
     fifo_worker_deferred: bool
 
 
-def fifo_queue(f: FifoState) -> list[Contender]:
-    return f.fifo_queue
-
-
-def fifo_active_slot(f: FifoState) -> ActiveSlot:
-    return f.fifo_active_slot
-
-
-def fifo_worker_deferred(f: FifoState) -> bool:
-    return f.fifo_worker_deferred
-
-
 class Event:
     pass
 
@@ -162,31 +137,31 @@ def transition(
 ) -> FifoState | None:
     match event0:
         case Enqueue(c):
-            match fifo_active_slot(s):
+            match s.fifo_active_slot:
                 case Idle():
                     return FifoState(
-                        fifo_queue=fifo_queue(s) + [c] + [],
-                        fifo_active_slot=fifo_active_slot(s),
-                        fifo_worker_deferred=fifo_worker_deferred(s),
+                        fifo_queue=s.fifo_queue + [c] + [],
+                        fifo_active_slot=s.fifo_active_slot,
+                        fifo_worker_deferred=s.fifo_worker_deferred,
                     )
                 case HolderActive(c0):
                     return FifoState(
-                        fifo_queue=fifo_queue(s) + [c] + [],
-                        fifo_active_slot=fifo_active_slot(s),
-                        fifo_worker_deferred=fifo_worker_deferred(s),
+                        fifo_queue=s.fifo_queue + [c] + [],
+                        fifo_active_slot=s.fifo_active_slot,
+                        fifo_worker_deferred=s.fifo_worker_deferred,
                     )
                 case WorkerActive():
                     return FifoState(
-                        fifo_queue=fifo_queue(s) + [c] + [],
+                        fifo_queue=s.fifo_queue + [c] + [],
                         fifo_active_slot=Idle(),
                         fifo_worker_deferred=True,
                     )
                 case __impossible:
                     assert_never(__impossible)
         case Dequeue():
-            match fifo_active_slot(s):
+            match s.fifo_active_slot:
                 case Idle():
-                    __list = fifo_queue(s)
+                    __list = s.fifo_queue
                     if __list == []:
                         return None
                     c = __list[0]
@@ -194,7 +169,7 @@ def transition(
                     return FifoState(
                         fifo_queue=rest,
                         fifo_active_slot=HolderActive(c),
-                        fifo_worker_deferred=fifo_worker_deferred(s),
+                        fifo_worker_deferred=s.fifo_worker_deferred,
                     )
                 case HolderActive(c):
                     return None
@@ -203,25 +178,25 @@ def transition(
                 case __impossible:
                     assert_never(__impossible)
         case WorkerDefer():
-            match fifo_active_slot(s):
+            match s.fifo_active_slot:
                 case Idle():
                     return None
                 case HolderActive(c):
                     return None
                 case WorkerActive():
                     return FifoState(
-                        fifo_queue=fifo_queue(s),
+                        fifo_queue=s.fifo_queue,
                         fifo_active_slot=Idle(),
                         fifo_worker_deferred=True,
                     )
                 case __impossible:
                     assert_never(__impossible)
         case WorkerResume():
-            match fifo_active_slot(s):
+            match s.fifo_active_slot:
                 case Idle():
-                    __list = fifo_queue(s)
+                    __list = s.fifo_queue
                     if __list == []:
-                        if fifo_worker_deferred(s):
+                        if s.fifo_worker_deferred:
                             return FifoState(
                                 fifo_queue=[],
                                 fifo_active_slot=WorkerActive(),
@@ -238,20 +213,20 @@ def transition(
                 case __impossible:
                     assert_never(__impossible)
         case Release(outcome):
-            match fifo_active_slot(s):
+            match s.fifo_active_slot:
                 case Idle():
                     return None
                 case HolderActive(c):
                     return FifoState(
-                        fifo_queue=fifo_queue(s),
+                        fifo_queue=s.fifo_queue,
                         fifo_active_slot=Idle(),
-                        fifo_worker_deferred=fifo_worker_deferred(s),
+                        fifo_worker_deferred=s.fifo_worker_deferred,
                     )
                 case WorkerActive():
                     return FifoState(
-                        fifo_queue=fifo_queue(s),
+                        fifo_queue=s.fifo_queue,
                         fifo_active_slot=Idle(),
-                        fifo_worker_deferred=fifo_worker_deferred(s),
+                        fifo_worker_deferred=s.fifo_worker_deferred,
                     )
                 case __impossible:
                     assert_never(__impossible)

@@ -14,9 +14,6 @@ from typing import (
 )
 
 
-# bool: remapped to Python primitive
-
-
 def bool_not(b: bool) -> bool:
     if b:
         return False

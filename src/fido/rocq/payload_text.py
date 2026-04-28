@@ -14,12 +14,6 @@ from typing import (
 )
 
 
-# bool: remapped to Python primitive
-# byte: remapped to Python primitive
-# ascii: remapped to Python primitive
-# string: remapped to Python primitive
-
-
 event_name: str = "pull_request"
 
 

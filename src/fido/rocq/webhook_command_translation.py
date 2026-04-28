@@ -14,28 +14,6 @@ from typing import (
 )
 
 
-# bool: remapped to Python primitive
-
-_A = TypeVar("_A")
-
-
-# list: remapped to Python primitive
-# positive: remapped to Python primitive
-
-
-class Pos_Module(Protocol):
-    @property
-    def eqb(self) -> Callable[[int], Callable[[int], bool]]: ...
-
-
-__Pos_value: Any = __ModuleNamespace()
-Pos: Pos_Module = cast(Pos_Module, __Pos_value)
-
-
-# ascii: remapped to Python primitive
-# string: remapped to Python primitive
-
-
 class Contender:
     pass
 
