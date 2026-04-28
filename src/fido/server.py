@@ -457,7 +457,7 @@ def preflight_repo_identity(
         log.info("preflight: %s: work_dir identity confirmed", name)
 
 
-_REQUIRED_TOOLS = ("git", "gh", "claude", "copilot")
+_REQUIRED_TOOLS = ("git", "gh", "claude", "copilot", "codex")
 
 
 def preflight_tools(fs: Filesystem) -> None:
