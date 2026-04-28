@@ -14,9 +14,6 @@ from typing import (
 )
 
 
-# option: remapped to Python primitive
-
-
 class State:
     pass
 

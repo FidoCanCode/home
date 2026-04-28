@@ -14,13 +14,6 @@ from typing import (
 )
 
 
-# bool: remapped to Python primitive
-# nat: remapped to Python primitive
-# option: remapped to Python primitive
-# prod: remapped to Python primitive
-# list: remapped to Python primitive
-
-
 _LengthT0 = TypeVar("_LengthT0")
 
 
@@ -34,11 +27,6 @@ def length(x: list[_LengthT0]) -> int:
         return length0(l_) + 1
 
     return length0(x)
-
-
-# positive: remapped to Python primitive
-# ascii: remapped to Python primitive
-# string: remapped to Python primitive
 
 
 def add_claim(

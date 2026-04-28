@@ -64,3 +64,9 @@ def test_remapped_primitives_do_not_emit_unused_typevars(build_default) -> None:
 
     assert '_A = TypeVar("_A")' not in source
     assert '_B = TypeVar("_B")' not in source
+
+
+def test_remapped_primitives_do_not_emit_section_comments(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "remapped to Python primitive" not in source

@@ -14,13 +14,6 @@ from typing import (
 )
 
 
-# bool: remapped to Python primitive
-# list: remapped to Python primitive
-# positive: remapped to Python primitive
-# ascii: remapped to Python primitive
-# string: remapped to Python primitive
-
-
 class Contender:
     pass
 

@@ -3499,8 +3499,7 @@ let pp_ind_decl state (ind : ml_ind) =
       if p.ip_logical then
         str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
       else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
-        str "# " ++ Id.print p.ip_typename ++
-        str ": remapped to Python primitive" ++ fnl ()
+        mt ()
       else
         str "# " ++ Id.print p.ip_typename ++
         str ": singleton inductive, constructor was " ++
@@ -3510,8 +3509,7 @@ let pp_ind_decl state (ind : ml_ind) =
       if p.ip_logical then
         str "# " ++ Id.print p.ip_typename ++ str ": logical record" ++ fnl ()
       else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
-        str "# " ++ Id.print p.ip_typename ++
-        str ": remapped to Python primitive" ++ fnl ()
+        mt ()
       else
         let tvars = List.init ind.ind_nparams typevar_name in
         (* Emit TypeVar declarations once, before the dataclass. *)
@@ -3546,8 +3544,7 @@ let pp_ind_decl state (ind : ml_ind) =
         if p.ip_logical then
           str "# " ++ Id.print p.ip_typename ++ str ": logical inductive" ++ fnl ()
         else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
-          str "# " ++ Id.print p.ip_typename ++
-          str ": remapped to Python primitive" ++ fnl ()
+          mt ()
         else
           let tname = capitalize_first (pp_global state Term p.ip_typename_ref) in
           let n = Array.length p.ip_types in
@@ -3625,8 +3622,7 @@ let pp_ind_decl state (ind : ml_ind) =
         if p.ip_logical then
           str "# " ++ Id.print p.ip_typename ++ str ": logical coinductive" ++ fnl ()
         else if is_custom p.ip_typename_ref || is_std_remapped_type_ref p.ip_typename_ref then
-          str "# " ++ Id.print p.ip_typename ++
-          str ": remapped to Python primitive" ++ fnl ()
+          mt ()
         else
           let tname = packet_name state p in
           let local_tvar_name i =

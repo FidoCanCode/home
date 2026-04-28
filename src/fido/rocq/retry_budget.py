@@ -14,13 +14,6 @@ from typing import (
 )
 
 
-# nat: remapped to Python primitive
-# positive: remapped to Python primitive
-# N: remapped to Python primitive
-# Z: remapped to Python primitive
-# Q: remapped to Python primitive
-
-
 max_retries: int = ((0 + 1) + 1) + 1
 
 

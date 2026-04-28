@@ -14,11 +14,6 @@ from typing import (
 )
 
 
-# bool: remapped to Python primitive
-# option: remapped to Python primitive
-# list: remapped to Python primitive
-
-
 class ReviewReplyOutcome:
     pass
 
