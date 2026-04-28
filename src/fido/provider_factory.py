@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 
 from fido.claude import ClaudeAPI, ClaudeClient, ClaudeCode
+from fido.codex import CodexAPI
 from fido.config import RepoConfig
 from fido.copilotcli import CopilotCLI, CopilotCLIAPI, CopilotCLIClient
 from fido.provider import (
@@ -34,7 +35,7 @@ class DefaultProviderFactory:
                 case ProviderID.COPILOT_CLI:
                     api = CopilotCLIAPI()
                 case ProviderID.CODEX:
-                    raise NotImplementedError("codex provider not yet wired")
+                    api = CodexAPI()
                 case _:
                     raise ValueError(f"unsupported provider: {repo_cfg.provider}")
             self._apis[repo_cfg.provider] = api

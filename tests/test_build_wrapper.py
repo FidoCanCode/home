@@ -641,6 +641,7 @@ class TestFidoLauncher:
         assert 'add_mount_if_exists "$HOME/.claude.json"' in script
         assert 'add_mount_if_exists "$HOME/.config/gh"' in script
         assert 'add_mount_if_exists "$HOME/.cache/copilot"' in script
+        assert 'add_mount_if_exists "$HOME/.codex"' in script
         assert 'chmod 600 "$secret"' in script
 
     def test_only_up_requires_webhook_secret(self) -> None:

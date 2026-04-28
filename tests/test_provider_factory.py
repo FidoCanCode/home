@@ -37,18 +37,18 @@ class TestDefaultProviderFactory:
         )
         assert api.provider_id == ProviderID.COPILOT_CLI
 
-    def test_create_api_rejects_codex_until_wired(self, tmp_path: Path) -> None:
+    def test_create_api_builds_codex(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
         factory = DefaultProviderFactory(session_system_file=system_file)
-        with pytest.raises(NotImplementedError, match="codex provider not yet wired"):
-            factory.create_api(
-                RepoConfig(
-                    name="owner/repo",
-                    work_dir=tmp_path,
-                    provider=ProviderID.CODEX,
-                )
+        api = factory.create_api(
+            RepoConfig(
+                name="owner/repo",
+                work_dir=tmp_path,
+                provider=ProviderID.CODEX,
             )
+        )
+        assert api.provider_id == ProviderID.CODEX
 
     def test_create_provider_builds_claude(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"

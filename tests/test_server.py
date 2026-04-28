@@ -4434,7 +4434,7 @@ class TestPreflightTools:
     def test_required_tools_constant(self) -> None:
         from fido.server import _REQUIRED_TOOLS
 
-        assert set(_REQUIRED_TOOLS) == {"git", "gh", "claude", "copilot"}
+        assert set(_REQUIRED_TOOLS) == {"git", "gh", "claude", "copilot", "codex"}
 
 
 class TestPreflightSubDir:
