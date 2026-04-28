@@ -11,6 +11,8 @@ from primitives import (
     bool_or,
     bool_or_and,
     lambda_call_head,
+    list_append_left_nested,
+    list_append_right_nested,
     list_cons_append,
 )
 
@@ -86,6 +88,11 @@ def test_bool_and_eq_round_trip() -> None:
 
 def test_list_cons_append_round_trip() -> None:
     assert list_cons_append(1, [2], [3, 4]) == [1, 2, 3, 4]
+
+
+def test_nested_list_append_round_trip() -> None:
+    assert list_append_left_nested([1], [2], [3]) == [1, 2, 3]
+    assert list_append_right_nested([1], [2], [3]) == [1, 2, 3]
 
 
 def test_lambda_call_head_round_trip() -> None:
@@ -164,6 +171,14 @@ def test_list_append_preserves_left_associative_grouping(build_default) -> None:
     source = (build_default / "primitives.py").read_text()
 
     assert "return [h] + left + right" in source
+
+
+def test_nested_list_append_expressions_stay_flat(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "return left + middle + right" in source
+    assert "return (left + middle) + right" not in source
+    assert "return left + (middle + right)" not in source
 
 
 def test_lambda_call_head_is_parenthesized(build_default) -> None:

@@ -185,10 +185,22 @@ Fixpoint list_add_one (l : list nat) : list nat :=
 Definition list_cons_append (h : nat) (left right : list nat) : list nat :=
   h :: (left ++ right).
 
+(** [list_append_left_nested]: nested list append lowers to left-associative
+    Python [+] without redundant parentheses. *)
+Definition list_append_left_nested
+    (left middle right : list nat) : list nat :=
+  (left ++ middle) ++ right.
+
+(** [list_append_right_nested]: nested list append on the right keeps the
+    generated Python expression flat, relying on list-append associativity. *)
+Definition list_append_right_nested
+    (left middle right : list nat) : list nat :=
+  left ++ (middle ++ right).
+
 (** [lambda_call_head]: application of an inline lambda must parenthesize the
     call head because Python lambda has lower precedence than calls. *)
 Definition lambda_call_head (n : nat) : nat :=
   (fun f => f n) (fun x => S x).
 
 Python File Extraction primitives
-  "bool_not bool_and bool_or bool_neg bool_neg_and bool_neg_or bool_or_and bool_and_or bool_eq bool_eq_and bool_and_eq nat_double option_inc pair_swap list_add_one list_cons_append lambda_call_head".
+  "bool_not bool_and bool_or bool_neg bool_neg_and bool_neg_or bool_or_and bool_and_or bool_eq bool_eq_and bool_and_eq nat_double option_inc pair_swap list_add_one list_cons_append list_append_left_nested list_append_right_nested lambda_call_head".
