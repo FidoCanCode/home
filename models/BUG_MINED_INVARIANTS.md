@@ -132,10 +132,15 @@ issue body.
 surfaces: Python writes the durable task list, renders the work-queue
 projection, and the extracted D10 oracle checks that returned states match
 that projection. When the scheduler/reducer boundary becomes authoritative,
-`task_add`, `task_complete`, and `rescope_tasks` should become reducer
-transitions that commit the durable task store first, then run the PR-body
-update as an outbox effect. At that point the handwritten sync choreography in
-`sync_tasks` becomes replaceable glue rather than the source of the invariant.
+`task_complete` should stay an explicit reducer transition, while new reviewer
+input should arrive as a `change_request(request : str)` command whose rescope
+step lets the LLM rewrite the PR description and remaining tasks to fit the
+new ask. That rescope transition must preserve enough comment provenance to
+notify authors when their task is materially changed or deleted; grouping a
+task with another one should not count as a material deletion. The reducer
+commits the durable task store first, then runs the PR-body update and any
+notifications as outbox effects, making the handwritten sync choreography in
+`sync_tasks` replaceable glue rather than the source of the invariant.
 
 ---
 
