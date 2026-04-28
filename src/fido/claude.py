@@ -18,6 +18,7 @@ from typing import Any
 import requests as _requests
 
 from fido import provider
+from fido.idle_timeout import IdleDeadline
 from fido.provider import (
     OwnedSession,
     PromptSession,
@@ -417,24 +418,29 @@ def _run_streaming(
         talker_registered = True
 
     try:
-        last_activity = clock()
+        idle_deadline = IdleDeadline(
+            idle_timeout,
+            poll_interval=_SELECT_POLL_INTERVAL,
+            clock=clock,
+        )
 
         while True:
-            ready, _, _ = selector([proc.stdout], [], [], _SELECT_POLL_INTERVAL)
+            poll_timeout = idle_deadline.poll_timeout_or_expired()
+            if poll_timeout is None:
+                log.warning("claude idle for %.0fs — killing", idle_timeout)
+                proc.kill()
+                proc.wait()
+                raise ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)
+            ready, _, _ = selector([proc.stdout], [], [], poll_timeout)
             if ready:
                 line = proc.stdout.readline()
                 if not line:
                     break  # EOF
                 yield line
                 log.debug(line.rstrip())
-                last_activity = clock()
+                idle_deadline.reset()
             elif proc.poll() is not None:
                 break  # process exited
-            elif clock() - last_activity > idle_timeout:
-                log.warning("claude idle for %.0fs — killing", idle_timeout)
-                proc.kill()
-                proc.wait()
-                raise ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)
 
         proc.wait()
         # Drain any remaining output
@@ -1222,7 +1228,10 @@ class ClaudeSession(OwnedSession):
         # previous holder — the FSM's FIFO handler queue ensures the next
         # holder's turn starts clean without needing a separate pending flag.
         self._cancel.clear()
-        last_activity = time.monotonic()
+        idle_deadline = IdleDeadline(
+            self._idle_timeout,
+            poll_interval=_SELECT_POLL_INTERVAL,
+        )
         cancelled_at: float | None = None
         cancel_request_id: str | None = None
         cancel_ack_seen = False
@@ -1283,8 +1292,17 @@ class ClaudeSession(OwnedSession):
                 self._stream_reset()
                 self.recover()
                 raise ClaudeStreamError(_RETURNCODE_CANCEL_DRAIN_TIMEOUT)
+            poll_timeout = idle_deadline.poll_timeout_or_expired()
+            if poll_timeout is None:
+                log.warning(
+                    "ClaudeSession: idle for %.0fs — killing", self._idle_timeout
+                )
+                self._proc.kill()
+                self._proc.wait()
+                self.recover()
+                raise ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)
             ready, _, _ = self._selector(
-                [self._proc.stdout, self._wakeup_r], [], [], _SELECT_POLL_INTERVAL
+                [self._proc.stdout, self._wakeup_r], [], [], poll_timeout
             )
             self._drain_wakeup()
             if self._proc.stdout in ready:
@@ -1294,12 +1312,12 @@ class ClaudeSession(OwnedSession):
                     break  # EOF
                 line = line.strip()
                 if not line:
-                    last_activity = time.monotonic()
+                    idle_deadline.reset()
                     continue
                 obj = json.loads(line)
                 self._log_event(obj)
                 self._received_count += 1
-                last_activity = time.monotonic()
+                idle_deadline.reset()
                 # First non-empty event after Send transitions Sending →
                 # AwaitingReply.  Other states (AwaitingReply, Draining,
                 # Idle scaffolding) leave the FSM untouched.
@@ -1369,14 +1387,6 @@ class ClaudeSession(OwnedSession):
             elif self._proc.poll() is not None:
                 self._stream_reset()
                 break  # process exited
-            elif time.monotonic() - last_activity > self._idle_timeout:
-                log.warning(
-                    "ClaudeSession: idle for %.0fs — killing", self._idle_timeout
-                )
-                self._proc.kill()
-                self._proc.wait()
-                self.recover()
-                raise ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)
 
     def consume_until_result(self) -> str:
         """Drain events for the current turn and return the result text.

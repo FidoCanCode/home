@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any, Protocol
+from typing import IO, Any, NoReturn, Protocol
 
 import fido.provider as provider
 from fido.idle_timeout import IdleDeadline
@@ -759,11 +759,12 @@ class CodexSession(OwnedSession):
         thread_id = self._require_thread_id()
         idle_deadline = IdleDeadline(
             self._turn_idle_timeout,
+            poll_interval=_CODEX_TURN_POLL_INTERVAL,
             clock=self._clock,
         )
         while True:
-            timeout = min(idle_deadline.remaining(), _CODEX_TURN_POLL_INTERVAL)
-            if timeout <= 0:
+            timeout = idle_deadline.poll_timeout_or_expired()
+            if timeout is None:
                 self._recover_after_turn_idle_timeout(active_turn_id)
             try:
                 notification = self._client.wait_notification(
@@ -804,7 +805,7 @@ class CodexSession(OwnedSession):
             if completed is not None:
                 return self._finish_turn(completed, final_text)
 
-    def _recover_after_turn_idle_timeout(self, turn_id: str) -> None:
+    def _recover_after_turn_idle_timeout(self, turn_id: str) -> NoReturn:
         log.warning(
             "CodexSession: turn %s idle for %.0fs — restarting app-server",
             turn_id,
