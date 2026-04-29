@@ -72,23 +72,39 @@ def test_positive_equality_lowers_without_pos_protocol(build_default) -> None:
     assert "return left == right" in source
 
 
-def test_primitive_comparisons_compose_with_bool_ops(build_default) -> None:
+def test_primitive_comparisons_compose_with_bool_ops(
+    build_default,
+    assert_rendered_source,
+) -> None:
     compare_and = (build_default / "nat_compare_and.py").read_text()
     compare_or = (build_default / "nat_compare_or.py").read_text()
     compare_neg = (build_default / "nat_compare_neg.py").read_text()
 
-    assert "return left < middle and middle <= right" in compare_and
-    assert "return (left < middle) and (middle <= right)" not in compare_and
-    assert "return left == middle or middle < right" in compare_or
-    assert "return (left == middle) or (middle < right)" not in compare_or
-    assert "return not (left <= right)" in compare_neg
-    assert "return not left <= right" not in compare_neg
+    assert_rendered_source(
+        compare_and,
+        "return left < middle and middle <= right",
+        ("return (left < middle) and (middle <= right)",),
+    )
+    assert_rendered_source(
+        compare_or,
+        "return left == middle or middle < right",
+        ("return (left == middle) or (middle < right)",),
+    )
+    assert_rendered_source(
+        compare_neg,
+        "return not (left <= right)",
+        ("return not left <= right",),
+    )
 
 
 def test_primitive_comparison_as_equality_operand_is_parenthesized(
     build_default,
+    assert_rendered_source,
 ) -> None:
     source = (build_default / "nat_compare_bool_eq.py").read_text()
 
-    assert "return (left < right) == expected" in source
-    assert "return left < right == expected" not in source
+    assert_rendered_source(
+        source,
+        "return (left < right) == expected",
+        ("return left < right == expected",),
+    )
