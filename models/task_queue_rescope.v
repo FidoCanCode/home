@@ -133,13 +133,10 @@ Definition task_requires_abort
   | _, _ => false
   end.
 
-Definition positive_eqb (left right : positive) : bool :=
-  Pos.eqb left right.
-
 Fixpoint positive_mem (target : positive) (items : list positive) : bool :=
   match items with
   | [] => false
-  | item :: rest => if positive_eqb target item then true else positive_mem target rest
+  | item :: rest => if Pos.eqb target item then true else positive_mem target rest
   end.
 
 Fixpoint find_comment_duplicate
@@ -152,7 +149,7 @@ Fixpoint find_comment_duplicate
       match PositiveMap.find task rows with
       | Some row =>
           match task_source_comment row with
-          | Some existing => if positive_eqb existing comment then Some task else find_comment_duplicate comment rest rows
+          | Some existing => if Pos.eqb existing comment then Some task else find_comment_duplicate comment rest rows
           | None => find_comment_duplicate comment rest rows
           end
       | None => find_comment_duplicate comment rest rows
@@ -263,7 +260,7 @@ Definition clear_matching_lease
     (task : positive)
     (lease : option ExecutionLease) : option ExecutionLease :=
   match lease with
-  | Some active => if positive_eqb (lease_task active) task then None else lease
+  | Some active => if Pos.eqb (lease_task active) task then None else lease
   | None => None
   end.
 
@@ -290,7 +287,7 @@ Definition abort_task
     (task : positive)
     (lease : option ExecutionLease) : option ExecutionLease :=
   match lease with
-  | Some active => if positive_eqb (lease_task active) task then None else lease
+  | Some active => if Pos.eqb (lease_task active) task then None else lease
   | None => None
   end.
 
@@ -348,7 +345,7 @@ Fixpoint op_covers_task (task : positive) (ops : list RescopeOp) : bool :=
   match ops with
   | [] => false
   | op :: rest =>
-      if positive_eqb (rescope_task_id op) task then true else op_covers_task task rest
+      if Pos.eqb (rescope_task_id op) task then true else op_covers_task task rest
   end.
 
 (** [rescope_ops_cover_snapshot] checks that every snapped task has an explicit
@@ -368,7 +365,7 @@ Fixpoint release_for_task
   match releases with
   | [] => None
   | release :: rest =>
-      if positive_eqb (release_task_id release) task then
+      if Pos.eqb (release_task_id release) task then
         Some (release_decision release)
       else
         release_for_task task rest
@@ -628,7 +625,7 @@ Definition should_abort_for_new_task
   match lease with
   | None => false
   | Some active =>
-      if positive_eqb new_task (lease_task active) then false
+      if Pos.eqb new_task (lease_task active) then false
       else
         match PositiveMap.find new_task rows, PositiveMap.find (lease_task active) rows with
         | Some new_row, Some current_row => task_requires_abort new_row current_row
@@ -762,7 +759,7 @@ Fixpoint remove_from_order
   | [] => []
   | t :: rest =>
       let rest' := remove_from_order task rest in
-      if positive_eqb t task then rest' else t :: rest'
+      if Pos.eqb t task then rest' else t :: rest'
   end.
 
 (** [cleanup_aborted_task] removes an aborted task from the queue entirely and

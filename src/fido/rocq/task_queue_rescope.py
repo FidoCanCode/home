@@ -249,13 +249,6 @@ def task_preempt_rank(kind: TaskKind) -> int | None:
             assert_never(__impossible)
 
 
-def positive_eqb(
-    left: int,
-    right: int,
-) -> bool:
-    return left == right
-
-
 def positive_mem(
     target: int,
     items: list[int],
@@ -265,7 +258,7 @@ def positive_mem(
         return False
     item = __list[0]
     rest = __list[1:]
-    if positive_eqb(target, item):
+    if target == item:
         return True
     return positive_mem(target, rest)
 
@@ -296,7 +289,7 @@ def find_comment_duplicate(
             rows,
         )
     existing = __option
-    if positive_eqb(existing, comment):
+    if existing == comment:
         return task
     return find_comment_duplicate(
         comment,
@@ -474,7 +467,7 @@ def clear_matching_lease(
     if __option is None:
         return None
     active = __option
-    if positive_eqb(lease_task(active), task):
+    if lease_task(active) == task:
         return None
     return lease
 
@@ -517,7 +510,7 @@ def abort_task(
     if __option is None:
         return None
     active = __option
-    if positive_eqb(lease_task(active), task):
+    if lease_task(active) == task:
         return None
     return lease
 
@@ -610,7 +603,7 @@ def op_covers_task(
         return False
     op = __list[0]
     rest = __list[1:]
-    if positive_eqb(rescope_task_id(op), task):
+    if rescope_task_id(op) == task:
         return True
     return op_covers_task(task, rest)
 
@@ -638,7 +631,7 @@ def release_for_task(
         return None
     release = __list[0]
     rest = __list[1:]
-    if positive_eqb(release.task_id(), task):
+    if release.task_id() == task:
         return release.release_decision
     return release_for_task(task, rest)
 
@@ -1043,7 +1036,7 @@ def should_abort_for_new_task(
     if __option is None:
         return False
     active = __option
-    if positive_eqb(new_task, lease_task(active)):
+    if new_task == lease_task(active):
         return False
     __option = rows.get(_rocq_positive_key(new_task))
     if __option is None:
@@ -1251,7 +1244,7 @@ def remove_from_order(
     t0 = __list[0]
     rest = __list[1:]
     rest_ = remove_from_order(task, rest)
-    if positive_eqb(t0, task):
+    if t0 == task:
         return rest_
     return [t0] + rest_
 

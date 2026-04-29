@@ -175,7 +175,7 @@ Definition pr_body_status_eqb (left right : PRBodyStatus) : bool :=
   end.
 
 Definition pr_body_row_eqb (left right : PRBodyRow) : bool :=
-  let same_task := positive_eqb (pr_body_task left) (pr_body_task right) in
+  let same_task := Pos.eqb (pr_body_task left) (pr_body_task right) in
   let same_title := String.eqb (pr_body_title left) (pr_body_title right) in
   let same_description :=
     String.eqb (pr_body_description left) (pr_body_description right) in

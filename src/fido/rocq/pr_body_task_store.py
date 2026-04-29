@@ -121,13 +121,6 @@ def task_kind_is_non_ci(kind: TaskKind) -> bool:
     return not task_kind_is_ci(kind)
 
 
-def positive_eqb(
-    left: int,
-    right: int,
-) -> bool:
-    return left == right
-
-
 def positive_mem(
     target: int,
     items: list[int],
@@ -137,7 +130,7 @@ def positive_mem(
         return False
     item = __list[0]
     rest = __list[1:]
-    if positive_eqb(target, item):
+    if target == item:
         return True
     return positive_mem(target, rest)
 
@@ -168,7 +161,7 @@ def find_comment_duplicate(
             rows,
         )
     existing = __option
-    if positive_eqb(existing, comment):
+    if existing == comment:
         return task
     return find_comment_duplicate(
         comment,
@@ -671,7 +664,7 @@ class PRBodyRow:
         right: PRBodyRow,
     ) -> bool:
         left = self
-        same_task = positive_eqb(left.pr_body_task, right.pr_body_task)
+        same_task = left.pr_body_task == right.pr_body_task
         same_title = left.pr_body_title == right.pr_body_title
         same_description = left.pr_body_description == right.pr_body_description
         same_kind = task_kind_eqb(left.pr_body_kind, right.pr_body_kind)
