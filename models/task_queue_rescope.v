@@ -111,9 +111,6 @@ Definition task_kind_is_ci (kind : TaskKind) : bool :=
   | _ => false
   end.
 
-Definition task_kind_is_non_ci (kind : TaskKind) : bool :=
-  negb (task_kind_is_ci kind).
-
 (** [task_preempt_rank] encodes D3's new-task preemption policy. *)
 Definition task_preempt_rank (kind : TaskKind) : option nat :=
   match kind with
@@ -221,7 +218,7 @@ Fixpoint pick_first_non_ci
   | task :: rest =>
       match PositiveMap.find task rows with
       | Some row =>
-          if andb (task_row_executable row) (task_kind_is_non_ci (task_kind row))
+          if andb (task_row_executable row) (negb (task_kind_is_ci (task_kind row)))
           then Some task
           else pick_first_non_ci rest rows
       | None => pick_first_non_ci rest rows
@@ -491,7 +488,7 @@ Definition task_is_non_ci
     (rows : PositiveMap.t TaskRow)
     (task : positive) : bool :=
   match PositiveMap.find task rows with
-  | Some row => task_kind_is_non_ci (task_kind row)
+  | Some row => negb (task_kind_is_ci (task_kind row))
   | None => false
   end.
 

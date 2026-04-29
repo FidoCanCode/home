@@ -96,7 +96,7 @@ Definition pending_non_ci_projection
   | Some row =>
       match task_status row with
       | StatusPending =>
-          if task_kind_is_non_ci (task_kind row)
+          if negb (task_kind_is_ci (task_kind row))
           then [projected_row task row PRPending]
           else []
       | _ => []

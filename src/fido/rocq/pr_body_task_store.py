@@ -117,10 +117,6 @@ def task_kind_is_ci(kind: TaskKind) -> bool:
             assert_never(__impossible)
 
 
-def task_kind_is_non_ci(kind: TaskKind) -> bool:
-    return not task_kind_is_ci(kind)
-
-
 def positive_mem(
     target: int,
     items: list[int],
@@ -517,7 +513,7 @@ def task_is_non_ci(
     if __option is None:
         return False
     row = __option
-    return task_kind_is_non_ci(row.task_kind)
+    return not task_kind_is_ci(row.task_kind)
 
 
 def collect_ci_tasks(
@@ -719,7 +715,7 @@ def pending_non_ci_projection(
     row = __option
     match row.task_status:
         case StatusPending():
-            if task_kind_is_non_ci(row.task_kind):
+            if not task_kind_is_ci(row.task_kind):
                 return [projected_row(task, row, PRPending())] + []
             return []
         case StatusCompleted():
