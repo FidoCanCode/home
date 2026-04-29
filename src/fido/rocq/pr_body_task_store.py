@@ -841,28 +841,6 @@ def pr_body_status_eqb(
             assert_never(__impossible)
 
 
-def pr_body_eqb(
-    left: list[PRBodyRow],
-    right: list[PRBodyRow],
-) -> bool:
-    __list = left
-    if __list == []:
-        __list = right
-        if __list == []:
-            return True
-        p = __list[0]
-        l = __list[1:]
-        return False
-    left_row = __list[0]
-    left_rest = __list[1:]
-    __list = right
-    if __list == []:
-        return False
-    right_row = __list[0]
-    right_rest = __list[1:]
-    return left_row == right_row and pr_body_eqb(left_rest, right_rest)
-
-
 @dataclass(frozen=True)
 class SystemState:
     durable_task_store: TaskStore
@@ -872,7 +850,7 @@ class SystemState:
 def pr_body_matches_store_bool(state: SystemState) -> bool:
     visible = state.visible_pr_body
     projected = project_task_store(state.durable_task_store)
-    return pr_body_eqb(visible, projected)
+    return visible == projected
 
 
 def synced_state(store: TaskStore) -> SystemState:

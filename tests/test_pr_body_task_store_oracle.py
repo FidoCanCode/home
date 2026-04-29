@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 
 from fido.rocq import pr_body_task_store as oracle
@@ -83,3 +84,10 @@ def test_transition_rejects_stale_pr_body_before_next_write() -> None:
 
     assert not oracle.pr_body_matches_store_bool(stale_state)
     assert oracle.transition(stale_state, oracle.WriteTaskComplete(1)) is None
+
+
+def test_pr_body_list_equality_lowers_to_native_equality() -> None:
+    source = Path(oracle.__file__).read_text()
+
+    assert "def pr_body_eqb(" not in source
+    assert "return visible == projected" in source

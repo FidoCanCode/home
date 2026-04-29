@@ -184,6 +184,8 @@ Fixpoint pr_body_eqb (left right : list PRBodyRow) : bool :=
   | _, _ => false
   end.
 
+Extract Constant pr_body_eqb => "__PY_NATIVE_EQ__".
+
 (** [SystemState] carries both durable task state and the PR body visible to
     GitHub readers. *)
 Record SystemState : Type := {
