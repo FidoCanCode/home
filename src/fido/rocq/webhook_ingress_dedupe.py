@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 
 
@@ -18,16 +19,19 @@ class State:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Fresh(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Dispatched(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Collapsed(State):
     pass
@@ -40,16 +44,19 @@ class Event:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Arrive(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Redeliver(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class CollapseReview(Event):
     pass

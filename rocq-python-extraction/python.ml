@@ -50,6 +50,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 |}
 
@@ -4326,10 +4327,12 @@ let record_class_prefix_of_decl state decl =
       class Nat:
           pass
 
+      @final
       @dataclass(frozen=True)
       class Nat_O(Nat):
           pass
 
+      @final
       @dataclass(frozen=True)
       class Nat_S(Nat):
           arg0: nat          # typed via pp_type
@@ -4337,8 +4340,8 @@ let record_class_prefix_of_decl state decl =
     Records have a single constructor that *is* the type, so no separate
     base class is emitted there. *)
 
-(** Emit one [@dataclass(frozen=True)] class for constructor [j] of [packet].
-    If [base_opt] is [Some base], the class inherits from [base]. *)
+(** Emit one [@final] [@dataclass(frozen=True)] class for constructor [j] of
+    [packet].  If [base_opt] is [Some base], the class inherits from [base]. *)
 let pp_type_shifted_with state shift pp_tvar typ =
   pp_type_with state (fun i -> pp_tvar (max 0 (i - shift))) typ
 
@@ -4374,8 +4377,10 @@ let pp_one_cons state ?(typevar_shift=1) ?(pp_tvar=typevar_name)
     | None      -> mt ()
     | Some base -> str "(" ++ str base ++ str ")"
   in
+  str "@final" ++ fnl () ++
   str "@dataclass(frozen=True)" ++ fnl () ++
-  str "class " ++ str cname ++ pp_bases ++ str ":" ++ fnl () ++
+  str "class " ++ str cname ++
+  pp_bases ++ str ":" ++ fnl () ++
   ( if nargs = 0 then str "    pass" ++ fnl ()
     else
       prlist_with_sep mt

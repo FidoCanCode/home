@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 
 
@@ -18,31 +19,37 @@ class ReviewReplyOutcome:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewAct(ReviewReplyOutcome):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewDo(ReviewReplyOutcome):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewAsk(ReviewReplyOutcome):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewAnswer(ReviewReplyOutcome):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewDefer(ReviewReplyOutcome):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewDump(ReviewReplyOutcome):
     pass
@@ -57,11 +64,13 @@ class Contender:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Handler(Contender):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class CronSweep(Contender):
     pass
@@ -74,16 +83,19 @@ class ActiveSlot:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Idle(ActiveSlot):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class HolderActive(ActiveSlot):
     c: Contender
 
 
+@final
 @dataclass(frozen=True)
 class WorkerActive(ActiveSlot):
     pass
@@ -92,6 +104,7 @@ class WorkerActive(ActiveSlot):
 ActiveSlotT = Idle | HolderActive | WorkerActive
 
 
+@final
 @dataclass(frozen=True)
 class FifoState:
     fifo_queue: list[Contender]
@@ -103,26 +116,31 @@ class Event:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Enqueue(Event):
     c: Contender
 
 
+@final
 @dataclass(frozen=True)
 class Dequeue(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class WorkerDefer(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class WorkerResume(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Release(Event):
     outcome: ReviewReplyOutcome

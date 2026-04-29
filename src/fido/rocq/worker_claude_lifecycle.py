@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 
 
@@ -18,21 +19,25 @@ class WorkerState:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Absent(WorkerState):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Idle(WorkerState):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Active(WorkerState):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Deferred(WorkerState):
     pass
@@ -45,36 +50,43 @@ class WorkerEvent:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Spawn(WorkerEvent):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TakeWork(WorkerEvent):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Yield(WorkerEvent):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Resume(WorkerEvent):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Finish(WorkerEvent):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Restart(WorkerEvent):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Shutdown(WorkerEvent):
     pass

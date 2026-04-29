@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 
 
@@ -18,11 +19,13 @@ class State:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Empty(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class NonEmpty(State):
     pass
@@ -35,16 +38,19 @@ class Event:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class WebhookArrives(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class HandlerDone(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class WorkerTurnStart(Event):
     pass

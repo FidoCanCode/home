@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 
 
@@ -18,26 +19,31 @@ class TaskKind:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TaskCI(TaskKind):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TaskThread(TaskKind):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TaskSpec(TaskKind):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TaskAsk(TaskKind):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TaskDefer(TaskKind):
     pass
@@ -50,16 +56,19 @@ class TaskStatus:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class StatusPending(TaskStatus):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class StatusCompleted(TaskStatus):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class StatusBlocked(TaskStatus):
     pass
@@ -68,6 +77,7 @@ class StatusBlocked(TaskStatus):
 TaskStatusT = StatusPending | StatusCompleted | StatusBlocked
 
 
+@final
 @dataclass(frozen=True)
 class TaskRow:
     title: str
@@ -89,11 +99,13 @@ class RescopeOp:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class KeepTask(RescopeOp):
     task: int
 
 
+@final
 @dataclass(frozen=True)
 class RewriteTask(RescopeOp):
     task: int
@@ -101,6 +113,7 @@ class RewriteTask(RescopeOp):
     new_description: str
 
 
+@final
 @dataclass(frozen=True)
 class CompleteTask(RescopeOp):
     task: int
@@ -113,11 +126,13 @@ class RescopeReleaseKind:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReleaseACT(RescopeReleaseKind):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReleaseDO(RescopeReleaseKind):
     pass
@@ -126,6 +141,7 @@ class ReleaseDO(RescopeReleaseKind):
 RescopeReleaseKindT = ReleaseACT | ReleaseDO
 
 
+@final
 @dataclass(frozen=True)
 class RescopeRelease:
     release_kind: RescopeReleaseKind
@@ -976,16 +992,19 @@ class TaskChange:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TaskCompleted(TaskChange):
     task: int
 
 
+@final
 @dataclass(frozen=True)
 class TaskCancelled(TaskChange):
     task: int
 
 
+@final
 @dataclass(frozen=True)
 class TaskModified(TaskChange):
     task: int

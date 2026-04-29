@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 
 
@@ -18,21 +19,25 @@ class State:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Absent(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Active(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Crashed(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Stopped(State):
     pass
@@ -45,21 +50,25 @@ class Event:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Launch(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Rescue(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ThreadDies(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ThreadStops(Event):
     pass

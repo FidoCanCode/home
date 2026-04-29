@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 
 
@@ -18,16 +19,19 @@ class State:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Free(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class OwnedByWorker(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class OwnedByHandler(State):
     pass
@@ -40,26 +44,31 @@ class Event:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class WorkerAcquire(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class HandlerAcquire(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class WorkerRelease(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class HandlerRelease(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Preempt(Event):
     pass

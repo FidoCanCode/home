@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 
 
@@ -108,6 +109,7 @@ def repo_count(repos: list[repo_entry]) -> int:
     return length(repos)
 
 
+@final
 @dataclass(frozen=True)
 class CoordIndex:
     coord_claims: frozenset[int]

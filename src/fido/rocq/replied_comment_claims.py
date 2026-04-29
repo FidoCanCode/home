@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 
 
@@ -18,16 +19,19 @@ class ClaimState:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ClaimInProgress(ClaimState):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ClaimCompleted(ClaimState):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ClaimRetryableFailed(ClaimState):
     pass
@@ -40,21 +44,25 @@ class PromiseState:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class PromisePrepared(PromiseState):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class PromisePosted(PromiseState):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class PromiseAcked(PromiseState):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class PromiseFailed(PromiseState):
     pass
@@ -67,26 +75,31 @@ class RecoveryObservation:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class SeenPromiseMarker(RecoveryObservation):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class AnchorDeleted(RecoveryObservation):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class WrongPullRequest(RecoveryObservation):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReplayPosted(RecoveryObservation):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReplayFailed(RecoveryObservation):
     pass
@@ -101,16 +114,19 @@ class ClaimOwner:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class OwnerWebhook(ClaimOwner):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class OwnerWorker(ClaimOwner):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class OwnerRecovery(ClaimOwner):
     pass
@@ -119,6 +135,7 @@ class OwnerRecovery(ClaimOwner):
 ClaimOwnerT = OwnerWebhook | OwnerWorker | OwnerRecovery
 
 
+@final
 @dataclass(frozen=True)
 class Attempt:
     attempt_owner: ClaimOwner
@@ -126,6 +143,7 @@ class Attempt:
     attempt_next_retry_after: int
 
 
+@final
 @dataclass(frozen=True)
 class ClaimRow:
     claim_attempt: Attempt
@@ -137,6 +155,7 @@ class ClaimRow:
         return not isinstance(row.claim_state, ClaimRetryableFailed)
 
 
+@final
 @dataclass(frozen=True)
 class PromiseRow:
     promise_attempt: Attempt
@@ -149,11 +168,13 @@ class ConversationLane:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewThreadLane(ConversationLane):
     thread_id: int
 
 
+@final
 @dataclass(frozen=True)
 class PullRequestLane(ConversationLane):
     pr_number: int
@@ -162,6 +183,7 @@ class PullRequestLane(ConversationLane):
 ConversationLaneT = ReviewThreadLane | PullRequestLane
 
 
+@final
 @dataclass(frozen=True)
 class ReplyArtifact:
     artifact_comment: int
@@ -173,31 +195,37 @@ class ReviewReplyOutcome:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewAct(ReviewReplyOutcome):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewDo(ReviewReplyOutcome):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewAsk(ReviewReplyOutcome):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewAnswer(ReviewReplyOutcome):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewDefer(ReviewReplyOutcome):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReviewDump(ReviewReplyOutcome):
     pass

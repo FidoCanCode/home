@@ -39,3 +39,10 @@ def test_constructor_tag_predicate_helper_is_inlined() -> None:
     assert "color_is_red_tag(" not in filter_source
     assert "isinstance(c, Red)" in filter_source
     assert "not isinstance(c, Red)" in filter_source
+
+
+def test_generated_dataclasses_are_final() -> None:
+    module_source = inspect.getsource(datatypes)
+
+    assert "    final,\n" in module_source
+    assert "@final\n@dataclass(frozen=True)\nclass Red(Color):" in module_source

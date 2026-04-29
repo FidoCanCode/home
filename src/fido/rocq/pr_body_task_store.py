@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 
 
@@ -18,26 +19,31 @@ class TaskKind:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TaskCI(TaskKind):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TaskThread(TaskKind):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TaskSpec(TaskKind):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TaskAsk(TaskKind):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TaskDefer(TaskKind):
     pass
@@ -50,16 +56,19 @@ class TaskStatus:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class StatusPending(TaskStatus):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class StatusCompleted(TaskStatus):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class StatusBlocked(TaskStatus):
     pass
@@ -68,6 +77,7 @@ class StatusBlocked(TaskStatus):
 TaskStatusT = StatusPending | StatusCompleted | StatusBlocked
 
 
+@final
 @dataclass(frozen=True)
 class TaskRow:
     title: str
@@ -81,11 +91,13 @@ class RescopeOp:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class KeepTask(RescopeOp):
     task: int
 
 
+@final
 @dataclass(frozen=True)
 class RewriteTask(RescopeOp):
     task: int
@@ -93,6 +105,7 @@ class RewriteTask(RescopeOp):
     new_description: str
 
 
+@final
 @dataclass(frozen=True)
 class CompleteTask(RescopeOp):
     task: int
@@ -534,6 +547,7 @@ def complete_task_visible(
 model_version: int = 0
 
 
+@final
 @dataclass(frozen=True)
 class TaskStore:
     task_store_order: list[int]
@@ -544,11 +558,13 @@ class PRBodyStatus:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class PRPending(PRBodyStatus):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class PRCompleted(PRBodyStatus):
     pass
@@ -557,6 +573,7 @@ class PRCompleted(PRBodyStatus):
 PRBodyStatusT = PRPending | PRCompleted
 
 
+@final
 @dataclass(frozen=True)
 class PRBodyRow:
     pr_body_task: int
@@ -716,6 +733,7 @@ def pr_body_status_eqb(
             assert_never(__impossible)
 
 
+@final
 @dataclass(frozen=True)
 class SystemState:
     durable_task_store: TaskStore
@@ -739,17 +757,20 @@ class TaskWrite:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class WriteTaskAdd(TaskWrite):
     task: int
     row: TaskRow
 
 
+@final
 @dataclass(frozen=True)
 class WriteTaskComplete(TaskWrite):
     task: int
 
 
+@final
 @dataclass(frozen=True)
 class WriteTaskRescope(TaskWrite):
     snapshot_order: list[int]

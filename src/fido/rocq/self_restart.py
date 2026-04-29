@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 
 
@@ -18,31 +19,37 @@ class State:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Running(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Syncing(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class StoppingWorkers(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class KillingChildren(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Exiting(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Aborted(State):
     pass
@@ -55,26 +62,31 @@ class Event:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TriggerRestart(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class SyncOk(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class SyncFail(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class WorkersStopped(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ChildrenKilled(Event):
     pass

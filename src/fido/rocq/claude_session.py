@@ -11,6 +11,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 
 
@@ -18,26 +19,31 @@ class State:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Idle(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Sending(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class AwaitingReply(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Draining(State):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Cancelled(State):
     pass
@@ -50,31 +56,37 @@ class Event:
     pass
 
 
+@final
 @dataclass(frozen=True)
 class Send(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReplyChunk(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class ReplyEnd(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class CancelFire(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class DrainObserve(Event):
     pass
 
 
+@final
 @dataclass(frozen=True)
 class TurnReturn(Event):
     pass
