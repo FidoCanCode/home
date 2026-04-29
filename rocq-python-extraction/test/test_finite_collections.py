@@ -49,33 +49,33 @@ def test_set_infix_lowerings_preserve_precedence(
 
     assert_rendered_source(
         source,
-        "positive_claim_union_expr = (positive_claim_set | positive_claim_diff)",
+        "positive_claim_union_expr = positive_claim_set | positive_claim_diff",
     )
     assert_rendered_source(
         source,
-        "positive_claim_inter_expr = (positive_claim_set & positive_claim_union)",
+        "positive_claim_inter_expr = positive_claim_set & positive_claim_union",
     )
     assert_rendered_source(
         source,
-        "positive_claim_diff_expr = (positive_claim_union - positive_claim_set)",
+        "positive_claim_diff_expr = positive_claim_union - positive_claim_set",
     )
     assert_rendered_source(
         source,
         "positive_claim_nested_expr = "
-        "((positive_claim_set | positive_claim_diff) & positive_claim_union)",
+        "(positive_claim_set | positive_claim_diff) & positive_claim_union",
     )
     assert_rendered_source(
         source,
         "positive_claim_union_inter_expr = "
-        "(positive_claim_diff | positive_claim_set & positive_claim_union)",
+        "positive_claim_diff | positive_claim_set & positive_claim_union",
     )
     assert_rendered_source(
         source,
         "positive_claim_diff_union_expr = "
-        "(positive_claim_union - (positive_claim_diff | positive_claim_inter))",
+        "positive_claim_union - (positive_claim_diff | positive_claim_inter)",
     )
     assert_rendered_source(
         source,
         "positive_claim_inter_diff_expr = "
-        "((positive_claim_union - positive_claim_diff) & positive_claim_set)",
+        "(positive_claim_union - positive_claim_diff) & positive_claim_set",
     )

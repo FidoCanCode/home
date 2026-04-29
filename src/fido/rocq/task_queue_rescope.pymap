@@ -30,7 +30,7 @@ open,193,4,193,31,task_queue_rescope.v,88,2,88,18,extraction,release_decision,re
 open,200,0,213,38,task_queue_rescope.v,92,11,92,26,extraction,task_executable,task_executable
 open,79,4,89,42,task_queue_rescope.v,102,11,102,30,extraction,task_row_executable,TaskRow.row_executable
 open,216,0,229,38,task_queue_rescope.v,108,11,108,26,extraction,task_kind_is_ci,task_kind_is_ci
-open,232,0,233,38,task_queue_rescope.v,114,11,114,30,extraction,task_kind_is_non_ci,task_kind_is_non_ci
+open,232,0,233,36,task_queue_rescope.v,114,11,114,30,extraction,task_kind_is_non_ci,task_kind_is_non_ci
 open,236,0,249,38,task_queue_rescope.v,118,11,118,28,extraction,task_preempt_rank,task_preempt_rank
 open,91,4,93,29,task_queue_rescope.v,129,11,129,30,extraction,task_requires_abort,TaskRow.requires_abort
 open,252,0,254,15,task_queue_rescope.v,136,11,136,23,extraction,positive_eqb,positive_eqb

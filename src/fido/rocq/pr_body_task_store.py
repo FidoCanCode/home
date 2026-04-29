@@ -118,7 +118,7 @@ def task_kind_is_ci(kind: TaskKind) -> bool:
 
 
 def task_kind_is_non_ci(kind: TaskKind) -> bool:
-    return not (task_kind_is_ci(kind))
+    return not task_kind_is_ci(kind)
 
 
 def positive_eqb(

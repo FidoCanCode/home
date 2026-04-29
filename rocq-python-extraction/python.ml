@@ -562,15 +562,6 @@ let std_string_expr_value expr =
   in
   loop expr
 
-let needs_numeric_constructor_parens = function
-  | MLcons (_, r, [_]) when is_std_nat_succ_ref r ->
-      true
-  | MLcons (_, r, [_])
-    when is_std_positive_xo_ref r || is_std_positive_xi_ref r ->
-      true
-  | _ ->
-      false
-
 type py_associativity =
   | PyAssocLeft
   | PyAssocRight
@@ -623,15 +614,11 @@ let pp_py_child parent_precedence associativity side child =
   then str "(" ++ child.py_expr_pp ++ str ")"
   else child.py_expr_pp
 
-let py_prefix ?(wrap_operand=false) prefix precedence operand =
-  let pp_operand =
-    if wrap_operand then str "(" ++ operand.py_expr_pp ++ str ")"
-    else pp_py_child precedence PyAssocNone PyOperandChild operand
-  in
+let py_prefix prefix precedence operand =
+  let pp_operand = pp_py_child precedence PyAssocNone PyOperandChild operand in
   py_rendered ~precedence (str prefix ++ pp_operand)
 
-let py_infix ?(associativity=PyAssocLeft) ?(wrap=false)
-    operator precedence left right =
+let py_infix ?(associativity=PyAssocLeft) operator precedence left right =
   let pp_left =
     pp_py_child precedence associativity PyLeftChild left
   in
@@ -641,7 +628,6 @@ let py_infix ?(associativity=PyAssocLeft) ?(wrap=false)
   let pp =
     pp_left ++ str (" " ^ operator ^ " ") ++ pp_right
   in
-  let pp = if wrap then str "(" ++ pp ++ str ")" else pp in
   py_rendered ~precedence pp
 
 let py_call_with_args head args =
@@ -1172,8 +1158,9 @@ let rec py_expr_precedence expr =
       py_prec_add
   | MLcons (_, r, [_]) when is_std_nat_succ_ref r ->
       py_prec_add
-  | MLcons (_, r, [_])
-    when is_std_positive_xo_ref r || is_std_positive_xi_ref r ->
+  | MLcons (_, r, [_]) when is_std_positive_xo_ref r ->
+      py_prec_mul
+  | MLcons (_, r, [_]) when is_std_positive_xi_ref r ->
       py_prec_add
   | MLcons (_, r, [_]) when is_std_Z_neg_ref r ->
       py_prec_unary
@@ -1432,19 +1419,19 @@ and pp_expr state env expr =
                  (rendered_expr values))
         | [left; right] when is_positive_set_ref r "union" || is_string_set_ref r "union" ->
             Some
-              (py_infix ~wrap:true "|"
+              (py_infix "|"
                  py_prec_bit_or
                  (rendered_expr left)
                  (rendered_expr right))
         | [left; right] when is_positive_set_ref r "inter" || is_string_set_ref r "inter" ->
             Some
-              (py_infix ~wrap:true "&"
+              (py_infix "&"
                  py_prec_bit_and
                  (rendered_expr left)
                  (rendered_expr right))
         | [left; right] when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
             Some
-              (py_infix ~associativity:PyAssocNone ~wrap:true "-"
+              (py_infix ~associativity:PyAssocNone "-"
                  py_prec_add
                  (rendered_expr left)
                  (rendered_expr right))
@@ -1470,7 +1457,7 @@ and pp_expr state env expr =
         match all_args with
         | [value] when is_std_bool_ref r "negb" ->
             Some
-              (py_prefix ~wrap_operand:true "not " py_prec_not
+              (py_prefix "not " py_prec_not
                  (rendered_expr value))
         | [left; right] when is_std_bool_ref r "andb" ->
             Some
@@ -1719,25 +1706,28 @@ and pp_expr state env expr =
   | MLcons (_, r, []) when is_std_nat_zero_ref r ->
       str "0"
   | MLcons (_, r, [n]) when is_std_nat_succ_ref r ->
-      let pp_n = pp_expr state env n in
-      if needs_numeric_constructor_parens n then
-        str "(" ++ pp_n ++ str ") + 1"
-      else
-        pp_n ++ str " + 1"
+      pp_py_rendered
+        (py_infix "+"
+           py_prec_add
+           (pp_rendered_expr state env n)
+           (py_rendered (str "1")))
   | MLcons (_, r, []) when is_std_positive_xh_ref r ->
       str "1"
   | MLcons (_, r, [p]) when is_std_positive_xo_ref r ->
-      let pp_p = pp_expr state env p in
-      if needs_numeric_constructor_parens p then
-        str "(" ++ pp_p ++ str ") * 2"
-      else
-        pp_p ++ str " * 2"
+      pp_py_rendered
+        (py_infix "*"
+           py_prec_mul
+           (pp_rendered_expr state env p)
+           (py_rendered (str "2")))
   | MLcons (_, r, [p]) when is_std_positive_xi_ref r ->
-      let pp_p = pp_expr state env p in
-      if needs_numeric_constructor_parens p then
-        str "(" ++ pp_p ++ str ") * 2 + 1"
-      else
-        pp_p ++ str " * 2 + 1"
+      pp_py_rendered
+        (py_infix "+"
+           py_prec_add
+           (py_infix "*"
+              py_prec_mul
+              (pp_rendered_expr state env p)
+              (py_rendered (str "2")))
+           (py_rendered (str "1")))
   | MLcons (_, r, []) when is_std_N_zero_ref r ->
       str "0"
   | MLcons (_, r, [p]) when is_std_N_pos_ref r ->
@@ -1747,11 +1737,8 @@ and pp_expr state env expr =
   | MLcons (_, r, [p]) when is_std_Z_pos_ref r ->
       pp_expr state env p
   | MLcons (_, r, [p]) when is_std_Z_neg_ref r ->
-      let pp_p = pp_expr state env p in
-      if needs_numeric_constructor_parens p then
-        str "-(" ++ pp_p ++ str ")"
-      else
-        str "-" ++ pp_p
+      pp_py_rendered
+        (py_prefix "-" py_prec_unary (pp_rendered_expr state env p))
   | MLcons (_, r, [num; den]) when is_std_Q_make_ref r ->
       str "Fraction(" ++ pp_expr state env num ++ str ", " ++
       pp_expr state env den ++ str ")"

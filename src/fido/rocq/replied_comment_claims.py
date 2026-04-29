@@ -248,7 +248,7 @@ def comment_claimable(
     if __option is None:
         return True
     row = __option
-    return not (row.is_blocking())
+    return not row.is_blocking()
 
 
 def all_claimable(

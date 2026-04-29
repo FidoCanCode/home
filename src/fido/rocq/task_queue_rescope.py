@@ -108,14 +108,14 @@ class TaskRow:
         after_row: TaskRow,
     ) -> bool:
         before_row = self
-        return not (before_row.task_title == after_row.task_title)
+        return not before_row.task_title == after_row.task_title
 
     def description_changed(
         self,
         after_row: TaskRow,
     ) -> bool:
         before_row = self
-        return not (before_row.task_description == after_row.task_description)
+        return not before_row.task_description == after_row.task_description
 
     def metadata_changed(
         self,
@@ -230,7 +230,7 @@ def task_kind_is_ci(kind: TaskKind) -> bool:
 
 
 def task_kind_is_non_ci(kind: TaskKind) -> bool:
-    return not (task_kind_is_ci(kind))
+    return not task_kind_is_ci(kind)
 
 
 def task_preempt_rank(kind: TaskKind) -> int | None:
@@ -240,7 +240,7 @@ def task_preempt_rank(kind: TaskKind) -> int | None:
         case TaskThread():
             return 0 + 1
         case TaskSpec():
-            return (0 + 1) + 1
+            return 0 + 1 + 1
         case TaskAsk():
             return None
         case TaskDefer():
@@ -951,7 +951,7 @@ def task_source_comment_changed(
     before_source: int | None,
     after_source: int | None,
 ) -> bool:
-    return not (option_positive_eqb(before_source, after_source))
+    return not option_positive_eqb(before_source, after_source)
 
 
 def rescope_preserves_task_identity(

@@ -14,7 +14,7 @@ from typing import (
 )
 
 
-max_retries: int = ((0 + 1) + 1) + 1
+max_retries: int = 0 + 1 + 1 + 1
 
 
 retry_budget: int = 1 * 2 + 1
