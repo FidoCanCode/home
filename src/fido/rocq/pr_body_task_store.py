@@ -105,14 +105,16 @@ def positive_mem(
     target: int,
     items: list[int],
 ) -> bool:
-    __list = items
-    if __list == []:
-        return False
-    item = __list[0]
-    rest = __list[1:]
-    if target == item:
-        return True
-    return positive_mem(target, rest)
+    while True:
+        __list = items
+        if __list == []:
+            return False
+        item = __list[0]
+        rest = __list[1:]
+        if target == item:
+            return True
+        target, items = target, rest
+        continue
 
 
 def find_comment_duplicate(
@@ -120,34 +122,26 @@ def find_comment_duplicate(
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> int | None:
-    __list = order
-    if __list == []:
-        return None
-    task = __list[0]
-    rest = __list[1:]
-    __option = rows.get(_rocq_positive_key(task))
-    if __option is None:
-        return find_comment_duplicate(
-            comment,
-            rest,
-            rows,
-        )
-    row = __option
-    __option = row.source_comment
-    if __option is None:
-        return find_comment_duplicate(
-            comment,
-            rest,
-            rows,
-        )
-    existing = __option
-    if existing == comment:
-        return task
-    return find_comment_duplicate(
-        comment,
-        rest,
-        rows,
-    )
+    while True:
+        __list = order
+        if __list == []:
+            return None
+        task = __list[0]
+        rest = __list[1:]
+        __option = rows.get(_rocq_positive_key(task))
+        if __option is None:
+            comment, order, rows = comment, rest, rows
+            continue
+        row = __option
+        __option = row.source_comment
+        if __option is None:
+            comment, order, rows = comment, rest, rows
+            continue
+        existing = __option
+        if existing == comment:
+            return task
+        comment, order, rows = comment, rest, rows
+        continue
 
 
 def row_has_pending_title(
@@ -182,18 +176,16 @@ def find_pending_title_duplicate(
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> int | None:
-    __list = order
-    if __list == []:
-        return None
-    task = __list[0]
-    rest = __list[1:]
-    if task_has_pending_title(candidate_title, task, rows):
-        return task
-    return find_pending_title_duplicate(
-        candidate_title,
-        rest,
-        rows,
-    )
+    while True:
+        __list = order
+        if __list == []:
+            return None
+        task = __list[0]
+        rest = __list[1:]
+        if task_has_pending_title(candidate_title, task, rows):
+            return task
+        candidate_title, order, rows = candidate_title, rest, rows
+        continue
 
 
 def enqueue_task(
@@ -352,63 +344,70 @@ def apply_rescope_ops(
     pending_ids: list[int],
     completed_ids: list[int],
 ) -> tuple[tuple[dict[int, TaskRow], list[int]], list[int]]:
-    __list = ops
-    if __list == []:
-        return (
-            (
+    while True:
+        __list = ops
+        if __list == []:
+            return (
+                (
+                    rows,
+                    pending_ids,
+                ),
+                completed_ids,
+            )
+        op = __list[0]
+        rest = __list[1:]
+        task = rescope_task_id(op)
+        __option = rows.get(_rocq_positive_key(task))
+        if __option is None:
+            ops, rows, pending_ids, completed_ids = (
+                rest,
                 rows,
                 pending_ids,
-            ),
-            completed_ids,
-        )
-    op = __list[0]
-    rest = __list[1:]
-    task = rescope_task_id(op)
-    __option = rows.get(_rocq_positive_key(task))
-    if __option is None:
-        return apply_rescope_ops(
+                completed_ids,
+            )
+            continue
+        row = __option
+        __pair = apply_rescope_op(op, task, row, rows, pending_ids, completed_ids)
+        p = __pair[0]
+        completed_ids_ = __pair[1]
+        __pair = p
+        rows_ = __pair[0]
+        pending_ids_ = __pair[1]
+        ops, rows, pending_ids, completed_ids = (
             rest,
-            rows,
-            pending_ids,
-            completed_ids,
+            rows_,
+            pending_ids_,
+            completed_ids_,
         )
-    row = __option
-    __pair = apply_rescope_op(op, task, row, rows, pending_ids, completed_ids)
-    p = __pair[0]
-    completed_ids_ = __pair[1]
-    __pair = p
-    rows_ = __pair[0]
-    pending_ids_ = __pair[1]
-    return apply_rescope_ops(
-        rest,
-        rows_,
-        pending_ids_,
-        completed_ids_,
-    )
+        continue
 
 
 def completed_tasks_in_order(
     order: list[int],
     rows: dict[int, TaskRow],
 ) -> list[int]:
-    __list = order
-    if __list == []:
-        return []
-    task = __list[0]
-    rest = __list[1:]
-    __option = rows.get(_rocq_positive_key(task))
-    if __option is None:
-        return completed_tasks_in_order(rest, rows)
-    row = __option
-    match row.status:
-        case StatusPending():
-            return completed_tasks_in_order(rest, rows)
-        case StatusCompleted():
-            return [task] + completed_tasks_in_order(rest, rows)
-        case StatusBlocked():
-            return completed_tasks_in_order(rest, rows)
-        case __impossible:
-            assert_never(__impossible)
+    while True:
+        __list = order
+        if __list == []:
+            return []
+        task = __list[0]
+        rest = __list[1:]
+        __option = rows.get(_rocq_positive_key(task))
+        if __option is None:
+            order, rows = rest, rows
+            continue
+        row = __option
+        match row.status:
+            case StatusPending():
+                order, rows = rest, rows
+                continue
+            case StatusCompleted():
+                return [task] + completed_tasks_in_order(rest, rows)
+            case StatusBlocked():
+                order, rows = rest, rows
+                continue
+            case __impossible:
+                assert_never(__impossible)
 
 
 def preserve_newly_added(

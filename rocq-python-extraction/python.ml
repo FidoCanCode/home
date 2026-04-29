@@ -173,6 +173,24 @@ let pp_lambda ids body =
     prlist_with_sep (fun () -> str ", ") pp_param params ++
     str ": " ++ body
 
+type tail_context = {
+  tail_name : string;
+  tail_params : Id.t list;
+}
+
+let active_tail_context : tail_context option ref = ref None
+
+let with_tail_context context f =
+  let previous = !active_tail_context in
+  active_tail_context := context;
+  try
+    let result = f () in
+    active_tail_context := previous;
+    result
+  with exn ->
+    active_tail_context := previous;
+    raise exn
+
 let is_erased_arg = function
   | MLdummy _ -> true
   | _         -> false
@@ -3057,6 +3075,9 @@ let rec pp_return_body state env indent = function
             when String.equal marker marker_io_bracket ->
               pp_io_bracket_statement acquire release use
           | _ ->
+          match pp_tail_self_rebind state env indent head visible_args with
+          | Some pp -> pp
+          | None ->
           match unwrap_fix head with
           | None ->
               (match head with
@@ -3087,6 +3108,88 @@ let rec pp_return_body state env indent = function
       pp_defs ++ fnl () ++ fnl () ++ str def_pfx ++ str "return " ++ pp_pyid selected
   | expr ->
       str "return " ++ pp_statement_expr state env indent expr
+
+and tail_call_name state env = function
+  | MLglob r -> Some (pp_global state Term r)
+  | MLrel n -> Some (Pp.string_of_ppcmds (pp_pyid (get_db_name n env)))
+  | _ -> None
+
+and is_active_tail_call state env head =
+  match !active_tail_context, tail_call_name state env head with
+  | Some context, Some name -> String.equal context.tail_name name
+  | _ -> false
+
+and pp_tail_self_rebind state env indent head args =
+  match !active_tail_context with
+  | Some context
+    when is_active_tail_call state env head &&
+         Int.equal (List.length context.tail_params) (List.length args) ->
+      let pfx = String.make indent ' ' in
+      let continuation_pfx = fnl () ++ str pfx in
+      let pp_continue = str "continue" in
+      if List.is_empty context.tail_params then
+        Some pp_continue
+      else
+        let lhs =
+          prlist_with_sep (fun () -> str ", ") pp_pyid context.tail_params
+        in
+        let rhs =
+          prlist_with_sep (fun () -> str ", ") (pp_expr state env) args
+        in
+        let assignment = lhs ++ str " = " ++ rhs in
+        if String.length (pfx ^ Pp.string_of_ppcmds assignment) <= 88 then
+          Some (assignment ++ continuation_pfx ++ pp_continue)
+        else
+          Some
+            (lhs ++ str " = (" ++ fnl () ++
+             prlist_with_sep
+               (fun () -> str "," ++ fnl ())
+               (fun arg ->
+                  str (pfx ^ "    ") ++
+                  pp_statement_expr state env (indent + 4) arg)
+               args ++
+             str "," ++ fnl () ++ str pfx ++ str ")" ++
+             continuation_pfx ++ pp_continue)
+  | _ -> None
+
+and has_tail_self_call state env expr =
+  match expr with
+  | MLmagic a -> has_tail_self_call state env a
+  | MLletin (id, _a1, a2) ->
+      let _, env' = push_vars [id_of_mlid id] env in
+      has_tail_self_call state env' a2
+  | MLcase (_, _scrutinee, branches) ->
+      Array.exists
+        (fun (ids, _pat, body) ->
+           let _ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
+           has_tail_self_call state env' body)
+        branches
+  | MLapp (f, args) -> (
+      match collect_app f args with
+      | MLmagic a, all_args ->
+          has_tail_self_call state env (MLapp (a, all_args))
+      | MLletin (id, a1, a2), all_args ->
+          has_tail_self_call state env (MLletin (id, a1, MLapp (a2, all_args)))
+      | head, all_args ->
+          let visible_args =
+            List.filter (fun a -> not (is_erased_arg a)) all_args
+          in
+          is_active_tail_call state env head &&
+          (match !active_tail_context with
+           | Some context ->
+               Int.equal (List.length context.tail_params) (List.length visible_args)
+           | None -> false))
+  | _ -> false
+
+and pp_return_body_with_tail_loop state env indent name params body =
+  let context = Some { tail_name = name; tail_params = params } in
+  with_tail_context context (fun () ->
+      if has_tail_self_call state env body then
+        str "while True:" ++ fnl () ++
+        str (String.make (indent + 4) ' ') ++
+        pp_return_body state env (indent + 4) body
+      else
+        pp_return_body state env indent body)
 
 and pp_return_arm state env indent ids values body =
   let ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
@@ -3323,10 +3426,14 @@ and pp_fix_statement state env indent i ids defs =
     let lam_ids, body = collect_lams defs.(j) in
     let params = List.map id_of_mlid lam_ids in
     let params', env'' = push_vars params env' in
+    let function_name = Pp.string_of_ppcmds (pp_pyid name_arr.(j)) in
+    let function_params = List.rev (visible_params params') in
     str "def " ++ pp_pyid name_arr.(j) ++ str "(" ++
     pp_param_list (List.rev params') ++
     str "):" ++ fnl () ++
-    str body_pfx ++ pp_return_body state env'' (indent + 4) body
+    str body_pfx ++
+    pp_return_body_with_tail_loop state env'' (indent + 4)
+      function_name function_params body
   in
   prlist_with_sep (fun () -> fnl () ++ str def_pfx) pp_one
     (List.init n (fun j -> j)),
@@ -3811,7 +3918,11 @@ let pp_term_decl state env name a typ =
       pp_prefix ++
       pp_def_signature name (existing_params @ synthetic_signature_params) ret_annot ++
       fnl () ++
-      str "    " ++ pp_return_body state env'' 4 body_app ++ fnl ()
+      str "    " ++
+      pp_return_body_with_tail_loop state env'' 4 name
+        (visible_params_rev @ synthetic_ids)
+        body_app ++
+      fnl ()
     else
       let pp_params = annotated_params_opt visible_params_rev arg_annots in
       pp_prefix ++
@@ -3823,7 +3934,9 @@ let pp_term_decl state env name a typ =
       (* [indent=4]: the body is indented by 4 spaces inside the def; [case] arms
          at 8, case bodies at 12.  The "    " prefix handles the first line only;
          [pp_return_body] generates the rest with absolute column positions. *)
-      str "    " ++ pp_return_body state env' 4 body ++ fnl ()
+      str "    " ++
+      pp_return_body_with_tail_loop state env' 4 name visible_params_rev body ++
+      fnl ()
 
 let pp_method_signature ?(is_async=false) name params ret_annot =
   let def_prefix = if is_async then str "async def " else str "def " in

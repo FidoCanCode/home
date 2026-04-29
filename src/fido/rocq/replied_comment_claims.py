@@ -247,14 +247,16 @@ def all_claimable(
     claims: dict[int, ClaimRow],
     comments: list[int],
 ) -> bool:
-    __list = comments
-    if __list == []:
-        return True
-    comment = __list[0]
-    rest = __list[1:]
-    if comment_claimable(claims, comment):
-        return all_claimable(claims, rest)
-    return False
+    while True:
+        __list = comments
+        if __list == []:
+            return True
+        comment = __list[0]
+        rest = __list[1:]
+        if comment_claimable(claims, comment):
+            claims, comments = claims, rest
+            continue
+        return False
 
 
 def in_progress_row(
@@ -274,21 +276,23 @@ def claim_all(
     comments: list[int],
     claims: dict[int, ClaimRow],
 ) -> dict[int, ClaimRow]:
-    __list = comments
-    if __list == []:
-        return claims
-    comment = __list[0]
-    rest = __list[1:]
-    return claim_all(
-        owner,
-        promise,
-        rest,
-        _rocq_map_add(
-            _rocq_positive_key(comment),
-            in_progress_row(owner, promise),
-            claims,
-        ),
-    )
+    while True:
+        __list = comments
+        if __list == []:
+            return claims
+        comment = __list[0]
+        rest = __list[1:]
+        owner, promise, comments, claims = (
+            owner,
+            promise,
+            rest,
+            _rocq_map_add(
+                _rocq_positive_key(comment),
+                in_progress_row(owner, promise),
+                claims,
+            ),
+        )
+        continue
 
 
 def prepare_claims(
@@ -373,20 +377,22 @@ def complete_all(
     comments: list[int],
     claims: dict[int, ClaimRow],
 ) -> dict[int, ClaimRow]:
-    __list = comments
-    if __list == []:
-        return claims
-    comment = __list[0]
-    rest = __list[1:]
-    return complete_all(
-        promise,
-        rest,
-        complete_comment(
+    while True:
+        __list = comments
+        if __list == []:
+            return claims
+        comment = __list[0]
+        rest = __list[1:]
+        promise, comments, claims = (
             promise,
-            comment,
-            claims,
-        ),
-    )
+            rest,
+            complete_comment(
+                promise,
+                comment,
+                claims,
+            ),
+        )
+        continue
 
 
 def ack_promise(
@@ -449,12 +455,14 @@ def fail_all(
     comments: list[int],
     claims: dict[int, ClaimRow],
 ) -> dict[int, ClaimRow]:
-    __list = comments
-    if __list == []:
-        return claims
-    comment = __list[0]
-    rest = __list[1:]
-    return fail_all(rest, fail_comment(comment, claims))
+    while True:
+        __list = comments
+        if __list == []:
+            return claims
+        comment = __list[0]
+        rest = __list[1:]
+        comments, claims = rest, fail_comment(comment, claims)
+        continue
 
 
 def fail_promise(
