@@ -278,6 +278,31 @@ def row_with_status(
     )
 
 
+def row_with_description(
+    row: TaskRow,
+    new_description: str,
+) -> TaskRow:
+    return TaskRow(
+        title=row.title,
+        description=new_description,
+        kind=row.kind,
+        status=row.status,
+        source_comment=row.source_comment,
+    )
+
+
+def task_visible_after_rescope(row: TaskRow) -> bool:
+    match row.status:
+        case StatusPending():
+            return True
+        case StatusCompleted():
+            return False
+        case StatusBlocked():
+            return True
+        case __impossible:
+            assert_never(__impossible)
+
+
 def rescope_task_id(op: RescopeOp) -> int:
     match op:
         case KeepTask(task):
@@ -288,6 +313,61 @@ def rescope_task_id(op: RescopeOp) -> int:
             return task
         case __impossible:
             assert_never(__impossible)
+
+
+def apply_rescope_op(
+    op: RescopeOp,
+    task: int,
+    row: TaskRow,
+    rows: dict[int, TaskRow],
+    pending_ids: list[int],
+    completed_ids: list[int],
+) -> tuple[tuple[dict[int, TaskRow], list[int]], list[int]]:
+    if task_visible_after_rescope(row):
+        match op:
+            case KeepTask(task0):
+                return (
+                    (
+                        rows,
+                        pending_ids + [task] + [],
+                    ),
+                    completed_ids,
+                )
+            case RewriteTask(task0, new_title, new_description):
+                row_ = row_with_description(row, new_description)
+                return (
+                    (
+                        _rocq_map_add(
+                            _rocq_positive_key(task),
+                            row_,
+                            rows,
+                        ),
+                        pending_ids + [task] + [],
+                    ),
+                    completed_ids,
+                )
+            case CompleteTask(task0):
+                row_ = row_with_status(row, StatusCompleted())
+                return (
+                    (
+                        _rocq_map_add(
+                            _rocq_positive_key(task),
+                            row_,
+                            rows,
+                        ),
+                        pending_ids,
+                    ),
+                    completed_ids + [task] + [],
+                )
+            case __impossible:
+                assert_never(__impossible)
+    return (
+        (
+            rows,
+            pending_ids,
+        ),
+        completed_ids,
+    )
 
 
 def apply_rescope_ops(
@@ -317,128 +397,18 @@ def apply_rescope_ops(
             completed_ids,
         )
     row = __option
-    match op:
-        case KeepTask(task0):
-            match row.status:
-                case StatusPending():
-                    return apply_rescope_ops(
-                        rest,
-                        rows,
-                        pending_ids + [task] + [],
-                        completed_ids,
-                    )
-                case StatusCompleted():
-                    return apply_rescope_ops(
-                        rest,
-                        rows,
-                        pending_ids,
-                        completed_ids,
-                    )
-                case StatusBlocked():
-                    return apply_rescope_ops(
-                        rest,
-                        rows,
-                        pending_ids + [task] + [],
-                        completed_ids,
-                    )
-                case __impossible:
-                    assert_never(__impossible)
-        case RewriteTask(task0, new_title, new_description):
-            match row.status:
-                case StatusPending():
-                    row_ = TaskRow(
-                        title=row.title,
-                        description=new_description,
-                        kind=row.kind,
-                        status=row.status,
-                        source_comment=row.source_comment,
-                    )
-                    return apply_rescope_ops(
-                        rest,
-                        _rocq_map_add(
-                            _rocq_positive_key(task),
-                            row_,
-                            rows,
-                        ),
-                        pending_ids + [task] + [],
-                        completed_ids,
-                    )
-                case StatusCompleted():
-                    return apply_rescope_ops(
-                        rest,
-                        rows,
-                        pending_ids,
-                        completed_ids,
-                    )
-                case StatusBlocked():
-                    row_ = TaskRow(
-                        title=row.title,
-                        description=new_description,
-                        kind=row.kind,
-                        status=row.status,
-                        source_comment=row.source_comment,
-                    )
-                    return apply_rescope_ops(
-                        rest,
-                        _rocq_map_add(
-                            _rocq_positive_key(task),
-                            row_,
-                            rows,
-                        ),
-                        pending_ids + [task] + [],
-                        completed_ids,
-                    )
-                case __impossible:
-                    assert_never(__impossible)
-        case CompleteTask(task0):
-            match row.status:
-                case StatusPending():
-                    row_ = TaskRow(
-                        title=row.title,
-                        description=row.description,
-                        kind=row.kind,
-                        status=StatusCompleted(),
-                        source_comment=row.source_comment,
-                    )
-                    return apply_rescope_ops(
-                        rest,
-                        _rocq_map_add(
-                            _rocq_positive_key(task),
-                            row_,
-                            rows,
-                        ),
-                        pending_ids,
-                        completed_ids + [task] + [],
-                    )
-                case StatusCompleted():
-                    return apply_rescope_ops(
-                        rest,
-                        rows,
-                        pending_ids,
-                        completed_ids,
-                    )
-                case StatusBlocked():
-                    row_ = TaskRow(
-                        title=row.title,
-                        description=row.description,
-                        kind=row.kind,
-                        status=StatusCompleted(),
-                        source_comment=row.source_comment,
-                    )
-                    return apply_rescope_ops(
-                        rest,
-                        _rocq_map_add(
-                            _rocq_positive_key(task),
-                            row_,
-                            rows,
-                        ),
-                        pending_ids,
-                        completed_ids + [task] + [],
-                    )
-                case __impossible:
-                    assert_never(__impossible)
-        case __impossible:
-            assert_never(__impossible)
+    __pair = apply_rescope_op(op, task, row, rows, pending_ids, completed_ids)
+    p = __pair[0]
+    completed_ids_ = __pair[1]
+    __pair = p
+    rows_ = __pair[0]
+    pending_ids_ = __pair[1]
+    return apply_rescope_ops(
+        rest,
+        rows_,
+        pending_ids_,
+        completed_ids_,
+    )
 
 
 def completed_tasks_in_order(

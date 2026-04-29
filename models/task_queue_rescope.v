@@ -307,6 +307,23 @@ Definition row_with_status (row : TaskRow) (new_status : TaskStatus) : TaskRow :
     source_comment := source_comment row
   |}.
 
+Definition row_with_description
+    (row : TaskRow)
+    (new_description : string) : TaskRow :=
+  {|
+    title := title row;
+    description := new_description;
+    kind := kind row;
+    status := status row;
+    source_comment := source_comment row
+  |}.
+
+Definition task_visible_after_rescope (row : TaskRow) : bool :=
+  match status row with
+  | StatusCompleted => false
+  | _ => true
+  end.
+
 Definition unblock_task_row
     (task : positive)
     (row : TaskRow)
@@ -395,6 +412,31 @@ Fixpoint normalize_rescope_batch
       end
   end.
 
+Definition apply_rescope_op
+    (op : RescopeOp)
+    (task : positive)
+    (row : TaskRow)
+    (rows : PositiveMap.t TaskRow)
+    (pending_ids completed_ids : list positive)
+    : PositiveMap.t TaskRow * list positive * list positive :=
+  if task_visible_after_rescope row then
+    match op with
+    | KeepTask _ =>
+        (rows, List.app pending_ids [task], completed_ids)
+    | RewriteTask _ _ new_description =>
+        let row' := row_with_description row new_description in
+        (PositiveMap.add task row' rows,
+          List.app pending_ids [task],
+          completed_ids)
+    | CompleteTask _ =>
+        let row' := row_with_status row StatusCompleted in
+        (PositiveMap.add task row' rows,
+          pending_ids,
+          List.app completed_ids [task])
+    end
+  else
+    (rows, pending_ids, completed_ids).
+
 Fixpoint apply_rescope_ops
     (ops : list RescopeOp)
     (rows : PositiveMap.t TaskRow)
@@ -408,45 +450,9 @@ Fixpoint apply_rescope_ops
       match PositiveMap.find task rows with
       | None => apply_rescope_ops rest rows pending_ids completed_ids
       | Some row =>
-          match op with
-          | KeepTask _ =>
-              match status row with
-              | StatusCompleted => apply_rescope_ops rest rows pending_ids completed_ids
-              | _ => apply_rescope_ops rest rows (List.app pending_ids [task]) completed_ids
-              end
-          | RewriteTask _ new_title new_description =>
-              match status row with
-              | StatusCompleted => apply_rescope_ops rest rows pending_ids completed_ids
-              | _ =>
-                  let row' := {|
-                    title := title row;
-                    description := new_description;
-                    kind := kind row;
-                    status := status row;
-                    source_comment := source_comment row
-                  |} in
-                  apply_rescope_ops rest
-                    (PositiveMap.add task row' rows)
-                    (List.app pending_ids [task])
-                    completed_ids
-              end
-          | CompleteTask _ =>
-              match status row with
-              | StatusCompleted => apply_rescope_ops rest rows pending_ids completed_ids
-              | _ =>
-                  let row' := {|
-                    title := title row;
-                    description := description row;
-                    kind := kind row;
-                    status := StatusCompleted;
-                    source_comment := source_comment row
-                  |} in
-                  apply_rescope_ops rest
-                    (PositiveMap.add task row' rows)
-                    pending_ids
-                    (List.app completed_ids [task])
-              end
-          end
+          let '(rows', pending_ids', completed_ids') :=
+            apply_rescope_op op task row rows pending_ids completed_ids in
+          apply_rescope_ops rest rows' pending_ids' completed_ids'
       end
   end.
 
