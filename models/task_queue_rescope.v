@@ -153,6 +153,23 @@ Fixpoint find_comment_duplicate
       end
   end.
 
+Definition row_has_pending_title
+    (candidate_title : string)
+    (row : TaskRow) : bool :=
+  match status row with
+  | StatusPending => String.eqb (title row) candidate_title
+  | _ => false
+  end.
+
+Definition task_has_pending_title
+    (candidate_title : string)
+    (task : positive)
+    (rows : PositiveMap.t TaskRow) : bool :=
+  match PositiveMap.find task rows with
+  | Some row => row_has_pending_title candidate_title row
+  | None => false
+  end.
+
 Fixpoint find_pending_title_duplicate
     (candidate_title : string)
     (order : list positive)
@@ -160,16 +177,9 @@ Fixpoint find_pending_title_duplicate
   match order with
   | [] => None
   | task :: rest =>
-      match PositiveMap.find task rows with
-      | Some row =>
-          match status row with
-          | StatusPending =>
-              if String.eqb (title row) candidate_title then Some task
-              else find_pending_title_duplicate candidate_title rest rows
-          | _ => find_pending_title_duplicate candidate_title rest rows
-          end
-      | None => find_pending_title_duplicate candidate_title rest rows
-      end
+      if task_has_pending_title candidate_title task rows
+      then Some task
+      else find_pending_title_duplicate candidate_title rest rows
   end.
 
 (** [enqueue_task] applies the current handwritten dedup rules to a task add.

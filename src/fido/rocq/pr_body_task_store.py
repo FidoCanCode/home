@@ -166,6 +166,33 @@ def find_comment_duplicate(
     )
 
 
+def row_has_pending_title(
+    candidate_title: str,
+    row: TaskRow,
+) -> bool:
+    match row.status:
+        case StatusPending():
+            return row.title == candidate_title
+        case StatusCompleted():
+            return False
+        case StatusBlocked():
+            return False
+        case __impossible:
+            assert_never(__impossible)
+
+
+def task_has_pending_title(
+    candidate_title: str,
+    task: int,
+    rows: dict[int, TaskRow],
+) -> bool:
+    __option = rows.get(_rocq_positive_key(task))
+    if __option is None:
+        return False
+    row = __option
+    return row_has_pending_title(candidate_title, row)
+
+
 def find_pending_title_duplicate(
     candidate_title: str,
     order: list[int],
@@ -176,37 +203,13 @@ def find_pending_title_duplicate(
         return None
     task = __list[0]
     rest = __list[1:]
-    __option = rows.get(_rocq_positive_key(task))
-    if __option is None:
-        return find_pending_title_duplicate(
-            candidate_title,
-            rest,
-            rows,
-        )
-    row = __option
-    match row.status:
-        case StatusPending():
-            if row.title == candidate_title:
-                return task
-            return find_pending_title_duplicate(
-                candidate_title,
-                rest,
-                rows,
-            )
-        case StatusCompleted():
-            return find_pending_title_duplicate(
-                candidate_title,
-                rest,
-                rows,
-            )
-        case StatusBlocked():
-            return find_pending_title_duplicate(
-                candidate_title,
-                rest,
-                rows,
-            )
-        case __impossible:
-            assert_never(__impossible)
+    if task_has_pending_title(candidate_title, task, rows):
+        return task
+    return find_pending_title_duplicate(
+        candidate_title,
+        rest,
+        rows,
+    )
 
 
 def enqueue_task(
