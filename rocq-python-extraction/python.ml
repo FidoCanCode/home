@@ -214,6 +214,8 @@ let lookup_active_method_target source_name =
 
 let active_record_field_targets : (string * string) list ref = ref []
 
+let active_constructor_tag_predicates = ref []
+
 let source_name_tail source_name =
   match String.rindex_opt source_name '.' with
   | Some index ->
@@ -227,6 +229,14 @@ let lookup_active_record_field_target source_name =
 
 let is_active_record_field_target source_name =
   match lookup_active_record_field_target source_name with
+  | Some _ -> true
+  | None -> false
+
+let lookup_active_constructor_tag_predicate source_name =
+  List.assoc_opt source_name !active_constructor_tag_predicates
+
+let is_active_constructor_tag_predicate source_name =
+  match lookup_active_constructor_tag_predicate source_name with
   | Some _ -> true
   | None -> false
 
@@ -1689,6 +1699,18 @@ and pp_expr state env expr =
         | _ ->
             None
       in
+      let pp_constructor_tag_predicate_app r =
+        match all_args with
+        | [value] -> (
+            match lookup_active_constructor_tag_predicate (pp_global state Term r) with
+            | Some constructor_ref ->
+                Some
+                  (py_call (py_rendered (str "isinstance"))
+                     (pp_py_rendered (rendered_expr value) ++ str ", " ++
+                      str (str_cons state constructor_ref)))
+            | None -> None)
+        | _ -> None
+      in
       let pp_collection_expr =
         match head with
         | MLglob r when is_std_bool_ref r "andb" || is_std_bool_ref r "orb" ||
@@ -1698,6 +1720,8 @@ and pp_expr state env expr =
             pp_std_primitive_compare r
         | MLglob r when is_native_equality_marker_ref r ->
             pp_native_equality_app r
+        | MLglob r when is_active_constructor_tag_predicate (pp_global state Term r) ->
+            pp_constructor_tag_predicate_app r
         | MLglob r when is_std_list_app_ref r ->
             pp_list_app r
         | MLglob r when is_std_prod_fst_ref r || is_std_prod_snd_ref r ->
@@ -2679,6 +2703,14 @@ let rec pp_statement_expr state env indent = function
               (List.map (pp_statement_expr state env (indent + 4)) args)
           in
           match head, all_args with
+          | MLglob r, [value]
+            when is_active_constructor_tag_predicate (pp_global state Term r) -> (
+              match lookup_active_constructor_tag_predicate (pp_global state Term r) with
+              | Some constructor_ref ->
+                  str "isinstance(" ++ pp_expr state env value ++ str ", " ++
+                  str (str_cons state constructor_ref) ++ str ")"
+              | None ->
+                  pp_expr state env (MLapp (f, args)))
           | MLglob r, [left; right] when is_std_list_app_ref r ->
               pp_py_rendered
                 (py_infix "+"
@@ -2754,6 +2786,20 @@ let is_primitive_equality_expr expr =
   match primitive_equality_expr_parts expr with
   | Some _ -> true
   | None -> false
+
+let rec constructor_tag_predicate_target expr =
+  match expr with
+  | MLmagic a ->
+      constructor_tag_predicate_target a
+  | _ ->
+      let lam_ids, body = collect_lams expr in
+      (match lam_ids, body with
+       | [_], MLcase (_, _scrutinee, branches) ->
+           (match constructor_tag_bool_test_target branches with
+            | Some (constructor_ref, true) when not (is_inline_custom constructor_ref) ->
+                Some constructor_ref
+            | Some (_, true) | Some (_, false) | None -> None)
+       | _, _ -> None)
 
 let is_negated_primitive_equality_expr expr =
   match expr with
@@ -4228,13 +4274,23 @@ let classify_term_decl state r typ =
   else if is_custom r then TermDeclCustomAlias (find_custom r)
   else TermDeclEmit
 
+let register_inline_term_decl state r a action =
+  match action, constructor_tag_predicate_target a with
+  | TermDeclEmit, Some constructor_ref ->
+      active_constructor_tag_predicates :=
+        (pp_global state Term r, constructor_ref)
+        :: !active_constructor_tag_predicates;
+      TermDeclSuppress
+  | _, _ ->
+      action
+
 let classify_type_decl r =
   if is_std_real_type_ref r then TypeDeclError "PYEX041"
   else if is_custom r || is_std_remapped_type_ref r then TypeDeclSuppress
   else TypeDeclUnsupported
 
 let pp_classified_term_decl state env r a typ =
-  match classify_term_decl state r typ with
+  match register_inline_term_decl state r a (classify_term_decl state r typ) with
   | TermDeclSuppress -> mt ()
   | TermDeclCustomAlias alias ->
       fnl () ++ fnl () ++
@@ -4243,7 +4299,12 @@ let pp_classified_term_decl state env r a typ =
       let () = validate_prop_discipline_decl (Dterm (r, a, typ)) in
       fnl () ++ fnl () ++ pp_term_decl state env (pp_global state Term r) a typ
 
-let term_decl_export_names state r typ =
+let term_decl_export_names state r a typ =
+  match register_inline_term_decl state r a (classify_term_decl state r typ) with
+  | TermDeclSuppress -> []
+  | TermDeclCustomAlias _ | TermDeclEmit -> [pp_global state Term r]
+
+let fixed_term_decl_export_names state r typ =
   match classify_term_decl state r typ with
   | TermDeclSuppress -> []
   | TermDeclCustomAlias _ | TermDeclEmit -> [pp_global state Term r]
@@ -4288,11 +4349,11 @@ let rec module_type_annotation state = function
       str "]"
 
 let decl_export_names state = function
-  | Dterm (r, _, typ) ->
-      term_decl_export_names state r typ
+  | Dterm (r, a, typ) ->
+      term_decl_export_names state r a typ
   | Dfix (rv, _, typs) ->
       List.init (Array.length rv) Fun.id
-      |> List.concat_map (fun i -> term_decl_export_names state rv.(i) typs.(i))
+      |> List.concat_map (fun i -> fixed_term_decl_export_names state rv.(i) typs.(i))
   | Dtype (r, _, _) ->
       (match classify_type_decl r with
        | TypeDeclError _ | TypeDeclSuppress -> []

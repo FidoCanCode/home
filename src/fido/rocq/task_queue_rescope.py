@@ -164,10 +164,6 @@ def task_row_executable(row: TaskRow) -> bool:
             assert_never(__impossible)
 
 
-def task_kind_is_ci(kind0: TaskKind) -> bool:
-    return isinstance(kind0, TaskCI)
-
-
 def task_preempt_rank(kind0: TaskKind) -> int | None:
     match kind0:
         case TaskCI():
@@ -360,7 +356,7 @@ def pick_first_ci(
     if __option is None:
         return pick_first_ci(rest, rows)
     row = __option
-    if task_row_executable(row) and task_kind_is_ci(row.kind):
+    if task_row_executable(row) and isinstance(row.kind, TaskCI):
         return task
     return pick_first_ci(rest, rows)
 
@@ -378,7 +374,7 @@ def pick_first_non_ci(
     if __option is None:
         return pick_first_non_ci(rest, rows)
     row = __option
-    if task_row_executable(row) and not task_kind_is_ci(row.kind):
+    if task_row_executable(row) and not isinstance(row.kind, TaskCI):
         return task
     return pick_first_non_ci(rest, rows)
 
@@ -785,8 +781,8 @@ def task_matches_ci_filter(
         return False
     row = __option
     if include_ci:
-        return task_kind_is_ci(row.kind)
-    return not task_kind_is_ci(row.kind)
+        return isinstance(row.kind, TaskCI)
+    return not isinstance(row.kind, TaskCI)
 
 
 def collect_tasks(

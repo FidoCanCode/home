@@ -582,10 +582,6 @@ def review_outcome_resolves_thread(outcome: ReviewReplyOutcome) -> bool:
             assert_never(__impossible)
 
 
-def claim_state_completed(state: ClaimState) -> bool:
-    return isinstance(state, ClaimCompleted)
-
-
 def claim_completed(
     claims: dict[int, ClaimRow],
     comment: int,
@@ -594,4 +590,4 @@ def claim_completed(
     if __option is None:
         return False
     row = __option
-    return claim_state_completed(row.claim_state)
+    return isinstance(row.claim_state, ClaimCompleted)

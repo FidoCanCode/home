@@ -1,6 +1,7 @@
 import inspect
 
-from datatypes import Blue, Color, Green, Red, color_is_red
+import datatypes
+from datatypes import Blue, Color, Green, Red, color_is_red, color_tag_matches_filter
 
 
 def test_color_is_red_round_trip() -> None:
@@ -23,3 +24,18 @@ def test_color_is_red_lowers_to_direct_type_check() -> None:
 
     assert "match c:" not in source
     assert "isinstance(c, Red)" in source
+
+
+def test_constructor_tag_predicate_helper_is_inlined() -> None:
+    assert color_tag_matches_filter(True, Red()) is True
+    assert color_tag_matches_filter(True, Green()) is False
+    assert color_tag_matches_filter(False, Red()) is False
+    assert color_tag_matches_filter(False, Green()) is True
+
+    module_source = inspect.getsource(datatypes)
+    filter_source = inspect.getsource(color_tag_matches_filter)
+
+    assert "def color_is_red_tag(" not in module_source
+    assert "color_is_red_tag(" not in filter_source
+    assert "isinstance(c, Red)" in filter_source
+    assert "not isinstance(c, Red)" in filter_source

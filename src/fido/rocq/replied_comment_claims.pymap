@@ -59,6 +59,6 @@ open,489,0,493,36,replied_comment_claims.v,302,11,302,26,extraction,recover_prom
 open,532,0,536,40,replied_comment_claims.v,321,11,321,32,extraction,record_reply_artifact,record_reply_artifact
 open,549,0,564,38,replied_comment_claims.v,334,11,334,39,extraction,review_outcome_creates_tasks,review_outcome_creates_tasks
 open,567,0,582,38,replied_comment_claims.v,343,11,343,41,extraction,review_outcome_resolves_thread,review_outcome_resolves_thread
-open,585,0,586,44,replied_comment_claims.v,351,11,351,32,extraction,claim_state_completed,claim_state_completed
-open,589,0,591,17,replied_comment_claims.v,358,11,358,26,extraction,claim_completed,claim_completed
+open,1,0,1,0,replied_comment_claims.v,351,11,351,32,extraction,claim_state_completed,claim_state_completed
+open,585,0,587,17,replied_comment_claims.v,358,11,358,26,extraction,claim_completed,claim_completed
 open,246,0,248,24,replied_comment_claims.v,137,9,137,22,extraction,all_claimable,all_claimable

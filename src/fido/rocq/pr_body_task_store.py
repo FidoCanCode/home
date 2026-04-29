@@ -101,10 +101,6 @@ class CompleteTask(RescopeOp):
 RescopeOpT = KeepTask | RewriteTask | CompleteTask
 
 
-def task_kind_is_ci(kind0: TaskKind) -> bool:
-    return isinstance(kind0, TaskCI)
-
-
 def positive_mem(
     target: int,
     items: list[int],
@@ -457,8 +453,8 @@ def task_matches_ci_filter(
         return False
     row = __option
     if include_ci:
-        return task_kind_is_ci(row.kind)
-    return not task_kind_is_ci(row.kind)
+        return isinstance(row.kind, TaskCI)
+    return not isinstance(row.kind, TaskCI)
 
 
 def collect_tasks(
@@ -604,8 +600,8 @@ def task_kind_matches_ci_filter(
     kind0: TaskKind,
 ) -> bool:
     if include_ci:
-        return task_kind_is_ci(kind0)
-    return not task_kind_is_ci(kind0)
+        return isinstance(kind0, TaskCI)
+    return not isinstance(kind0, TaskCI)
 
 
 def pending_projection(
