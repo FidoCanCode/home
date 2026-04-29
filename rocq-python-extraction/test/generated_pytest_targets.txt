@@ -26,6 +26,7 @@ positive_case.py
 nat_compare_and.py
 nat_compare_or.py
 nat_compare_neg.py
+nat_compare_neg_lt.py
 nat_compare_bool_eq.py
 n_seven.py
 n_case.py

@@ -403,11 +403,23 @@ let is_std_positive_ref r name =
   global_path_has_suffix r (".PArith.BinPos.Pos." ^ name) ||
   global_path_has_suffix r (".PArith.BinPosDef.Pos." ^ name)
 
+let primitive_comparison_operators r =
+  if is_std_bool_ref r "eqb" || is_std_nat_ref r "eqb" ||
+     is_std_positive_ref r "eqb" || is_std_ascii_ref r "eqb" ||
+     is_std_string_ref r "eqb"
+  then Some ("==", "!=")
+  else if is_std_nat_ref r "leb" || is_std_positive_ref r "leb" ||
+          is_std_ascii_ref r "leb" || is_std_string_ref r "leb"
+  then Some ("<=", ">")
+  else if is_std_nat_ref r "ltb" || is_std_positive_ref r "ltb" ||
+          is_std_ascii_ref r "ltb" || is_std_string_ref r "ltb"
+  then Some ("<", ">=")
+  else None
+
 let is_std_primitive_compare_ref r =
-  is_std_nat_ref r "eqb" || is_std_nat_ref r "leb" || is_std_nat_ref r "ltb" ||
-  is_std_positive_ref r "eqb" || is_std_positive_ref r "leb" || is_std_positive_ref r "ltb" ||
-  is_std_ascii_ref r "eqb" || is_std_ascii_ref r "leb" || is_std_ascii_ref r "ltb" ||
-  is_std_string_ref r "eqb" || is_std_string_ref r "leb" || is_std_string_ref r "ltb"
+  match primitive_comparison_operators r with
+  | Some _ -> true
+  | None -> false
 
 let is_positive_map_type_ref r =
   global_path_has_suffix r ".FSets.FMapPositive.PositiveMap.t"
@@ -1215,21 +1227,28 @@ let rec collect_app_args acc = function
 let collect_app head args =
   collect_app_args args head
 
-let primitive_equality_expr_parts expr =
+let primitive_comparison_expr_parts expr =
   match expr with
   | MLapp (head, args) ->
       let head, all_args = collect_app head args in
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
       (match head, all_args with
-       | MLglob r, [left; right] when is_std_bool_ref r "eqb" ->
-           Some (left, right)
-       | MLglob r, [left; right]
-         when is_std_nat_ref r "eqb" || is_std_positive_ref r "eqb" ||
-              is_std_ascii_ref r "eqb" || is_std_string_ref r "eqb" ->
-           Some (left, right)
+       | MLglob r, [left; right] ->
+           (match primitive_comparison_operators r with
+            | Some (operator, inverted_operator) ->
+                Some (operator, inverted_operator, left, right)
+            | None ->
+                None)
        | _, _ ->
            None)
   | _ ->
+      None
+
+let primitive_equality_expr_parts expr =
+  match primitive_comparison_expr_parts expr with
+  | Some ("==", "!=", left, right) ->
+      Some (left, right)
+  | Some _ | None ->
       None
 
 let rec py_expr_precedence expr =
@@ -1275,7 +1294,7 @@ let rec py_expr_precedence expr =
       let app_args = List.filter (fun a -> not (is_erased_arg a)) app_args in
       (match app_head, app_args with
        | MLglob r, [value] when is_std_bool_ref r "negb" ->
-           (match primitive_equality_expr_parts value with
+           (match primitive_comparison_expr_parts value with
             | Some _ -> py_prec_compare
             | None -> py_prec_not)
        | MLglob r, [_; _] when is_std_bool_ref r "andb" ->
@@ -1325,6 +1344,26 @@ and rendered_args state env args =
     (fun () -> str ", ")
     (fun arg -> pp_py_rendered (pp_rendered_expr state env arg))
     args
+
+and rendered_primitive_comparison state env operator left right =
+  py_infix ~associativity:PyAssocNone operator
+    py_prec_compare
+    (pp_rendered_expr state env left)
+    (pp_rendered_expr state env right)
+
+and rendered_primitive_comparison_expr state env expr =
+  match primitive_comparison_expr_parts expr with
+  | Some (operator, _, left, right) ->
+      Some (rendered_primitive_comparison state env operator left right)
+  | None ->
+      None
+
+and rendered_inverted_primitive_comparison_expr state env expr =
+  match primitive_comparison_expr_parts expr with
+  | Some (_, inverted_operator, left, right) ->
+      Some (rendered_primitive_comparison state env inverted_operator left right)
+  | None ->
+      None
 
 and py_list_prepend state env head tail =
   py_infix "+"
@@ -1559,13 +1598,9 @@ and pp_expr state env expr =
       let pp_std_bool_app r =
         match all_args with
         | [value] when is_std_bool_ref r "negb" ->
-            (match primitive_equality_expr_parts value with
-             | Some (left, right) ->
-                 Some
-                   (py_infix ~associativity:PyAssocNone "!="
-                      py_prec_compare
-                      (rendered_expr left)
-                      (rendered_expr right))
+            (match rendered_inverted_primitive_comparison_expr state env value with
+             | Some rendered ->
+                 Some rendered
              | None ->
                  Some
                    (py_prefix "not " py_prec_not
@@ -1584,39 +1619,18 @@ and pp_expr state env expr =
                  (rendered_expr right))
         | [left; right] when is_std_bool_ref r "eqb" ->
             Some
-              (py_infix ~associativity:PyAssocNone "=="
-                 py_prec_compare
-                 (rendered_expr left)
-                 (rendered_expr right))
+              (rendered_primitive_comparison state env "==" left right)
         | _ ->
             None
       in
       let pp_std_primitive_compare r =
         match all_args with
-        | [left; right]
-          when is_std_nat_ref r "eqb" || is_std_positive_ref r "eqb" ||
-               is_std_ascii_ref r "eqb" || is_std_string_ref r "eqb" ->
-            Some
-              (py_infix ~associativity:PyAssocNone "=="
-                 py_prec_compare
-                 (rendered_expr left)
-                 (rendered_expr right))
-        | [left; right]
-          when is_std_nat_ref r "leb" || is_std_positive_ref r "leb" ||
-               is_std_ascii_ref r "leb" || is_std_string_ref r "leb" ->
-            Some
-              (py_infix ~associativity:PyAssocNone "<="
-                 py_prec_compare
-                 (rendered_expr left)
-                 (rendered_expr right))
-        | [left; right]
-          when is_std_nat_ref r "ltb" || is_std_positive_ref r "ltb" ||
-               is_std_ascii_ref r "ltb" || is_std_string_ref r "ltb" ->
-            Some
-              (py_infix ~associativity:PyAssocNone "<"
-                 py_prec_compare
-                 (rendered_expr left)
-                 (rendered_expr right))
+        | [left; right] ->
+            (match primitive_comparison_operators r with
+             | Some (operator, _) ->
+                 Some (rendered_primitive_comparison state env operator left right)
+             | None ->
+                 None)
         | _ ->
             None
       in

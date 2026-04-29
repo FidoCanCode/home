@@ -6,6 +6,7 @@ from n_seven import n_seven
 from nat_compare_and import nat_compare_and
 from nat_compare_bool_eq import nat_compare_bool_eq
 from nat_compare_neg import nat_compare_neg
+from nat_compare_neg_lt import nat_compare_neg_lt
 from nat_compare_or import nat_compare_or
 from nat_pred_or_zero import nat_pred_or_zero
 from nat_roundtrip import nat_roundtrip
@@ -38,6 +39,8 @@ def test_nat_positive_n_and_z_are_native_ints() -> None:
     assert nat_compare_or(3, 2, 1) is False
     assert nat_compare_neg(3, 2) is True
     assert nat_compare_neg(2, 3) is False
+    assert nat_compare_neg_lt(3, 3) is True
+    assert nat_compare_neg_lt(2, 3) is False
     assert nat_compare_bool_eq(1, 2, True) is True
     assert nat_compare_bool_eq(1, 2, False) is False
     assert n_seven == 7
@@ -105,6 +108,7 @@ def test_primitive_comparisons_compose_with_bool_ops(
     compare_and = (build_default / "nat_compare_and.py").read_text()
     compare_or = (build_default / "nat_compare_or.py").read_text()
     compare_neg = (build_default / "nat_compare_neg.py").read_text()
+    compare_neg_lt = (build_default / "nat_compare_neg_lt.py").read_text()
 
     assert_rendered_source(
         compare_and,
@@ -118,8 +122,19 @@ def test_primitive_comparisons_compose_with_bool_ops(
     )
     assert_rendered_source(
         compare_neg,
-        "return not (left <= right)",
-        ("return not left <= right",),
+        "return left > right",
+        (
+            "return not left <= right",
+            "return not (left <= right)",
+        ),
+    )
+    assert_rendered_source(
+        compare_neg_lt,
+        "return left >= right",
+        (
+            "return not left < right",
+            "return not (left < right)",
+        ),
     )
 
 
