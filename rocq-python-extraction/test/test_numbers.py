@@ -67,12 +67,48 @@ def test_q_extracts_to_fraction_with_normalized_fields() -> None:
     assert q_den(Fraction(2, 4)) == 2
 
 
-def test_positive_equality_lowers_without_pos_protocol(build_default) -> None:
+def test_positive_equality_lowers_without_pos_protocol(
+    build_default,
+    assert_rendered_source,
+) -> None:
     source = (build_default / "positive_eq.py").read_text()
 
-    assert "class Pos_Module" not in source
-    assert "Pos:" not in source
-    assert "return left == right" in source
+    assert_rendered_source(
+        source,
+        "return left == right",
+        (
+            "def eqb(",
+            "class Pos_Module",
+            "Pos:",
+        ),
+    )
+
+
+def test_numeric_stdlib_operation_declarations_are_suppressed(
+    build_default,
+    assert_rendered_source,
+) -> None:
+    compare_and_source = (build_default / "nat_compare_and.py").read_text()
+    compare_or_source = (build_default / "nat_compare_or.py").read_text()
+
+    assert_rendered_source(
+        compare_and_source,
+        "return left < middle and middle <= right",
+        (
+            "def andb(",
+            "def ltb(",
+            "def leb(",
+        ),
+    )
+    assert_rendered_source(
+        compare_or_source,
+        "return left == middle or middle < right",
+        (
+            "def orb(",
+            "def eqb(",
+            "def ltb(",
+        ),
+    )
 
 
 def test_numeric_constructor_constants_render_as_literals(

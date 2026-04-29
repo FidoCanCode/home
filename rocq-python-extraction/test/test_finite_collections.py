@@ -117,3 +117,30 @@ def test_finite_collection_rule_shapes_are_characterized(
     assert "_rocq_set_fold(" in source
     assert "class PositiveMap" not in source
     assert "class PositiveSet" not in source
+
+
+def test_finite_collection_stdlib_refs_are_filtered_from_module_exports(
+    build_default,
+    assert_rendered_source,
+) -> None:
+    source = (build_default / "FiniteCollectionFixtures.py").read_text()
+
+    assert_rendered_source(
+        source,
+        "FiniteCollectionFixtures.positive_task_map = positive_task_map",
+        (
+            "FiniteCollectionFixtures.PositiveMap = PositiveMap",
+            "FiniteCollectionFixtures.PositiveSet = PositiveSet",
+            "class PositiveMap",
+            "class PositiveSet",
+        ),
+    )
+    assert_rendered_source(
+        source,
+        "positive_task_find_expr = positive_task_map.get(1)",
+        (
+            "def find(",
+            "def mem(",
+            "def cardinal(",
+        ),
+    )
