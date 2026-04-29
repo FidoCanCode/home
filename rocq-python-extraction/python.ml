@@ -383,6 +383,12 @@ let is_std_prod_type_ref r =
 let is_std_prod_pair_ref r =
   global_path_has_suffix r ".Init.Datatypes.pair"
 
+let is_std_prod_fst_ref r =
+  global_path_has_suffix r ".Init.Datatypes.fst"
+
+let is_std_prod_snd_ref r =
+  global_path_has_suffix r ".Init.Datatypes.snd"
+
 let is_std_bool_type_ref r =
   global_path_has_suffix r ".Init.Datatypes.bool"
 
@@ -735,6 +741,13 @@ let py_attr receiver field =
   in
   py_rendered ~precedence:py_prec_call
     (pp_receiver ++ str "." ++ str field)
+
+let py_index receiver index =
+  let pp_receiver =
+    pp_py_child py_prec_call PyAssocLeft PyLeftChild receiver
+  in
+  py_rendered ~precedence:py_prec_call
+    (pp_receiver ++ str "[" ++ str index ++ str "]")
 
 let py_method_call receiver method_name args =
   py_call (py_attr receiver method_name) args
@@ -1601,6 +1614,14 @@ and pp_expr state env expr =
                  (rendered_expr right))
         | _ -> None
       in
+      let pp_prod_projection r =
+        match all_args with
+        | [pair] when is_std_prod_fst_ref r ->
+            Some (py_index (rendered_expr pair) "0")
+        | [pair] when is_std_prod_snd_ref r ->
+            Some (py_index (rendered_expr pair) "1")
+        | _ -> None
+      in
       let pp_std_bool_app r =
         match all_args with
         | [value] when is_std_bool_ref r "negb" ->
@@ -1659,6 +1680,8 @@ and pp_expr state env expr =
             pp_native_equality_app r
         | MLglob r when is_std_list_app_ref r ->
             pp_list_app r
+        | MLglob r when is_std_prod_fst_ref r || is_std_prod_snd_ref r ->
+            pp_prod_projection r
         | MLglob r when is_positive_map_ref r "empty" || is_positive_map_ref r "add" ||
                         is_positive_map_ref r "remove" || is_positive_map_ref r "find" ||
                         is_positive_map_ref r "mem" || is_positive_map_ref r "cardinal" ||
