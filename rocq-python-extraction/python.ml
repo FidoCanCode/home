@@ -562,6 +562,83 @@ let std_string_expr_value expr =
   in
   loop expr
 
+let decimal_add_small value add =
+  let carry = ref add in
+  let digits = Bytes.of_string value in
+  for i = Bytes.length digits - 1 downto 0 do
+    let digit = Char.code (Bytes.get digits i) - Char.code '0' in
+    let total = digit + !carry in
+    Bytes.set digits i (Char.chr (Char.code '0' + (total mod 10)));
+    carry := total / 10
+  done;
+  if !carry = 0 then Bytes.to_string digits
+  else string_of_int !carry ^ Bytes.to_string digits
+
+let decimal_double value =
+  let carry = ref 0 in
+  let digits = Bytes.of_string value in
+  for i = Bytes.length digits - 1 downto 0 do
+    let digit = Char.code (Bytes.get digits i) - Char.code '0' in
+    let total = (digit * 2) + !carry in
+    Bytes.set digits i (Char.chr (Char.code '0' + (total mod 10)));
+    carry := total / 10
+  done;
+  if !carry = 0 then Bytes.to_string digits
+  else string_of_int !carry ^ Bytes.to_string digits
+
+let rec std_nat_expr_literal = function
+  | MLcons (_, r, []) when is_std_nat_zero_ref r ->
+      Some "0"
+  | MLcons (_, r, [n]) when is_std_nat_succ_ref r ->
+      Option.map (fun value -> decimal_add_small value 1)
+        (std_nat_expr_literal n)
+  | _ ->
+      None
+
+let rec std_positive_expr_literal = function
+  | MLcons (_, r, []) when is_std_positive_xh_ref r ->
+      Some "1"
+  | MLcons (_, r, [p]) when is_std_positive_xo_ref r ->
+      Option.map decimal_double (std_positive_expr_literal p)
+  | MLcons (_, r, [p]) when is_std_positive_xi_ref r ->
+      Option.map (fun value -> decimal_add_small (decimal_double value) 1)
+        (std_positive_expr_literal p)
+  | _ ->
+      None
+
+let std_N_expr_literal = function
+  | MLcons (_, r, []) when is_std_N_zero_ref r ->
+      Some "0"
+  | MLcons (_, r, [p]) when is_std_N_pos_ref r ->
+      std_positive_expr_literal p
+  | _ ->
+      None
+
+let std_Z_expr_literal = function
+  | MLcons (_, r, []) when is_std_Z_zero_ref r ->
+      Some "0"
+  | MLcons (_, r, [p]) when is_std_Z_pos_ref r ->
+      std_positive_expr_literal p
+  | MLcons (_, r, [p]) when is_std_Z_neg_ref r ->
+      Option.map (fun value -> "-" ^ value) (std_positive_expr_literal p)
+  | _ ->
+      None
+
+let std_numeric_expr_literal expr =
+  match std_nat_expr_literal expr with
+  | Some value ->
+      Some value
+  | None ->
+  match std_positive_expr_literal expr with
+  | Some value ->
+      Some value
+  | None ->
+  match std_N_expr_literal expr with
+  | Some value ->
+      Some value
+  | None ->
+      std_Z_expr_literal expr
+
 type py_associativity =
   | PyAssocLeft
   | PyAssocRight
@@ -1142,6 +1219,9 @@ let rec py_expr_precedence expr =
   match std_string_expr_value expr with
   | Some _ -> py_prec_atom
   | None ->
+  match std_numeric_expr_literal expr with
+  | Some _ -> py_prec_atom
+  | None ->
   match expr with
   | MLrel _ | MLglob _ | MLdummy _ | MLuint _ | MLfloat _ | MLstring _
   | MLcons (_, _, []) ->
@@ -1249,6 +1329,10 @@ and pp_expr state env expr =
   match std_string_expr_value expr with
   | Some value ->
       str "\"" ++ str (py_escape_str value) ++ str "\""
+  | None ->
+  match std_numeric_expr_literal expr with
+  | Some value ->
+      str value
   | None ->
   match expr with
   | MLglob r when is_custom r && String.equal (find_custom r) marker_state_get ->

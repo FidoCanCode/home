@@ -238,9 +238,9 @@ def task_preempt_rank(kind: TaskKind) -> int | None:
         case TaskCI():
             return 0
         case TaskThread():
-            return 0 + 1
+            return 1
         case TaskSpec():
-            return 0 + 1 + 1
+            return 2
         case TaskAsk():
             return None
         case TaskDefer():

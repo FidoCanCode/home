@@ -72,6 +72,32 @@ def test_positive_equality_lowers_without_pos_protocol(build_default) -> None:
     assert "return left == right" in source
 
 
+def test_numeric_constructor_constants_render_as_literals(
+    build_default,
+    assert_rendered_source,
+) -> None:
+    assert_rendered_source(
+        (build_default / "nat_three.py").read_text(),
+        "nat_three: int = 3",
+    )
+    assert_rendered_source(
+        (build_default / "positive_five.py").read_text(),
+        "positive_five: int = 5",
+    )
+    assert_rendered_source(
+        (build_default / "n_seven.py").read_text(),
+        "n_seven: int = 7",
+    )
+    assert_rendered_source(
+        (build_default / "z_neg_three.py").read_text(),
+        "z_neg_three: int = -3",
+    )
+    assert_rendered_source(
+        (build_default / "q_half.py").read_text(),
+        "q_half: Fraction = Fraction(1, 2)",
+    )
+
+
 def test_primitive_comparisons_compose_with_bool_ops(
     build_default,
     assert_rendered_source,

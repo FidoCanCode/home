@@ -14,10 +14,10 @@ from typing import (
 )
 
 
-max_retries: int = 0 + 1 + 1 + 1
+max_retries: int = 3
 
 
-retry_budget: int = 1 * 2 + 1
+retry_budget: int = 3
 
 
 def retry_delta(remaining: int) -> int:
@@ -30,4 +30,4 @@ def retry_delta(remaining: int) -> int:
     return _rocq_numeric_domain_error("N", __n)
 
 
-backoff_ratio: Fraction = Fraction(1, 1 * 2)
+backoff_ratio: Fraction = Fraction(1, 2)
