@@ -649,20 +649,6 @@ class PRBodyRow:
     pr_body_status: PRBodyStatus
 
 
-def projected_row(
-    task: int,
-    row: TaskRow,
-    status0: PRBodyStatus,
-) -> PRBodyRow:
-    return PRBodyRow(
-        pr_body_task=task,
-        pr_body_title=row.title,
-        pr_body_description=row.description,
-        pr_body_kind=row.kind,
-        pr_body_status=status0,
-    )
-
-
 def pending_ci_projection(
     task: int,
     rows: dict[int, TaskRow],
@@ -674,7 +660,15 @@ def pending_ci_projection(
     match row.status:
         case StatusPending():
             if task_kind_is_ci(row.kind):
-                return [projected_row(task, row, PRPending())] + []
+                return [
+                    PRBodyRow(
+                        pr_body_task=task,
+                        pr_body_title=row.title,
+                        pr_body_description=row.description,
+                        pr_body_kind=row.kind,
+                        pr_body_status=PRPending(),
+                    ),
+                ] + []
             return []
         case StatusCompleted():
             return []
@@ -695,7 +689,15 @@ def pending_non_ci_projection(
     match row.status:
         case StatusPending():
             if not task_kind_is_ci(row.kind):
-                return [projected_row(task, row, PRPending())] + []
+                return [
+                    PRBodyRow(
+                        pr_body_task=task,
+                        pr_body_title=row.title,
+                        pr_body_description=row.description,
+                        pr_body_kind=row.kind,
+                        pr_body_status=PRPending(),
+                    ),
+                ] + []
             return []
         case StatusCompleted():
             return []
@@ -717,7 +719,15 @@ def completed_projection(
         case StatusPending():
             return []
         case StatusCompleted():
-            return [projected_row(task, row, PRCompleted())] + []
+            return [
+                PRBodyRow(
+                    pr_body_task=task,
+                    pr_body_title=row.title,
+                    pr_body_description=row.description,
+                    pr_body_kind=row.kind,
+                    pr_body_status=PRCompleted(),
+                ),
+            ] + []
         case StatusBlocked():
             return []
         case __impossible:

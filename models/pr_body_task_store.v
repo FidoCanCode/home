@@ -63,17 +63,6 @@ Record PRBodyRow : Type := {
   pr_body_status : PRBodyStatus
 }.
 
-Definition projected_row
-    (task : positive)
-    (row : TaskRow)
-    (status : PRBodyStatus) : PRBodyRow := {|
-  pr_body_task := task;
-  pr_body_title := title row;
-  pr_body_description := description row;
-  pr_body_kind := kind row;
-  pr_body_status := status
-|}.
-
 Definition pending_ci_projection
     (task : positive)
     (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
@@ -82,7 +71,13 @@ Definition pending_ci_projection
       match status row with
       | StatusPending =>
           if task_kind_is_ci (kind row)
-          then [projected_row task row PRPending]
+          then [{|
+            pr_body_task := task;
+            pr_body_title := title row;
+            pr_body_description := description row;
+            pr_body_kind := kind row;
+            pr_body_status := PRPending
+          |}]
           else []
       | _ => []
       end
@@ -97,7 +92,13 @@ Definition pending_non_ci_projection
       match status row with
       | StatusPending =>
           if negb (task_kind_is_ci (kind row))
-          then [projected_row task row PRPending]
+          then [{|
+            pr_body_task := task;
+            pr_body_title := title row;
+            pr_body_description := description row;
+            pr_body_kind := kind row;
+            pr_body_status := PRPending
+          |}]
           else []
       | _ => []
       end
@@ -110,7 +111,13 @@ Definition completed_projection
   match PositiveMap.find task rows with
   | Some row =>
       match status row with
-      | StatusCompleted => [projected_row task row PRCompleted]
+      | StatusCompleted => [{|
+          pr_body_task := task;
+          pr_body_title := title row;
+          pr_body_description := description row;
+          pr_body_kind := kind row;
+          pr_body_status := PRCompleted
+        |}]
       | _ => []
       end
   | None => []

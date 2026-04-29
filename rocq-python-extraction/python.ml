@@ -2556,6 +2556,18 @@ let rec pp_statement_expr state env indent = function
       pp_multiline_tuple indent
         [ pp_statement_expr state env (indent + 4) left;
           pp_statement_expr state env (indent + 4) right ]
+  | MLcons (_, r, [((MLcons (_, head_r, _) as head)); tail])
+    when is_std_list_cons_ref r &&
+         not (List.is_empty (get_record_fields (State.get_table state) head_r)) &&
+         not (is_std_Q_make_ref head_r) ->
+      pp_py_rendered
+        (py_infix "+"
+           py_prec_add
+           (py_rendered
+              ~precedence:py_prec_atom
+              (pp_multiline_enclosed indent (str "[") (str "]")
+                 [pp_statement_expr state env (indent + 4) head]))
+           (pp_rendered_expr state env tail))
   | MLcons (_, r, args)
     when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
          not (String.equal "" (str_cons state r)) &&
