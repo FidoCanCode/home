@@ -101,22 +101,6 @@ class CompleteTask(RescopeOp):
 RescopeOpT = KeepTask | RewriteTask | CompleteTask
 
 
-def positive_mem(
-    target: int,
-    items: list[int],
-) -> bool:
-    while True:
-        __list = items
-        if __list == []:
-            return False
-        item = __list[0]
-        rest = __list[1:]
-        if target == item:
-            return True
-        target, items = target, rest
-        continue
-
-
 def find_comment_duplicate(
     comment: int,
     order: list[int],
@@ -425,7 +409,7 @@ def preserve_newly_added(
         rest,
         rows,
     )
-    if positive_mem(task, snapshot_order):
+    if task in snapshot_order:
         return rest_
     __option = rows.get(_rocq_positive_key(task))
     if __option is None:

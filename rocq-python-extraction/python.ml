@@ -234,6 +234,8 @@ let active_record_field_targets : (string * string) list ref = ref []
 
 let active_constructor_tag_predicates = ref []
 
+let active_list_membership_predicates = ref []
+
 let source_name_tail source_name =
   match String.rindex_opt source_name '.' with
   | Some index ->
@@ -257,6 +259,13 @@ let is_active_constructor_tag_predicate source_name =
   match lookup_active_constructor_tag_predicate source_name with
   | Some _ -> true
   | None -> false
+
+let is_active_list_membership_predicate source_name =
+  List.exists
+    (fun target ->
+       String.equal source_name target ||
+       String.equal (source_name_tail source_name) (source_name_tail target))
+    !active_list_membership_predicates
 
 let pp_collection_key kind pp_key =
   match kind with
@@ -1729,6 +1738,17 @@ and pp_expr state env expr =
             | None -> None)
         | _ -> None
       in
+      let pp_list_membership_predicate_app r =
+        match all_args with
+        | [target; items]
+          when is_active_list_membership_predicate (pp_global state Term r) ->
+            Some
+              (py_infix ~associativity:PyAssocNone "in"
+                 py_prec_compare
+                 (rendered_expr target)
+                 (rendered_expr items))
+        | _ -> None
+      in
       let pp_collection_expr =
         match head with
         | MLglob r when is_std_bool_ref r "andb" || is_std_bool_ref r "orb" ||
@@ -1740,6 +1760,8 @@ and pp_expr state env expr =
             pp_native_equality_app r
         | MLglob r when is_active_constructor_tag_predicate (pp_global state Term r) ->
             pp_constructor_tag_predicate_app r
+        | MLglob r when is_active_list_membership_predicate (pp_global state Term r) ->
+            pp_list_membership_predicate_app r
         | MLglob r when is_std_list_app_ref r ->
             pp_list_app r
         | MLglob r when is_std_prod_fst_ref r || is_std_prod_snd_ref r ->
@@ -2729,6 +2751,13 @@ let rec pp_statement_expr state env indent = function
                   str (str_cons state constructor_ref) ++ str ")"
               | None ->
                   pp_expr state env (MLapp (f, args)))
+          | MLglob r, [target; items]
+            when is_active_list_membership_predicate (pp_global state Term r) ->
+              pp_py_rendered
+                (py_infix ~associativity:PyAssocNone "in"
+                   py_prec_compare
+                   (pp_rendered_expr state env target)
+                   (pp_rendered_expr state env items))
           | MLglob r, [left; right] when is_std_list_app_ref r ->
               pp_py_rendered
                 (py_infix "+"
@@ -4388,11 +4417,15 @@ let classify_term_decl state r typ =
   else TermDeclEmit
 
 let register_inline_term_decl state r a action =
+  let source_name = pp_global state Term r in
   match action, constructor_tag_predicate_target a with
   | TermDeclEmit, Some constructor_ref ->
       active_constructor_tag_predicates :=
-        (pp_global state Term r, constructor_ref)
-        :: !active_constructor_tag_predicates;
+        (source_name, constructor_ref) :: !active_constructor_tag_predicates;
+      TermDeclSuppress
+  | TermDeclEmit, _ when String.equal (source_name_tail source_name) "positive_mem" ->
+      active_list_membership_predicates :=
+        source_name :: !active_list_membership_predicates;
       TermDeclSuppress
   | _, _ ->
       action

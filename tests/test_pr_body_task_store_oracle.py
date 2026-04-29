@@ -91,3 +91,10 @@ def test_pr_body_list_equality_lowers_to_native_equality() -> None:
 
     assert "def pr_body_eqb(" not in source
     assert "return visible == projected" in source
+
+
+def test_positive_membership_lowers_to_native_membership() -> None:
+    source = Path(oracle.__file__).read_text()
+
+    assert "def positive_mem(" not in source
+    assert "if task in snapshot_order:" in source
