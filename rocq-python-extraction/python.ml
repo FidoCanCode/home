@@ -265,11 +265,6 @@ let lookup_active_record_field_target source_name =
   | Some _ as result -> result
   | None -> List.assoc_opt (source_name_tail source_name) !active_record_field_targets
 
-let is_active_record_field_target source_name =
-  match lookup_active_record_field_target source_name with
-  | Some _ -> true
-  | None -> false
-
 let lookup_active_constructor_tag_predicate source_name =
   List.assoc_opt source_name !active_constructor_tag_predicates
 
@@ -527,6 +522,8 @@ type lowering_family =
   | LoweringStringMap
   | LoweringPositiveSet
   | LoweringStringSet
+  | LoweringMarker
+  | LoweringRecordField
 
 type lowering_ref_match =
   | LoweringBoolRef of string
@@ -536,6 +533,8 @@ type lowering_ref_match =
   | LoweringStringMapRef of string
   | LoweringPositiveSetRef of string
   | LoweringStringSetRef of string
+  | LoweringMarkerRef of string
+  | LoweringRecordFieldRef of string
 
 type lowering_emit_form =
   | LoweringEmitPrefix of string
@@ -543,6 +542,7 @@ type lowering_emit_form =
   | LoweringEmitCall of string
   | LoweringEmitMethod of string
   | LoweringEmitLiteral of string
+  | LoweringEmitAttribute of string
   | LoweringEmitIndex of int
 
 type lowering_rule = {
@@ -634,6 +634,8 @@ let lowering_rule_matches r rule =
   | LoweringStringMapRef name -> is_string_map_ref r name
   | LoweringPositiveSetRef name -> is_positive_set_ref r name
   | LoweringStringSetRef name -> is_string_set_ref r name
+  | LoweringMarkerRef marker -> is_custom r && String.equal (find_custom r) marker
+  | LoweringRecordFieldRef _ -> false
 
 let lowering_rule_of_ref r =
   List.find_opt (lowering_rule_matches r) primitive_collection_lowering_rules
@@ -663,11 +665,6 @@ let lowering_rule_is_primitive_or_collection rule =
 let is_primitive_or_collection_lowering_ref r =
   match lowering_rule_of_ref r with
   | Some rule -> lowering_rule_is_primitive_or_collection rule
-  | None -> false
-
-let lowering_rule_suppresses_declaration r =
-  match lowering_rule_of_ref r with
-  | Some rule -> rule.lowering_suppress_declaration
   | None -> false
 
 let std_byte_constructor_value r =
@@ -1178,6 +1175,96 @@ let marker_of_ast = function
   | _ ->
       None
 
+let marker_lowering_specs = [
+  (marker_state_get, "StateT.get", [0], LoweringEmitLiteral "StateT.get_state()");
+  (marker_state_pure, "StateT.pure", [1], LoweringEmitLiteral "StateT.pure");
+  (marker_state_bind, "StateT.bind", [2], LoweringEmitLiteral "StateT.bind");
+  (marker_state_put, "StateT.put", [1], LoweringEmitLiteral "StateT.put_state");
+  (marker_option_bind, "Option.bind", [2], LoweringEmitCall "<option-bind>");
+  (marker_reader_ask, "Reader.ask", [0],
+   LoweringEmitLiteral "lambda __reader_env: __reader_env");
+  (marker_reader_pure, "Reader.pure", [1],
+   LoweringEmitLiteral "(lambda value: (lambda __reader_env: value))");
+  (marker_reader_bind, "Reader.bind", [2],
+   LoweringEmitLiteral
+     "(lambda reader_expr, fn_expr: lambda __reader_env: fn_expr(reader_expr(__reader_env))(__reader_env))");
+  (marker_io_pure, "IO.pure", [1], LoweringEmitLiteral "IO.pure");
+  (marker_io_bind, "IO.bind", [2], LoweringEmitLiteral "IO.bind");
+  (marker_io_bracket, "IO.bracket", [3], LoweringEmitLiteral "IO.bracket");
+  (marker_io_run, "IO.run", [1], LoweringEmitCall "<io-run>");
+  (marker_new_mutex, "Mutex.new", [0], LoweringEmitLiteral "Mutex.new()");
+  (marker_new_channel, "Channel.new", [0], LoweringEmitLiteral "Channel.new()");
+  (marker_new_future, "Future.new", [0], LoweringEmitLiteral "Future.new()");
+  (marker_mutex_acquire, "Mutex.acquire", [1], LoweringEmitLiteral "Mutex.acquire");
+  (marker_mutex_release, "Mutex.release", [1], LoweringEmitLiteral "Mutex.release");
+  (marker_channel_send, "Channel.send", [2], LoweringEmitLiteral "Channel.send");
+  (marker_channel_receive, "Channel.receive", [1],
+   LoweringEmitLiteral "Channel.receive");
+  (marker_future_set, "Future.set_result", [2],
+   LoweringEmitLiteral "Future.set_result");
+  (marker_future_result, "Future.result", [1], LoweringEmitLiteral "Future.result");
+  (marker_future_done, "Future.done", [1], LoweringEmitLiteral "Future.done");
+  (marker_interleave, "Concurrency.interleave", [2],
+   LoweringEmitCall "<interleave>");
+]
+
+let marker_lowering_rules =
+  List.map
+    (fun (marker, operation, arities, emit) ->
+       lowering_rule (LoweringMarkerRef marker) LoweringMarker operation arities emit)
+    marker_lowering_specs
+
+let marker_lowering_rule_of_marker marker =
+  List.find_opt
+    (fun rule ->
+       match rule.lowering_match with
+       | LoweringMarkerRef expected -> String.equal expected marker
+       | _ -> false)
+    marker_lowering_rules
+
+let marker_lowering_rule_of_ref r =
+  match marker_of_ast (MLglob r) with
+  | Some marker -> marker_lowering_rule_of_marker marker
+  | None -> None
+
+let marker_lowering_rule_of_ast = function
+  | MLglob r -> marker_lowering_rule_of_ref r
+  | _ -> None
+
+let marker_of_lowering_rule rule =
+  match rule.lowering_match with
+  | LoweringMarkerRef marker -> Some marker
+  | _ -> None
+
+let marker_of_lowering_ast ast =
+  match Option.bind (marker_lowering_rule_of_ast ast) marker_of_lowering_rule with
+  | Some _ as marker -> marker
+  | None -> marker_of_ast ast
+
+let record_field_lowering_rule source_name field_name =
+  lowering_rule
+    (LoweringRecordFieldRef source_name)
+    LoweringRecordField
+    ("record field " ^ field_name)
+    [1]
+    (LoweringEmitAttribute field_name)
+
+let record_field_lowering_rule_of_source_name source_name =
+  match lookup_active_record_field_target source_name with
+  | Some field_name -> Some (record_field_lowering_rule source_name field_name)
+  | None -> None
+
+let record_field_lowering_rule_of_ref state r =
+  record_field_lowering_rule_of_source_name (pp_global state Term r)
+
+let rewrite_lowering_rule_of_ref state r =
+  match lowering_rule_of_ref r with
+  | Some _ as rule -> rule
+  | None ->
+      (match marker_lowering_rule_of_ref r with
+       | Some _ as rule -> rule
+       | None -> record_field_lowering_rule_of_ref state r)
+
 let rec validate_prop_discipline_expr context = function
   | MLdummy Kprop ->
       (match context with
@@ -1528,8 +1615,10 @@ let record_projection_parts state expr =
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
       match head, List.rev all_args with
       | MLglob r, base :: _ -> (
-          match lookup_active_record_field_target (pp_global state Term r) with
-          | Some field_name -> Some (field_name, base)
+          match record_field_lowering_rule_of_ref state r with
+          | Some { lowering_emit = LoweringEmitAttribute field_name; _ } ->
+              Some (field_name, base)
+          | Some _ -> None
           | None -> None)
       | _ -> None)
   | _ -> None
@@ -1640,7 +1729,7 @@ let rec py_expr_precedence expr =
        | MLglob r, [_; _] when is_native_equality_marker_ref r ->
            py_prec_compare
        | _, _ ->
-           (match marker_of_ast app_head with
+           (match marker_of_lowering_ast app_head with
             | Some marker
               when String.equal marker marker_reader_pure ||
                    String.equal marker marker_reader_bind ||
@@ -1783,6 +1872,13 @@ and rendered_lowering_rule_app state env r rule args =
   | _, _, _ ->
       None
 
+and rendered_record_field_rule_app state env rule args =
+  match rule.lowering_emit, args with
+  | LoweringEmitAttribute field_name, self_arg :: _ ->
+      Some (py_attr (pp_rendered_expr state env self_arg) field_name)
+  | _, _ ->
+      None
+
 and py_list_prepend state env head tail =
   py_infix "+"
     py_prec_add
@@ -1811,56 +1907,23 @@ and pp_expr state env expr =
       str value
   | None ->
   match expr with
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_state_get ->
-      str "StateT.get_state()"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_state_pure ->
-      str "StateT.pure"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_state_bind ->
-      str "StateT.bind"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_state_put ->
-      str "StateT.put_state"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_reader_ask ->
-      str "lambda __reader_env: __reader_env"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_reader_pure ->
-      str "(lambda value: (lambda __reader_env: value))"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_reader_bind ->
-      str "(lambda reader_expr, fn_expr: lambda __reader_env: fn_expr(reader_expr(__reader_env))(__reader_env))"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_io_pure ->
-      str "IO.pure"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_io_bind ->
-      str "IO.bind"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_io_bracket ->
-      str "IO.bracket"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_new_mutex ->
-      str "Mutex.new()"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_new_channel ->
-      str "Channel.new()"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_new_future ->
-      str "Future.new()"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_mutex_acquire ->
-      str "Mutex.acquire"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_mutex_release ->
-      str "Mutex.release"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_channel_send ->
-      str "Channel.send"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_channel_receive ->
-      str "Channel.receive"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_future_set ->
-      str "Future.set_result"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_future_result ->
-      str "Future.result"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_future_done ->
-      str "Future.done"
-  | MLglob r when is_custom r && String.equal (find_custom r) marker_interleave ->
-      extraction_diagnostic_error ~detail:(find_custom r) "PYEX043"
-  | MLglob r when is_custom r && is_concurrency_marker_string (find_custom r) ->
-      extraction_diagnostic_error ~detail:(find_custom r) "PYEX044"
   | MLglob r -> (
-      match lowering_rule_of_ref r with
+      match rewrite_lowering_rule_of_ref state r with
+      | Some { lowering_family = LoweringMarker;
+               lowering_match = LoweringMarkerRef marker;
+               lowering_emit = LoweringEmitLiteral literal; _ } ->
+          str literal
+      | Some { lowering_family = LoweringMarker;
+               lowering_match = LoweringMarkerRef marker; _ }
+        when String.equal marker marker_interleave ->
+          extraction_diagnostic_error ~detail:marker "PYEX043"
       | Some { lowering_emit = LoweringEmitLiteral literal; _ } ->
           str literal
       | Some _ | None ->
-          pp_glob state r)
+          if is_custom r && is_concurrency_marker_string (find_custom r) then
+            extraction_diagnostic_error ~detail:(find_custom r) "PYEX044"
+          else
+            pp_glob state r)
   | MLrel n ->
       (* De Bruijn variable: look up the binder name.  The dummy name [_]
          signals an erased binder; emit [__] (the module-level sentinel). *)
@@ -1916,9 +1979,9 @@ and pp_expr state env expr =
               | MLglob r -> pp_global state Term r
               | _ -> Pp.string_of_ppcmds (pp_expr state env head)
             in
-            match lookup_active_record_field_target head_name with
-            | Some field_name ->
-                Some (py_attr (rendered_expr self_arg) field_name)
+            match record_field_lowering_rule_of_source_name head_name with
+            | Some rule ->
+                rendered_record_field_rule_app state env rule [self_arg]
             | None -> None)
         | _ -> None
       in
@@ -2004,7 +2067,7 @@ and pp_expr state env expr =
            str "(__reader_env))(__reader_env)")
       in
       let pp_concurrency_expr =
-        match marker_of_ast head, all_args with
+        match marker_of_lowering_ast head, all_args with
         | Some marker, [] when String.equal marker marker_new_mutex ->
             Some (py_method_call (py_rendered (str "Mutex")) "new" (mt ()))
         | Some marker, [] when String.equal marker marker_new_channel ->
@@ -2035,7 +2098,7 @@ and pp_expr state env expr =
             None
       in
       let pp_monad_expr =
-        match marker_of_ast head, all_args with
+        match marker_of_lowering_ast head, all_args with
         | Some marker, [value] when String.equal marker marker_state_pure ->
             Some (py_method_call (py_rendered (str "StateT")) "pure"
                     (rendered_args state env [value]))
@@ -3304,7 +3367,7 @@ let rec pp_return_body state env indent = function
             str "return IO.bracket(" ++ pp_expr state env acquire ++ str ", " ++
             str release_name ++ str ", " ++ str use_name ++ str ")"
           in
-          match marker_of_ast head, visible_args with
+          match marker_of_lowering_ast head, visible_args with
           | Some marker, [action; next] when String.equal marker marker_io_bind ->
               pp_io_bind_statement action next
           | Some marker, [acquire; release; use]
@@ -4838,11 +4901,12 @@ let classify_term_decl state r typ =
   else if is_runtime_marker_ref r then TermDeclSuppress
   else if is_native_equality_marker_ref r then TermDeclSuppress
   else if is_inline_custom r then TermDeclSuppress
-  else if lowering_rule_suppresses_declaration r then TermDeclSuppress
-  else if is_active_record_field_target (pp_global state Term r) then
-    TermDeclSuppress
-  else if is_custom r then TermDeclCustomAlias (find_custom r)
-  else TermDeclEmit
+  else
+    match rewrite_lowering_rule_of_ref state r with
+    | Some rule when rule.lowering_suppress_declaration -> TermDeclSuppress
+    | Some _ | None ->
+        if is_custom r then TermDeclCustomAlias (find_custom r)
+        else TermDeclEmit
 
 let register_inline_term_decl state r a action =
   let source_name = pp_global state Term r in
