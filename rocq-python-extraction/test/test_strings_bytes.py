@@ -6,6 +6,7 @@ from strings_bytes import (
     first_ascii_or_A,
     github_key,
     payload_fragment,
+    string_neq,
     tail_or_empty,
 )
 
@@ -33,3 +34,21 @@ def test_string_and_byte_patterns() -> None:
     assert tail_or_empty("Fido") == "ido"
     assert byte_label(10) == "lf"
     assert byte_label(65) == "other"
+
+
+def test_string_neq_round_trip() -> None:
+    assert string_neq("task", "task") is False
+    assert string_neq("task", "thread") is True
+
+
+def test_string_neq_lowers_to_direct_comparison(
+    build_default,
+    assert_rendered_source,
+) -> None:
+    source = (build_default / "strings_bytes.py").read_text()
+
+    assert_rendered_source(
+        source,
+        "return left != right",
+        ("return not left == right", "return not (left == right)"),
+    )

@@ -108,14 +108,14 @@ class TaskRow:
         after_row: TaskRow,
     ) -> bool:
         before_row = self
-        return not before_row.task_title == after_row.task_title
+        return before_row.task_title != after_row.task_title
 
     def description_changed(
         self,
         after_row: TaskRow,
     ) -> bool:
         before_row = self
-        return not before_row.task_description == after_row.task_description
+        return before_row.task_description != after_row.task_description
 
     def metadata_changed(
         self,

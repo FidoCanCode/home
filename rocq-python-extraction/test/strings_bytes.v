@@ -44,6 +44,11 @@ Definition tail_or_empty (s : String.string) : String.string :=
   | String _ rest => rest
   end.
 
+(** [string_neq] checks negated structural equality lowers to direct Python
+    inequality instead of [not left == right]. *)
+Definition string_neq (left right : String.string) : bool :=
+  negb (String.eqb left right).
+
 (** [ascii_roundtrip] reconstructs an [ascii] value from its eight bits. *)
 Definition ascii_roundtrip (a : ascii) : ascii :=
   match a with
@@ -66,4 +71,4 @@ Definition byte_label (b : byte) : String.string :=
 (** [strings_bytes.py]: covers Rocq [string] → Python [str], primitive
     byte-string → Python [bytes], [ascii] → Python [str], [byte] → Python
     [int], and pattern-matching on [string] and [byte] constructors. *)
-Python File Extraction strings_bytes "github_key payload_fragment ascii_A byte_lf first_ascii_or_A tail_or_empty ascii_roundtrip byte_label".
+Python File Extraction strings_bytes "github_key payload_fragment ascii_A byte_lf first_ascii_or_A tail_or_empty string_neq ascii_roundtrip byte_label".

@@ -1215,6 +1215,23 @@ let rec collect_app_args acc = function
 let collect_app head args =
   collect_app_args args head
 
+let primitive_equality_expr_parts expr =
+  match expr with
+  | MLapp (head, args) ->
+      let head, all_args = collect_app head args in
+      let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      (match head, all_args with
+       | MLglob r, [left; right] when is_std_bool_ref r "eqb" ->
+           Some (left, right)
+       | MLglob r, [left; right]
+         when is_std_nat_ref r "eqb" || is_std_positive_ref r "eqb" ||
+              is_std_ascii_ref r "eqb" || is_std_string_ref r "eqb" ->
+           Some (left, right)
+       | _, _ ->
+           None)
+  | _ ->
+      None
+
 let rec py_expr_precedence expr =
   match std_string_expr_value expr with
   | Some _ -> py_prec_atom
@@ -1257,8 +1274,10 @@ let rec py_expr_precedence expr =
       let app_head, app_args = collect_app app_head app_args in
       let app_args = List.filter (fun a -> not (is_erased_arg a)) app_args in
       (match app_head, app_args with
-       | MLglob r, [_] when is_std_bool_ref r "negb" ->
-           py_prec_not
+       | MLglob r, [value] when is_std_bool_ref r "negb" ->
+           (match primitive_equality_expr_parts value with
+            | Some _ -> py_prec_compare
+            | None -> py_prec_not)
        | MLglob r, [_; _] when is_std_bool_ref r "andb" ->
            py_prec_and
        | MLglob r, [_; _] when is_std_bool_ref r "orb" ->
@@ -1540,9 +1559,17 @@ and pp_expr state env expr =
       let pp_std_bool_app r =
         match all_args with
         | [value] when is_std_bool_ref r "negb" ->
-            Some
-              (py_prefix "not " py_prec_not
-                 (rendered_expr value))
+            (match primitive_equality_expr_parts value with
+             | Some (left, right) ->
+                 Some
+                   (py_infix ~associativity:PyAssocNone "!="
+                      py_prec_compare
+                      (rendered_expr left)
+                      (rendered_expr right))
+             | None ->
+                 Some
+                   (py_prefix "not " py_prec_not
+                      (rendered_expr value)))
         | [left; right] when is_std_bool_ref r "andb" ->
             Some
               (py_infix "and"
@@ -2632,21 +2659,9 @@ let classify_std_option_branches branches =
   (!none_arm, !some_arm, !wildcard_arm)
 
 let is_primitive_equality_expr expr =
-  match expr with
-  | MLapp (head, args) ->
-      let head, all_args = collect_app head args in
-      let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
-      (match head, all_args with
-       | MLglob r, [_; _] when is_std_bool_ref r "eqb" ->
-           true
-       | MLglob r, [_; _]
-         when is_std_nat_ref r "eqb" || is_std_positive_ref r "eqb" ||
-              is_std_ascii_ref r "eqb" || is_std_string_ref r "eqb" ->
-           true
-       | _, _ ->
-           false)
-  | _ ->
-      false
+  match primitive_equality_expr_parts expr with
+  | Some _ -> true
+  | None -> false
 
 let is_negated_primitive_equality_expr expr =
   match expr with
