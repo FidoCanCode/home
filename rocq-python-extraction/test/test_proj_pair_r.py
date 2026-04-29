@@ -1,4 +1,11 @@
-from records import Pair_r, proj_first, proj_second, swap_pair_r
+from records import (
+    Pair_r,
+    pair_r_same,
+    proj_first,
+    proj_second,
+    set_second_direct,
+    swap_pair_r,
+)
 
 
 def test_proj_pair_r_round_trip() -> None:
@@ -29,6 +36,22 @@ def test_proj_pair_r_round_trip() -> None:
     assert isinstance(p1, Pair_r), "p1 must be Pair_r"
     assert isinstance(swapped, Pair_r), "swapped must be Pair_r"
 
+    assert pair_r_same(p1, Pair_r(pfst_r=3, psnd_r=7)) is True
+    assert pair_r_same(p1, Pair_r(pfst_r=7, psnd_r=3)) is False
+
+
+def test_record_update_uses_dataclasses_replace(build_default) -> None:
+    p = Pair_r(pfst_r=3, psnd_r=7)
+    updated = set_second_direct(p, 11)
+
+    assert updated == Pair_r(pfst_r=3, psnd_r=11)
+    assert p == Pair_r(pfst_r=3, psnd_r=7)
+
+    source = (build_default / "records.py").read_text()
+    assert "from dataclasses import dataclass, replace" in source
+    assert "return replace(p, psnd_r=n)" in source
+    assert "Pair_r(pfst_r=p.pfst_r, psnd_r=n)" not in source
+
 
 def test_record_fields_do_not_emit_accessor_functions(build_default) -> None:
     source = (build_default / "records.py").read_text()
@@ -37,3 +60,11 @@ def test_record_fields_do_not_emit_accessor_functions(build_default) -> None:
     assert "def psnd_r(" not in source
     assert "return p.pfst_r" in source
     assert "return p.psnd_r" in source
+
+
+def test_record_equality_lowers_to_direct_equality(build_default) -> None:
+    source = (build_default / "records.py").read_text()
+
+    assert "pair_r_eq =" not in source
+    assert "__PY_NATIVE_EQ__" not in source
+    assert "return left == right" in source

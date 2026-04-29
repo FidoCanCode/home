@@ -59,10 +59,14 @@ Definition nat_compare_and (left middle right : nat) : bool :=
 Definition nat_compare_or (left middle right : nat) : bool :=
   orb (Nat.eqb left middle) (Nat.ltb middle right).
 
-(** [nat_compare_neg] parenthesizes a primitive comparison under lowered
-    boolean negation. *)
+(** [nat_compare_neg] inverts a primitive comparison under lowered boolean
+    negation. *)
 Definition nat_compare_neg (left right : nat) : bool :=
   negb (Nat.leb left right).
+
+(** [nat_compare_neg_lt] covers strict primitive comparison inversion. *)
+Definition nat_compare_neg_lt (left right : nat) : bool :=
+  negb (Nat.ltb left right).
 
 (** [nat_compare_bool_eq] parenthesizes a primitive comparison when it becomes
     the left operand of another lowered equality expression. *)
@@ -114,6 +118,7 @@ Python Extraction positive_eq.
 Python Extraction nat_compare_and.
 Python Extraction nat_compare_or.
 Python Extraction nat_compare_neg.
+Python Extraction nat_compare_neg_lt.
 Python Extraction nat_compare_bool_eq.
 Python Extraction n_seven.
 Python Extraction n_case.

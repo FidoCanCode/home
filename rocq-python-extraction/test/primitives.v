@@ -103,6 +103,14 @@ Fixpoint nat_double (n : nat) : nat :=
   | S m => S (S (nat_double m))
   end.
 
+(** [nat_count_down]: tail-recursive accumulator loop.
+    Extracted Python must not rely on Python tail-call optimization. *)
+Fixpoint nat_count_down (n acc : nat) : nat :=
+  match n with
+  | O   => acc
+  | S m => nat_count_down m (S acc)
+  end.
+
 (* ------------------------------------------------------------------ *)
 (*  option → Python Optional                                           *)
 (*                                                                     *)
@@ -129,6 +137,15 @@ Definition option_inc (o : option nat) : option nat :=
   | Some n => Some (S n)
   end.
 
+(** [option_nat_neq]: optional primitive values compare directly in Python
+    instead of expanding the structural option match. *)
+Definition option_nat_neq (left right : option nat) : bool :=
+  match left, right with
+  | Some l, Some r => negb (Nat.eqb l r)
+  | None, None => false
+  | _, _ => true
+  end.
+
 (* ------------------------------------------------------------------ *)
 (*  prod → Python tuple                                                *)
 (*                                                                     *)
@@ -151,6 +168,14 @@ Definition pair_swap (p : nat * nat) : nat * nat :=
   match p with
   | (a, b) => (b, a)
   end.
+
+(** [pair_first]: standard [fst] lowers to tuple index access. *)
+Definition pair_first (p : nat * bool) : nat :=
+  fst p.
+
+(** [pair_second]: standard [snd] lowers to tuple index access. *)
+Definition pair_second (p : nat * bool) : bool :=
+  snd p.
 
 (* ------------------------------------------------------------------ *)
 (*  list → Python list                                                 *)
@@ -215,4 +240,4 @@ Definition lambda_call_head (n : nat) : nat :=
   (fun f => f n) (fun x => S x).
 
 Python File Extraction primitives
-  "bool_not bool_and bool_or bool_neg bool_neg_and bool_neg_or bool_or_and bool_and_or bool_eq bool_eq_and bool_and_eq nat_double option_inc pair_swap list_add_one list_cons_append list_append_left_nested list_append_right_nested list_append_let_child list_append_match_child lambda_call_head".
+  "bool_not bool_and bool_or bool_neg bool_neg_and bool_or_and bool_and_or bool_eq bool_eq_and bool_and_eq nat_double nat_count_down option_inc option_nat_neq pair_swap pair_first pair_second list_add_one list_cons_append list_append_left_nested list_append_right_nested list_append_let_child list_append_match_child lambda_call_head".

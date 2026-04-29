@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 
 from fido.rocq import pr_body_task_store as oracle
@@ -10,16 +11,24 @@ def _row(
     description: str = "",
 ) -> Any:
     return oracle.TaskRow(
-        task_title=title,
-        task_description=description,
-        task_kind=kind,
-        task_status=status,
-        task_source_comment=None,
+        title=title,
+        description=description,
+        kind=kind,
+        status=status,
+        source_comment=None,
     )
 
 
 def _status_names(rows: list[Any]) -> list[str]:
     return [type(row.pr_body_status).__name__ for row in rows]
+
+
+def _function_source(source: str, name: str) -> str:
+    start = source.index(f"def {name}(")
+    next_function = source.find("\ndef ", start + 1)
+    if next_function == -1:
+        return source[start:]
+    return source[start:next_function]
 
 
 def test_projection_matches_rendered_pr_body_order() -> None:
@@ -83,3 +92,28 @@ def test_transition_rejects_stale_pr_body_before_next_write() -> None:
 
     assert not oracle.pr_body_matches_store_bool(stale_state)
     assert oracle.transition(stale_state, oracle.WriteTaskComplete(1)) is None
+
+
+def test_pr_body_list_equality_lowers_to_native_equality() -> None:
+    source = Path(oracle.__file__).read_text()
+
+    assert "def pr_body_eqb(" not in source
+    assert "return visible == projected" in source
+
+
+def test_positive_membership_lowers_to_native_membership() -> None:
+    source = Path(oracle.__file__).read_text()
+
+    assert "def positive_mem(" not in source
+    assert "if task in snapshot_order:" in source
+
+
+def test_tail_recursive_duplicate_scans_lower_to_for_loops() -> None:
+    source = Path(oracle.__file__).read_text()
+    comment_duplicate = _function_source(source, "find_comment_duplicate")
+    pending_title_duplicate = _function_source(source, "find_pending_title_duplicate")
+
+    assert "while True:" not in comment_duplicate
+    assert "for task in order:" in comment_duplicate
+    assert "while True:" not in pending_title_duplicate
+    assert "for task in order:" in pending_title_duplicate

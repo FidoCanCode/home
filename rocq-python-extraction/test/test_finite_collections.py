@@ -41,34 +41,41 @@ def test_string_maps_and_sets_have_sorted_views() -> None:
     assert fixtures.string_label_set_elements(labels) == labels
 
 
-def test_set_infix_lowerings_preserve_precedence(build_default) -> None:
+def test_set_infix_lowerings_preserve_precedence(
+    build_default,
+    assert_rendered_source,
+) -> None:
     source = (build_default / "FiniteCollectionFixtures.py").read_text()
 
-    assert (
-        "positive_claim_union_expr = (positive_claim_set | positive_claim_diff)"
-        in source
+    assert_rendered_source(
+        source,
+        "positive_claim_union_expr = positive_claim_set | positive_claim_diff",
     )
-    assert (
-        "positive_claim_inter_expr = (positive_claim_set & positive_claim_union)"
-        in source
+    assert_rendered_source(
+        source,
+        "positive_claim_inter_expr = positive_claim_set & positive_claim_union",
     )
-    assert (
-        "positive_claim_diff_expr = (positive_claim_union - positive_claim_set)"
-        in source
+    assert_rendered_source(
+        source,
+        "positive_claim_diff_expr = positive_claim_union - positive_claim_set",
     )
-    assert (
+    assert_rendered_source(
+        source,
         "positive_claim_nested_expr = "
-        "((positive_claim_set | positive_claim_diff) & positive_claim_union)"
-    ) in source
-    assert (
+        "(positive_claim_set | positive_claim_diff) & positive_claim_union",
+    )
+    assert_rendered_source(
+        source,
         "positive_claim_union_inter_expr = "
-        "(positive_claim_diff | positive_claim_set & positive_claim_union)"
-    ) in source
-    assert (
+        "positive_claim_diff | positive_claim_set & positive_claim_union",
+    )
+    assert_rendered_source(
+        source,
         "positive_claim_diff_union_expr = "
-        "(positive_claim_union - (positive_claim_diff | positive_claim_inter))"
-    ) in source
-    assert (
+        "positive_claim_union - (positive_claim_diff | positive_claim_inter)",
+    )
+    assert_rendered_source(
+        source,
         "positive_claim_inter_diff_expr = "
-        "((positive_claim_union - positive_claim_diff) & positive_claim_set)"
-    ) in source
+        "(positive_claim_union - positive_claim_diff) & positive_claim_set",
+    )

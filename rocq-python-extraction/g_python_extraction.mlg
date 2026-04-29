@@ -114,10 +114,13 @@ let top_level_spacing_before previous line =
     None
   else if starts_with line "class " then
     (match previous with
-     | Some prev when starts_with prev "@dataclass" -> Some 0
+     | Some prev when starts_with prev "@" -> Some 0
      | _ -> Some 2)
-  else if starts_with line "def "
-          || starts_with line "@dataclass" then
+  else if starts_with line "@" then
+    (match previous with
+     | Some prev when starts_with prev "@" -> Some 0
+     | _ -> Some 2)
+  else if starts_with line "def " then
     Some 2
   else if starts_with line "#" then
     match previous with

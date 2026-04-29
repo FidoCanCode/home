@@ -16,6 +16,7 @@ from primitives import (
     list_append_match_child,
     list_append_right_nested,
     list_cons_append,
+    option_nat_neq,
 )
 
 
@@ -88,6 +89,14 @@ def test_bool_and_eq_round_trip() -> None:
     assert bool_and_eq(False, True, True) is False
 
 
+def test_option_nat_neq_round_trip() -> None:
+    assert option_nat_neq(None, None) is False
+    assert option_nat_neq(None, 1) is True
+    assert option_nat_neq(1, None) is True
+    assert option_nat_neq(1, 1) is False
+    assert option_nat_neq(1, 2) is True
+
+
 def test_list_cons_append_round_trip() -> None:
     assert list_cons_append(1, [2], [3, 4]) == [1, 2, 3, 4]
 
@@ -127,32 +136,56 @@ def test_bool_neg_lowers_to_native_not(build_default) -> None:
     assert "return not b" in source
 
 
-def test_bool_neg_and_preserves_precedence(build_default) -> None:
+def test_bool_neg_and_preserves_precedence(
+    build_default,
+    assert_rendered_source,
+) -> None:
     source = (build_default / "primitives.py").read_text()
 
-    assert "return not (b1 and b2)" in source
-    assert "return not b1 and b2" not in source
+    assert_rendered_source(
+        source,
+        "return not (b1 and b2)",
+        ("return not b1 and b2",),
+    )
 
 
-def test_bool_neg_or_preserves_precedence(build_default) -> None:
+def test_bool_neg_or_preserves_precedence(
+    build_default,
+    assert_rendered_source,
+) -> None:
     source = (build_default / "primitives.py").read_text()
 
-    assert "return not (b1 or b2)" in source
-    assert "return not b1 or b2" not in source
+    assert_rendered_source(
+        source,
+        "return not (b1 or b2)",
+        ("return not b1 or b2",),
+    )
 
 
-def test_bool_or_and_keeps_python_precedence(build_default) -> None:
+def test_bool_or_and_keeps_python_precedence(
+    build_default,
+    assert_rendered_source,
+) -> None:
     source = (build_default / "primitives.py").read_text()
 
-    assert "return b1 or b2 and b3" in source
-    assert "return b1 or (b2 and b3)" not in source
+    assert_rendered_source(
+        source,
+        "return b1 or b2 and b3",
+        ("return b1 or (b2 and b3)",),
+    )
 
 
-def test_bool_and_or_parenthesizes_or_operand(build_default) -> None:
+def test_bool_and_or_parenthesizes_or_operand(
+    build_default,
+    assert_rendered_source,
+) -> None:
     source = (build_default / "primitives.py").read_text()
 
-    assert "return b1 and (b2 or b3)" in source
-    assert "return b1 and b2 or b3" not in source
+    assert_rendered_source(
+        source,
+        "return b1 and (b2 or b3)",
+        ("return b1 and b2 or b3",),
+    )
 
 
 def test_bool_eq_lowers_to_native_equality(build_default) -> None:
@@ -168,11 +201,33 @@ def test_bool_equality_operand_keeps_and_precedence(build_default) -> None:
     assert "return b1 == b2 and b3" in source
 
 
-def test_bool_and_operand_is_parenthesized_for_equality(build_default) -> None:
+def test_bool_and_operand_is_parenthesized_for_equality(
+    build_default,
+    assert_rendered_source,
+) -> None:
     source = (build_default / "primitives.py").read_text()
 
-    assert "return (b1 and b2) == b3" in source
-    assert "return b1 and b2 == b3" not in source
+    assert_rendered_source(
+        source,
+        "return (b1 and b2) == b3",
+        ("return b1 and b2 == b3",),
+    )
+
+
+def test_option_nat_neq_lowers_to_direct_comparison(
+    build_default,
+    assert_rendered_source,
+) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert_rendered_source(
+        source,
+        "return left != right",
+        (
+            "return not (left == right)",
+            "if __option is None",
+        ),
+    )
 
 
 def test_list_append_preserves_left_associative_grouping(build_default) -> None:
@@ -181,22 +236,37 @@ def test_list_append_preserves_left_associative_grouping(build_default) -> None:
     assert "return [h] + left + right" in source
 
 
-def test_nested_list_append_expressions_stay_flat(build_default) -> None:
+def test_nested_list_append_expressions_stay_flat(
+    build_default,
+    assert_rendered_source,
+) -> None:
     source = (build_default / "primitives.py").read_text()
 
-    assert "return left + middle + right" in source
-    assert "return (left + middle) + right" not in source
-    assert "return left + (middle + right)" not in source
+    assert_rendered_source(
+        source,
+        "return left + middle + right",
+        (
+            "return (left + middle) + right",
+            "return left + (middle + right)",
+        ),
+    )
 
 
 def test_list_append_low_precedence_children_are_parenthesized(
     build_default,
+    assert_rendered_source,
 ) -> None:
     source = (build_default / "primitives.py").read_text()
 
-    assert "return (lambda prefix: prefix)([h] + []) + right" in source
-    assert "return [0] + [] if flag else [0 + 1] + [] + right" not in source
-    assert "return ([0] + [] if flag else [0 + 1] + []) + right" in source
+    assert_rendered_source(
+        source,
+        "return (lambda prefix: prefix)([h] + []) + right",
+    )
+    assert_rendered_source(
+        source,
+        "return ([0] + [] if flag else [0 + 1] + []) + right",
+        ("return [0] + [] if flag else [0 + 1] + [] + right",),
+    )
 
 
 def test_lambda_call_head_is_parenthesized(build_default) -> None:

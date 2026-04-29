@@ -1,4 +1,4 @@
-from primitives import pair_swap
+from primitives import pair_first, pair_second, pair_swap
 
 
 def test_pair_swap_round_trip() -> None:
@@ -11,3 +11,18 @@ def test_pair_swap_round_trip() -> None:
     assert pair_swap((5, 5)) == (5, 5), "pair_swap((5, 5)): got " + repr(
         pair_swap((5, 5))
     )
+
+
+def test_pair_projection_round_trip() -> None:
+    assert pair_first((3, True)) == 3
+    assert pair_second((3, True)) is True
+    assert pair_second((7, False)) is False
+
+
+def test_pair_projection_lowers_to_index_access(build_default) -> None:
+    source = (build_default / "primitives.py").read_text()
+
+    assert "def fst(" not in source
+    assert "def snd(" not in source
+    assert "return p[0]" in source
+    assert "return p[1]" in source

@@ -39,7 +39,7 @@ let file_naming state mp =
 (*s Preamble emitted at the top of every extracted .py file. *)
 
 let runtime_prelude = {|from fido.rocq_runtime import *
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import (
     Any,
@@ -50,6 +50,7 @@ from typing import (
     TypeVar,
     assert_never,
     cast,
+    final,
 )
 |}
 
@@ -173,6 +174,41 @@ let pp_lambda ids body =
     prlist_with_sep (fun () -> str ", ") pp_param params ++
     str ": " ++ body
 
+type tail_context = {
+  tail_name : string;
+  tail_params : Id.t list;
+}
+
+type list_scan_context = {
+  list_scan_list_param : Id.t;
+  list_scan_rest_param : Id.t;
+}
+
+let active_tail_context : tail_context option ref = ref None
+let active_list_scan_context : list_scan_context option ref = ref None
+
+let with_tail_context context f =
+  let previous = !active_tail_context in
+  active_tail_context := context;
+  try
+    let result = f () in
+    active_tail_context := previous;
+    result
+  with exn ->
+    active_tail_context := previous;
+    raise exn
+
+let with_list_scan_context context f =
+  let previous = !active_list_scan_context in
+  active_list_scan_context := context;
+  try
+    let result = f () in
+    active_list_scan_context := previous;
+    result
+  with exn ->
+    active_list_scan_context := previous;
+    raise exn
+
 let is_erased_arg = function
   | MLdummy _ -> true
   | _         -> false
@@ -214,6 +250,10 @@ let lookup_active_method_target source_name =
 
 let active_record_field_targets : (string * string) list ref = ref []
 
+let active_constructor_tag_predicates = ref []
+
+let active_list_membership_predicates = ref []
+
 let source_name_tail source_name =
   match String.rindex_opt source_name '.' with
   | Some index ->
@@ -229,6 +269,21 @@ let is_active_record_field_target source_name =
   match lookup_active_record_field_target source_name with
   | Some _ -> true
   | None -> false
+
+let lookup_active_constructor_tag_predicate source_name =
+  List.assoc_opt source_name !active_constructor_tag_predicates
+
+let is_active_constructor_tag_predicate source_name =
+  match lookup_active_constructor_tag_predicate source_name with
+  | Some _ -> true
+  | None -> false
+
+let is_active_list_membership_predicate source_name =
+  List.exists
+    (fun target ->
+       String.equal source_name target ||
+       String.equal (source_name_tail source_name) (source_name_tail target))
+    !active_list_membership_predicates
 
 let pp_collection_key kind pp_key =
   match kind with
@@ -383,6 +438,12 @@ let is_std_prod_type_ref r =
 let is_std_prod_pair_ref r =
   global_path_has_suffix r ".Init.Datatypes.pair"
 
+let is_std_prod_fst_ref r =
+  global_path_has_suffix r ".Init.Datatypes.fst"
+
+let is_std_prod_snd_ref r =
+  global_path_has_suffix r ".Init.Datatypes.snd"
+
 let is_std_bool_type_ref r =
   global_path_has_suffix r ".Init.Datatypes.bool"
 
@@ -403,11 +464,23 @@ let is_std_positive_ref r name =
   global_path_has_suffix r (".PArith.BinPos.Pos." ^ name) ||
   global_path_has_suffix r (".PArith.BinPosDef.Pos." ^ name)
 
+let primitive_comparison_operators r =
+  if is_std_bool_ref r "eqb" || is_std_nat_ref r "eqb" ||
+     is_std_positive_ref r "eqb" || is_std_ascii_ref r "eqb" ||
+     is_std_string_ref r "eqb"
+  then Some ("==", "!=")
+  else if is_std_nat_ref r "leb" || is_std_positive_ref r "leb" ||
+          is_std_ascii_ref r "leb" || is_std_string_ref r "leb"
+  then Some ("<=", ">")
+  else if is_std_nat_ref r "ltb" || is_std_positive_ref r "ltb" ||
+          is_std_ascii_ref r "ltb" || is_std_string_ref r "ltb"
+  then Some ("<", ">=")
+  else None
+
 let is_std_primitive_compare_ref r =
-  is_std_nat_ref r "eqb" || is_std_nat_ref r "leb" || is_std_nat_ref r "ltb" ||
-  is_std_positive_ref r "eqb" || is_std_positive_ref r "leb" || is_std_positive_ref r "ltb" ||
-  is_std_ascii_ref r "eqb" || is_std_ascii_ref r "leb" || is_std_ascii_ref r "ltb" ||
-  is_std_string_ref r "eqb" || is_std_string_ref r "leb" || is_std_string_ref r "ltb"
+  match primitive_comparison_operators r with
+  | Some _ -> true
+  | None -> false
 
 let is_positive_map_type_ref r =
   global_path_has_suffix r ".FSets.FMapPositive.PositiveMap.t"
@@ -535,6 +608,26 @@ let std_bool_expr = function
   | MLcons (_, r, []) when is_std_bool_false_ref r -> Some false
   | _ -> None
 
+let nullary_constructor_pattern = function
+  | Pusual r | Pcons (r, []) -> Some r
+  | _ -> None
+
+let constructor_tag_bool_test_target branches =
+  let rec collect idx true_refs false_refs =
+    if idx = Array.length branches then
+      match true_refs, false_refs with
+      | [r], _ :: _ -> Some (r, true)
+      | _ :: _, [r] -> Some (r, false)
+      | _ -> None
+    else
+      let (ids, pat, body) = branches.(idx) in
+      match ids, nullary_constructor_pattern pat, std_bool_expr body with
+      | [], Some r, Some true -> collect (idx + 1) (r :: true_refs) false_refs
+      | [], Some r, Some false -> collect (idx + 1) true_refs (r :: false_refs)
+      | _ -> None
+  in
+  collect 0 [] []
+
 let std_ascii_expr_value = function
   | MLcons (_, r, args) when is_std_ascii_cons_ref r && List.length args = 8 ->
       let bits = List.map std_bool_expr args in
@@ -562,14 +655,82 @@ let std_string_expr_value expr =
   in
   loop expr
 
-let needs_numeric_constructor_parens = function
-  | MLcons (_, r, [_]) when is_std_nat_succ_ref r ->
-      true
-  | MLcons (_, r, [_])
-    when is_std_positive_xo_ref r || is_std_positive_xi_ref r ->
-      true
+let decimal_add_small value add =
+  let carry = ref add in
+  let digits = Bytes.of_string value in
+  for i = Bytes.length digits - 1 downto 0 do
+    let digit = Char.code (Bytes.get digits i) - Char.code '0' in
+    let total = digit + !carry in
+    Bytes.set digits i (Char.chr (Char.code '0' + (total mod 10)));
+    carry := total / 10
+  done;
+  if !carry = 0 then Bytes.to_string digits
+  else string_of_int !carry ^ Bytes.to_string digits
+
+let decimal_double value =
+  let carry = ref 0 in
+  let digits = Bytes.of_string value in
+  for i = Bytes.length digits - 1 downto 0 do
+    let digit = Char.code (Bytes.get digits i) - Char.code '0' in
+    let total = (digit * 2) + !carry in
+    Bytes.set digits i (Char.chr (Char.code '0' + (total mod 10)));
+    carry := total / 10
+  done;
+  if !carry = 0 then Bytes.to_string digits
+  else string_of_int !carry ^ Bytes.to_string digits
+
+let rec std_nat_expr_literal = function
+  | MLcons (_, r, []) when is_std_nat_zero_ref r ->
+      Some "0"
+  | MLcons (_, r, [n]) when is_std_nat_succ_ref r ->
+      Option.map (fun value -> decimal_add_small value 1)
+        (std_nat_expr_literal n)
   | _ ->
-      false
+      None
+
+let rec std_positive_expr_literal = function
+  | MLcons (_, r, []) when is_std_positive_xh_ref r ->
+      Some "1"
+  | MLcons (_, r, [p]) when is_std_positive_xo_ref r ->
+      Option.map decimal_double (std_positive_expr_literal p)
+  | MLcons (_, r, [p]) when is_std_positive_xi_ref r ->
+      Option.map (fun value -> decimal_add_small (decimal_double value) 1)
+        (std_positive_expr_literal p)
+  | _ ->
+      None
+
+let std_N_expr_literal = function
+  | MLcons (_, r, []) when is_std_N_zero_ref r ->
+      Some "0"
+  | MLcons (_, r, [p]) when is_std_N_pos_ref r ->
+      std_positive_expr_literal p
+  | _ ->
+      None
+
+let std_Z_expr_literal = function
+  | MLcons (_, r, []) when is_std_Z_zero_ref r ->
+      Some "0"
+  | MLcons (_, r, [p]) when is_std_Z_pos_ref r ->
+      std_positive_expr_literal p
+  | MLcons (_, r, [p]) when is_std_Z_neg_ref r ->
+      Option.map (fun value -> "-" ^ value) (std_positive_expr_literal p)
+  | _ ->
+      None
+
+let std_numeric_expr_literal expr =
+  match std_nat_expr_literal expr with
+  | Some value ->
+      Some value
+  | None ->
+  match std_positive_expr_literal expr with
+  | Some value ->
+      Some value
+  | None ->
+  match std_N_expr_literal expr with
+  | Some value ->
+      Some value
+  | None ->
+      std_Z_expr_literal expr
 
 type py_associativity =
   | PyAssocLeft
@@ -623,15 +784,11 @@ let pp_py_child parent_precedence associativity side child =
   then str "(" ++ child.py_expr_pp ++ str ")"
   else child.py_expr_pp
 
-let py_prefix ?(wrap_operand=false) prefix precedence operand =
-  let pp_operand =
-    if wrap_operand then str "(" ++ operand.py_expr_pp ++ str ")"
-    else pp_py_child precedence PyAssocNone PyOperandChild operand
-  in
+let py_prefix prefix precedence operand =
+  let pp_operand = pp_py_child precedence PyAssocNone PyOperandChild operand in
   py_rendered ~precedence (str prefix ++ pp_operand)
 
-let py_infix ?(associativity=PyAssocLeft) ?(wrap=false)
-    operator precedence left right =
+let py_infix ?(associativity=PyAssocLeft) operator precedence left right =
   let pp_left =
     pp_py_child precedence associativity PyLeftChild left
   in
@@ -641,15 +798,17 @@ let py_infix ?(associativity=PyAssocLeft) ?(wrap=false)
   let pp =
     pp_left ++ str (" " ^ operator ^ " ") ++ pp_right
   in
-  let pp = if wrap then str "(" ++ pp ++ str ")" else pp in
   py_rendered ~precedence pp
 
-let py_call head args =
+let py_call_with_args head args =
   let pp_head =
     pp_py_child py_prec_call PyAssocLeft PyLeftChild head
   in
   py_rendered ~precedence:py_prec_call
     (pp_head ++ str "(" ++ args ++ str ")")
+
+let py_call head args =
+  py_call_with_args head args
 
 let py_attr receiver field =
   let pp_receiver =
@@ -657,6 +816,13 @@ let py_attr receiver field =
   in
   py_rendered ~precedence:py_prec_call
     (pp_receiver ++ str "." ++ str field)
+
+let py_index receiver index =
+  let pp_receiver =
+    pp_py_child py_prec_call PyAssocLeft PyLeftChild receiver
+  in
+  py_rendered ~precedence:py_prec_call
+    (pp_receiver ++ str "[" ++ str index ++ str "]")
 
 let py_method_call receiver method_name args =
   py_call (py_attr receiver method_name) args
@@ -817,6 +983,7 @@ let marker_future_set = "__PYCONC_FUTURE_SET__"
 let marker_future_result = "__PYCONC_FUTURE_RESULT__"
 let marker_future_done = "__PYCONC_FUTURE_DONE__"
 let marker_interleave = "__PYCONC_INTERLEAVE__"
+let marker_native_eq = "__PY_NATIVE_EQ__"
 
 let is_monad_marker_string s =
   let prefix = "__PYMONAD_" in
@@ -829,6 +996,9 @@ let is_concurrency_marker_string s =
   let prefix_len = String.length prefix in
   String.length s >= prefix_len &&
   String.equal prefix (String.sub s 0 prefix_len)
+
+let is_native_equality_marker_ref r =
+  is_custom r && String.equal (find_custom r) marker_native_eq
 
 let is_monad_marker_ref r =
   is_custom r && is_monad_marker_string (find_custom r)
@@ -1142,10 +1312,243 @@ let record_proj_info state branches =
 (*s Core expression printer.
     [env] carries de Bruijn binder names (innermost first). *)
 
-let rec pp_expr state env expr =
+let rec collect_app_args acc = function
+  | MLapp (head, args) -> collect_app_args (args @ acc) head
+  | head               -> (head, acc)
+
+let collect_app head args =
+  collect_app_args args head
+
+let primitive_comparison_expr_parts expr =
+  match expr with
+  | MLapp (head, args) ->
+      let head, all_args = collect_app head args in
+      let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      (match head, all_args with
+       | MLglob r, [left; right] ->
+           (match primitive_comparison_operators r with
+            | Some (operator, inverted_operator) ->
+                Some (operator, inverted_operator, left, right)
+            | None ->
+                None)
+       | _, _ ->
+           None)
+  | _ ->
+      None
+
+let primitive_equality_expr_parts expr =
+  match primitive_comparison_expr_parts expr with
+  | Some ("==", "!=", left, right) ->
+      Some (left, right)
+  | Some _ | None ->
+      None
+
+let rec unwrap_magic = function
+  | MLmagic a -> unwrap_magic a
+  | expr -> expr
+
+let record_projection_parts state expr =
+  match unwrap_magic expr with
+  | MLapp (f, args) -> (
+      let head, all_args = collect_app f args in
+      let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      match head, List.rev all_args with
+      | MLglob r, base :: _ -> (
+          match lookup_active_record_field_target (pp_global state Term r) with
+          | Some field_name -> Some (field_name, base)
+          | None -> None)
+      | _ -> None)
+  | _ -> None
+
+let record_replace_expr_parts state r args =
+  let fields = get_record_fields (State.get_table state) r in
+  let field_name i = Pp.string_of_ppcmds (pp_field_name state r fields i) in
+  let same_base expected actual =
+    match expected with
+    | None -> Some actual
+    | Some base when base = actual -> Some base
+    | Some _ -> None
+  in
+  let rec loop base_opt unchanged_count changes i = function
+    | [] ->
+        (match base_opt with
+         | Some base when unchanged_count > 0 -> Some (base, List.rev changes)
+         | Some _ | None -> None)
+    | arg :: rest ->
+        let expected_field = field_name i in
+        match record_projection_parts state arg with
+        | Some (actual_field, base)
+          when String.equal actual_field expected_field -> (
+            match same_base base_opt base with
+            | Some base_opt ->
+                loop (Some base_opt) (unchanged_count + 1) changes (i + 1) rest
+            | None ->
+                None)
+        | Some _ | None ->
+            loop base_opt unchanged_count ((expected_field, arg) :: changes)
+              (i + 1) rest
+  in
+  if List.is_empty fields || not (Int.equal (List.length fields) (List.length args)) then
+    None
+  else
+    loop None 0 [] 0 args
+
+let rec py_expr_precedence expr =
+  match std_string_expr_value expr with
+  | Some _ -> py_prec_atom
+  | None ->
+  match std_numeric_expr_literal expr with
+  | Some _ -> py_prec_atom
+  | None ->
+  match expr with
+  | MLrel _ | MLglob _ | MLdummy _ | MLuint _ | MLfloat _ | MLstring _
+  | MLcons (_, _, []) ->
+      py_prec_atom
+  | MLlam _ ->
+      py_prec_lambda
+  | MLletin _ ->
+      py_prec_call
+  | MLtuple _ ->
+      py_prec_atom
+  | MLcons (_, r, [_]) when is_std_option_some_ref r ->
+      py_prec_atom
+  | MLcons (_, r, [_]) when is_std_list_cons_ref r ->
+      py_prec_add
+  | MLcons (_, r, [_]) when is_std_nat_succ_ref r ->
+      py_prec_add
+  | MLcons (_, r, [_]) when is_std_positive_xo_ref r ->
+      py_prec_mul
+  | MLcons (_, r, [_]) when is_std_positive_xi_ref r ->
+      py_prec_add
+  | MLcons (_, r, [_]) when is_std_Z_neg_ref r ->
+      py_prec_unary
+  | MLcons (_, r, [_]) when is_std_N_pos_ref r || is_std_Z_pos_ref r ->
+      py_prec_atom
+  | MLcons (_, r, [_; _])
+    when is_std_prod_pair_ref r || is_std_Q_make_ref r ->
+      py_prec_atom
+  | MLcons (_, r, [_; _]) when is_std_string_cons_ref r ->
+      py_prec_add
+  | MLcons _ ->
+      py_prec_call
+  | MLapp (app_head, app_args) ->
+      let app_head, app_args = collect_app app_head app_args in
+      let app_args = List.filter (fun a -> not (is_erased_arg a)) app_args in
+      (match app_head, app_args with
+       | MLglob r, [value] when is_std_bool_ref r "negb" ->
+           (match primitive_comparison_expr_parts value with
+            | Some _ -> py_prec_compare
+            | None -> py_prec_not)
+       | MLglob r, [_; _] when is_std_bool_ref r "andb" ->
+           py_prec_and
+       | MLglob r, [_; _] when is_std_bool_ref r "orb" ->
+           py_prec_or
+       | MLglob r, [_; _] when is_std_bool_ref r "eqb" ->
+           py_prec_compare
+       | MLglob r, [_; _] when is_std_primitive_compare_ref r ->
+           py_prec_compare
+       | MLglob r, [_; _] when is_native_equality_marker_ref r ->
+           py_prec_compare
+       | MLglob r, [_; _] when is_std_list_app_ref r ->
+           py_prec_add
+       | MLglob r, [_; _]
+         when is_positive_set_ref r "union" || is_string_set_ref r "union" ->
+           py_prec_bit_or
+       | MLglob r, [_; _]
+         when is_positive_set_ref r "inter" || is_string_set_ref r "inter" ->
+           py_prec_bit_and
+       | MLglob r, [_; _]
+         when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
+           py_prec_add
+       | MLglob r, [_; _]
+         when is_positive_map_ref r "mem" || is_string_map_ref r "mem" ||
+              is_positive_set_ref r "mem" || is_string_set_ref r "mem" ->
+           py_prec_compare
+       | _, _ ->
+           (match marker_of_ast app_head with
+            | Some marker
+              when String.equal marker marker_reader_pure ||
+                   String.equal marker marker_reader_bind ||
+                   String.equal marker marker_reader_ask ->
+                py_prec_lambda
+            | _ ->
+                py_prec_call))
+  | MLcase _ ->
+      py_prec_conditional
+  | MLfix _ ->
+      py_prec_call
+  | MLexn _ | MLaxiom _ | MLmagic _ | MLparray _ ->
+      py_prec_atom
+
+let rec pp_rendered_expr state env expr =
+  py_rendered ~precedence:(py_expr_precedence expr) (pp_expr state env expr)
+
+and rendered_args state env args =
+  prlist_with_sep
+    (fun () -> str ", ")
+    (fun arg -> pp_py_rendered (pp_rendered_expr state env arg))
+    args
+
+and pp_record_replace_expr state env base changes =
+  match changes with
+  | [] ->
+      pp_expr state env base
+  | _ ->
+      str "replace(" ++ pp_py_rendered (pp_rendered_expr state env base) ++
+      str ", " ++
+      prlist_with_sep
+        (fun () -> str ", ")
+        (fun (field_name, value) ->
+           str field_name ++ str "=" ++ pp_expr state env value)
+        changes ++
+      str ")"
+
+and rendered_primitive_comparison state env operator left right =
+  py_infix ~associativity:PyAssocNone operator
+    py_prec_compare
+    (pp_rendered_expr state env left)
+    (pp_rendered_expr state env right)
+
+and rendered_primitive_comparison_expr state env expr =
+  match primitive_comparison_expr_parts expr with
+  | Some (operator, _, left, right) ->
+      Some (rendered_primitive_comparison state env operator left right)
+  | None ->
+      None
+
+and rendered_inverted_primitive_comparison_expr state env expr =
+  match primitive_comparison_expr_parts expr with
+  | Some (_, inverted_operator, left, right) ->
+      Some (rendered_primitive_comparison state env inverted_operator left right)
+  | None ->
+      None
+
+and py_list_prepend state env head tail =
+  py_infix "+"
+    py_prec_add
+    (py_rendered
+       (str "[" ++ pp_py_rendered (pp_rendered_expr state env head) ++ str "]"))
+    (pp_rendered_expr state env tail)
+
+and py_string_cons state env head tail =
+  py_infix "+"
+    py_prec_add
+    (pp_rendered_expr state env head)
+    (pp_rendered_expr state env tail)
+
+and py_default_call state env head args =
+  py_call_with_args
+    (pp_rendered_expr state env head)
+    (rendered_args state env args)
+
+and pp_expr state env expr =
   match std_string_expr_value expr with
   | Some value ->
       str "\"" ++ str (py_escape_str value) ++ str "\""
+  | None ->
+  match std_numeric_expr_literal expr with
+  | Some value ->
+      str value
   | None ->
   match expr with
   | MLglob r when is_custom r && String.equal (find_custom r) marker_state_get ->
@@ -1226,104 +1629,13 @@ let rec pp_expr state env expr =
   | MLapp (f, args) ->
       (* Flatten left-associative curried application:
          MLapp(MLapp(f,[a]),[b]) → f(a, b) *)
-      let rec collect acc = function
-        | MLapp (g, more) -> collect (more @ acc) g
-        | head            -> (head, acc)
-      in
-      let (head, all_args) = collect args f in
+      let (head, all_args) = collect_app f args in
       let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
-      let rec rendered_expr expr =
-        py_rendered ~precedence:(expr_precedence expr) (pp_expr state env expr)
-      and expr_precedence expr =
-        match std_string_expr_value expr with
-        | Some _ -> py_prec_atom
-        | None ->
-        match expr with
-        | MLrel _ | MLglob _ | MLdummy _ | MLuint _ | MLfloat _ | MLstring _
-        | MLcons (_, _, []) ->
-            py_prec_atom
-        | MLlam _ ->
-            py_prec_lambda
-        | MLletin _ ->
-            py_prec_call
-        | MLtuple _ ->
-            py_prec_atom
-        | MLcons (_, r, [_]) when is_std_option_some_ref r ->
-            py_prec_atom
-        | MLcons (_, r, [_]) when is_std_list_cons_ref r ->
-            py_prec_add
-        | MLcons (_, r, [_]) when is_std_nat_succ_ref r ->
-            py_prec_add
-        | MLcons (_, r, [_])
-          when is_std_positive_xo_ref r || is_std_positive_xi_ref r ->
-            py_prec_add
-        | MLcons (_, r, [_]) when is_std_Z_neg_ref r ->
-            py_prec_unary
-        | MLcons (_, r, [_]) when is_std_N_pos_ref r || is_std_Z_pos_ref r ->
-            py_prec_atom
-        | MLcons (_, r, [_; _])
-          when is_std_prod_pair_ref r || is_std_Q_make_ref r ->
-            py_prec_atom
-        | MLcons (_, r, [_; _]) when is_std_string_cons_ref r ->
-            py_prec_add
-        | MLcons _ ->
-            py_prec_call
-        | MLapp (app_head, app_args) ->
-            let (app_head, app_args) = collect app_args app_head in
-            let app_args =
-              List.filter (fun a -> not (is_erased_arg a)) app_args
-            in
-            (match app_head, app_args with
-             | MLglob r, [_] when is_std_bool_ref r "negb" ->
-                 py_prec_not
-             | MLglob r, [_; _] when is_std_bool_ref r "andb" ->
-                 py_prec_and
-             | MLglob r, [_; _] when is_std_bool_ref r "orb" ->
-                 py_prec_or
-             | MLglob r, [_; _] when is_std_bool_ref r "eqb" ->
-                 py_prec_compare
-             | MLglob r, [_; _] when is_std_primitive_compare_ref r ->
-                 py_prec_compare
-             | MLglob r, [_; _] when is_std_list_app_ref r ->
-                 py_prec_add
-             | MLglob r, [_; _]
-               when is_positive_set_ref r "union" || is_string_set_ref r "union" ->
-                 py_prec_bit_or
-             | MLglob r, [_; _]
-               when is_positive_set_ref r "inter" || is_string_set_ref r "inter" ->
-                 py_prec_bit_and
-             | MLglob r, [_; _]
-               when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
-                 py_prec_add
-             | MLglob r, [_; _]
-               when is_positive_map_ref r "mem" || is_string_map_ref r "mem" ||
-                    is_positive_set_ref r "mem" || is_string_set_ref r "mem" ->
-                 py_prec_compare
-             | _, _ ->
-                 (match marker_of_ast app_head with
-                  | Some marker
-                    when String.equal marker marker_reader_pure ||
-                         String.equal marker marker_reader_bind ||
-                         String.equal marker marker_reader_ask ->
-                      py_prec_lambda
-                  | _ ->
-                      py_prec_call)
-            )
-        | MLcase _ ->
-            py_prec_conditional
-        | MLfix _ ->
-            py_prec_call
-        | MLexn _ | MLaxiom _ | MLmagic _ | MLparray _ ->
-            py_prec_atom
-      in
-      let rendered_args args =
-        prlist_with_sep
-          (fun () -> str ", ")
-          (fun arg -> pp_py_rendered (rendered_expr arg))
-          args
+      let rendered_expr =
+        pp_rendered_expr state env
       in
       let runtime_call name args =
-        py_call (py_rendered (str name)) (rendered_args args)
+        py_call (py_rendered (str name)) (rendered_args state env args)
       in
       let pp_method_call_expr =
         match head, all_args with
@@ -1332,7 +1644,7 @@ let rec pp_expr state env expr =
             | Some (_class_name, method_name) ->
                 Some
                   (py_method_call (rendered_expr self_arg) method_name
-                     (rendered_args method_args))
+                     (rendered_args state env method_args))
             | None -> None)
         | _ -> None
       in
@@ -1361,7 +1673,7 @@ let rec pp_expr state env expr =
             Some
               (py_call (py_rendered (str "_rocq_map_add"))
                  (collection_key kind key ++ str ", " ++
-                  rendered_args [value; mapping]))
+                  rendered_args state env [value; mapping]))
         | [key; mapping] when is_positive_map_ref r "remove" || is_string_map_ref r "remove" ->
             Some
               (py_call (py_rendered (str "_rocq_map_remove"))
@@ -1407,19 +1719,19 @@ let rec pp_expr state env expr =
                  (rendered_expr values))
         | [left; right] when is_positive_set_ref r "union" || is_string_set_ref r "union" ->
             Some
-              (py_infix ~wrap:true "|"
+              (py_infix "|"
                  py_prec_bit_or
                  (rendered_expr left)
                  (rendered_expr right))
         | [left; right] when is_positive_set_ref r "inter" || is_string_set_ref r "inter" ->
             Some
-              (py_infix ~wrap:true "&"
+              (py_infix "&"
                  py_prec_bit_and
                  (rendered_expr left)
                  (rendered_expr right))
         | [left; right] when is_positive_set_ref r "diff" || is_string_set_ref r "diff" ->
             Some
-              (py_infix ~associativity:PyAssocNone ~wrap:true "-"
+              (py_infix ~associativity:PyAssocNone "-"
                  py_prec_add
                  (rendered_expr left)
                  (rendered_expr right))
@@ -1441,12 +1753,24 @@ let rec pp_expr state env expr =
                  (rendered_expr right))
         | _ -> None
       in
+      let pp_prod_projection r =
+        match all_args with
+        | [pair] when is_std_prod_fst_ref r ->
+            Some (py_index (rendered_expr pair) "0")
+        | [pair] when is_std_prod_snd_ref r ->
+            Some (py_index (rendered_expr pair) "1")
+        | _ -> None
+      in
       let pp_std_bool_app r =
         match all_args with
         | [value] when is_std_bool_ref r "negb" ->
-            Some
-              (py_prefix ~wrap_operand:true "not " py_prec_not
-                 (rendered_expr value))
+            (match rendered_inverted_primitive_comparison_expr state env value with
+             | Some rendered ->
+                 Some rendered
+             | None ->
+                 Some
+                   (py_prefix "not " py_prec_not
+                      (rendered_expr value)))
         | [left; right] when is_std_bool_ref r "andb" ->
             Some
               (py_infix "and"
@@ -1461,41 +1785,51 @@ let rec pp_expr state env expr =
                  (rendered_expr right))
         | [left; right] when is_std_bool_ref r "eqb" ->
             Some
-              (py_infix ~associativity:PyAssocNone "=="
-                 py_prec_compare
-                 (rendered_expr left)
-                 (rendered_expr right))
+              (rendered_primitive_comparison state env "==" left right)
         | _ ->
             None
       in
       let pp_std_primitive_compare r =
         match all_args with
-        | [left; right]
-          when is_std_nat_ref r "eqb" || is_std_positive_ref r "eqb" ||
-               is_std_ascii_ref r "eqb" || is_std_string_ref r "eqb" ->
-            Some
-              (py_infix ~associativity:PyAssocNone "=="
-                 py_prec_compare
-                 (rendered_expr left)
-                 (rendered_expr right))
-        | [left; right]
-          when is_std_nat_ref r "leb" || is_std_positive_ref r "leb" ||
-               is_std_ascii_ref r "leb" || is_std_string_ref r "leb" ->
-            Some
-              (py_infix ~associativity:PyAssocNone "<="
-                 py_prec_compare
-                 (rendered_expr left)
-                 (rendered_expr right))
-        | [left; right]
-          when is_std_nat_ref r "ltb" || is_std_positive_ref r "ltb" ||
-               is_std_ascii_ref r "ltb" || is_std_string_ref r "ltb" ->
-            Some
-              (py_infix ~associativity:PyAssocNone "<"
-                 py_prec_compare
-                 (rendered_expr left)
-                 (rendered_expr right))
+        | [left; right] ->
+            (match primitive_comparison_operators r with
+             | Some (operator, _) ->
+                 Some (rendered_primitive_comparison state env operator left right)
+             | None ->
+                 None)
         | _ ->
             None
+      in
+      let pp_native_equality_app r =
+        match all_args with
+        | [left; right] when is_native_equality_marker_ref r ->
+            Some
+              (rendered_primitive_comparison state env "==" left right)
+        | _ ->
+            None
+      in
+      let pp_constructor_tag_predicate_app r =
+        match all_args with
+        | [value] -> (
+            match lookup_active_constructor_tag_predicate (pp_global state Term r) with
+            | Some constructor_ref ->
+                Some
+                  (py_call (py_rendered (str "isinstance"))
+                     (pp_py_rendered (rendered_expr value) ++ str ", " ++
+                      str (str_cons state constructor_ref)))
+            | None -> None)
+        | _ -> None
+      in
+      let pp_list_membership_predicate_app r =
+        match all_args with
+        | [target; items]
+          when is_active_list_membership_predicate (pp_global state Term r) ->
+            Some
+              (py_infix ~associativity:PyAssocNone "in"
+                 py_prec_compare
+                 (rendered_expr target)
+                 (rendered_expr items))
+        | _ -> None
       in
       let pp_collection_expr =
         match head with
@@ -1504,8 +1838,16 @@ let rec pp_expr state env expr =
             pp_std_bool_app r
         | MLglob r when is_std_primitive_compare_ref r ->
             pp_std_primitive_compare r
+        | MLglob r when is_native_equality_marker_ref r ->
+            pp_native_equality_app r
+        | MLglob r when is_active_constructor_tag_predicate (pp_global state Term r) ->
+            pp_constructor_tag_predicate_app r
+        | MLglob r when is_active_list_membership_predicate (pp_global state Term r) ->
+            pp_list_membership_predicate_app r
         | MLglob r when is_std_list_app_ref r ->
             pp_list_app r
+        | MLglob r when is_std_prod_fst_ref r || is_std_prod_snd_ref r ->
+            pp_prod_projection r
         | MLglob r when is_positive_map_ref r "empty" || is_positive_map_ref r "add" ||
                         is_positive_map_ref r "remove" || is_positive_map_ref r "find" ||
                         is_positive_map_ref r "mem" || is_positive_map_ref r "cardinal" ||
@@ -1565,12 +1907,12 @@ let rec pp_expr state env expr =
             Some (py_method_call (rendered_expr mutex) "release" (mt ()))
         | Some marker, [channel; value] when String.equal marker marker_channel_send ->
             Some (py_method_call (rendered_expr channel) "send"
-                    (rendered_args [value]))
+                    (rendered_args state env [value]))
         | Some marker, [channel] when String.equal marker marker_channel_receive ->
             Some (py_method_call (rendered_expr channel) "receive" (mt ()))
         | Some marker, [future; value] when String.equal marker marker_future_set ->
             Some (py_method_call (rendered_expr future) "set_result"
-                    (rendered_args [value]))
+                    (rendered_args state env [value]))
         | Some marker, [future] when String.equal marker marker_future_result ->
             Some (py_method_call (rendered_expr future) "result" (mt ()))
         | Some marker, [future] when String.equal marker marker_future_done ->
@@ -1586,16 +1928,16 @@ let rec pp_expr state env expr =
         match marker_of_ast head, all_args with
         | Some marker, [value] when String.equal marker marker_state_pure ->
             Some (py_method_call (py_rendered (str "StateT")) "pure"
-                    (rendered_args [value]))
+                    (rendered_args state env [value]))
         | Some marker, [m; f] when String.equal marker marker_state_bind ->
             Some (py_method_call (rendered_expr m) "bind"
-                    (rendered_args [f]))
+                    (rendered_args state env [f]))
         | Some marker, [] when String.equal marker marker_state_get ->
             Some (py_method_call (py_rendered (str "StateT")) "get_state"
                     (mt ()))
         | Some marker, [new_state] when String.equal marker marker_state_put ->
             Some (py_method_call (py_rendered (str "StateT")) "put_state"
-                    (rendered_args [new_state]))
+                    (rendered_args state env [new_state]))
         | Some marker, [value] when String.equal marker marker_reader_pure ->
             Some (pp_reader_pure_expr value)
         | Some marker, [reader_expr; fn_expr] when String.equal marker marker_reader_bind ->
@@ -1606,13 +1948,13 @@ let rec pp_expr state env expr =
                  (str "lambda __reader_env: __reader_env"))
         | Some marker, [value] when String.equal marker marker_io_pure ->
             Some (py_method_call (py_rendered (str "IO")) "pure"
-                    (rendered_args [value]))
+                    (rendered_args state env [value]))
         | Some marker, [m; f] when String.equal marker marker_io_bind ->
             Some (py_method_call (rendered_expr m) "bind"
-                    (rendered_args [f]))
+                    (rendered_args state env [f]))
         | Some marker, [acquire; release; use] when String.equal marker marker_io_bracket ->
             Some (py_method_call (py_rendered (str "IO")) "bracket"
-                    (rendered_args [acquire; release; use]))
+                    (rendered_args state env [acquire; release; use]))
         | Some marker, _ when String.equal marker marker_io_run ->
             extraction_diagnostic_error ~detail:marker "PYEX042"
         | Some marker, [opt_expr; fn_expr] when String.equal marker marker_option_bind ->
@@ -1630,11 +1972,7 @@ let rec pp_expr state env expr =
         if List.is_empty all_args then pp_py_rendered rendered_head
         else
           pp_py_rendered
-            (py_call rendered_head
-               (prlist_with_sep
-                  (fun () -> str ", ")
-                  (fun arg -> pp_py_rendered (rendered_expr arg))
-                  all_args))
+            (py_default_call state env head all_args)
       in
       let pp_special =
         match pp_record_field_expr with
@@ -1687,8 +2025,7 @@ let rec pp_expr state env expr =
   | MLcons (_, r, []) when is_std_list_nil_ref r ->
       str "[]"
   | MLcons (_, r, [head; tail]) when is_std_list_cons_ref r ->
-      str "[" ++ pp_expr state env head ++ str "] + " ++
-      pp_expr state env tail
+      pp_py_rendered (py_list_prepend state env head tail)
   | MLcons (_, r, [left; right]) when is_std_prod_pair_ref r ->
       str "(" ++ pp_expr state env left ++ str ", " ++
       pp_expr state env right ++ str ")"
@@ -1699,25 +2036,28 @@ let rec pp_expr state env expr =
   | MLcons (_, r, []) when is_std_nat_zero_ref r ->
       str "0"
   | MLcons (_, r, [n]) when is_std_nat_succ_ref r ->
-      let pp_n = pp_expr state env n in
-      if needs_numeric_constructor_parens n then
-        str "(" ++ pp_n ++ str ") + 1"
-      else
-        pp_n ++ str " + 1"
+      pp_py_rendered
+        (py_infix "+"
+           py_prec_add
+           (pp_rendered_expr state env n)
+           (py_rendered (str "1")))
   | MLcons (_, r, []) when is_std_positive_xh_ref r ->
       str "1"
   | MLcons (_, r, [p]) when is_std_positive_xo_ref r ->
-      let pp_p = pp_expr state env p in
-      if needs_numeric_constructor_parens p then
-        str "(" ++ pp_p ++ str ") * 2"
-      else
-        pp_p ++ str " * 2"
+      pp_py_rendered
+        (py_infix "*"
+           py_prec_mul
+           (pp_rendered_expr state env p)
+           (py_rendered (str "2")))
   | MLcons (_, r, [p]) when is_std_positive_xi_ref r ->
-      let pp_p = pp_expr state env p in
-      if needs_numeric_constructor_parens p then
-        str "(" ++ pp_p ++ str ") * 2 + 1"
-      else
-        pp_p ++ str " * 2 + 1"
+      pp_py_rendered
+        (py_infix "+"
+           py_prec_add
+           (py_infix "*"
+              py_prec_mul
+              (pp_rendered_expr state env p)
+              (py_rendered (str "2")))
+           (py_rendered (str "1")))
   | MLcons (_, r, []) when is_std_N_zero_ref r ->
       str "0"
   | MLcons (_, r, [p]) when is_std_N_pos_ref r ->
@@ -1727,18 +2067,15 @@ let rec pp_expr state env expr =
   | MLcons (_, r, [p]) when is_std_Z_pos_ref r ->
       pp_expr state env p
   | MLcons (_, r, [p]) when is_std_Z_neg_ref r ->
-      let pp_p = pp_expr state env p in
-      if needs_numeric_constructor_parens p then
-        str "-(" ++ pp_p ++ str ")"
-      else
-        str "-" ++ pp_p
+      pp_py_rendered
+        (py_prefix "-" py_prec_unary (pp_rendered_expr state env p))
   | MLcons (_, r, [num; den]) when is_std_Q_make_ref r ->
       str "Fraction(" ++ pp_expr state env num ++ str ", " ++
       pp_expr state env den ++ str ")"
   | MLcons (_, r, []) when is_std_string_empty_ref r ->
       str "\"\""
   | MLcons (_, r, [head; tail]) when is_std_string_cons_ref r ->
-      pp_expr state env head ++ str " + " ++ pp_expr state env tail
+      pp_py_rendered (py_string_cons state env head tail)
   | MLcons (t_, r, args) when is_std_ascii_cons_ref r ->
       if List.length args <> 8 then extraction_diagnostic_error "PYEX008"
       else
@@ -1790,13 +2127,17 @@ let rec pp_expr state env expr =
       else
         let fds = get_record_fields (State.get_table state) r in
         if not (List.is_empty fds) then
-          (* Record type: keyword arguments [T(field=a, field2=b)] *)
-          str cons_name ++ str "(" ++
-          prlist_with_sep (fun () -> str ", ")
-            (fun (i, a) ->
-               pp_field_name state r fds i ++ str "=" ++ pp_expr state env a)
-            (List.mapi (fun i a -> (i, a)) args) ++
-          str ")"
+          (match record_replace_expr_parts state r args with
+           | Some (base, changes) ->
+               pp_record_replace_expr state env base changes
+           | None ->
+               (* Record type: keyword arguments [T(field=a, field2=b)] *)
+               str cons_name ++ str "(" ++
+               prlist_with_sep (fun () -> str ", ")
+                 (fun (i, a) ->
+                    pp_field_name state r fds i ++ str "=" ++ pp_expr state env a)
+                 (List.mapi (fun i a -> (i, a)) args) ++
+               str ")")
         else if List.is_empty args then
           (* Zero-argument constructor.  Inline-custom constructors are plain
              literals (["True"], ["None"], ["0"], etc.) that are emitted
@@ -1841,19 +2182,26 @@ let rec pp_expr state env expr =
         pp_std_prod_match_expr state env scrutinee branches
       else if is_std_bool_type ty then
         pp_std_bool_match_expr state env scrutinee branches
-      else if is_bool then
-        let (_, _, body_true)  = branches.(0) in
-        let (_, _, body_false) = branches.(1) in
-        pp_ternary_operand_expr state env body_true  ++ str " if " ++
-        pp_ternary_operand_expr state env scrutinee  ++ str " else " ++
-        pp_ternary_operand_expr state env body_false
-      else if is_custom_match branches then
-        (* Custom match function: [Extract Inductive T => "t" [...] "fn"].
-           Emit as [fn(branch_thunk_0, branch_thunk_1, …, scrutinee)] where
-           each branch becomes a Python lambda.  This handles types like
-           [nat → int] whose constructors do not exist as Python patterns. *)
-        pp_custom_match_expr state env (find_custom_match branches) scrutinee branches
       else
+        (match constructor_tag_bool_test_target branches with
+        | Some (r, expected) ->
+            str (if expected then "isinstance(" else "not isinstance(") ++
+            pp_expr state env scrutinee ++ str ", " ++ str (str_cons state r) ++
+            str ")"
+        | None ->
+            if is_bool then
+              let (_, _, body_true)  = branches.(0) in
+              let (_, _, body_false) = branches.(1) in
+              pp_ternary_operand_expr state env body_true  ++ str " if " ++
+              pp_ternary_operand_expr state env scrutinee  ++ str " else " ++
+              pp_ternary_operand_expr state env body_false
+            else if is_custom_match branches then
+              (* Custom match function: [Extract Inductive T => "t" [...] "fn"].
+                 Emit as [fn(branch_thunk_0, branch_thunk_1, …, scrutinee)] where
+                 each branch becomes a Python lambda.  This handles types like
+                 [nat → int] whose constructors do not exist as Python patterns. *)
+              pp_custom_match_expr state env (find_custom_match branches) scrutinee branches
+            else
         (* Record projection: single-branch match over a record inductive.
            Instead of [match scrutinee: case Ctor(f0,f1): body], emit the
            lambda-lifted attribute form:
@@ -1944,7 +2292,7 @@ let rec pp_expr state env expr =
         in
         str "match " ++ pp_scrutinee ++ str ":" ++ fnl () ++
         prlist_with_sep fnl pp_branch (Array.to_list branches) ++
-        catch_all)
+        catch_all))
   | MLfix (i, ids, defs) ->
       (* Mutual fixpoint: push all n names into the env (reversed, per the
          extraction convention so [ids.(0)] becomes the outermost binder),
@@ -2392,13 +2740,6 @@ let rec unwrap_fix = function
   | MLmagic a            -> unwrap_fix a
   | _                    -> None
 
-let collect_app f args =
-  let rec collect acc = function
-    | MLapp (g, more) -> collect (more @ acc) g
-    | head            -> (head, acc)
-  in
-  collect args f
-
 let pp_multiline_enclosed indent open_pp close_pp items =
   let arg_pfx = indent_string (indent + 4) in
   let close_pfx = indent_string indent in
@@ -2424,18 +2765,40 @@ let rec pp_statement_expr state env indent = function
       pp_multiline_tuple indent
         [ pp_statement_expr state env (indent + 4) left;
           pp_statement_expr state env (indent + 4) right ]
+  | MLcons (_, r, [((MLcons (_, head_r, _) as head)); tail])
+    when is_std_list_cons_ref r &&
+         not (List.is_empty (get_record_fields (State.get_table state) head_r)) &&
+         not (is_std_Q_make_ref head_r) ->
+      pp_py_rendered
+        (py_infix "+"
+           py_prec_add
+           (py_rendered
+              ~precedence:py_prec_atom
+              (pp_multiline_enclosed indent (str "[") (str "]")
+                 [pp_statement_expr state env (indent + 4) head]))
+           (pp_rendered_expr state env tail))
   | MLcons (_, r, args)
     when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
          not (String.equal "" (str_cons state r)) &&
          not (List.is_empty (get_record_fields (State.get_table state) r)) ->
-      let cons_name = str_cons state r in
-      let fds = get_record_fields (State.get_table state) r in
-      pp_multiline_items indent (str cons_name)
-        (List.mapi
-           (fun i a ->
-              pp_field_name state r fds i ++ str "=" ++
-              pp_statement_expr state env (indent + 4) a)
-           args)
+      (match record_replace_expr_parts state r args with
+       | Some (base, changes) ->
+           pp_multiline_items indent (str "replace")
+             (pp_statement_expr state env (indent + 4) base ::
+              List.map
+                (fun (field_name, value) ->
+                   str field_name ++ str "=" ++
+                   pp_statement_expr state env (indent + 4) value)
+                changes)
+       | None ->
+           let cons_name = str_cons state r in
+           let fds = get_record_fields (State.get_table state) r in
+           pp_multiline_items indent (str cons_name)
+             (List.mapi
+                (fun i a ->
+                   pp_field_name state r fds i ++ str "=" ++
+                   pp_statement_expr state env (indent + 4) a)
+                args))
   | MLcons (_, r, args)
     when not (type_is_coinductive state (Tglob (get_ind r, []))) &&
          not (String.equal "" (str_cons state r)) &&
@@ -2469,8 +2832,27 @@ let rec pp_statement_expr state env indent = function
               (List.map (pp_statement_expr state env (indent + 4)) args)
           in
           match head, all_args with
+          | MLglob r, [value]
+            when is_active_constructor_tag_predicate (pp_global state Term r) -> (
+              match lookup_active_constructor_tag_predicate (pp_global state Term r) with
+              | Some constructor_ref ->
+                  str "isinstance(" ++ pp_expr state env value ++ str ", " ++
+                  str (str_cons state constructor_ref) ++ str ")"
+              | None ->
+                  pp_expr state env (MLapp (f, args)))
+          | MLglob r, [target; items]
+            when is_active_list_membership_predicate (pp_global state Term r) ->
+              pp_py_rendered
+                (py_infix ~associativity:PyAssocNone "in"
+                   py_prec_compare
+                   (pp_rendered_expr state env target)
+                   (pp_rendered_expr state env items))
           | MLglob r, [left; right] when is_std_list_app_ref r ->
-              pp_expr state env left ++ str " + " ++ pp_expr state env right
+              pp_py_rendered
+                (py_infix "+"
+                   py_prec_add
+                   (pp_rendered_expr state env left)
+                   (pp_rendered_expr state env right))
           | MLglob r, [key; value; mapping]
             when is_positive_map_ref r "add" || is_string_map_ref r "add" ->
               let kind =
@@ -2518,6 +2900,87 @@ let rec pp_statement_expr state env indent = function
       pp_expr state env expr
       )
 
+let classify_std_option_branches branches =
+  let none_arm = ref None in
+  let some_arm = ref None in
+  let wildcard_arm = ref None in
+  let classify (ids, pat, body) =
+    match expand_pusual (List.length ids) pat with
+    | Pcons (r, []) when is_std_option_none_ref r ->
+        set_once none_arm (ids, body)
+    | Pcons (r, _) when is_std_option_some_ref r ->
+        set_once some_arm (ids, body)
+    | Pwild ->
+        set_once wildcard_arm (ids, body)
+    | _ ->
+        extraction_diagnostic_error ~detail:"unsupported option pattern shape" "PYEX040"
+  in
+  Array.iter classify branches;
+  (!none_arm, !some_arm, !wildcard_arm)
+
+let is_primitive_equality_expr expr =
+  match primitive_equality_expr_parts expr with
+  | Some _ -> true
+  | None -> false
+
+let rec constructor_tag_predicate_target expr =
+  match expr with
+  | MLmagic a ->
+      constructor_tag_predicate_target a
+  | _ ->
+      let lam_ids, body = collect_lams expr in
+      (match lam_ids, body with
+       | [_], MLcase (_, _scrutinee, branches) ->
+           (match constructor_tag_bool_test_target branches with
+            | Some (constructor_ref, true) when not (is_inline_custom constructor_ref) ->
+                Some constructor_ref
+            | Some (_, true) | Some (_, false) | None -> None)
+       | _, _ -> None)
+
+let is_negated_primitive_equality_expr expr =
+  match expr with
+  | MLapp (head, args) ->
+      let head, all_args = collect_app head args in
+      let all_args = List.filter (fun a -> not (is_erased_arg a)) all_args in
+      (match head, all_args with
+       | MLglob r, [value] when is_std_bool_ref r "negb" ->
+           is_primitive_equality_expr value
+       | _, _ ->
+           false)
+  | _ ->
+      false
+
+let option_neq_expr_parts = function
+  | MLcase (left_ty, left_scrutinee, left_branches)
+    when is_std_option_type left_ty ->
+      let left_none, left_some, _ = classify_std_option_branches left_branches in
+      (match left_none, left_some with
+       | Some (_, MLcase (right_none_ty, right_none_scrutinee, right_none_branches)),
+         Some (_, MLcase (right_some_ty, _right_some_scrutinee, right_some_branches))
+         when is_std_option_type right_none_ty &&
+              is_std_option_type right_some_ty ->
+           let right_none_none, right_none_some, _ =
+             classify_std_option_branches right_none_branches
+           in
+           let right_some_none, right_some_some, _ =
+             classify_std_option_branches right_some_branches
+           in
+           (match right_none_none, right_none_some,
+                  right_some_none, right_some_some with
+            | Some (_, none_none_body), Some (_, none_some_body),
+              Some (_, some_none_body), Some (_, some_some_body)
+              when std_bool_expr none_none_body = Some false &&
+                   std_bool_expr none_some_body = Some true &&
+                   std_bool_expr some_none_body = Some true &&
+                   is_negated_primitive_equality_expr some_some_body ->
+                Some (left_scrutinee, right_none_scrutinee)
+            | _, _, _, _ ->
+                None)
+       | _, _ ->
+           None)
+  | _ ->
+      None
+
 (*s Statement-level body printer for Python [def] bodies.
     Inside a [def], [return <match-stmt>] is invalid Python because [match] is
     a statement, not an expression.  This printer recurses into [MLcase]
@@ -2536,6 +2999,15 @@ let rec pp_return_body state env indent = function
       pp_impossible_stmt ()
   | MLmagic a ->
       pp_return_body state env indent a
+  | expr
+    when (match option_neq_expr_parts expr with Some _ -> true | None -> false) ->
+      let left, right = Option.get (option_neq_expr_parts expr) in
+      str "return " ++
+      pp_py_rendered
+        (py_infix ~associativity:PyAssocNone "!="
+           py_prec_compare
+           (pp_rendered_expr state env left)
+           (pp_rendered_expr state env right))
   | MLcase (ty, scrutinee, branches) as expr ->
       let is_bool =
         Array.length branches = 2 &&
@@ -2559,14 +3031,21 @@ let rec pp_return_body state env indent = function
         str "return " ++ pp_expr state env expr
       else if is_std_bool_type ty then
         pp_std_bool_return_body state env indent scrutinee branches
-      else if is_bool then
-        (* Ternary — valid expression; a single [return] suffices. *)
-        str "return " ++ pp_expr state env expr
-      else if is_custom_match branches then
-        (* Custom-match — also a pure expression. *)
-        str "return " ++
-        pp_custom_match_expr state env (find_custom_match branches) scrutinee branches
       else
+        (match constructor_tag_bool_test_target branches with
+        | Some (r, expected) ->
+            str "return " ++ str (if expected then "isinstance(" else "not isinstance(") ++
+            pp_expr state env scrutinee ++ str ", " ++ str (str_cons state r) ++
+            str ")"
+        | None ->
+            if is_bool then
+              (* Ternary — valid expression; a single [return] suffices. *)
+              str "return " ++ pp_expr state env expr
+            else if is_custom_match branches then
+              (* Custom-match — also a pure expression. *)
+              str "return " ++
+              pp_custom_match_expr state env (find_custom_match branches) scrutinee branches
+            else
         (* Record projection — [record_proj_info] detects the single-branch
            record match; [pp_expr] emits the lambda-lift form, which is a
            valid expression so a single [return] suffices. *)
@@ -2625,7 +3104,7 @@ let rec pp_return_body state env indent = function
               in
               str "match " ++ pp_scrutinee ++ str ":" ++ fnl () ++
               prlist_with_sep fnl pp_branch (Array.to_list branches) ++
-              catch_all )
+              catch_all ))
   | MLaxiom _ | MLexn _ | MLparray _ as expr ->
       (* These emit [raise …], which is a valid Python statement but NOT a
          valid expression.  Emit bare — no [return] prefix. *)
@@ -2714,6 +3193,9 @@ let rec pp_return_body state env indent = function
             when String.equal marker marker_io_bracket ->
               pp_io_bracket_statement acquire release use
           | _ ->
+          match pp_tail_self_rebind state env indent head visible_args with
+          | Some pp -> pp
+          | None ->
           match unwrap_fix head with
           | None ->
               (match head with
@@ -2744,6 +3226,311 @@ let rec pp_return_body state env indent = function
       pp_defs ++ fnl () ++ fnl () ++ str def_pfx ++ str "return " ++ pp_pyid selected
   | expr ->
       str "return " ++ pp_statement_expr state env indent expr
+
+and tail_call_name state env = function
+  | MLglob r -> Some (pp_global state Term r)
+  | MLrel n -> Some (Pp.string_of_ppcmds (pp_pyid (get_db_name n env)))
+  | _ -> None
+
+and is_active_tail_call state env head =
+  match !active_tail_context, tail_call_name state env head with
+  | Some context, Some name -> String.equal context.tail_name name
+  | _ -> false
+
+and arg_var_name env = function
+  | MLmagic a -> arg_var_name env a
+  | MLrel n -> Some (get_db_name n env)
+  | _ -> None
+
+and list_scan_tail_updates state env head args =
+  match !active_tail_context, !active_list_scan_context with
+  | Some context, Some scan_context
+    when is_active_tail_call state env head &&
+         Int.equal (List.length context.tail_params) (List.length args) ->
+      let rec collect params args acc =
+        match params, args with
+        | [], [] -> Some (List.rev acc)
+        | param :: params, arg :: args -> (
+           match arg_var_name env arg with
+           | Some arg_name
+             when Id.equal param scan_context.list_scan_list_param ->
+               if Id.equal arg_name scan_context.list_scan_rest_param then
+                 collect params args acc
+               else
+                 None
+           | Some arg_name when Id.equal arg_name param ->
+               collect params args acc
+           | _ ->
+               collect params args ((param, arg) :: acc))
+        | _, _ -> None
+      in
+      collect context.tail_params args []
+  | _, _ ->
+      None
+
+and is_list_scan_tail_continue state env head args =
+  match list_scan_tail_updates state env head args with
+  | Some _ -> true
+  | None -> false
+
+and pp_rebind_assignment state env indent updates =
+  let pp_continue = str "continue" in
+  let pfx = String.make indent ' ' in
+  let continuation_pfx = fnl () ++ str pfx in
+  match updates with
+  | [] ->
+      pp_continue
+  | [(param, arg)] ->
+      pp_pyid param ++ str " = " ++
+      pp_statement_expr state env indent arg ++
+      continuation_pfx ++ pp_continue
+  | _ ->
+      let lhs =
+        prlist_with_sep (fun () -> str ", ") pp_pyid
+          (List.map fst updates)
+      in
+      let rhs =
+        prlist_with_sep (fun () -> str ", ")
+          (fun (_param, arg) -> pp_expr state env arg)
+          updates
+      in
+      let assignment = lhs ++ str " = " ++ rhs in
+      if String.length (pfx ^ Pp.string_of_ppcmds assignment) <= 88 then
+        assignment ++ continuation_pfx ++ pp_continue
+      else
+        lhs ++ str " = (" ++ fnl () ++
+        prlist_with_sep
+          (fun () -> str "," ++ fnl ())
+          (fun (_param, arg) ->
+             str (pfx ^ "    ") ++
+             pp_statement_expr state env (indent + 4) arg)
+          updates ++
+        str "," ++ fnl () ++ str pfx ++ str ")" ++
+        continuation_pfx ++ pp_continue
+
+and pp_list_scan_tail_rebind state env indent head args =
+  match list_scan_tail_updates state env head args with
+  | None -> None
+  | Some updates ->
+      Some (pp_rebind_assignment state env indent updates)
+
+and pp_tail_self_rebind state env indent head args =
+  match !active_tail_context with
+  | Some context
+    when is_active_tail_call state env head &&
+         Int.equal (List.length context.tail_params) (List.length args) ->
+      (match pp_list_scan_tail_rebind state env indent head args with
+       | Some pp -> Some pp
+       | None ->
+           Some
+             (pp_rebind_assignment state env indent
+                (List.combine context.tail_params args)))
+  | _ -> None
+
+and expr_has_active_tail_call state env expr =
+  match expr with
+  | MLmagic a ->
+      expr_has_active_tail_call state env a
+  | MLrel _ | MLglob _ | MLdummy _ | MLexn _ | MLaxiom _
+  | MLuint _ | MLfloat _ | MLstring _ | MLparray _ ->
+      false
+  | MLlam (id, body) ->
+      let _, env' = push_vars [id_of_mlid id] env in
+      expr_has_active_tail_call state env' body
+  | MLletin (id, a1, a2) ->
+      expr_has_active_tail_call state env a1 ||
+      let _, env' = push_vars [id_of_mlid id] env in
+      expr_has_active_tail_call state env' a2
+  | MLcons (_, _, args) | MLtuple args ->
+      List.exists (expr_has_active_tail_call state env) args
+  | MLcase (_, scrutinee, branches) ->
+      expr_has_active_tail_call state env scrutinee ||
+      Array.exists
+        (fun (ids, _pat, body) ->
+           let _, env' = push_vars (List.rev_map id_of_mlid ids) env in
+           expr_has_active_tail_call state env' body)
+        branches
+  | MLfix (_, ids, defs) ->
+      let id_list = List.rev (Array.to_list ids) in
+      let _, env' = push_vars id_list env in
+      Array.exists (expr_has_active_tail_call state env') defs
+  | MLapp (f, args) ->
+      let head, all_args = collect_app f args in
+      is_active_tail_call state env head ||
+      expr_has_active_tail_call state env f ||
+      List.exists (expr_has_active_tail_call state env) all_args
+
+and list_scan_body_has_continue state env expr =
+  match expr with
+  | MLmagic a ->
+      list_scan_body_has_continue state env a
+  | MLletin (id, _a1, a2) ->
+      let _, env' = push_vars [id_of_mlid id] env in
+      list_scan_body_has_continue state env' a2
+  | MLcase (_, _scrutinee, branches) ->
+      Array.exists
+        (fun (ids, _pat, body) ->
+           let _, env' = push_vars (List.rev_map id_of_mlid ids) env in
+           list_scan_body_has_continue state env' body)
+        branches
+  | MLapp (f, args) -> (
+      match collect_app f args with
+      | MLmagic a, all_args ->
+          list_scan_body_has_continue state env (MLapp (a, all_args))
+      | MLletin (id, a1, a2), all_args ->
+          list_scan_body_has_continue state env
+            (MLletin (id, a1, MLapp (a2, all_args)))
+      | head, all_args ->
+          let visible_args =
+            List.filter (fun a -> not (is_erased_arg a)) all_args
+          in
+          is_list_scan_tail_continue state env head visible_args)
+  | _ ->
+      false
+
+and list_scan_body_supported state env expr =
+  match expr with
+  | MLmagic a ->
+      list_scan_body_supported state env a
+  | MLletin (id, a1, a2) ->
+      not (expr_has_active_tail_call state env a1) &&
+      (let _, env' = push_vars [id_of_mlid id] env in
+       list_scan_body_supported state env' a2)
+  | MLcase (_, scrutinee, branches) ->
+      not (expr_has_active_tail_call state env scrutinee) &&
+      Array.for_all
+        (fun (ids, _pat, body) ->
+           let _, env' = push_vars (List.rev_map id_of_mlid ids) env in
+           list_scan_body_supported state env' body)
+        branches
+  | MLapp (f, args) -> (
+      match collect_app f args with
+      | MLmagic a, all_args ->
+          list_scan_body_supported state env (MLapp (a, all_args))
+      | MLletin (id, a1, a2), all_args ->
+          list_scan_body_supported state env
+            (MLletin (id, a1, MLapp (a2, all_args)))
+      | head, all_args ->
+          let visible_args =
+            List.filter (fun a -> not (is_erased_arg a)) all_args
+          in
+          if is_active_tail_call state env head then
+            is_list_scan_tail_continue state env head visible_args
+          else
+            not (expr_has_active_tail_call state env (MLapp (f, args))))
+  | _ ->
+      not (expr_has_active_tail_call state env expr)
+
+and has_tail_self_call state env expr =
+  match expr with
+  | MLmagic a -> has_tail_self_call state env a
+  | MLletin (id, _a1, a2) ->
+      let _, env' = push_vars [id_of_mlid id] env in
+      has_tail_self_call state env' a2
+  | MLcase (_, _scrutinee, branches) ->
+      Array.exists
+        (fun (ids, _pat, body) ->
+           let _ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
+           has_tail_self_call state env' body)
+        branches
+  | MLapp (f, args) -> (
+      match collect_app f args with
+      | MLmagic a, all_args ->
+          has_tail_self_call state env (MLapp (a, all_args))
+      | MLletin (id, a1, a2), all_args ->
+          has_tail_self_call state env (MLletin (id, a1, MLapp (a2, all_args)))
+      | head, all_args ->
+          let visible_args =
+            List.filter (fun a -> not (is_erased_arg a)) all_args
+          in
+          is_active_tail_call state env head &&
+          (match !active_tail_context with
+           | Some context ->
+               Int.equal (List.length context.tail_params) (List.length visible_args)
+           | None -> false))
+  | _ -> false
+
+and pp_return_body_with_tail_loop state env indent name params body =
+  let context = Some { tail_name = name; tail_params = params } in
+  with_tail_context context (fun () ->
+      match pp_list_scan_tail_loop state env indent params body with
+      | Some pp -> pp
+      | None ->
+      if has_tail_self_call state env body then
+        str "while True:" ++ fnl () ++
+        str (String.make (indent + 4) ' ') ++
+        pp_return_body state env (indent + 4) body
+      else
+        pp_return_body state env indent body)
+
+and pp_list_scan_tail_loop state env indent function_params body =
+  let find_function_param id =
+    List.find_opt (fun param -> Id.equal param id) function_params
+  in
+  let classify_list_branches branches =
+    let nil_arm = ref None in
+    let cons_arm = ref None in
+    let wildcard_arm = ref None in
+    let classify (ids, pat, body) =
+      match expand_pusual (List.length ids) pat with
+      | Pcons (r, []) when is_std_list_nil_ref r ->
+          set_once nil_arm (ids, body)
+      | Pcons (r, _) when is_std_list_cons_ref r ->
+          set_once cons_arm (ids, body)
+      | Pwild ->
+          set_once wildcard_arm (ids, body)
+      | _ ->
+          ()
+    in
+    Array.iter classify branches;
+    (!nil_arm, !cons_arm, !wildcard_arm)
+  in
+  match body with
+  | MLcase (ty, scrutinee, branches) when is_std_list_type ty -> (
+      match arg_var_name env scrutinee with
+      | None -> None
+      | Some scrutinee_name -> (
+          match find_function_param scrutinee_name with
+          | None -> None
+          | Some list_param -> (
+              let nil_arm, cons_arm, _wildcard_arm =
+                classify_list_branches branches
+              in
+              match nil_arm, cons_arm with
+              | Some (nil_ids, nil_body), Some (cons_ids, cons_body) -> (
+                  let cons_ids', cons_env =
+                    push_vars (List.rev_map id_of_mlid cons_ids) env
+                  in
+                  let cons_params = List.rev cons_ids' in
+                  match visible_params cons_params with
+                  | head_param :: rest_param :: _ ->
+                      let scan_context = Some {
+                        list_scan_list_param = list_param;
+                        list_scan_rest_param = rest_param;
+                      } in
+                      with_list_scan_context scan_context (fun () ->
+                          if
+                            list_scan_body_has_continue state cons_env cons_body &&
+                            list_scan_body_supported state cons_env cons_body &&
+                            not (expr_has_active_tail_call state env nil_body)
+                          then
+                            let loop_pfx = String.make indent ' ' in
+                            let body_pfx = String.make (indent + 4) ' ' in
+                            Some
+                              (str "for " ++ pp_pyid head_param ++ str " in " ++
+                               pp_expr state env scrutinee ++ str ":" ++ fnl () ++
+                               str body_pfx ++
+                               pp_return_body state cons_env (indent + 4) cons_body ++
+                               fnl () ++ str loop_pfx ++
+                               pp_return_arm state env indent nil_ids [] nil_body)
+                          else
+                            None)
+                  | _ ->
+                      None)
+              | _, _ ->
+                  None)))
+  | _ ->
+      None
 
 and pp_return_arm state env indent ids values body =
   let ids', env' = push_vars (List.rev_map id_of_mlid ids) env in
@@ -2809,37 +3596,25 @@ and pp_std_list_return_body state env indent scrutinee branches =
   str pfx ++ pp_cons
 
 and pp_std_option_return_body state env indent scrutinee branches =
-  let none_arm = ref None in
-  let some_arm = ref None in
-  let wildcard_arm = ref None in
-  let classify (ids, pat, body) =
-    match expand_pusual (List.length ids) pat with
-    | Pcons (r, []) when is_std_option_none_ref r ->
-        set_once none_arm (ids, body)
-    | Pcons (r, _) when is_std_option_some_ref r ->
-        set_once some_arm (ids, body)
-    | Pwild ->
-        set_once wildcard_arm (ids, body)
-    | _ ->
-        extraction_diagnostic_error ~detail:"unsupported option pattern shape" "PYEX040"
+  let none_arm, some_arm, wildcard_arm =
+    classify_std_option_branches branches
   in
-  Array.iter classify branches;
   let pfx = String.make indent ' ' in
   let body_pfx = String.make (indent + 4) ' ' in
   let fallback body_indent =
-    pp_return_or_impossible state env body_indent !wildcard_arm
+    pp_return_or_impossible state env body_indent wildcard_arm
   in
   let pp_none =
-    match !none_arm with
+    match none_arm with
     | Some (ids, body) -> pp_return_arm state env (indent + 4) ids [] body
     | None -> fallback (indent + 4)
   in
   let pp_some =
-    match !some_arm with
+    match some_arm with
     | Some (ids, body) ->
         pp_return_arm state env indent ids [str "__option"] body
     | None ->
-        pp_return_or_impossible state env indent !wildcard_arm
+        pp_return_or_impossible state env indent wildcard_arm
   in
   str "__option = " ++ pp_expr state env scrutinee ++ fnl () ++
   str pfx ++ str "if __option is None:" ++ fnl () ++
@@ -2992,10 +3767,14 @@ and pp_fix_statement state env indent i ids defs =
     let lam_ids, body = collect_lams defs.(j) in
     let params = List.map id_of_mlid lam_ids in
     let params', env'' = push_vars params env' in
+    let function_name = Pp.string_of_ppcmds (pp_pyid name_arr.(j)) in
+    let function_params = List.rev (visible_params params') in
     str "def " ++ pp_pyid name_arr.(j) ++ str "(" ++
     pp_param_list (List.rev params') ++
     str "):" ++ fnl () ++
-    str body_pfx ++ pp_return_body state env'' (indent + 4) body
+    str body_pfx ++
+    pp_return_body_with_tail_loop state env'' (indent + 4)
+      function_name function_params body
   in
   prlist_with_sep (fun () -> fnl () ++ str def_pfx) pp_one
     (List.init n (fun j -> j)),
@@ -3309,24 +4088,21 @@ let pp_function_wrapper state env name a typ =
           let visible_args =
             List.filter (fun a -> not (is_erased_arg a)) all_args
           in
-          let pp_head =
-            match head with
-            | MLlam _ -> str "(" ++ pp_expr state env head ++ str ")"
-            | _       -> pp_expr state env head
-          in
-          pp_head ++ str "(" ++
-          prlist_with_sep (fun () -> str ", ") (pp_expr state env) visible_args ++
-          (if List.is_empty visible_args then mt () else str ", ") ++
-          prlist_with_sep (fun () -> str ", ")
-            (fun i -> pp_pyname (List.nth arg_names i))
-            (List.init n Fun.id) ++
-          str ")"
+          pp_py_rendered
+            (py_call_with_args
+               (pp_rendered_expr state env head)
+               (rendered_args state env visible_args ++
+                (if List.is_empty visible_args then mt () else str ", ") ++
+                prlist_with_sep (fun () -> str ", ")
+                  (fun i -> pp_pyname (List.nth arg_names i))
+                  (List.init n Fun.id)))
       | _ ->
-          str "(" ++ pp_expr state env a ++ str ")(" ++
-          prlist_with_sep (fun () -> str ", ")
-            (fun i -> pp_pyname (List.nth arg_names i))
-            (List.init n Fun.id) ++
-          str ")"
+          pp_py_rendered
+            (py_call_with_args
+               (pp_rendered_expr state env a)
+               (prlist_with_sep (fun () -> str ", ")
+                  (fun i -> pp_pyname (List.nth arg_names i))
+                  (List.init n Fun.id)))
     in
     let pp_signature =
       pp_def_signature name
@@ -3483,7 +4259,11 @@ let pp_term_decl state env name a typ =
       pp_prefix ++
       pp_def_signature name (existing_params @ synthetic_signature_params) ret_annot ++
       fnl () ++
-      str "    " ++ pp_return_body state env'' 4 body_app ++ fnl ()
+      str "    " ++
+      pp_return_body_with_tail_loop state env'' 4 name
+        (visible_params_rev @ synthetic_ids)
+        body_app ++
+      fnl ()
     else
       let pp_params = annotated_params_opt visible_params_rev arg_annots in
       pp_prefix ++
@@ -3495,7 +4275,9 @@ let pp_term_decl state env name a typ =
       (* [indent=4]: the body is indented by 4 spaces inside the def; [case] arms
          at 8, case bodies at 12.  The "    " prefix handles the first line only;
          [pp_return_body] generates the rest with absolute column positions. *)
-      str "    " ++ pp_return_body state env' 4 body ++ fnl ()
+      str "    " ++
+      pp_return_body_with_tail_loop state env' 4 name visible_params_rev body ++
+      fnl ()
 
 let pp_method_signature ?(is_async=false) name params ret_annot =
   let def_prefix = if is_async then str "async def " else str "def " in
@@ -3648,10 +4430,12 @@ let record_class_prefix_of_decl state decl =
       class Nat:
           pass
 
+      @final
       @dataclass(frozen=True)
       class Nat_O(Nat):
           pass
 
+      @final
       @dataclass(frozen=True)
       class Nat_S(Nat):
           arg0: nat          # typed via pp_type
@@ -3659,8 +4443,8 @@ let record_class_prefix_of_decl state decl =
     Records have a single constructor that *is* the type, so no separate
     base class is emitted there. *)
 
-(** Emit one [@dataclass(frozen=True)] class for constructor [j] of [packet].
-    If [base_opt] is [Some base], the class inherits from [base]. *)
+(** Emit one [@final] [@dataclass(frozen=True)] class for constructor [j] of
+    [packet].  If [base_opt] is [Some base], the class inherits from [base]. *)
 let pp_type_shifted_with state shift pp_tvar typ =
   pp_type_with state (fun i -> pp_tvar (max 0 (i - shift))) typ
 
@@ -3696,8 +4480,10 @@ let pp_one_cons state ?(typevar_shift=1) ?(pp_tvar=typevar_name)
     | None      -> mt ()
     | Some base -> str "(" ++ str base ++ str ")"
   in
+  str "@final" ++ fnl () ++
   str "@dataclass(frozen=True)" ++ fnl () ++
-  str "class " ++ str cname ++ pp_bases ++ str ":" ++ fnl () ++
+  str "class " ++ str cname ++
+  pp_bases ++ str ":" ++ fnl () ++
   ( if nargs = 0 then str "    pass" ++ fnl ()
     else
       prlist_with_sep mt
@@ -3936,6 +4722,7 @@ let is_std_bool_term_ref r =
 let classify_term_decl state r typ =
   if is_prop_type typ then TermDeclSuppress
   else if is_runtime_marker_ref r then TermDeclSuppress
+  else if is_native_equality_marker_ref r then TermDeclSuppress
   else if is_inline_custom r then TermDeclSuppress
   else if is_std_bool_term_ref r then TermDeclSuppress
   else if is_std_primitive_compare_ref r then TermDeclSuppress
@@ -3945,21 +4732,41 @@ let classify_term_decl state r typ =
   else if is_custom r then TermDeclCustomAlias (find_custom r)
   else TermDeclEmit
 
+let register_inline_term_decl state r a action =
+  let source_name = pp_global state Term r in
+  match action, constructor_tag_predicate_target a with
+  | TermDeclEmit, Some constructor_ref ->
+      active_constructor_tag_predicates :=
+        (source_name, constructor_ref) :: !active_constructor_tag_predicates;
+      TermDeclSuppress
+  | TermDeclEmit, _ when String.equal (source_name_tail source_name) "positive_mem" ->
+      active_list_membership_predicates :=
+        source_name :: !active_list_membership_predicates;
+      TermDeclSuppress
+  | _, _ ->
+      action
+
 let classify_type_decl r =
   if is_std_real_type_ref r then TypeDeclError "PYEX041"
   else if is_custom r || is_std_remapped_type_ref r then TypeDeclSuppress
   else TypeDeclUnsupported
 
 let pp_classified_term_decl state env r a typ =
-  match classify_term_decl state r typ with
+  match register_inline_term_decl state r a (classify_term_decl state r typ) with
   | TermDeclSuppress -> mt ()
   | TermDeclCustomAlias alias ->
+      fnl () ++ fnl () ++
       str (pp_global state Term r) ++ str " = " ++ str alias ++ fnl ()
   | TermDeclEmit ->
       let () = validate_prop_discipline_decl (Dterm (r, a, typ)) in
       fnl () ++ fnl () ++ pp_term_decl state env (pp_global state Term r) a typ
 
-let term_decl_export_names state r typ =
+let term_decl_export_names state r a typ =
+  match register_inline_term_decl state r a (classify_term_decl state r typ) with
+  | TermDeclSuppress -> []
+  | TermDeclCustomAlias _ | TermDeclEmit -> [pp_global state Term r]
+
+let fixed_term_decl_export_names state r typ =
   match classify_term_decl state r typ with
   | TermDeclSuppress -> []
   | TermDeclCustomAlias _ | TermDeclEmit -> [pp_global state Term r]
@@ -4004,11 +4811,11 @@ let rec module_type_annotation state = function
       str "]"
 
 let decl_export_names state = function
-  | Dterm (r, _, typ) ->
-      term_decl_export_names state r typ
+  | Dterm (r, a, typ) ->
+      term_decl_export_names state r a typ
   | Dfix (rv, _, typs) ->
       List.init (Array.length rv) Fun.id
-      |> List.concat_map (fun i -> term_decl_export_names state rv.(i) typs.(i))
+      |> List.concat_map (fun i -> fixed_term_decl_export_names state rv.(i) typs.(i))
   | Dtype (r, _, _) ->
       (match classify_type_decl r with
        | TypeDeclError _ | TypeDeclSuppress -> []

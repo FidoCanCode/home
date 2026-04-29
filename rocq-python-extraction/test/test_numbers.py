@@ -6,6 +6,7 @@ from n_seven import n_seven
 from nat_compare_and import nat_compare_and
 from nat_compare_bool_eq import nat_compare_bool_eq
 from nat_compare_neg import nat_compare_neg
+from nat_compare_neg_lt import nat_compare_neg_lt
 from nat_compare_or import nat_compare_or
 from nat_pred_or_zero import nat_pred_or_zero
 from nat_roundtrip import nat_roundtrip
@@ -38,6 +39,8 @@ def test_nat_positive_n_and_z_are_native_ints() -> None:
     assert nat_compare_or(3, 2, 1) is False
     assert nat_compare_neg(3, 2) is True
     assert nat_compare_neg(2, 3) is False
+    assert nat_compare_neg_lt(3, 3) is True
+    assert nat_compare_neg_lt(2, 3) is False
     assert nat_compare_bool_eq(1, 2, True) is True
     assert nat_compare_bool_eq(1, 2, False) is False
     assert n_seven == 7
@@ -72,23 +75,77 @@ def test_positive_equality_lowers_without_pos_protocol(build_default) -> None:
     assert "return left == right" in source
 
 
-def test_primitive_comparisons_compose_with_bool_ops(build_default) -> None:
+def test_numeric_constructor_constants_render_as_literals(
+    build_default,
+    assert_rendered_source,
+) -> None:
+    assert_rendered_source(
+        (build_default / "nat_three.py").read_text(),
+        "nat_three: int = 3",
+    )
+    assert_rendered_source(
+        (build_default / "positive_five.py").read_text(),
+        "positive_five: int = 5",
+    )
+    assert_rendered_source(
+        (build_default / "n_seven.py").read_text(),
+        "n_seven: int = 7",
+    )
+    assert_rendered_source(
+        (build_default / "z_neg_three.py").read_text(),
+        "z_neg_three: int = -3",
+    )
+    assert_rendered_source(
+        (build_default / "q_half.py").read_text(),
+        "q_half: Fraction = Fraction(1, 2)",
+    )
+
+
+def test_primitive_comparisons_compose_with_bool_ops(
+    build_default,
+    assert_rendered_source,
+) -> None:
     compare_and = (build_default / "nat_compare_and.py").read_text()
     compare_or = (build_default / "nat_compare_or.py").read_text()
     compare_neg = (build_default / "nat_compare_neg.py").read_text()
+    compare_neg_lt = (build_default / "nat_compare_neg_lt.py").read_text()
 
-    assert "return left < middle and middle <= right" in compare_and
-    assert "return (left < middle) and (middle <= right)" not in compare_and
-    assert "return left == middle or middle < right" in compare_or
-    assert "return (left == middle) or (middle < right)" not in compare_or
-    assert "return not (left <= right)" in compare_neg
-    assert "return not left <= right" not in compare_neg
+    assert_rendered_source(
+        compare_and,
+        "return left < middle and middle <= right",
+        ("return (left < middle) and (middle <= right)",),
+    )
+    assert_rendered_source(
+        compare_or,
+        "return left == middle or middle < right",
+        ("return (left == middle) or (middle < right)",),
+    )
+    assert_rendered_source(
+        compare_neg,
+        "return left > right",
+        (
+            "return not left <= right",
+            "return not (left <= right)",
+        ),
+    )
+    assert_rendered_source(
+        compare_neg_lt,
+        "return left >= right",
+        (
+            "return not left < right",
+            "return not (left < right)",
+        ),
+    )
 
 
 def test_primitive_comparison_as_equality_operand_is_parenthesized(
     build_default,
+    assert_rendered_source,
 ) -> None:
     source = (build_default / "nat_compare_bool_eq.py").read_text()
 
-    assert "return (left < right) == expected" in source
-    assert "return left < right == expected" not in source
+    assert_rendered_source(
+        source,
+        "return (left < right) == expected",
+        ("return left < right == expected",),
+    )

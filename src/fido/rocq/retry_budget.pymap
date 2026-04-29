@@ -1,5 +1,5 @@
 stability,python_start_line,python_start_col,python_end_line,python_end_col,source_file,source_start_line,source_start_col,source_end_line,source_end_col,kind,symbol,python_symbol
-open,17,0,17,36,retry_budget.v,17,11,17,22,extraction,max_retries,max_retries
-open,20,0,20,29,retry_budget.v,21,11,21,23,extraction,retry_budget,retry_budget
-open,23,0,30,47,retry_budget.v,26,11,26,22,extraction,retry_delta,retry_delta
-open,33,0,33,44,retry_budget.v,34,11,34,24,extraction,backoff_ratio,backoff_ratio
+open,18,0,18,20,retry_budget.v,17,11,17,22,extraction,max_retries,max_retries
+open,21,0,21,21,retry_budget.v,21,11,21,23,extraction,retry_budget,retry_budget
+open,24,0,31,47,retry_budget.v,26,11,26,22,extraction,retry_delta,retry_delta
+open,34,0,34,40,retry_budget.v,34,11,34,24,extraction,backoff_ratio,backoff_ratio

@@ -48,11 +48,11 @@ Inductive TaskStatus : Type :=
 
 (** [TaskRow] carries the durable task metadata relevant to D3. *)
 Record TaskRow : Type := {
-  task_title : string;
-  task_description : string;
-  task_kind : TaskKind;
-  task_status : TaskStatus;
-  task_source_comment : option positive
+  title : string;
+  description : string;
+  kind : TaskKind;
+  status : TaskStatus;
+  source_comment : option positive
 }.
 
 (** [ExecutionLease] represents the single task currently being executed for a
@@ -65,7 +65,7 @@ Record ExecutionLease : Type := {
     task.  The handwritten adapter can derive these from today's omission-based
     provider output before comparing against the model.
 
-    D11 treats [task_title] and [task_source_comment] as immutable task
+    D11 treats [title] and [source_comment] as immutable task
     identity.  [RewriteTask] still carries a title because today's Python
     proposal shape includes one, but the modeled transition must ignore that
     field and may only revise mutable task text. *)
@@ -100,8 +100,8 @@ Definition task_executable (kind : TaskKind) : bool :=
 
 (** [task_row_executable] says whether one row is eligible for execution now. *)
 Definition task_row_executable (row : TaskRow) : bool :=
-  match task_status row with
-  | StatusPending => task_executable (task_kind row)
+  match status row with
+  | StatusPending => task_executable (kind row)
   | _ => false
   end.
 
@@ -110,9 +110,6 @@ Definition task_kind_is_ci (kind : TaskKind) : bool :=
   | TaskCI => true
   | _ => false
   end.
-
-Definition task_kind_is_non_ci (kind : TaskKind) : bool :=
-  negb (task_kind_is_ci kind).
 
 (** [task_preempt_rank] encodes D3's new-task preemption policy. *)
 Definition task_preempt_rank (kind : TaskKind) : option nat :=
@@ -128,18 +125,15 @@ Definition task_preempt_rank (kind : TaskKind) : option nat :=
     current active lease and therefore should interrupt it. *)
 Definition task_requires_abort
     (new_row current_row : TaskRow) : bool :=
-  match task_preempt_rank (task_kind new_row), task_preempt_rank (task_kind current_row) with
+  match task_preempt_rank (kind new_row), task_preempt_rank (kind current_row) with
   | Some new_rank, Some current_rank => Nat.ltb new_rank current_rank
   | _, _ => false
   end.
 
-Definition positive_eqb (left right : positive) : bool :=
-  Pos.eqb left right.
-
 Fixpoint positive_mem (target : positive) (items : list positive) : bool :=
   match items with
   | [] => false
-  | item :: rest => if positive_eqb target item then true else positive_mem target rest
+  | item :: rest => if Pos.eqb target item then true else positive_mem target rest
   end.
 
 Fixpoint find_comment_duplicate
@@ -151,31 +145,41 @@ Fixpoint find_comment_duplicate
   | task :: rest =>
       match PositiveMap.find task rows with
       | Some row =>
-          match task_source_comment row with
-          | Some existing => if positive_eqb existing comment then Some task else find_comment_duplicate comment rest rows
+          match source_comment row with
+          | Some existing => if Pos.eqb existing comment then Some task else find_comment_duplicate comment rest rows
           | None => find_comment_duplicate comment rest rows
           end
       | None => find_comment_duplicate comment rest rows
       end
   end.
 
+Definition row_has_pending_title
+    (candidate_title : string)
+    (row : TaskRow) : bool :=
+  match status row with
+  | StatusPending => String.eqb (title row) candidate_title
+  | _ => false
+  end.
+
+Definition task_has_pending_title
+    (candidate_title : string)
+    (task : positive)
+    (rows : PositiveMap.t TaskRow) : bool :=
+  match PositiveMap.find task rows with
+  | Some row => row_has_pending_title candidate_title row
+  | None => false
+  end.
+
 Fixpoint find_pending_title_duplicate
-    (title : string)
+    (candidate_title : string)
     (order : list positive)
     (rows : PositiveMap.t TaskRow) : option positive :=
   match order with
   | [] => None
   | task :: rest =>
-      match PositiveMap.find task rows with
-      | Some row =>
-          match task_status row with
-          | StatusPending =>
-              if String.eqb (task_title row) title then Some task
-              else find_pending_title_duplicate title rest rows
-          | _ => find_pending_title_duplicate title rest rows
-          end
-      | None => find_pending_title_duplicate title rest rows
-      end
+      if task_has_pending_title candidate_title task rows
+      then Some task
+      else find_pending_title_duplicate candidate_title rest rows
   end.
 
 (** [enqueue_task] applies the current handwritten dedup rules to a task add.
@@ -188,14 +192,14 @@ Definition enqueue_task
     (order : list positive)
     (rows : PositiveMap.t TaskRow)
     : list positive * PositiveMap.t TaskRow * positive :=
-  match task_source_comment row with
+  match source_comment row with
   | Some comment =>
       match find_comment_duplicate comment order rows with
       | Some existing => (order, rows, existing)
       | None => (List.app order [task], PositiveMap.add task row rows, task)
       end
   | None =>
-      match find_pending_title_duplicate (task_title row) order rows with
+      match find_pending_title_duplicate (title row) order rows with
       | Some existing => (order, rows, existing)
       | None => (List.app order [task], PositiveMap.add task row rows, task)
       end
@@ -209,7 +213,7 @@ Fixpoint pick_first_ci
   | task :: rest =>
       match PositiveMap.find task rows with
       | Some row =>
-          if andb (task_row_executable row) (task_kind_is_ci (task_kind row))
+          if andb (task_row_executable row) (task_kind_is_ci (kind row))
           then Some task
           else pick_first_ci rest rows
       | None => pick_first_ci rest rows
@@ -224,7 +228,7 @@ Fixpoint pick_first_non_ci
   | task :: rest =>
       match PositiveMap.find task rows with
       | Some row =>
-          if andb (task_row_executable row) (task_kind_is_non_ci (task_kind row))
+          if andb (task_row_executable row) (negb (task_kind_is_ci (kind row)))
           then Some task
           else pick_first_non_ci rest rows
       | None => pick_first_non_ci rest rows
@@ -263,7 +267,7 @@ Definition clear_matching_lease
     (task : positive)
     (lease : option ExecutionLease) : option ExecutionLease :=
   match lease with
-  | Some active => if positive_eqb (lease_task active) task then None else lease
+  | Some active => if Pos.eqb (lease_task active) task then None else lease
   | None => None
   end.
 
@@ -276,11 +280,11 @@ Definition complete_task
   | None => (lease', rows)
   | Some row =>
       let row' := {|
-        task_title := task_title row;
-        task_description := task_description row;
-        task_kind := task_kind row;
-        task_status := StatusCompleted;
-        task_source_comment := task_source_comment row
+        title := title row;
+        description := description row;
+        kind := kind row;
+        status := StatusCompleted;
+        source_comment := source_comment row
       |} in
       (lease', PositiveMap.add task row' rows)
   end.
@@ -290,25 +294,30 @@ Definition abort_task
     (task : positive)
     (lease : option ExecutionLease) : option ExecutionLease :=
   match lease with
-  | Some active => if positive_eqb (lease_task active) task then None else lease
+  | Some active => if Pos.eqb (lease_task active) task then None else lease
   | None => None
   end.
 
-Definition row_with_status (row : TaskRow) (status : TaskStatus) : TaskRow :=
-  {|
-    task_title := task_title row;
-    task_description := task_description row;
-    task_kind := task_kind row;
-    task_status := status;
-    task_source_comment := task_source_comment row
-  |}.
+Definition task_visible_after_rescope (row : TaskRow) : bool :=
+  match status row with
+  | StatusCompleted => false
+  | _ => true
+  end.
 
 Definition unblock_task_row
     (task : positive)
     (row : TaskRow)
     (rows : PositiveMap.t TaskRow) : PositiveMap.t TaskRow :=
-  match task_status row with
-  | StatusBlocked => PositiveMap.add task (row_with_status row StatusPending) rows
+  match status row with
+  | StatusBlocked =>
+      let row' := {|
+        title := title row;
+        description := description row;
+        kind := kind row;
+        status := StatusPending;
+        source_comment := source_comment row
+      |} in
+      PositiveMap.add task row' rows
   | _ => rows
   end.
 
@@ -348,7 +357,7 @@ Fixpoint op_covers_task (task : positive) (ops : list RescopeOp) : bool :=
   match ops with
   | [] => false
   | op :: rest =>
-      if positive_eqb (rescope_task_id op) task then true else op_covers_task task rest
+      if Pos.eqb (rescope_task_id op) task then true else op_covers_task task rest
   end.
 
 (** [rescope_ops_cover_snapshot] checks that every snapped task has an explicit
@@ -368,7 +377,7 @@ Fixpoint release_for_task
   match releases with
   | [] => None
   | release :: rest =>
-      if positive_eqb (release_task_id release) task then
+      if Pos.eqb (release_task_id release) task then
         Some (release_decision release)
       else
         release_for_task task rest
@@ -391,6 +400,43 @@ Fixpoint normalize_rescope_batch
       end
   end.
 
+Definition apply_rescope_op
+    (op : RescopeOp)
+    (task : positive)
+    (row : TaskRow)
+    (rows : PositiveMap.t TaskRow)
+    (pending_ids completed_ids : list positive)
+    : PositiveMap.t TaskRow * list positive * list positive :=
+  if task_visible_after_rescope row then
+    match op with
+    | KeepTask _ =>
+        (rows, List.app pending_ids [task], completed_ids)
+    | RewriteTask _ _ new_description =>
+        let row' := {|
+          title := title row;
+          description := new_description;
+          kind := kind row;
+          status := status row;
+          source_comment := source_comment row
+        |} in
+        (PositiveMap.add task row' rows,
+          List.app pending_ids [task],
+          completed_ids)
+    | CompleteTask _ =>
+        let row' := {|
+          title := title row;
+          description := description row;
+          kind := kind row;
+          status := StatusCompleted;
+          source_comment := source_comment row
+        |} in
+        (PositiveMap.add task row' rows,
+          pending_ids,
+          List.app completed_ids [task])
+    end
+  else
+    (rows, pending_ids, completed_ids).
+
 Fixpoint apply_rescope_ops
     (ops : list RescopeOp)
     (rows : PositiveMap.t TaskRow)
@@ -404,45 +450,9 @@ Fixpoint apply_rescope_ops
       match PositiveMap.find task rows with
       | None => apply_rescope_ops rest rows pending_ids completed_ids
       | Some row =>
-          match op with
-          | KeepTask _ =>
-              match task_status row with
-              | StatusCompleted => apply_rescope_ops rest rows pending_ids completed_ids
-              | _ => apply_rescope_ops rest rows (List.app pending_ids [task]) completed_ids
-              end
-          | RewriteTask _ title description =>
-              match task_status row with
-              | StatusCompleted => apply_rescope_ops rest rows pending_ids completed_ids
-              | _ =>
-                  let row' := {|
-                    task_title := task_title row;
-                    task_description := description;
-                    task_kind := task_kind row;
-                    task_status := task_status row;
-                    task_source_comment := task_source_comment row
-                  |} in
-                  apply_rescope_ops rest
-                    (PositiveMap.add task row' rows)
-                    (List.app pending_ids [task])
-                    completed_ids
-              end
-          | CompleteTask _ =>
-              match task_status row with
-              | StatusCompleted => apply_rescope_ops rest rows pending_ids completed_ids
-              | _ =>
-                  let row' := {|
-                    task_title := task_title row;
-                    task_description := task_description row;
-                    task_kind := task_kind row;
-                    task_status := StatusCompleted;
-                    task_source_comment := task_source_comment row
-                  |} in
-                  apply_rescope_ops rest
-                    (PositiveMap.add task row' rows)
-                    pending_ids
-                    (List.app completed_ids [task])
-              end
-          end
+          let '(rows', pending_ids', completed_ids') :=
+            apply_rescope_op op task row rows pending_ids completed_ids in
+          apply_rescope_ops rest rows' pending_ids' completed_ids'
       end
   end.
 
@@ -454,7 +464,7 @@ Fixpoint completed_tasks_in_order
   | task :: rest =>
       match PositiveMap.find task rows with
       | Some row =>
-          match task_status row with
+          match status row with
           | StatusCompleted => task :: completed_tasks_in_order rest rows
           | _ => completed_tasks_in_order rest rows
           end
@@ -474,7 +484,7 @@ Fixpoint preserve_newly_added
       else
         match PositiveMap.find task rows with
         | Some row =>
-            match task_status row with
+            match status row with
             | StatusCompleted => rest'
             | _ => task :: rest'
             end
@@ -482,54 +492,43 @@ Fixpoint preserve_newly_added
         end
   end.
 
-Definition task_is_ci
+Definition task_matches_ci_filter
+    (include_ci : bool)
     (rows : PositiveMap.t TaskRow)
     (task : positive) : bool :=
   match PositiveMap.find task rows with
-  | Some row => task_kind_is_ci (task_kind row)
+  | Some row =>
+      if include_ci
+      then task_kind_is_ci (kind row)
+      else negb (task_kind_is_ci (kind row))
   | None => false
   end.
 
-Definition task_is_non_ci
-    (rows : PositiveMap.t TaskRow)
-    (task : positive) : bool :=
-  match PositiveMap.find task rows with
-  | Some row => task_kind_is_non_ci (task_kind row)
-  | None => false
-  end.
-
-Fixpoint collect_ci_tasks
+Fixpoint collect_tasks
+    (include_ci : bool)
     (order : list positive)
     (rows : PositiveMap.t TaskRow) : list positive :=
   match order with
   | [] => []
   | task :: rest =>
-      let rest' := collect_ci_tasks rest rows in
-      if task_is_ci rows task then task :: rest' else rest'
-  end.
-
-Fixpoint collect_non_ci_tasks
-    (order : list positive)
-    (rows : PositiveMap.t TaskRow) : list positive :=
-  match order with
-  | [] => []
-  | task :: rest =>
-      let rest' := collect_non_ci_tasks rest rows in
-      if task_is_non_ci rows task then task :: rest' else rest'
+      let rest' := collect_tasks include_ci rest rows in
+      if task_matches_ci_filter include_ci rows task
+      then task :: rest'
+      else rest'
   end.
 
 Definition stable_ci_first
     (order : list positive)
     (rows : PositiveMap.t TaskRow) : list positive :=
-  let ci := collect_ci_tasks order rows in
-  let non_ci := collect_non_ci_tasks order rows in
+  let ci := collect_tasks true order rows in
+  let non_ci := collect_tasks false order rows in
   List.app ci non_ci.
 
 Definition task_title_changed (before_row after_row : TaskRow) : bool :=
-  negb (String.eqb (task_title before_row) (task_title after_row)).
+  negb (String.eqb (title before_row) (title after_row)).
 
 Definition task_description_changed (before_row after_row : TaskRow) : bool :=
-  negb (String.eqb (task_description before_row) (task_description after_row)).
+  negb (String.eqb (description before_row) (description after_row)).
 
 Definition task_metadata_changed (before_row after_row : TaskRow) : bool :=
   if task_title_changed before_row after_row then
@@ -537,17 +536,13 @@ Definition task_metadata_changed (before_row after_row : TaskRow) : bool :=
   else
     task_description_changed before_row after_row.
 
-Definition option_positive_eqb
-    (left right : option positive) : bool :=
-  match left, right with
-  | Some l, Some r => positive_eqb l r
-  | None, None => true
-  | _, _ => false
-  end.
-
 Definition task_source_comment_changed
     (before_source after_source : option positive) : bool :=
-  negb (option_positive_eqb before_source after_source).
+  match before_source, after_source with
+  | Some before, Some after => negb (Pos.eqb before after)
+  | None, None => false
+  | _, _ => true
+  end.
 
 (** [task_identity_changed] captures the D11 invariant boundary: rescope may
     reorder tasks, complete tasks, or revise mutable task text, but it may not
@@ -557,8 +552,8 @@ Definition task_identity_changed
   if task_title_changed before_row after_row then
     true
   else
-    let before_source := task_source_comment before_row in
-    let after_source := task_source_comment after_row in
+    let before_source := source_comment before_row in
+    let after_source := source_comment after_row in
     task_source_comment_changed before_source after_source.
 
 Fixpoint rescope_preserves_task_identity
@@ -614,7 +609,7 @@ Definition rescope_affects_active_task
       match PositiveMap.find (lease_task active) rows_before,
             PositiveMap.find (lease_task active) rows_after with
       | Some before_row, Some after_row =>
-          match task_status after_row with
+          match status after_row with
           | StatusCompleted => true
           | _ => task_metadata_changed before_row after_row
           end
@@ -632,7 +627,7 @@ Definition should_abort_for_new_task
   match lease with
   | None => false
   | Some active =>
-      if positive_eqb new_task (lease_task active) then false
+      if Pos.eqb new_task (lease_task active) then false
       else
         match PositiveMap.find new_task rows, PositiveMap.find (lease_task active) rows with
         | Some new_row, Some current_row => task_requires_abort new_row current_row
@@ -655,11 +650,17 @@ Definition complete_task_visible
   match PositiveMap.find task rows with
   | None => (rows, None)
   | Some row =>
-      match task_status row with
+      match status row with
       | StatusCompleted => (rows, None)
       | _ =>
-          let row' := row_with_status row StatusCompleted in
-          (PositiveMap.add task row' rows, task_source_comment row)
+          let row' := {|
+            title := title row;
+            description := description row;
+            kind := kind row;
+            status := StatusCompleted;
+            source_comment := source_comment row
+          |} in
+          (PositiveMap.add task row' rows, source_comment row)
       end
   end.
 
@@ -696,22 +697,22 @@ Definition task_change
   match PositiveMap.find task rows_before with
   | None => None
   | Some before_row =>
-      match task_source_comment before_row with
+      match source_comment before_row with
       | None => None
       | Some _ =>
-          match task_status before_row with
+          match status before_row with
           | StatusCompleted => None
           | _ =>
               match PositiveMap.find task rows_after with
               | None => Some (TaskCancelled task)
               | Some after_row =>
-                  match task_status after_row with
+                  match status after_row with
                   | StatusCompleted => Some (TaskCompleted task)
                   | _ =>
                       if task_metadata_changed before_row after_row then
                         Some (TaskModified task
-                          (task_title after_row)
-                          (task_description after_row))
+                          (title after_row)
+                          (description after_row))
                       else None
                   end
               end
@@ -766,7 +767,7 @@ Fixpoint remove_from_order
   | [] => []
   | t :: rest =>
       let rest' := remove_from_order task rest in
-      if positive_eqb t task then rest' else t :: rest'
+      if Pos.eqb t task then rest' else t :: rest'
   end.
 
 (** [cleanup_aborted_task] removes an aborted task from the queue entirely and
@@ -799,7 +800,7 @@ Definition task_still_pending
     (rows : PositiveMap.t TaskRow) : bool :=
   match PositiveMap.find task rows with
   | Some row =>
-      match task_status row with
+      match status row with
       | StatusPending => true
       | _ => false
       end

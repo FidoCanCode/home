@@ -180,6 +180,17 @@ Definition color_is_red (c : color) : bool :=
   | Blue  => false
   end.
 
+Definition color_is_red_tag (c : color) : bool :=
+  match c with
+  | Red => true
+  | _ => false
+  end.
+
+Definition color_tag_matches_filter (include_red : bool) (c : color) : bool :=
+  if include_red
+  then color_is_red_tag c
+  else negb (color_is_red_tag c).
+
 (* ------------------------------------------------------------------ *)
 (*  7. Even/Odd mutual inductive — mutual types + mutual fixpoint       *)
 (*                                                                      *)
@@ -340,4 +351,4 @@ with dtree_size (d : DTree) : nat :=
   | DDecl s t => stree_size s + dtree_size t
   end.
 
-Python File Extraction datatypes "mylist_is_empty bintree_is_leaf roseforest_is_empty mforest_is_empty myopt_flatten color_is_red even_depth is_even ntree_is_leaf stree_size".
+Python File Extraction datatypes "mylist_is_empty bintree_is_leaf roseforest_is_empty mforest_is_empty myopt_flatten color_is_red color_tag_matches_filter even_depth is_even ntree_is_leaf stree_size".

@@ -72,11 +72,11 @@ def _task_store_for_oracle(
         order.append(oracle_id)
         tasks_by_oracle_id[oracle_id] = task
         rows[oracle_id] = task_store_oracle.TaskRow(
-            task_title=task.get("title", ""),
-            task_description=task.get("description", ""),
-            task_kind=_task_kind_for_oracle(task),
-            task_status=_task_status_for_oracle(task),
-            task_source_comment=_task_source_comment_for_oracle(task),
+            title=task.get("title", ""),
+            description=task.get("description", ""),
+            kind=_task_kind_for_oracle(task),
+            status=_task_status_for_oracle(task),
+            source_comment=_task_source_comment_for_oracle(task),
         )
     return task_store_oracle.TaskStore(order, rows), tasks_by_oracle_id
 
@@ -131,11 +131,11 @@ def _rescope_state_for_oracle(
         tasks_by_oracle_id[oracle_id] = task
         order.append(oracle_id)
         rows[oracle_id] = rescope_oracle.TaskRow(
-            task_title=task.get("title", ""),
-            task_description=task.get("description", ""),
-            task_kind=_rescope_task_kind_for_oracle(task),
-            task_status=_rescope_task_status_for_oracle(task),
-            task_source_comment=_rescope_task_source_comment_for_oracle(task),
+            title=task.get("title", ""),
+            description=task.get("description", ""),
+            kind=_rescope_task_kind_for_oracle(task),
+            status=_rescope_task_status_for_oracle(task),
+            source_comment=_rescope_task_source_comment_for_oracle(task),
         )
     return ids_by_task_id, tasks_by_oracle_id, order, rows
 
@@ -196,11 +196,11 @@ def _materialize_rescope_oracle_result(
     for oracle_id in oracle_order:
         task = dict(tasks_by_oracle_id[oracle_id])
         row = oracle_rows[oracle_id]
-        task["title"] = row.task_title
-        task["description"] = row.task_description
-        if isinstance(row.task_status, rescope_oracle.StatusCompleted):
+        task["title"] = row.title
+        task["description"] = row.description
+        if isinstance(row.status, rescope_oracle.StatusCompleted):
             task["status"] = str(TaskStatus.COMPLETED)
-        elif isinstance(row.task_status, rescope_oracle.StatusBlocked):
+        elif isinstance(row.status, rescope_oracle.StatusBlocked):
             task["status"] = str(TaskStatus.BLOCKED)
         else:
             task["status"] = task.get("status", str(TaskStatus.PENDING))

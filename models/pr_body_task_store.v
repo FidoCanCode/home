@@ -63,41 +63,29 @@ Record PRBodyRow : Type := {
   pr_body_status : PRBodyStatus
 }.
 
-Definition projected_row
-    (task : positive)
-    (row : TaskRow)
-    (status : PRBodyStatus) : PRBodyRow := {|
-  pr_body_task := task;
-  pr_body_title := task_title row;
-  pr_body_description := task_description row;
-  pr_body_kind := task_kind row;
-  pr_body_status := status
-|}.
+Definition task_kind_matches_ci_filter
+    (include_ci : bool)
+    (kind : TaskKind) : bool :=
+  if include_ci
+  then task_kind_is_ci kind
+  else negb (task_kind_is_ci kind).
 
-Definition pending_ci_projection
+Definition pending_projection
+    (include_ci : bool)
     (task : positive)
     (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
   match PositiveMap.find task rows with
   | Some row =>
-      match task_status row with
+      match status row with
       | StatusPending =>
-          if task_kind_is_ci (task_kind row)
-          then [projected_row task row PRPending]
-          else []
-      | _ => []
-      end
-  | None => []
-  end.
-
-Definition pending_non_ci_projection
-    (task : positive)
-    (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
-  match PositiveMap.find task rows with
-  | Some row =>
-      match task_status row with
-      | StatusPending =>
-          if task_kind_is_non_ci (task_kind row)
-          then [projected_row task row PRPending]
+          if task_kind_matches_ci_filter include_ci (kind row)
+          then [{|
+            pr_body_task := task;
+            pr_body_title := title row;
+            pr_body_description := description row;
+            pr_body_kind := kind row;
+            pr_body_status := PRPending
+          |}]
           else []
       | _ => []
       end
@@ -109,30 +97,29 @@ Definition completed_projection
     (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
   match PositiveMap.find task rows with
   | Some row =>
-      match task_status row with
-      | StatusCompleted => [projected_row task row PRCompleted]
+      match status row with
+      | StatusCompleted => [{|
+          pr_body_task := task;
+          pr_body_title := title row;
+          pr_body_description := description row;
+          pr_body_kind := kind row;
+          pr_body_status := PRCompleted
+        |}]
       | _ => []
       end
   | None => []
   end.
 
-Fixpoint project_pending_ci
+Fixpoint project_pending
+    (include_ci : bool)
     (order : list positive)
     (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
   match order with
   | [] => []
   | task :: rest =>
-      List.app (pending_ci_projection task rows) (project_pending_ci rest rows)
-  end.
-
-Fixpoint project_pending_non_ci
-    (order : list positive)
-    (rows : PositiveMap.t TaskRow) : list PRBodyRow :=
-  match order with
-  | [] => []
-  | task :: rest =>
-      List.app (pending_non_ci_projection task rows)
-        (project_pending_non_ci rest rows)
+      let current := pending_projection include_ci task rows in
+      let remaining := project_pending include_ci rest rows in
+      List.app current remaining
   end.
 
 Fixpoint project_completed
@@ -152,8 +139,8 @@ Fixpoint project_completed
 Definition project_task_store (store : TaskStore) : list PRBodyRow :=
   let order := task_store_order store in
   let rows := task_store_rows store in
-  let pending_ci := project_pending_ci order rows in
-  let pending_non_ci := project_pending_non_ci order rows in
+  let pending_ci := project_pending true order rows in
+  let pending_non_ci := project_pending false order rows in
   let completed := project_completed order rows in
   List.app pending_ci (List.app pending_non_ci completed).
 
@@ -175,7 +162,7 @@ Definition pr_body_status_eqb (left right : PRBodyStatus) : bool :=
   end.
 
 Definition pr_body_row_eqb (left right : PRBodyRow) : bool :=
-  let same_task := positive_eqb (pr_body_task left) (pr_body_task right) in
+  let same_task := Pos.eqb (pr_body_task left) (pr_body_task right) in
   let same_title := String.eqb (pr_body_title left) (pr_body_title right) in
   let same_description :=
     String.eqb (pr_body_description left) (pr_body_description right) in
@@ -186,6 +173,8 @@ Definition pr_body_row_eqb (left right : PRBodyRow) : bool :=
   let same_metadata := andb same_kind same_status in
   andb same_task (andb same_text same_metadata).
 
+Extract Constant pr_body_row_eqb => "__PY_NATIVE_EQ__".
+
 Fixpoint pr_body_eqb (left right : list PRBodyRow) : bool :=
   match left, right with
   | [], [] => true
@@ -194,6 +183,8 @@ Fixpoint pr_body_eqb (left right : list PRBodyRow) : bool :=
         (pr_body_eqb left_rest right_rest)
   | _, _ => false
   end.
+
+Extract Constant pr_body_eqb => "__PY_NATIVE_EQ__".
 
 (** [SystemState] carries both durable task state and the PR body visible to
     GitHub readers. *)
