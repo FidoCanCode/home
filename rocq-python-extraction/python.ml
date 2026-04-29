@@ -644,12 +644,15 @@ let py_infix ?(associativity=PyAssocLeft) ?(wrap=false)
   let pp = if wrap then str "(" ++ pp ++ str ")" else pp in
   py_rendered ~precedence pp
 
-let py_call head args =
+let py_call_with_args head args =
   let pp_head =
     pp_py_child py_prec_call PyAssocLeft PyLeftChild head
   in
   py_rendered ~precedence:py_prec_call
     (pp_head ++ str "(" ++ args ++ str ")")
+
+let py_call head args =
+  py_call_with_args head args
 
 let py_attr receiver field =
   let pp_receiver =
@@ -1231,6 +1234,30 @@ let rec py_expr_precedence expr =
 let rec pp_rendered_expr state env expr =
   py_rendered ~precedence:(py_expr_precedence expr) (pp_expr state env expr)
 
+and rendered_args state env args =
+  prlist_with_sep
+    (fun () -> str ", ")
+    (fun arg -> pp_py_rendered (pp_rendered_expr state env arg))
+    args
+
+and py_list_prepend state env head tail =
+  py_infix "+"
+    py_prec_add
+    (py_rendered
+       (str "[" ++ pp_py_rendered (pp_rendered_expr state env head) ++ str "]"))
+    (pp_rendered_expr state env tail)
+
+and py_string_cons state env head tail =
+  py_infix "+"
+    py_prec_add
+    (pp_rendered_expr state env head)
+    (pp_rendered_expr state env tail)
+
+and py_default_call state env head args =
+  py_call_with_args
+    (pp_rendered_expr state env head)
+    (rendered_args state env args)
+
 and pp_expr state env expr =
   match std_string_expr_value expr with
   | Some value ->
@@ -1320,14 +1347,8 @@ and pp_expr state env expr =
       let rendered_expr =
         pp_rendered_expr state env
       in
-      let rendered_args args =
-        prlist_with_sep
-          (fun () -> str ", ")
-          (fun arg -> pp_py_rendered (rendered_expr arg))
-          args
-      in
       let runtime_call name args =
-        py_call (py_rendered (str name)) (rendered_args args)
+        py_call (py_rendered (str name)) (rendered_args state env args)
       in
       let pp_method_call_expr =
         match head, all_args with
@@ -1336,7 +1357,7 @@ and pp_expr state env expr =
             | Some (_class_name, method_name) ->
                 Some
                   (py_method_call (rendered_expr self_arg) method_name
-                     (rendered_args method_args))
+                     (rendered_args state env method_args))
             | None -> None)
         | _ -> None
       in
@@ -1365,7 +1386,7 @@ and pp_expr state env expr =
             Some
               (py_call (py_rendered (str "_rocq_map_add"))
                  (collection_key kind key ++ str ", " ++
-                  rendered_args [value; mapping]))
+                  rendered_args state env [value; mapping]))
         | [key; mapping] when is_positive_map_ref r "remove" || is_string_map_ref r "remove" ->
             Some
               (py_call (py_rendered (str "_rocq_map_remove"))
@@ -1569,12 +1590,12 @@ and pp_expr state env expr =
             Some (py_method_call (rendered_expr mutex) "release" (mt ()))
         | Some marker, [channel; value] when String.equal marker marker_channel_send ->
             Some (py_method_call (rendered_expr channel) "send"
-                    (rendered_args [value]))
+                    (rendered_args state env [value]))
         | Some marker, [channel] when String.equal marker marker_channel_receive ->
             Some (py_method_call (rendered_expr channel) "receive" (mt ()))
         | Some marker, [future; value] when String.equal marker marker_future_set ->
             Some (py_method_call (rendered_expr future) "set_result"
-                    (rendered_args [value]))
+                    (rendered_args state env [value]))
         | Some marker, [future] when String.equal marker marker_future_result ->
             Some (py_method_call (rendered_expr future) "result" (mt ()))
         | Some marker, [future] when String.equal marker marker_future_done ->
@@ -1590,16 +1611,16 @@ and pp_expr state env expr =
         match marker_of_ast head, all_args with
         | Some marker, [value] when String.equal marker marker_state_pure ->
             Some (py_method_call (py_rendered (str "StateT")) "pure"
-                    (rendered_args [value]))
+                    (rendered_args state env [value]))
         | Some marker, [m; f] when String.equal marker marker_state_bind ->
             Some (py_method_call (rendered_expr m) "bind"
-                    (rendered_args [f]))
+                    (rendered_args state env [f]))
         | Some marker, [] when String.equal marker marker_state_get ->
             Some (py_method_call (py_rendered (str "StateT")) "get_state"
                     (mt ()))
         | Some marker, [new_state] when String.equal marker marker_state_put ->
             Some (py_method_call (py_rendered (str "StateT")) "put_state"
-                    (rendered_args [new_state]))
+                    (rendered_args state env [new_state]))
         | Some marker, [value] when String.equal marker marker_reader_pure ->
             Some (pp_reader_pure_expr value)
         | Some marker, [reader_expr; fn_expr] when String.equal marker marker_reader_bind ->
@@ -1610,13 +1631,13 @@ and pp_expr state env expr =
                  (str "lambda __reader_env: __reader_env"))
         | Some marker, [value] when String.equal marker marker_io_pure ->
             Some (py_method_call (py_rendered (str "IO")) "pure"
-                    (rendered_args [value]))
+                    (rendered_args state env [value]))
         | Some marker, [m; f] when String.equal marker marker_io_bind ->
             Some (py_method_call (rendered_expr m) "bind"
-                    (rendered_args [f]))
+                    (rendered_args state env [f]))
         | Some marker, [acquire; release; use] when String.equal marker marker_io_bracket ->
             Some (py_method_call (py_rendered (str "IO")) "bracket"
-                    (rendered_args [acquire; release; use]))
+                    (rendered_args state env [acquire; release; use]))
         | Some marker, _ when String.equal marker marker_io_run ->
             extraction_diagnostic_error ~detail:marker "PYEX042"
         | Some marker, [opt_expr; fn_expr] when String.equal marker marker_option_bind ->
@@ -1634,11 +1655,7 @@ and pp_expr state env expr =
         if List.is_empty all_args then pp_py_rendered rendered_head
         else
           pp_py_rendered
-            (py_call rendered_head
-               (prlist_with_sep
-                  (fun () -> str ", ")
-                  (fun arg -> pp_py_rendered (rendered_expr arg))
-                  all_args))
+            (py_default_call state env head all_args)
       in
       let pp_special =
         match pp_record_field_expr with
@@ -1691,8 +1708,7 @@ and pp_expr state env expr =
   | MLcons (_, r, []) when is_std_list_nil_ref r ->
       str "[]"
   | MLcons (_, r, [head; tail]) when is_std_list_cons_ref r ->
-      str "[" ++ pp_expr state env head ++ str "] + " ++
-      pp_expr state env tail
+      pp_py_rendered (py_list_prepend state env head tail)
   | MLcons (_, r, [left; right]) when is_std_prod_pair_ref r ->
       str "(" ++ pp_expr state env left ++ str ", " ++
       pp_expr state env right ++ str ")"
@@ -1742,7 +1758,7 @@ and pp_expr state env expr =
   | MLcons (_, r, []) when is_std_string_empty_ref r ->
       str "\"\""
   | MLcons (_, r, [head; tail]) when is_std_string_cons_ref r ->
-      pp_expr state env head ++ str " + " ++ pp_expr state env tail
+      pp_py_rendered (py_string_cons state env head tail)
   | MLcons (t_, r, args) when is_std_ascii_cons_ref r ->
       if List.length args <> 8 then extraction_diagnostic_error "PYEX008"
       else
@@ -2474,7 +2490,11 @@ let rec pp_statement_expr state env indent = function
           in
           match head, all_args with
           | MLglob r, [left; right] when is_std_list_app_ref r ->
-              pp_expr state env left ++ str " + " ++ pp_expr state env right
+              pp_py_rendered
+                (py_infix "+"
+                   py_prec_add
+                   (pp_rendered_expr state env left)
+                   (pp_rendered_expr state env right))
           | MLglob r, [key; value; mapping]
             when is_positive_map_ref r "add" || is_string_map_ref r "add" ->
               let kind =
@@ -3313,24 +3333,21 @@ let pp_function_wrapper state env name a typ =
           let visible_args =
             List.filter (fun a -> not (is_erased_arg a)) all_args
           in
-          let pp_head =
-            match head with
-            | MLlam _ -> str "(" ++ pp_expr state env head ++ str ")"
-            | _       -> pp_expr state env head
-          in
-          pp_head ++ str "(" ++
-          prlist_with_sep (fun () -> str ", ") (pp_expr state env) visible_args ++
-          (if List.is_empty visible_args then mt () else str ", ") ++
-          prlist_with_sep (fun () -> str ", ")
-            (fun i -> pp_pyname (List.nth arg_names i))
-            (List.init n Fun.id) ++
-          str ")"
+          pp_py_rendered
+            (py_call_with_args
+               (pp_rendered_expr state env head)
+               (rendered_args state env visible_args ++
+                (if List.is_empty visible_args then mt () else str ", ") ++
+                prlist_with_sep (fun () -> str ", ")
+                  (fun i -> pp_pyname (List.nth arg_names i))
+                  (List.init n Fun.id)))
       | _ ->
-          str "(" ++ pp_expr state env a ++ str ")(" ++
-          prlist_with_sep (fun () -> str ", ")
-            (fun i -> pp_pyname (List.nth arg_names i))
-            (List.init n Fun.id) ++
-          str ")"
+          pp_py_rendered
+            (py_call_with_args
+               (pp_rendered_expr state env a)
+               (prlist_with_sep (fun () -> str ", ")
+                  (fun i -> pp_pyname (List.nth arg_names i))
+                  (List.init n Fun.id)))
     in
     let pp_signature =
       pp_def_signature name
