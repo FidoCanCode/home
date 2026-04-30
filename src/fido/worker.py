@@ -2086,10 +2086,16 @@ class Worker:
             repo_ctx.owner, repo_ctx.repo_name, pr_number
         )
         pending_tasks = tasks.thread_tasks_for_auto_resolve_oracle(self._tasks.list())
+        config = self._config
+        allowed_bots = config.allowed_bots if config is not None else frozenset()
         resolved_any = False
         for node in nodes:
             review_thread = tasks.review_thread_for_auto_resolve_oracle(
-                node, repo_ctx.gh_user
+                node,
+                repo_ctx.gh_user,
+                owner=repo_ctx.owner,
+                collaborators=repo_ctx.collaborators,
+                allowed_bots=allowed_bots,
             )
             decision = thread_resolve_oracle.resolution_decision(
                 review_thread,
@@ -2695,7 +2701,14 @@ class Worker:
             self._yield_for_untriaged()
 
         if completed_without_commit:
-            self._tasks.complete_with_resolve(task["id"], self.gh)
+            config = self._config
+            allowed_bots = config.allowed_bots if config is not None else frozenset()
+            self._tasks.complete_with_resolve(
+                task["id"],
+                self.gh,
+                collaborators=repo_ctx.collaborators,
+                allowed_bots=allowed_bots,
+            )
             with State(fido_dir).modify() as state:
                 state.pop("current_task_id", None)
             tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
@@ -2707,7 +2720,14 @@ class Worker:
         self._squash_wip_commit("origin", slug, repo_ctx.default_branch)
         pushed = self.ensure_pushed("origin", slug)
         if pushed is not False:
-            self._tasks.complete_with_resolve(task["id"], self.gh)
+            config = self._config
+            allowed_bots = config.allowed_bots if config is not None else frozenset()
+            self._tasks.complete_with_resolve(
+                task["id"],
+                self.gh,
+                collaborators=repo_ctx.collaborators,
+                allowed_bots=allowed_bots,
+            )
             with State(fido_dir).modify() as state:
                 state.pop("current_task_id", None)
             tasks.sync_tasks(self.work_dir, self.gh, blocking=True)

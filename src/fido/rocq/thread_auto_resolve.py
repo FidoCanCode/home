@@ -52,11 +52,25 @@ class CommentByFido(ThreadCommentAuthor):
 
 @final
 @dataclass(frozen=True)
-class CommentByHuman(ThreadCommentAuthor):
+class CommentByActionable(ThreadCommentAuthor):
     pass
 
 
-ThreadCommentAuthorT = CommentByFido | CommentByHuman
+@final
+@dataclass(frozen=True)
+class CommentByBot(ThreadCommentAuthor):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class CommentIgnored(ThreadCommentAuthor):
+    pass
+
+
+ThreadCommentAuthorT = (
+    CommentByFido | CommentByActionable | CommentByBot | CommentIgnored
+)
 
 
 @final
@@ -127,18 +141,51 @@ def thread_comment_ids(comments: list[ThreadComment]) -> list[int]:
     return [comment.thread_comment_id] + thread_comment_ids(rest)
 
 
-def last_comment_author_from(
+def modeled_thread_comment_ids(comments: list[ThreadComment]) -> list[int]:
+    while True:
+        __list = comments
+        if __list == []:
+            return []
+        comment = __list[0]
+        rest = __list[1:]
+        match comment.thread_comment_author:
+            case CommentByFido():
+                return [comment.thread_comment_id] + modeled_thread_comment_ids(rest)
+            case CommentByActionable():
+                return [comment.thread_comment_id] + modeled_thread_comment_ids(rest)
+            case CommentByBot():
+                return [comment.thread_comment_id] + modeled_thread_comment_ids(rest)
+            case CommentIgnored():
+                comments = rest
+                continue
+            case __impossible:
+                assert_never(__impossible)
+
+
+def last_modeled_author_from(
     current: ThreadCommentAuthor | None,
     comments: list[ThreadComment],
 ) -> ThreadCommentAuthor | None:
     for comment in comments:
-        current = comment.thread_comment_author
-        continue
+        match comment.thread_comment_author:
+            case CommentByFido():
+                current = CommentByFido()
+                continue
+            case CommentByActionable():
+                current = CommentByActionable()
+                continue
+            case CommentByBot():
+                current = CommentByBot()
+                continue
+            case CommentIgnored():
+                continue
+            case __impossible:
+                assert_never(__impossible)
     return current
 
 
-def last_comment_author(comments: list[ThreadComment]) -> ThreadCommentAuthor | None:
-    return last_comment_author_from(None, comments)
+def last_modeled_author(comments: list[ThreadComment]) -> ThreadCommentAuthor | None:
+    return last_modeled_author_from(None, comments)
 
 
 def task_blocks_thread_resolution(
@@ -168,7 +215,7 @@ def has_pending_thread_task(
 
 
 def latest_comment_is_fido(thread: ReviewThread) -> bool:
-    __option = last_comment_author(thread.review_thread_comments)
+    __option = last_modeled_author(thread.review_thread_comments)
     if __option is None:
         return False
     t = __option
@@ -179,7 +226,7 @@ def should_resolve_thread(
     thread: ReviewThread,
     tasks: list[ThreadTask],
 ) -> bool:
-    comment_ids = thread_comment_ids(thread.review_thread_comments)
+    comment_ids = modeled_thread_comment_ids(thread.review_thread_comments)
     thread_open = not thread.review_thread_resolved
     fido_last = latest_comment_is_fido(thread)
     followup_done = not has_pending_thread_task(comment_ids, tasks)
@@ -195,19 +242,23 @@ def resolution_decision(
     return KeepReviewThreadOpen()
 
 
-def latest_human_comment(comments: list[ThreadComment]) -> int | None:
+def latest_queueable_comment(comments: list[ThreadComment]) -> int | None:
     __list = comments
     if __list == []:
         return None
     comment = __list[0]
     rest = __list[1:]
-    __option = latest_human_comment(rest)
+    __option = latest_queueable_comment(rest)
     if __option is None:
         match comment.thread_comment_author:
             case CommentByFido():
                 return None
-            case CommentByHuman():
+            case CommentByActionable():
                 return comment.thread_comment_id
+            case CommentByBot():
+                return comment.thread_comment_id
+            case CommentIgnored():
+                return None
             case __impossible:
                 assert_never(__impossible)
     later = __option
@@ -220,7 +271,7 @@ def resolved_thread_queue_decision(
 ) -> ResolvedThreadQueueDecision:
     if not thread.review_thread_resolved:
         return QueueThreadTask()
-    __option = latest_human_comment(thread.review_thread_comments)
+    __option = latest_queueable_comment(thread.review_thread_comments)
     if __option is None:
         return DismissStaleResolvedThread()
     latest = __option

@@ -25,12 +25,12 @@ from fido.rocq import webhook_command_translation as wct_oracle
 from fido.rocq import webhook_ingress_dedupe as ingress_fsm
 from fido.state import State
 from fido.store import FidoStore, append_reply_promise_markers
-from fido.tasks import Tasks
+from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
 from fido.types import TaskType
 
 log = logging.getLogger(__name__)
 
-_FIDO_LOGINS = {"fidocancode", "fido-can-code"}
+_FIDO_LOGINS = frozenset({"fidocancode", "fido-can-code"})
 
 # Per-work_dir coalescing state for _reorder_tasks_background.
 # Ensures at most one Opus call in-flight + one pending per repo.
@@ -1935,7 +1935,28 @@ def _reorder_tasks_background(
         raise
 
 
-def _thread_task_is_stale_resolved(gh: GitHub, thread: dict[str, Any]) -> bool:
+def _resolved_thread_comment_author_for_oracle(
+    login: str,
+    owner: str,
+    collaborators: frozenset[str],
+    allowed_bots: frozenset[str],
+) -> thread_resolve_oracle.ThreadCommentAuthor:
+    return thread_comment_author_for_auto_resolve_oracle(
+        login,
+        fido_logins=_FIDO_LOGINS,
+        owner=owner,
+        collaborators=collaborators,
+        allowed_bots=allowed_bots,
+    )
+
+
+def _thread_task_is_stale_resolved(
+    gh: GitHub,
+    thread: dict[str, Any],
+    *,
+    collaborators: frozenset[str] = frozenset(),
+    allowed_bots: frozenset[str] = frozenset(),
+) -> bool:
     """Return whether a resolved-thread task request is stale duplicate work.
 
     Resolved-thread suppression exists for late handlers racing with Fido's
@@ -1946,15 +1967,19 @@ def _thread_task_is_stale_resolved(gh: GitHub, thread: dict[str, Any]) -> bool:
     comment_id = thread.get("comment_id")
     if comment_id is None:
         return True
+    owner, _repo_name = str(thread["repo"]).split("/", 1)
     comments = gh.fetch_comment_thread(thread["repo"], thread["pr"], int(comment_id))
     if not comments:
         return True
     oracle_comments = [
         thread_resolve_oracle.ThreadComment(
             thread_comment_id=int(comment["id"]),
-            thread_comment_author=thread_resolve_oracle.CommentByFido()
-            if str(comment.get("author", "")).lower() in _FIDO_LOGINS
-            else thread_resolve_oracle.CommentByHuman(),
+            thread_comment_author=_resolved_thread_comment_author_for_oracle(
+                str(comment.get("author", "")),
+                owner,
+                collaborators,
+                allowed_bots,
+            ),
         )
         for comment in comments
     ]
@@ -2020,7 +2045,12 @@ def create_task(
         # return another MagicMock — truthy by default) don't cause this
         # guard to swallow every test-level task creation.  Real GitHub
         # always returns a real bool from ``is_thread_resolved_for_comment``.
-        if already is True and _thread_task_is_stale_resolved(gh, thread):
+        if already is True and _thread_task_is_stale_resolved(
+            gh,
+            thread,
+            collaborators=repo_cfg.membership.collaborators,
+            allowed_bots=config.allowed_bots,
+        ):
             log.info(
                 "create_task: thread for comment %s already resolved on GitHub — "
                 "skipping queue (closes #520)",

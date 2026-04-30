@@ -36,9 +36,9 @@ def _task(
 def test_resolution_requires_fido_last_comment() -> None:
     thread = _thread(
         [
-            _comment(1, oracle.CommentByHuman()),
+            _comment(1, oracle.CommentByActionable()),
             _comment(2, oracle.CommentByFido()),
-            _comment(3, oracle.CommentByHuman()),
+            _comment(3, oracle.CommentByActionable()),
         ],
     )
 
@@ -52,8 +52,8 @@ def test_resolution_requires_fido_last_comment() -> None:
 def test_resolution_requires_no_pending_work_anywhere_on_thread() -> None:
     thread = _thread(
         [
-            _comment(10, oracle.CommentByHuman()),
-            _comment(11, oracle.CommentByHuman()),
+            _comment(10, oracle.CommentByActionable()),
+            _comment(11, oracle.CommentByActionable()),
             _comment(12, oracle.CommentByFido()),
         ],
     )
@@ -67,10 +67,53 @@ def test_resolution_requires_no_pending_work_anywhere_on_thread() -> None:
     )
 
 
+def test_resolution_ignores_outside_commenters() -> None:
+    thread = _thread(
+        [
+            _comment(13, oracle.CommentByActionable()),
+            _comment(14, oracle.CommentByFido()),
+            _comment(15, oracle.CommentIgnored()),
+        ],
+    )
+
+    assert oracle.thread_comment_ids(thread.review_thread_comments) == [13, 14, 15]
+    assert oracle.modeled_thread_comment_ids(thread.review_thread_comments) == [
+        13,
+        14,
+    ]
+    assert oracle.should_resolve_thread(thread, [])
+    assert oracle.should_resolve_thread(thread, [_task(15)])
+    assert isinstance(
+        oracle.resolution_decision(thread, []),
+        oracle.ResolveReviewThread,
+    )
+
+
+def test_bot_comment_after_fido_blocks_resolution() -> None:
+    thread = _thread(
+        [
+            _comment(16, oracle.CommentByActionable()),
+            _comment(17, oracle.CommentByFido()),
+            _comment(18, oracle.CommentByBot()),
+        ],
+    )
+
+    assert oracle.modeled_thread_comment_ids(thread.review_thread_comments) == [
+        16,
+        17,
+        18,
+    ]
+    assert not oracle.should_resolve_thread(thread, [])
+    assert isinstance(
+        oracle.resolution_decision(thread, []),
+        oracle.KeepReviewThreadOpen,
+    )
+
+
 def test_resolution_ignores_pending_work_outside_thread() -> None:
     thread = _thread(
         [
-            _comment(20, oracle.CommentByHuman()),
+            _comment(20, oracle.CommentByActionable()),
             _comment(21, oracle.CommentByFido()),
         ],
     )
@@ -85,7 +128,7 @@ def test_resolution_ignores_pending_work_outside_thread() -> None:
 def test_completed_or_blocked_same_thread_work_allows_resolution() -> None:
     thread = _thread(
         [
-            _comment(30, oracle.CommentByHuman()),
+            _comment(30, oracle.CommentByActionable()),
             _comment(31, oracle.CommentByFido()),
         ],
     )
@@ -101,7 +144,7 @@ def test_completed_or_blocked_same_thread_work_allows_resolution() -> None:
 def test_already_resolved_thread_stays_open_for_oracle() -> None:
     thread = _thread(
         [
-            _comment(40, oracle.CommentByHuman()),
+            _comment(40, oracle.CommentByActionable()),
             _comment(41, oracle.CommentByFido()),
         ],
         resolved=True,
@@ -114,29 +157,29 @@ def test_already_resolved_thread_stays_open_for_oracle() -> None:
     )
 
 
-def test_resolved_thread_latest_human_comment_queues_work() -> None:
+def test_resolved_thread_latest_queueable_comment_queues_work() -> None:
     thread = _thread(
         [
-            _comment(50, oracle.CommentByHuman()),
+            _comment(50, oracle.CommentByActionable()),
             _comment(51, oracle.CommentByFido()),
-            _comment(52, oracle.CommentByHuman()),
+            _comment(52, oracle.CommentByActionable()),
         ],
         resolved=True,
     )
 
-    assert oracle.latest_human_comment(thread.review_thread_comments) == 52
+    assert oracle.latest_queueable_comment(thread.review_thread_comments) == 52
     assert isinstance(
         oracle.resolved_thread_queue_decision(thread, 52),
         oracle.QueueThreadTask,
     )
 
 
-def test_resolved_thread_stale_human_comment_is_dismissed() -> None:
+def test_resolved_thread_stale_queueable_comment_is_dismissed() -> None:
     thread = _thread(
         [
-            _comment(60, oracle.CommentByHuman()),
+            _comment(60, oracle.CommentByActionable()),
             _comment(61, oracle.CommentByFido()),
-            _comment(62, oracle.CommentByHuman()),
+            _comment(62, oracle.CommentByActionable()),
         ],
         resolved=True,
     )
@@ -147,10 +190,44 @@ def test_resolved_thread_stale_human_comment_is_dismissed() -> None:
     )
 
 
+def test_resolved_thread_ignored_comment_is_dismissed() -> None:
+    thread = _thread(
+        [
+            _comment(63, oracle.CommentByActionable()),
+            _comment(64, oracle.CommentByFido()),
+            _comment(65, oracle.CommentIgnored()),
+        ],
+        resolved=True,
+    )
+
+    assert oracle.latest_queueable_comment(thread.review_thread_comments) == 63
+    assert isinstance(
+        oracle.resolved_thread_queue_decision(thread, 65),
+        oracle.DismissStaleResolvedThread,
+    )
+
+
+def test_resolved_thread_latest_bot_comment_queues_work() -> None:
+    thread = _thread(
+        [
+            _comment(66, oracle.CommentByActionable()),
+            _comment(67, oracle.CommentByFido()),
+            _comment(68, oracle.CommentByBot()),
+        ],
+        resolved=True,
+    )
+
+    assert oracle.latest_queueable_comment(thread.review_thread_comments) == 68
+    assert isinstance(
+        oracle.resolved_thread_queue_decision(thread, 68),
+        oracle.QueueThreadTask,
+    )
+
+
 def test_unresolved_thread_always_queues_comment_task() -> None:
     thread = _thread(
         [
-            _comment(70, oracle.CommentByHuman()),
+            _comment(70, oracle.CommentByActionable()),
             _comment(71, oracle.CommentByFido()),
         ],
     )

@@ -7,10 +7,11 @@
     resolver acts.
 
     The core safety rule is deliberately small: Fido may resolve a thread only
-    when the thread is still open, Fido authored the latest visible comment,
-    and no pending follow-up task remains for any comment in that thread.  A
-    concurrent human re-comment therefore keeps the thread open until that new
-    input is queued or explicitly dismissed.
+    when the thread is still open, Fido authored the latest modeled comment,
+    and no pending follow-up task remains for any modeled comment in that
+    thread.  A concurrent owner/collaborator or bot re-comment therefore keeps
+    the thread open until that new input is queued or explicitly dismissed;
+    comments from other users are ignored for now.
 
     E1 flip point: while D13 is in oracle mode, Python should translate the
     current [Tasks.complete_with_resolve], [Worker.resolve_addressed_threads],
@@ -31,11 +32,18 @@ Open Scope positive_scope.
 Import ListNotations.
 
 (** [ThreadCommentAuthor] is the review-thread actor relevant to the
-    auto-resolve decision.  The Python adapter maps all Fido bot logins to
-    [CommentByFido] and every human reviewer to [CommentByHuman]. *)
+    auto-resolve decision.  The Python adapter maps Fido's own comments to
+    [CommentByFido], owner/collaborator comments to [CommentByActionable],
+    recognized bot comments to [CommentByBot], and all other comments to
+    [CommentIgnored].  Ignored comments are visible in GitHub's thread but do
+    not keep the thread open or queue work in D13.  Bots are modeled
+    separately so the later DO/DUMP bot-feedback reducer can distinguish them
+    from owner/collaborator review input. *)
 Inductive ThreadCommentAuthor : Type :=
 | CommentByFido
-| CommentByHuman.
+| CommentByActionable
+| CommentByBot
+| CommentIgnored.
 
 (** [ThreadComment] is one GitHub review-thread comment in chronological
     order.  [thread_comment_id] is the raw GitHub database id used by task
@@ -76,18 +84,32 @@ Fixpoint thread_comment_ids (comments : list ThreadComment) : list positive :=
   | comment :: rest => thread_comment_id comment :: thread_comment_ids rest
   end.
 
-Fixpoint last_comment_author_from
+Fixpoint modeled_thread_comment_ids
+    (comments : list ThreadComment) : list positive :=
+  match comments with
+  | [] => []
+  | comment :: rest =>
+      match thread_comment_author comment with
+      | CommentIgnored => modeled_thread_comment_ids rest
+      | _ => thread_comment_id comment :: modeled_thread_comment_ids rest
+      end
+  end.
+
+Fixpoint last_modeled_author_from
     (current : option ThreadCommentAuthor)
     (comments : list ThreadComment) : option ThreadCommentAuthor :=
   match comments with
   | [] => current
   | comment :: rest =>
-      last_comment_author_from (Some (thread_comment_author comment)) rest
+      match thread_comment_author comment with
+      | CommentIgnored => last_modeled_author_from current rest
+      | author => last_modeled_author_from (Some author) rest
+      end
   end.
 
-Definition last_comment_author
+Definition last_modeled_author
     (comments : list ThreadComment) : option ThreadCommentAuthor :=
-  last_comment_author_from None comments.
+  last_modeled_author_from None comments.
 
 Definition comment_is_pending_task (task : ThreadTask) : bool :=
   match thread_task_status task with
@@ -115,7 +137,7 @@ Fixpoint has_pending_thread_task
   end.
 
 Definition latest_comment_is_fido (thread : ReviewThread) : bool :=
-  match last_comment_author (review_thread_comments thread) with
+  match last_modeled_author (review_thread_comments thread) with
   | Some CommentByFido => true
   | _ => false
   end.
@@ -126,7 +148,8 @@ Definition latest_comment_is_fido (thread : ReviewThread) : bool :=
 Definition should_resolve_thread
     (thread : ReviewThread)
     (tasks : list ThreadTask) : bool :=
-  let comment_ids := thread_comment_ids (review_thread_comments thread) in
+  let comment_ids := modeled_thread_comment_ids
+    (review_thread_comments thread) in
   let thread_open := negb (review_thread_resolved thread) in
   let fido_last := latest_comment_is_fido thread in
   let followup_done := negb (has_pending_thread_task comment_ids tasks) in
@@ -139,31 +162,34 @@ Definition resolution_decision
   then ResolveReviewThread
   else KeepReviewThreadOpen.
 
-Fixpoint latest_human_comment (comments : list ThreadComment) : option positive :=
+Fixpoint latest_queueable_comment
+    (comments : list ThreadComment) : option positive :=
   match comments with
   | [] => None
   | comment :: rest =>
-      match latest_human_comment rest with
+      match latest_queueable_comment rest with
       | Some later => Some later
       | None =>
           match thread_comment_author comment with
-          | CommentByHuman => Some (thread_comment_id comment)
-          | CommentByFido => None
+          | CommentByActionable | CommentByBot =>
+              Some (thread_comment_id comment)
+          | CommentByFido | CommentIgnored => None
           end
       end
   end.
 
 (** [resolved_thread_queue_decision] is the race guard for webhook admission.
-    If GitHub already reports the thread as resolved, only the latest human
-    comment is fresh input that must queue work.  Older human comments on that
-    resolved thread are stale duplicate deliveries and may be dismissed. *)
+    If GitHub already reports the thread as resolved, only the latest
+    queueable owner/collaborator or bot comment is fresh input that must queue
+    work.  Older queueable comments and ignored outsider comments on that
+    resolved thread are stale deliveries and may be dismissed. *)
 Definition resolved_thread_queue_decision
     (thread : ReviewThread)
     (incoming_comment : positive) : ResolvedThreadQueueDecision :=
   if negb (review_thread_resolved thread) then
     QueueThreadTask
   else
-    match latest_human_comment (review_thread_comments thread) with
+    match latest_queueable_comment (review_thread_comments thread) with
     | Some latest =>
         if Pos.eqb latest incoming_comment
         then QueueThreadTask
@@ -172,13 +198,13 @@ Definition resolved_thread_queue_decision
     end.
 
 Python File Extraction thread_auto_resolve
-  "thread_comment_ids last_comment_author_from last_comment_author comment_is_pending_task task_blocks_thread_resolution has_pending_thread_task latest_comment_is_fido should_resolve_thread resolution_decision latest_human_comment resolved_thread_queue_decision".
+  "thread_comment_ids modeled_thread_comment_ids last_modeled_author_from last_modeled_author comment_is_pending_task task_blocks_thread_resolution has_pending_thread_task latest_comment_is_fido should_resolve_thread resolution_decision latest_queueable_comment resolved_thread_queue_decision".
 
 (** * Proved invariants *)
 
 Definition sample_human_comment : ThreadComment := {|
   thread_comment_id := 1;
-  thread_comment_author := CommentByHuman
+  thread_comment_author := CommentByActionable
 |}.
 
 Definition sample_fido_comment : ThreadComment := {|
@@ -188,7 +214,17 @@ Definition sample_fido_comment : ThreadComment := {|
 
 Definition sample_fresh_human_comment : ThreadComment := {|
   thread_comment_id := 3;
-  thread_comment_author := CommentByHuman
+  thread_comment_author := CommentByActionable
+|}.
+
+Definition sample_ignored_comment : ThreadComment := {|
+  thread_comment_id := 4;
+  thread_comment_author := CommentIgnored
+|}.
+
+Definition sample_bot_comment : ThreadComment := {|
+  thread_comment_id := 5;
+  thread_comment_author := CommentByBot
 |}.
 
 Definition sample_thread_fido_last : ReviewThread := {|
@@ -205,12 +241,48 @@ Definition sample_thread_human_last : ReviewThread := {|
   ]
 |}.
 
+Definition sample_thread_ignored_last : ReviewThread := {|
+  review_thread_resolved := false;
+  review_thread_comments := [
+    sample_human_comment;
+    sample_fido_comment;
+    sample_ignored_comment
+  ]
+|}.
+
+Definition sample_thread_bot_last : ReviewThread := {|
+  review_thread_resolved := false;
+  review_thread_comments := [
+    sample_human_comment;
+    sample_fido_comment;
+    sample_bot_comment
+  ]
+|}.
+
 Definition sample_resolved_thread : ReviewThread := {|
   review_thread_resolved := true;
   review_thread_comments := [
     sample_human_comment;
     sample_fido_comment;
     sample_fresh_human_comment
+  ]
+|}.
+
+Definition sample_resolved_thread_ignored_last : ReviewThread := {|
+  review_thread_resolved := true;
+  review_thread_comments := [
+    sample_human_comment;
+    sample_fido_comment;
+    sample_ignored_comment
+  ]
+|}.
+
+Definition sample_resolved_thread_bot_last : ReviewThread := {|
+  review_thread_resolved := true;
+  review_thread_comments := [
+    sample_human_comment;
+    sample_fido_comment;
+    sample_bot_comment
   ]
 |}.
 
@@ -228,6 +300,22 @@ Definition sample_completed_task : ThreadTask := {|
     Fido's reply keeps the thread open, even when no pending task remains. *)
 Lemma resolve_requires_fido_last_comment :
   resolution_decision sample_thread_human_last [] = KeepReviewThreadOpen.
+Proof.
+  reflexivity.
+Qed.
+
+(** [ignored_comment_after_fido_does_not_block_resolve]: comments from outside
+    the owner/collaborator/bot set are ignored by the D13 resolver. *)
+Lemma ignored_comment_after_fido_does_not_block_resolve :
+  resolution_decision sample_thread_ignored_last [] = ResolveReviewThread.
+Proof.
+  reflexivity.
+Qed.
+
+(** [bot_comment_after_fido_blocks_resolve]: bot comments are separate from
+    owner/collaborator comments, but still modeled thread input. *)
+Lemma bot_comment_after_fido_blocks_resolve :
+  resolution_decision sample_thread_bot_last [] = KeepReviewThreadOpen.
 Proof.
   reflexivity.
 Qed.
@@ -265,6 +353,24 @@ Qed.
 Lemma stale_resolved_thread_delivery_dismisses :
   resolved_thread_queue_decision sample_resolved_thread 1 =
     DismissStaleResolvedThread.
+Proof.
+  reflexivity.
+Qed.
+
+(** [ignored_resolved_thread_delivery_dismisses]: an ignored outsider comment
+    on an already resolved thread does not queue work. *)
+Lemma ignored_resolved_thread_delivery_dismisses :
+  resolved_thread_queue_decision sample_resolved_thread_ignored_last 4 =
+    DismissStaleResolvedThread.
+Proof.
+  reflexivity.
+Qed.
+
+(** [bot_resolved_thread_delivery_queues]: bot feedback is not collapsed into
+    owner/collaborator feedback, but it is still fresh queueable input in D13. *)
+Lemma bot_resolved_thread_delivery_queues :
+  resolved_thread_queue_decision sample_resolved_thread_bot_last 5 =
+    QueueThreadTask.
 Proof.
   reflexivity.
 Qed.

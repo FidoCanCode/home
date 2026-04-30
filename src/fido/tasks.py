@@ -98,18 +98,30 @@ def thread_tasks_for_auto_resolve_oracle(
     return tasks
 
 
-def _thread_comment_author_for_oracle(
+def thread_comment_author_for_auto_resolve_oracle(
     login: str,
-    gh_user: str,
+    *,
+    fido_logins: frozenset[str],
+    owner: str = "",
+    collaborators: frozenset[str] = frozenset(),
+    allowed_bots: frozenset[str] = frozenset(),
 ) -> thread_resolve_oracle.ThreadCommentAuthor:
-    if login == gh_user:
+    if login.lower() in fido_logins:
         return thread_resolve_oracle.CommentByFido()
-    return thread_resolve_oracle.CommentByHuman()
+    if login == owner or login in collaborators:
+        return thread_resolve_oracle.CommentByActionable()
+    if login in allowed_bots or login.endswith("[bot]"):
+        return thread_resolve_oracle.CommentByBot()
+    return thread_resolve_oracle.CommentIgnored()
 
 
 def review_thread_for_auto_resolve_oracle(
     node: dict[str, Any],
     gh_user: str,
+    *,
+    owner: str = "",
+    collaborators: frozenset[str] = frozenset(),
+    allowed_bots: frozenset[str] = frozenset(),
 ) -> thread_resolve_oracle.ReviewThread:
     comments: list[thread_resolve_oracle.ThreadComment] = []
     for comment in node.get("comments", {}).get("nodes", []):
@@ -120,8 +132,12 @@ def review_thread_for_auto_resolve_oracle(
         comments.append(
             thread_resolve_oracle.ThreadComment(
                 thread_comment_id=int(database_id),
-                thread_comment_author=_thread_comment_author_for_oracle(
-                    str(author), gh_user
+                thread_comment_author=thread_comment_author_for_auto_resolve_oracle(
+                    str(author),
+                    fido_logins=frozenset({gh_user.lower()}),
+                    owner=owner,
+                    collaborators=collaborators,
+                    allowed_bots=allowed_bots,
                 ),
             )
         )
@@ -1020,7 +1036,14 @@ class Tasks(JsonFileStore):
                     return t.get("thread")
         return None
 
-    def complete_with_resolve(self, task_id: str, gh: GitHub) -> None:
+    def complete_with_resolve(
+        self,
+        task_id: str,
+        gh: GitHub,
+        *,
+        collaborators: frozenset[str] = frozenset(),
+        allowed_bots: frozenset[str] = frozenset(),
+    ) -> None:
         """Mark a task completed and resolve its review thread if we posted last.
 
         Combines :meth:`complete_by_id` with the per-task thread-resolve logic
@@ -1044,29 +1067,19 @@ class Tasks(JsonFileStore):
             return
         try:
             us = gh.get_user()
-            comments = gh.get_pull_comments(repo, pr)
-            thread_comments = sorted(
-                [
-                    c
-                    for c in comments
-                    if c.get("id") == comment_id
-                    or c.get("in_reply_to_id") == comment_id
-                ],
-                key=lambda c: c.get("created_at", ""),
-            )
-            if not thread_comments:
-                return
-            last_author = thread_comments[-1].get("user", {}).get("login", "")
-            if last_author != us:
-                log.info("thread has new replies from %s — not resolving", last_author)
-                return
             owner, repo_name = repo.split("/", 1)
             threads = gh.get_review_threads(owner, repo_name, pr)
             pending_tasks = thread_tasks_for_auto_resolve_oracle(self.list())
             for t in threads:
                 if _review_thread_contains_comment(t, int(comment_id)):
                     decision = thread_resolve_oracle.resolution_decision(
-                        review_thread_for_auto_resolve_oracle(t, us),
+                        review_thread_for_auto_resolve_oracle(
+                            t,
+                            us,
+                            owner=owner,
+                            collaborators=collaborators,
+                            allowed_bots=allowed_bots,
+                        ),
                         pending_tasks,
                     )
                     if not isinstance(
