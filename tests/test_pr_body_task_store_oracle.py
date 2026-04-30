@@ -1,15 +1,14 @@
 from pathlib import Path
-from typing import Any
 
 from fido.rocq import pr_body_task_store as oracle
 
 
 def _row(
     title: str,
-    kind: Any,
-    status: Any = oracle.StatusPending(),
+    kind: oracle.TaskKind,
+    status: oracle.TaskStatus = oracle.StatusPending(),
     description: str = "",
-) -> Any:
+) -> oracle.TaskRow:
     return oracle.TaskRow(
         title=title,
         description=description,
