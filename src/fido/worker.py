@@ -1386,11 +1386,33 @@ class Worker:
                 "issue_started_at": datetime.now(tz=timezone.utc).isoformat(),
             }
         )
-        self.set_status(f"Picking up issue #{choice.number}: {choice.title}")
-        self.post_pickup_comment(
-            repo_ctx.repo, choice.number, choice.title, repo_ctx.gh_user
+        self._ensure_pickup_comment(
+            fido_dir, repo_ctx.repo, choice.number, choice.title, repo_ctx.gh_user
         )
+        self.set_status(f"Picking up issue #{choice.number}: {choice.title}")
         return choice.number
+
+    def _ensure_pickup_comment(
+        self,
+        fido_dir: Path,
+        repo: str,
+        issue: int,
+        issue_title: str,
+        gh_user: str,
+    ) -> None:
+        """Ensure the issue has its pickup acknowledgement after restart.
+
+        Fido writes the current issue to durable state before provider-backed
+        status/comment generation. If he crashes in that gap, the next run
+        resumes the issue instead of re-entering ``find_next_issue()``. A
+        separate durable bit lets resume retry this idempotent check.
+        """
+        state = State(fido_dir)
+        if state.load().get("pickup_comment_ensured") is True:
+            return
+        self.post_pickup_comment(repo, issue, issue_title, gh_user)
+        with state.modify() as data:
+            data["pickup_comment_ensured"] = True
 
     def _pick_from_cache(self, repo_ctx: RepoContext) -> PickerChoice | None:
         """Cache-driven picker (closes #812).
@@ -3464,6 +3486,9 @@ class Worker:
             issue_data = self.gh.view_issue(repo_ctx.repo, issue)
             issue_title = issue_data["title"]
             issue_body = issue_data.get("body", "") or ""
+            self._ensure_pickup_comment(
+                ctx.fido_dir, repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
+            )
             pr_number, slug, pr_is_fresh = self.find_or_create_pr(
                 ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
             )
