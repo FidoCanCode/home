@@ -5462,6 +5462,57 @@ class TestRunSeedTasksIntegration:
         _run_once(first=False)
         assert len(calls) == 1  # exactly one backfill, on the first-iteration run
 
+    def test_first_iteration_recovers_in_progress_pr_comments(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        store = FidoStore(tmp_path)
+        queued = store.enqueue_pr_comment(
+            delivery_id="delivery-1",
+            repo="owner/repo",
+            pr_number=42,
+            comment_type="issues",
+            comment_id=303,
+            author="owner",
+            is_bot=False,
+            body="please fix",
+            github_created_at="2026-04-30T12:00:00Z",
+            payload_json="{}",
+        )
+        assert store.claim_next_pr_comment(owner="worker", repo="owner/repo")
+
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh, first_iteration=True)
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(
+                worker, "create_context", return_value=self._make_mock_ctx(tmp_path)
+            ),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_queued_comments", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch("fido.events.backfill_missed_pr_comments", return_value=0),
+            caplog.at_level(logging.WARNING, logger="fido"),
+        ):
+            worker.run()
+
+        pending = store.pending_pr_comments(repo="owner/repo", pr_number=42)
+        assert [record.queue_id for record in pending] == [queued.queue_id]
+        assert pending[0].state == "pending"
+        assert pending[0].claim_owner is None
+        assert (
+            "recovered 1 in-progress PR comment claim(s) for owner/repo" in caplog.text
+        )
+
     def test_backfill_skipped_for_fresh_pr(self, tmp_path: Path) -> None:
         """A freshly-created PR has no comments to backfill — skip the call to
         avoid one superfluous API round-trip."""

@@ -556,6 +556,48 @@ class FidoStore:
             assert claimed is not None
             return self._pr_comment_record_from_row(claimed)
 
+    def recover_in_progress_pr_comments(
+        self, *, repo: str | None = None, pr_number: int | None = None
+    ) -> list[PRCommentQueueRecord]:
+        """Requeue comments abandoned by a worker crash or restart."""
+        with self._transaction() as conn:
+            where = ["state = 'in_progress'"]
+            params: list[object] = []
+            if repo is not None:
+                where.append("repo = ?")
+                params.append(repo)
+            if pr_number is not None:
+                where.append("pr_number = ?")
+                params.append(int(pr_number))
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM pr_comment_queue
+                WHERE {" AND ".join(where)}
+                ORDER BY github_created_at, comment_id, queue_id
+                """,
+                tuple(params),
+            ).fetchall()
+            if not rows:
+                return []
+            now = _utcnow()
+            recovered: list[PRCommentQueueRecord] = []
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE pr_comment_queue
+                    SET state = 'pending', claim_owner = NULL,
+                        next_retry_after = NULL, failure_reason = NULL,
+                        updated_at = ?
+                    WHERE queue_id = ?
+                    """,
+                    (now, row["queue_id"]),
+                )
+                updated = self._pr_comment_by_queue_id(conn, row["queue_id"])
+                assert updated is not None
+                recovered.append(self._pr_comment_record_from_row(updated))
+            return recovered
+
     def complete_pr_comment(self, queue_id: str) -> PRCommentQueueRecord | None:
         """Mark a queued PR comment completed."""
         return self._set_pr_comment_state(

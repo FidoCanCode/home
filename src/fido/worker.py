@@ -3448,6 +3448,16 @@ class Worker:
             pr_number, slug, pr_is_fresh = self.find_or_create_pr(
                 ctx.fido_dir, repo_ctx, issue, issue_title, issue_body
             )
+            if self._first_iteration:
+                recovered_comments = FidoStore(
+                    self.work_dir
+                ).recover_in_progress_pr_comments(repo=repo_ctx.repo)
+                if recovered_comments:
+                    log.warning(
+                        "recovered %s in-progress PR comment claim(s) for %s",
+                        len(recovered_comments),
+                        repo_ctx.repo,
+                    )
             recovery_provider = (
                 self._ensure_provider().provider_id
                 if self._repo_cfg is None

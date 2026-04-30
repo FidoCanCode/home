@@ -681,6 +681,94 @@ def test_claim_next_pr_comment_marks_oldest_in_progress(tmp_path: Path) -> None:
     assert store.pending_pr_comments(repo="owner/repo") == [newer]
 
 
+def test_recover_in_progress_pr_comments_requeues_abandoned_claim(
+    tmp_path: Path,
+) -> None:
+    store = FidoStore(tmp_path)
+    queued = store.enqueue_pr_comment(
+        delivery_id="delivery-1",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=450,
+        author="rob",
+        is_bot=False,
+        body="queued",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    assert store.claim_next_pr_comment(owner="worker", repo="owner/repo") is not None
+    assert store.pending_pr_comments(repo="owner/repo") == []
+
+    recovered = store.recover_in_progress_pr_comments(repo="owner/repo")
+
+    assert len(recovered) == 1
+    assert recovered[0].queue_id == queued.queue_id
+    assert recovered[0].state == "pending"
+    assert recovered[0].claim_owner is None
+    assert recovered[0].next_retry_after is None
+    assert store.pending_pr_comments(repo="owner/repo") == recovered
+
+
+def test_recover_in_progress_pr_comments_is_repo_and_pr_scoped(
+    tmp_path: Path,
+) -> None:
+    store = FidoStore(tmp_path)
+    target = store.enqueue_pr_comment(
+        delivery_id="delivery-target",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=451,
+        author="rob",
+        is_bot=False,
+        body="target",
+        github_created_at="2026-04-30T10:00:00Z",
+    )
+    other_pr = store.enqueue_pr_comment(
+        delivery_id="delivery-other-pr",
+        repo="owner/repo",
+        pr_number=8,
+        comment_type="pulls",
+        comment_id=452,
+        author="rob",
+        is_bot=False,
+        body="other pr",
+        github_created_at="2026-04-30T10:01:00Z",
+    )
+    other_repo = store.enqueue_pr_comment(
+        delivery_id="delivery-other-repo",
+        repo="owner/other",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=453,
+        author="rob",
+        is_bot=False,
+        body="other repo",
+        github_created_at="2026-04-30T10:02:00Z",
+    )
+    assert (
+        store.claim_next_pr_comment(owner="worker", repo="owner/repo", pr_number=7)
+        is not None
+    )
+    assert (
+        store.claim_next_pr_comment(owner="worker", repo="owner/repo", pr_number=8)
+        is not None
+    )
+    assert (
+        store.claim_next_pr_comment(owner="worker", repo="owner/other", pr_number=7)
+        is not None
+    )
+
+    recovered = store.recover_in_progress_pr_comments(repo="owner/repo", pr_number=7)
+
+    assert [record.queue_id for record in recovered] == [target.queue_id]
+    assert store.pending_pr_comments(repo="owner/repo", pr_number=7) == recovered
+    assert store.pending_pr_comments(repo="owner/repo", pr_number=8) == []
+    assert store.pending_pr_comments(repo="owner/other", pr_number=7) == []
+    assert other_pr.queue_id != target.queue_id
+    assert other_repo.queue_id != target.queue_id
+
+
 def test_complete_pr_comment_removes_it_from_pending_fifo(tmp_path: Path) -> None:
     store = FidoStore(tmp_path)
     queued = store.enqueue_pr_comment(
