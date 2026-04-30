@@ -1057,6 +1057,30 @@ class TestPreemptionFsmOracle:
         reg.note_durable_demand_drained("foo/bar")
         reg.assert_worker_turn_ok("foo/bar")
 
+    def test_durable_demand_before_untriaged_handler_exits_cleanly(self) -> None:
+        reg = self._reg()
+        reg.note_durable_demand("foo/bar")
+        reg.enter_untriaged("foo/bar")
+
+        reg.exit_untriaged("foo/bar")
+
+        with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
+            reg.assert_worker_turn_ok("foo/bar")
+        reg.note_durable_demand_drained("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")
+
+    def test_durable_demand_drain_preserves_untriaged_blocker(self) -> None:
+        reg = self._reg()
+        reg.note_durable_demand("foo/bar")
+        reg.enter_untriaged("foo/bar")
+
+        reg.note_durable_demand_drained("foo/bar")
+
+        with pytest.raises(AssertionError, match="WorkerTurnStart rejected"):
+            reg.assert_worker_turn_ok("foo/bar")
+        reg.exit_untriaged("foo/bar")
+        reg.assert_worker_turn_ok("foo/bar")
+
     # ── worker_turn_proceeds_when_empty ──────────────────────────────────
 
     def test_assert_worker_turn_ok_succeeds_when_empty(self) -> None:
