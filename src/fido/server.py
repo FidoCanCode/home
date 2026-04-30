@@ -789,14 +789,25 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # provider turn.  exit_untriaged is called in _process_action's finally
         # block when the handler finishes.
         if action and self._action_preempts_worker(action):
-            session = self.registry.get_session(repo_cfg.name)
-            if session is not None:
-                session.preempt_worker()
+            self._preempt_worker_best_effort(repo_cfg.name)
             self.registry.enter_untriaged(repo_cfg.name)
 
         # Process in background thread so we don't block the server.
         if action:
             type(self)._fn_spawn_bg(self._process_action, (action, repo_cfg))
+
+    def _preempt_worker_best_effort(self, repo_name: str) -> None:
+        """Try to interrupt the current worker after durable demand is recorded."""
+        session = self.registry.get_session(repo_name)
+        if session is None:
+            return
+        try:
+            session.preempt_worker()
+        except Exception:
+            log.exception(
+                "provider preempt failed for %s after durable webhook enqueue",
+                repo_name,
+            )
 
     def _patch_issue_cache(
         self, event: str, payload: dict[str, Any], repo_cfg: RepoConfig

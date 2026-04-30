@@ -3125,6 +3125,47 @@ class TestSynchronousPreemption:
         assert status == 200
         assert call_order == ["preempt", "spawn"]
 
+    def test_preempt_failure_keeps_enqueued_comment_and_spawns(
+        self, server: tuple
+    ) -> None:
+        """A provider interrupt failure must not discard durable webhook demand."""
+        url, cfg = server
+
+        call_order: list[str] = []
+
+        mock_session = MagicMock()
+        WebhookHandler.registry.get_session.return_value = mock_session
+
+        original_spawn = _capturing_spawn_bg
+
+        def tracking_spawn(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
+            call_order.append("spawn")
+            original_spawn(fn, args)
+
+        def failing_preempt() -> None:
+            call_order.append("preempt")
+            raise RuntimeError("interrupt failed")
+
+        mock_session.preempt_worker.side_effect = failing_preempt
+        WebhookHandler._fn_spawn_bg = staticmethod(tracking_spawn)  # type: ignore[assignment]
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            return_value=("ANSWER", [])
+        )
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        status = _post_webhook(
+            url, cfg, "issue_comment", self._issue_comment_payload(901)
+        )
+
+        assert status == 200
+        assert call_order == ["preempt", "spawn"]
+        WebhookHandler.registry.enter_untriaged.assert_called_with("owner/repo")
+        queued = FidoStore(cfg.repos["owner/repo"].work_dir).pending_pr_comments(
+            repo="owner/repo"
+        )
+        assert [entry.comment_id for entry in queued] == [901]
+
     def test_no_preempt_for_non_model_action(self, server: tuple) -> None:
         """A PR-merge webhook does not use the model — ``preempt_worker`` must
         NOT be called."""
