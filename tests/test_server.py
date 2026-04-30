@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import socket
 import subprocess
 import threading
 import urllib.error
@@ -26,7 +27,7 @@ from fido.events import (
 )
 from fido.infra import Infra
 from fido.provider import ProviderID
-from fido.server import PreflightError, WebhookHandler, _repo_status
+from fido.server import FidoHTTPServer, PreflightError, WebhookHandler, _repo_status
 from fido.store import FidoStore
 
 
@@ -3564,6 +3565,26 @@ class TestRun:
 
         mock_server.serve_forever.assert_called_once()
         mock_server.server_close.assert_called_once()
+
+    def test_default_server_does_not_block_behind_slow_client(self) -> None:
+        srv = FidoHTTPServer(("127.0.0.1", 0), WebhookHandler)
+        srv.request_timeout_seconds = 0.2
+        port = srv.server_address[1]
+        thread = threading.Thread(
+            target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        thread.start()
+        slow = socket.create_connection(("127.0.0.1", port), timeout=1)
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/", timeout=1
+            ) as response:
+                assert response.read() == b"fido is running"
+        finally:
+            slow.close()
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=1)
 
     def test_run_keyboard_interrupt_kills_children(self, tmp_path: Path) -> None:
         from fido.server import run
