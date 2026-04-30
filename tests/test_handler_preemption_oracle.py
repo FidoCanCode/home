@@ -214,3 +214,88 @@ def test_full_mixed_lifecycle_blocks_until_both_demands_drain() -> None:
         interrupt=InterruptWasRequested,
     )
     assert transition(drained, WorkerTurnStart()) == drained
+
+
+def test_mixed_handler_done_first_still_blocks_until_durable_drains() -> None:
+    """Draining legacy demand first leaves durable demand authoritative."""
+    state = transition(mixed_state, HandlerDone())
+    state = _assert_state(
+        state,
+        legacy=LegacyEmpty,
+        durable=DurableNonEmpty,
+        interrupt=InterruptWasRequested,
+    )
+
+    assert transition(state, WorkerTurnStart()) is None
+    state = transition(state, DurableDemandDrained())
+    state = _assert_state(
+        state,
+        legacy=LegacyEmpty,
+        durable=DurableEmpty,
+        interrupt=InterruptWasRequested,
+    )
+    assert transition(state, WorkerTurnStart()) == state
+
+
+def test_mixed_durable_drain_first_still_blocks_until_handler_done() -> None:
+    """Draining durable demand first leaves legacy demand authoritative."""
+    state = transition(mixed_state, DurableDemandDrained())
+    state = _assert_state(
+        state,
+        legacy=LegacyNonEmpty,
+        durable=DurableEmpty,
+        interrupt=InterruptWasRequested,
+    )
+
+    assert transition(state, WorkerTurnStart()) is None
+    state = transition(state, HandlerDone())
+    state = _assert_state(
+        state,
+        legacy=LegacyEmpty,
+        durable=DurableEmpty,
+        interrupt=InterruptWasRequested,
+    )
+    assert transition(state, WorkerTurnStart()) == state
+
+
+def test_durable_first_mixed_path_blocks_until_both_demands_drain() -> None:
+    """Durable demand can predate legacy demand without losing either blocker."""
+    state = transition(empty_state, DurableDemandRecorded())
+    state = _assert_state(
+        state,
+        legacy=LegacyEmpty,
+        durable=DurableNonEmpty,
+        interrupt=InterruptNotRequested,
+    )
+    state = transition(state, InterruptRequested())
+    state = _assert_state(
+        state,
+        legacy=LegacyEmpty,
+        durable=DurableNonEmpty,
+        interrupt=InterruptWasRequested,
+    )
+    state = transition(state, WebhookArrives())
+    state = _assert_state(
+        state,
+        legacy=LegacyNonEmpty,
+        durable=DurableNonEmpty,
+        interrupt=InterruptWasRequested,
+    )
+
+    assert transition(state, WorkerTurnStart()) is None
+    state = transition(state, DurableDemandDrained())
+    state = _assert_state(
+        state,
+        legacy=LegacyNonEmpty,
+        durable=DurableEmpty,
+        interrupt=InterruptWasRequested,
+    )
+    assert transition(state, WorkerTurnStart()) is None
+    state = transition(state, HandlerDone())
+    state = _assert_state(
+        state,
+        legacy=LegacyEmpty,
+        durable=DurableEmpty,
+        interrupt=InterruptWasRequested,
+    )
+    assert transition(state, WorkerTurnStart()) == state

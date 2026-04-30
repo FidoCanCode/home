@@ -260,3 +260,78 @@ Lemma durable_record_preserves_legacy_demand :
 Proof.
   reflexivity.
 Qed.
+
+Lemma mixed_handler_done_first_blocks_until_durable_drains :
+  transition mixed_state HandlerDone = Some {|
+    legacy_demand := LegacyEmpty;
+    durable_demand := DurableNonEmpty;
+    provider_interrupt := InterruptWasRequested
+  |} /\
+  transition {|
+    legacy_demand := LegacyEmpty;
+    durable_demand := DurableNonEmpty;
+    provider_interrupt := InterruptWasRequested
+  |} WorkerTurnStart = None /\
+  transition {|
+    legacy_demand := LegacyEmpty;
+    durable_demand := DurableNonEmpty;
+    provider_interrupt := InterruptWasRequested
+  |} DurableDemandDrained = Some {|
+    legacy_demand := LegacyEmpty;
+    durable_demand := DurableEmpty;
+    provider_interrupt := InterruptWasRequested
+  |}.
+Proof.
+  repeat split; reflexivity.
+Qed.
+
+Lemma mixed_durable_drain_first_blocks_until_handler_done :
+  transition mixed_state DurableDemandDrained = Some {|
+    legacy_demand := LegacyNonEmpty;
+    durable_demand := DurableEmpty;
+    provider_interrupt := InterruptWasRequested
+  |} /\
+  transition {|
+    legacy_demand := LegacyNonEmpty;
+    durable_demand := DurableEmpty;
+    provider_interrupt := InterruptWasRequested
+  |} WorkerTurnStart = None /\
+  transition {|
+    legacy_demand := LegacyNonEmpty;
+    durable_demand := DurableEmpty;
+    provider_interrupt := InterruptWasRequested
+  |} HandlerDone = Some {|
+    legacy_demand := LegacyEmpty;
+    durable_demand := DurableEmpty;
+    provider_interrupt := InterruptWasRequested
+  |}.
+Proof.
+  repeat split; reflexivity.
+Qed.
+
+Lemma durable_first_mixed_path_blocks_until_both_demands_drain :
+  transition empty_state DurableDemandRecorded = Some durable_state /\
+  transition durable_state InterruptRequested = Some preempted_durable_state /\
+  transition preempted_durable_state WebhookArrives = Some mixed_state /\
+  transition mixed_state DurableDemandDrained = Some {|
+    legacy_demand := LegacyNonEmpty;
+    durable_demand := DurableEmpty;
+    provider_interrupt := InterruptWasRequested
+  |} /\
+  transition {|
+    legacy_demand := LegacyNonEmpty;
+    durable_demand := DurableEmpty;
+    provider_interrupt := InterruptWasRequested
+  |} WorkerTurnStart = None /\
+  transition {|
+    legacy_demand := LegacyNonEmpty;
+    durable_demand := DurableEmpty;
+    provider_interrupt := InterruptWasRequested
+  |} HandlerDone = Some {|
+    legacy_demand := LegacyEmpty;
+    durable_demand := DurableEmpty;
+    provider_interrupt := InterruptWasRequested
+  |}.
+Proof.
+  repeat split; reflexivity.
+Qed.
