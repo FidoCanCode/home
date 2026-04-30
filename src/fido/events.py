@@ -308,6 +308,69 @@ def _record_reply_artifact(
         store.mark_posted(promise_id)
 
 
+def _existing_reply_artifact(
+    repo_cfg: RepoConfig, promise_ids: Iterable[str]
+) -> int | None:
+    """Return a durable reply artifact when every promise is already covered."""
+    store = FidoStore(repo_cfg.work_dir)
+    normalized = tuple(
+        dict.fromkeys(promise_id for promise_id in promise_ids if promise_id)
+    )
+    if not normalized:
+        return None
+    artifacts = [store.artifact_for_promise(promise_id) for promise_id in normalized]
+    if any(artifact is None for artifact in artifacts):
+        return None
+    artifact_ids = {artifact.artifact_comment_id for artifact in artifacts if artifact}
+    if len(artifact_ids) != 1:
+        return None
+    for promise_id in normalized:
+        store.mark_posted(promise_id)
+    return next(iter(artifact_ids))
+
+
+def _deferred_issue_key(promise_ids: Iterable[str]) -> str | None:
+    """Return the stable idempotence key for a deferred issue side effect."""
+    normalized = tuple(
+        sorted(dict.fromkeys(promise_id for promise_id in promise_ids if promise_id))
+    )
+    if not normalized:
+        return None
+    return "deferred-issue:" + ",".join(normalized)
+
+
+def _open_defer_issue_idempotent(
+    repo_cfg: RepoConfig,
+    gh: Any,
+    repo: str,
+    pr_url: str,
+    title: str,
+    comment: str,
+    promise_ids: Iterable[str],
+) -> str:
+    """Create or reuse the deferred tracking issue for this reply promise."""
+    issue_body = f"Deferred from {pr_url}\n\n> {comment}" if pr_url else comment
+    key = _deferred_issue_key(promise_ids)
+    store = FidoStore(repo_cfg.work_dir)
+    if key is not None:
+        existing = store.deferred_issue(key)
+        if existing is not None:
+            log.info(
+                "reusing deferred tracking issue for %s: %s", key, existing.issue_url
+            )
+            return existing.issue_url
+    url = _open_defer_issue(gh, repo, pr_url, title, comment)
+    if key is not None:
+        store.record_deferred_issue(
+            idempotence_key=key,
+            repo=repo,
+            title=title,
+            body=issue_body,
+            issue_url=url,
+        )
+    return url
+
+
 def _posted_comment_id(posted: object) -> int | None:
     """Return the GitHub comment id from a post response, when available."""
     if not isinstance(posted, dict):
@@ -1119,9 +1182,12 @@ def reply_to_comment(
     # Step 2: For DEFER, open a tracking issue before crafting the reply.
     # Raises on failure so we don't craft a reply referencing a missing issue.
     issue_url: str | None = None
+    promise_ids = _reply_promise_ids(context)
     if category == "DEFER" and info.get("repo"):
         pr_url = f"https://github.com/{info['repo']}/pull/{info['pr']}"
-        issue_url = _open_defer_issue(gh, info["repo"], pr_url, titles[0], comment)
+        issue_url = _open_defer_issue_idempotent(
+            repo_cfg, gh, info["repo"], pr_url, titles[0], comment, promise_ids
+        )
 
     # Step 3: Opus reply based on triage
     instr = prompts.reply_instruction(
@@ -1190,25 +1256,30 @@ def reply_to_comment(
             FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
         return (category, titles)
 
-    promise_ids = _reply_promise_ids(context)
     body = append_reply_promise_markers(body, promise_ids)
-    log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
-    posted = gh.reply_to_review_comment(
-        info["repo"], info["pr"], body, info["comment_id"]
-    )
-    log.info("reply posted")
     root_comment_id = (
         thread_comments[0]["id"] if thread_comments else info["comment_id"]
     )
-    if root_comment_id is not None:
-        _record_reply_artifact(
-            repo_cfg,
-            artifact_comment_id=_posted_comment_id(posted),
-            comment_type="pulls",
-            lane_key=_review_lane_key(
-                info["repo"], int(info["pr"]), int(root_comment_id)
-            ),
-            promise_ids=promise_ids,
+    existing_artifact_id = _existing_reply_artifact(repo_cfg, promise_ids)
+    if existing_artifact_id is None:
+        log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
+        posted = gh.reply_to_review_comment(
+            info["repo"], info["pr"], body, info["comment_id"]
+        )
+        log.info("reply posted")
+        if root_comment_id is not None:
+            _record_reply_artifact(
+                repo_cfg,
+                artifact_comment_id=_posted_comment_id(posted),
+                comment_type="pulls",
+                lane_key=_review_lane_key(
+                    info["repo"], int(info["pr"]), int(root_comment_id)
+                ),
+                promise_ids=promise_ids,
+            )
+    else:
+        log.info(
+            "reply artifact %s already recorded — skipping post", existing_artifact_id
         )
     if direct_promise is not None:
         FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
@@ -1578,9 +1649,12 @@ def reply_to_issue_comment(
     # For DEFER, open a tracking issue before crafting the reply.
     # Raises on failure so we don't craft a reply referencing a missing issue.
     issue_url: str | None = None
+    promise_ids = _reply_promise_ids(context)
     if category == "DEFER":
         pr_url = f"https://github.com/{repo_full}/pull/{number}" if number else ""
-        issue_url = _open_defer_issue(gh, repo_full, pr_url, titles[0], comment)
+        issue_url = _open_defer_issue_idempotent(
+            repo_cfg, gh, repo_full, pr_url, titles[0], comment, promise_ids
+        )
 
     instr = prompts.issue_reply_instruction(
         category, comment, ", ".join(titles), action.context, issue_url=issue_url
@@ -1601,18 +1675,23 @@ def reply_to_issue_comment(
         body[:80],
     )
 
-    promise_ids = _reply_promise_ids(context)
     body = append_reply_promise_markers(body, promise_ids)
-    log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
-    posted = gh.comment_issue(repo_full, number, body)
-    log.info("reply posted on PR #%s", number)
-    _record_reply_artifact(
-        repo_cfg,
-        artifact_comment_id=_posted_comment_id(posted),
-        comment_type="issues",
-        lane_key=_issue_lane_key(repo_full, int(number)),
-        promise_ids=promise_ids,
-    )
+    existing_artifact_id = _existing_reply_artifact(repo_cfg, promise_ids)
+    if existing_artifact_id is None:
+        log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
+        posted = gh.comment_issue(repo_full, number, body)
+        log.info("reply posted on PR #%s", number)
+        _record_reply_artifact(
+            repo_cfg,
+            artifact_comment_id=_posted_comment_id(posted),
+            comment_type="issues",
+            lane_key=_issue_lane_key(repo_full, int(number)),
+            promise_ids=promise_ids,
+        )
+    else:
+        log.info(
+            "reply artifact %s already recorded — skipping post", existing_artifact_id
+        )
     if direct_promise is not None:
         FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 

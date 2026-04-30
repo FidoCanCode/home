@@ -17,7 +17,7 @@ PRCommentQueueState = Literal["pending", "in_progress", "completed", "retryable_
 
 REPLY_PROMISE_MARKER_PREFIX = "fido:reply-promise:"
 _PROMISE_MARKER_RE = re.compile(r"<!--\s*fido:reply-promise:([0-9a-fA-F-]{36})\s*-->")
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,17 @@ class ReplyArtifactRecord:
     comment_type: str
     lane_key: str
     promise_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DeferredIssueRecord:
+    """One deferred tracking issue opened for an outbound reply promise."""
+
+    idempotence_key: str
+    repo: str
+    title: str
+    body: str
+    issue_url: str
 
 
 @dataclass(frozen=True)
@@ -278,6 +289,70 @@ class FidoStore:
             promise_ids=tuple(
                 str(promise_row["promise_id"]) for promise_row in promise_rows
             ),
+        )
+
+    def deferred_issue(self, idempotence_key: str) -> DeferredIssueRecord | None:
+        """Return a previously opened deferred issue for *idempotence_key*."""
+        self.ensure_schema()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM deferred_issue_outbox
+                WHERE idempotence_key = ?
+                """,
+                (idempotence_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return DeferredIssueRecord(
+            idempotence_key=row["idempotence_key"],
+            repo=row["repo"],
+            title=row["title"],
+            body=row["body"],
+            issue_url=row["issue_url"],
+        )
+
+    def record_deferred_issue(
+        self,
+        *,
+        idempotence_key: str,
+        repo: str,
+        title: str,
+        body: str,
+        issue_url: str,
+    ) -> DeferredIssueRecord:
+        """Persist a successfully opened deferred issue idempotently."""
+        now = _utcnow()
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO deferred_issue_outbox (
+                    idempotence_key, repo, title, body, issue_url, created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(idempotence_key) DO UPDATE SET
+                    issue_url = deferred_issue_outbox.issue_url,
+                    updated_at = excluded.updated_at
+                """,
+                (idempotence_key, repo, title, body, issue_url, now, now),
+            )
+            row = conn.execute(
+                """
+                SELECT *
+                FROM deferred_issue_outbox
+                WHERE idempotence_key = ?
+                """,
+                (idempotence_key,),
+            ).fetchone()
+            assert row is not None
+        return DeferredIssueRecord(
+            idempotence_key=row["idempotence_key"],
+            repo=row["repo"],
+            title=row["title"],
+            body=row["body"],
+            issue_url=row["issue_url"],
         )
 
     def enqueue_pr_comment(
@@ -826,6 +901,16 @@ CREATE TABLE IF NOT EXISTS reply_artifact_promises (
     FOREIGN KEY(artifact_comment_id) REFERENCES reply_artifacts(artifact_comment_id)
       ON DELETE CASCADE,
     FOREIGN KEY(promise_id) REFERENCES reply_promises(promise_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS deferred_issue_outbox (
+    idempotence_key TEXT PRIMARY KEY,
+    repo TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    issue_url TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS command_queue (

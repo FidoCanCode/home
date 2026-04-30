@@ -351,13 +351,14 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == 3
+    assert version == 4
     assert {
         "comment_claims",
         "reply_promises",
         "reply_promise_comments",
         "reply_artifacts",
         "reply_artifact_promises",
+        "deferred_issue_outbox",
         "command_queue",
         "pr_comment_queue",
         "implementation_tasks",
@@ -368,6 +369,31 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
         "restart_metadata",
         "transition_audit_log",
     } <= tables
+
+
+def test_record_deferred_issue_is_idempotent(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+
+    first = store.record_deferred_issue(
+        idempotence_key="deferred-issue:promise-1",
+        repo="owner/repo",
+        title="later",
+        body="body",
+        issue_url="https://github.com/owner/repo/issues/1",
+    )
+    second = store.record_deferred_issue(
+        idempotence_key="deferred-issue:promise-1",
+        repo="owner/repo",
+        title="later",
+        body="body",
+        issue_url="https://github.com/owner/repo/issues/2",
+    )
+
+    assert first.issue_url == "https://github.com/owner/repo/issues/1"
+    assert second.issue_url == first.issue_url
+    stored = store.deferred_issue("deferred-issue:promise-1")
+    assert stored is not None
+    assert stored.issue_url == first.issue_url
 
 
 def test_enqueue_pr_comment_persists_normalized_comment(tmp_path: Path) -> None:
@@ -699,7 +725,7 @@ def test_schema_rejects_newer_user_version(tmp_path: Path) -> None:
         store.ensure_schema()
 
 
-def test_schema_upgrades_v2_database_with_pr_comment_queue(tmp_path: Path) -> None:
+def test_schema_upgrades_v2_database_to_current_store(tmp_path: Path) -> None:
     store = FidoStore(tmp_path)
     store.db_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(store.db_path)) as conn:
@@ -710,15 +736,23 @@ def test_schema_upgrades_v2_database_with_pr_comment_queue(tmp_path: Path) -> No
 
     with closing(sqlite3.connect(store.db_path)) as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        table = conn.execute(
+        pr_comment_queue = conn.execute(
             """
             SELECT name
             FROM sqlite_master
             WHERE type = 'table' AND name = 'pr_comment_queue'
             """
         ).fetchone()
-    assert version == 3
-    assert table is not None
+        deferred_issue_outbox = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'deferred_issue_outbox'
+            """
+        ).fetchone()
+    assert version == 4
+    assert pr_comment_queue is not None
+    assert deferred_issue_outbox is not None
 
 
 def test_concurrent_prepare_has_one_winner(tmp_path: Path) -> None:
