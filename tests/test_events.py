@@ -9,6 +9,7 @@ from fido.config import RepoConfig as _RepoConfig
 from fido.events import (
     Action,
     _apply_reply_result,
+    _build_issue_comment_action,
     _configured_agent,
     _deferred_issue_key,
     _existing_reply_artifact,
@@ -27,6 +28,7 @@ from fido.events import (
     _try_resolve_thread,
     bot_feedback_creates_tasks,
     bot_feedback_resolves_thread,
+    build_review_comment_action,
     create_task,
     dispatch,
     launch_sync,
@@ -40,6 +42,7 @@ from fido.events import (
     reply_to_review,
     review_outcome_creates_tasks,
     review_outcome_resolves_thread,
+    thread_lineage_comment_ids,
 )
 from fido.provider import ProviderID
 from fido.rocq import replied_comment_claims as oracle
@@ -1138,6 +1141,48 @@ class TestReplyPromiseHelpers:
 
     def test_reply_promise_ids_handles_missing_context(self) -> None:
         assert _reply_promise_ids(None) == ()
+
+    def test_review_comment_action_carries_lineage(self) -> None:
+        action = build_review_comment_action(
+            "owner/repo",
+            7,
+            "PR title",
+            "PR body",
+            {
+                "id": 102,
+                "in_reply_to_id": 101,
+                "body": "follow up",
+                "html_url": "https://github.com/owner/repo/pull/7#discussion_r102",
+                "path": "x.py",
+                "line": 5,
+                "diff_hunk": "@@",
+                "user": {"login": "owner"},
+            },
+        )
+
+        assert action.reply_to is not None
+        assert action.reply_to["lineage_key"] == "pulls:owner/repo:7:thread:101"
+        assert action.reply_to["lineage_comment_ids"] == [101, 102]
+        assert thread_lineage_comment_ids(action.reply_to) == (101, 102)
+
+    def test_issue_comment_action_carries_pr_lineage(self) -> None:
+        action = _build_issue_comment_action(
+            "owner/repo",
+            7,
+            "PR title",
+            "PR body",
+            {
+                "id": 302,
+                "body": "please fix",
+                "html_url": "https://github.com/owner/repo/pull/7#issuecomment-302",
+                "user": {"login": "owner"},
+            },
+        )
+
+        assert action.thread is not None
+        assert action.thread["lineage_key"] == "issues:owner/repo:7"
+        assert action.thread["lineage_comment_ids"] == [302]
+        assert thread_lineage_comment_ids(action.thread) == (302,)
 
     def test_posted_comment_id_extracts_int_only(self) -> None:
         assert _posted_comment_id({"id": 7}) == 7

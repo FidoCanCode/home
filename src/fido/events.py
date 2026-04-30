@@ -212,6 +212,7 @@ def build_review_comment_action(
     )
     body = comment_body if comment_body is not None else (comment["body"] or "")
     is_bot = user.endswith("[bot]")
+    lineage_key, lineage_comment_ids = _review_lineage(repo, pr_number, comment)
     return Action(
         prompt=(
             f"Review comment on PR #{pr_number} by {user}"
@@ -224,6 +225,8 @@ def build_review_comment_action(
             "url": comment["html_url"],
             "author": user,
             "comment_type": "pulls",
+            "lineage_key": lineage_key,
+            "lineage_comment_ids": list(lineage_comment_ids),
         },
         comment_body=body,
         is_bot=is_bot,
@@ -251,6 +254,7 @@ def _build_issue_comment_action(
     body = comment_body if comment_body is not None else (comment["body"] or "")
     is_bot = user.endswith("[bot]")
     comment_id = int(comment["id"])
+    lineage_key = _issue_lane_key(repo, pr_number)
     return Action(
         prompt=f"PR top-level comment on #{pr_number} by {user}:\n\n{body}",
         reply_to=None,
@@ -268,6 +272,8 @@ def _build_issue_comment_action(
             "url": comment["html_url"],
             "author": user,
             "comment_type": "issues",
+            "lineage_key": lineage_key,
+            "lineage_comment_ids": [comment_id],
         },
     )
 
@@ -387,6 +393,53 @@ def _review_lane_key(repo: str, pr_number: int, root_comment_id: int) -> str:
 
 def _issue_lane_key(repo: str, pr_number: int) -> str:
     return f"issues:{repo}:{pr_number}"
+
+
+def _normalize_comment_ids(comment_ids: Iterable[object]) -> tuple[int, ...]:
+    """Return positive integer comment ids in stable first-seen order."""
+    normalized: list[int] = []
+    for comment_id in comment_ids:
+        if not isinstance(comment_id, int | str):
+            continue
+        try:
+            value = int(comment_id)
+        except TypeError, ValueError:
+            continue
+        if value > 0 and value not in normalized:
+            normalized.append(value)
+    return tuple(normalized)
+
+
+def _review_lineage(
+    repo: str,
+    pr_number: int,
+    comment: dict[str, Any],
+    thread_comments: Iterable[dict[str, Any]] = (),
+) -> tuple[str, tuple[int, ...]]:
+    """Return the durable lineage key and covered ids for a review thread."""
+    comment_id = int(comment["id"])
+    root_id = int(comment.get("in_reply_to_id") or comment_id)
+    lineage_ids = _normalize_comment_ids(
+        (
+            root_id,
+            *(thread_comment.get("id") for thread_comment in thread_comments),
+            comment_id,
+        )
+    )
+    return _review_lane_key(repo, pr_number, root_id), lineage_ids
+
+
+def thread_lineage_comment_ids(thread: dict[str, Any] | None) -> tuple[int, ...]:
+    """Return comment ids covered by a task/reply thread lineage."""
+    if not thread:
+        return ()
+    lineage = thread.get("lineage_comment_ids")
+    if isinstance(lineage, list):
+        return _normalize_comment_ids(lineage)
+    comment_id = thread.get("comment_id")
+    if comment_id is None:
+        return ()
+    return _normalize_comment_ids((comment_id,))
 
 
 def _comment_created_at(comment: dict[str, Any]) -> str:
@@ -1135,6 +1188,21 @@ def reply_to_comment(
         if fetched:
             thread_comments = list(fetched)
             context["comment_thread"] = thread_comments
+            root_comment = next(
+                (
+                    thread_comment
+                    for thread_comment in thread_comments
+                    if thread_comment.get("in_reply_to_id") is None
+                ),
+                thread_comments[0],
+            )
+            lineage_ids = _normalize_comment_ids(
+                thread_comment.get("id") for thread_comment in thread_comments
+            )
+            info["lineage_key"] = _review_lane_key(
+                info["repo"], int(info["pr"]), int(root_comment["id"])
+            )
+            info["lineage_comment_ids"] = list(lineage_ids)
             log.info(
                 "fetched %d comment(s) in thread for context", len(thread_comments)
             )

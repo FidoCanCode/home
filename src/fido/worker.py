@@ -2283,6 +2283,9 @@ class Worker:
                 owner="worker",
                 comment_type=queued.comment_type,
                 anchor_comment_id=queued.comment_id,
+                covered_comment_ids=events.thread_lineage_comment_ids(
+                    action.reply_to if queued.comment_type == "pulls" else action.thread
+                ),
             )
             if promise is None:
                 store.complete_pr_comment(queued.queue_id)
@@ -2744,6 +2747,12 @@ class Worker:
             )
             if thread.get("url"):
                 context_parts.append(f"Thread URL: {thread['url']}")
+            lineage_ids = thread.get("lineage_comment_ids") or []
+            if lineage_ids:
+                context_parts.append(
+                    "Related thread comment_ids: "
+                    + ", ".join(str(comment_id) for comment_id in lineage_ids)
+                )
         context = "\n".join(context_parts)
         build_prompt(fido_dir, "task", context)
         prompts = self._get_prompts()

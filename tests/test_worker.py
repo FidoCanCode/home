@@ -7691,6 +7691,37 @@ class TestHandleQueuedComments:
         mock_create_task.assert_called_once()
         assert FidoStore(tmp_path).claim_state(401) == "completed"
 
+    def test_review_followup_claim_covers_thread_lineage(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        self._enqueue(tmp_path, comment_type="pulls", comment_id=402)
+        gh.get_pr.return_value = {"title": "My PR", "body": "Body"}
+        gh.get_pull_comment.return_value = {
+            "id": 402,
+            "in_reply_to_id": 401,
+            "body": "same here",
+            "user": {"login": "owner"},
+            "html_url": "https://github.com/owner/repo/pull/7#discussion_r402",
+            "path": "x.py",
+            "line": 5,
+            "diff_hunk": "@@",
+        }
+
+        with (
+            patch("fido.events.reply_to_comment", return_value=("DO", ["do thing"])),
+            patch("fido.events.create_task") as mock_create_task,
+            patch("fido.tasks.sync_tasks_background"),
+        ):
+            worker.handle_queued_comments(
+                self._fido_dir(tmp_path), self._repo_ctx(), 7, "branch"
+            )
+
+        thread = mock_create_task.call_args.kwargs["thread"]
+        assert thread["lineage_key"] == "pulls:owner/repo:7:thread:401"
+        assert thread["lineage_comment_ids"] == [401, 402]
+        store = FidoStore(tmp_path)
+        assert store.claim_state(401) == "completed"
+        assert store.claim_state(402) == "completed"
+
     def test_retries_queue_record_on_reply_failure(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         queued = self._enqueue(tmp_path, comment_type="issues", comment_id=501)

@@ -32,6 +32,7 @@ from fido.events import (
     reply_to_comment,
     reply_to_issue_comment,
     reply_to_review,
+    thread_lineage_comment_ids,
 )
 from fido.github import GitHub
 from fido.infra import (
@@ -945,11 +946,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
         promise_key = self._reply_promise(action)
         if promise_key is None:
             return None
+        thread = action.reply_to or action.thread
         comment_type, comment_id = promise_key
         promise = FidoStore(repo_cfg.work_dir).prepare_reply(
             owner="webhook",
             comment_type=comment_type,
             anchor_comment_id=comment_id,
+            covered_comment_ids=thread_lineage_comment_ids(thread),
         )
         if promise is None:
             log.info("already replied to comment %s — skipping", comment_id)
