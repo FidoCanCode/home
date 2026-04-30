@@ -25,7 +25,6 @@
 From FidoModels Require Import preamble task_queue_rescope.
 
 From Stdlib Require Import
-  Arith.PeanoNat
   FSets.FMapPositive
   Lists.List
   Numbers.BinNums
@@ -78,7 +77,7 @@ Definition CIStore := PositiveMap.t CIRow.
 Definition ci_max_attempts : nat := S (S (S O)).
 
 Definition ci_task_title (snapshot : CIFailureSnapshot) : string :=
-  String.append "CI failure: " (ci_check_name snapshot).
+  ci_check_name snapshot.
 
 Definition ci_task_row (snapshot : CIFailureSnapshot) : TaskRow := {|
   title := ci_task_title snapshot;
@@ -190,19 +189,36 @@ Definition record_ci_attempt_failed
       match ci_phase row, ci_task row with
       | CIFixing, Some task =>
           let attempts' := S (ci_attempts row) in
-          let phase' :=
-            if ci_attempt_can_retry attempts' then CIFailing else CIGivenUp in
-          let task' := if ci_attempt_can_retry attempts' then Some task else None in
-          let row' := {|
-            ci_snapshot := ci_snapshot row;
-            ci_phase := phase';
-            ci_task := task';
-            ci_attempts := attempts'
-          |} in
-          PositiveMap.add check row' ci_store
+          if ci_attempt_can_retry attempts'
+          then
+            let row' := {|
+              ci_snapshot := ci_snapshot row;
+              ci_phase := CIFailing;
+              ci_task := Some task;
+              ci_attempts := attempts'
+            |} in
+            PositiveMap.add check row' ci_store
+          else
+            let row' := {|
+              ci_snapshot := ci_snapshot row;
+              ci_phase := CIGivenUp;
+              ci_task := None;
+              ci_attempts := attempts'
+            |} in
+            PositiveMap.add check row' ci_store
       | _, _ => ci_store
       end
   | None => ci_store
+  end.
+
+Definition complete_ci_task_if_present
+    (task : option positive)
+    (task_rows : PositiveMap.t TaskRow)
+    (lease : option ExecutionLease)
+    : option ExecutionLease * PositiveMap.t TaskRow :=
+  match task with
+  | Some task_id => complete_task task_id lease task_rows
+  | None => (lease, task_rows)
   end.
 
 Definition record_ci_resolved
@@ -214,10 +230,7 @@ Definition record_ci_resolved
   match PositiveMap.find check ci_store with
   | Some row =>
       let '(lease', task_rows') :=
-        match ci_task row with
-        | Some task => complete_task task lease task_rows
-        | None => (lease, task_rows)
-        end in
+        complete_ci_task_if_present (ci_task row) task_rows lease in
       let row' := {|
         ci_snapshot := ci_snapshot row;
         ci_phase := CIResolved;
@@ -227,6 +240,9 @@ Definition record_ci_resolved
       (PositiveMap.add check row' ci_store, task_rows', lease')
   | None => (ci_store, task_rows, lease)
   end.
+
+Python File Extraction ci_task_lifecycle
+  "ci_max_attempts ci_task_title ci_task_row ci_live_task ci_update_latest ci_new_live_row record_ci_failure start_ci_fix ci_attempt_can_retry record_ci_attempt_failed complete_ci_task_if_present record_ci_resolved".
 
 (** Concrete witnesses used by the theorems below. *)
 Definition sample_spec_row : TaskRow := {|
