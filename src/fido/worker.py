@@ -2223,6 +2223,7 @@ class Worker:
                 repo_cfg,
                 self.gh,
                 thread=action.reply_to,
+                is_bot=action.is_bot,
                 registry=self._registry,
             )
         log.info("threads done")

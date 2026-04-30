@@ -335,15 +335,50 @@ def _review_outcome(category: str) -> oracle.ReviewReplyOutcome:
     }[category]
 
 
-def review_outcome_creates_tasks(category: str) -> bool:
+def _bot_feedback_outcome(
+    category: str,
+) -> thread_resolve_oracle.BotFeedbackOutcome | None:
+    return {
+        "DO": thread_resolve_oracle.BotFeedbackDo(),
+        "DUMP": thread_resolve_oracle.BotFeedbackDump(),
+    }.get(category)
+
+
+def bot_feedback_creates_tasks(category: str) -> bool:
+    """Return whether a bot feedback outcome should create task objects."""
+    outcome = _bot_feedback_outcome(category)
+    if outcome is None:
+        return False
+    return isinstance(
+        thread_resolve_oracle.bot_feedback_decision(outcome),
+        thread_resolve_oracle.TakeBotSuggestion,
+    )
+
+
+def bot_feedback_resolves_thread(category: str) -> bool:
+    """Return whether a bot feedback outcome should resolve the thread."""
+    outcome = _bot_feedback_outcome(category)
+    if outcome is None:
+        return False
+    return isinstance(
+        thread_resolve_oracle.bot_feedback_decision(outcome),
+        thread_resolve_oracle.DumpBotSuggestionAndClose,
+    )
+
+
+def review_outcome_creates_tasks(category: str, *, is_bot: bool = False) -> bool:
     """Return whether a review reply outcome should create task objects."""
+    if is_bot:
+        return bot_feedback_creates_tasks(category)
     if category not in {"ACT", "DO", "ASK", "ANSWER", "DEFER", "DUMP"}:
         return False
     return bool(oracle.review_outcome_creates_tasks(_review_outcome(category)))
 
 
-def review_outcome_resolves_thread(category: str) -> bool:
+def review_outcome_resolves_thread(category: str, *, is_bot: bool = False) -> bool:
     """Return whether a review reply outcome should resolve the thread."""
+    if is_bot:
+        return bot_feedback_resolves_thread(category)
     if category not in {"ACT", "DO", "ASK", "ANSWER", "DEFER", "DUMP"}:
         return False
     return bool(oracle.review_outcome_resolves_thread(_review_outcome(category)))
@@ -353,10 +388,11 @@ def reply_outcome_creates_tasks(
     category: str,
     *,
     thread: dict[str, Any] | None,
+    is_bot: bool = False,
 ) -> bool:
     """Return whether a reply outcome should create task objects."""
     if thread is not None:
-        return review_outcome_creates_tasks(category)
+        return review_outcome_creates_tasks(category, is_bot=is_bot)
     return category not in ("DUMP", "ANSWER", "ASK", "DEFER")
 
 
@@ -368,6 +404,7 @@ def queue_reply_tasks(
     gh: GitHub,
     *,
     thread: dict[str, Any] | None,
+    is_bot: bool = False,
     registry: Any = None,
     create_task_fn: Callable[..., object] | None = None,
 ) -> int:
@@ -375,7 +412,7 @@ def queue_reply_tasks(
 
     Returns the number of created task objects.
     """
-    if not reply_outcome_creates_tasks(category, thread=thread):
+    if not reply_outcome_creates_tasks(category, thread=thread, is_bot=is_bot):
         return 0
     task_fn = create_task if create_task_fn is None else create_task_fn
     created = 0
@@ -1083,7 +1120,9 @@ def reply_to_comment(
         prompts=prompts,
     )
 
-    if review_outcome_resolves_thread(category) and info.get("comment_id"):
+    if review_outcome_resolves_thread(category, is_bot=action.is_bot) and info.get(
+        "comment_id"
+    ):
         _try_resolve_thread(info, gh)
 
     return (category, titles)

@@ -78,6 +78,21 @@ Inductive ResolvedThreadQueueDecision : Type :=
 | QueueThreadTask
 | DismissStaleResolvedThread.
 
+(** [BotFeedbackOutcome] is the triage result for recognized bot comments.
+    Bots do not share the owner/collaborator review model: DO means Fido
+    accepts the suggestion with a reply and queues work, while DUMP means Fido
+    replies with the reason for declining and treats that feedback as closed. *)
+Inductive BotFeedbackOutcome : Type :=
+| BotFeedbackDo
+| BotFeedbackDump.
+
+(** [BotFeedbackDecision] is the D13 projection of bot triage onto task and
+    thread side effects.  Python still writes the visible reply; the oracle
+    states the durable task and close-thread obligations. *)
+Inductive BotFeedbackDecision : Type :=
+| TakeBotSuggestion
+| DumpBotSuggestionAndClose.
+
 Fixpoint thread_comment_ids (comments : list ThreadComment) : list positive :=
   match comments with
   | [] => []
@@ -197,8 +212,29 @@ Definition resolved_thread_queue_decision
     | None => DismissStaleResolvedThread
     end.
 
+Definition bot_feedback_decision
+    (outcome : BotFeedbackOutcome) : BotFeedbackDecision :=
+  match outcome with
+  | BotFeedbackDo => TakeBotSuggestion
+  | BotFeedbackDump => DumpBotSuggestionAndClose
+  end.
+
+Definition bot_feedback_creates_task
+    (outcome : BotFeedbackOutcome) : bool :=
+  match bot_feedback_decision outcome with
+  | TakeBotSuggestion => true
+  | DumpBotSuggestionAndClose => false
+  end.
+
+Definition bot_feedback_resolves_thread
+    (outcome : BotFeedbackOutcome) : bool :=
+  match bot_feedback_decision outcome with
+  | TakeBotSuggestion => false
+  | DumpBotSuggestionAndClose => true
+  end.
+
 Python File Extraction thread_auto_resolve
-  "thread_comment_ids modeled_thread_comment_ids last_modeled_author_from last_modeled_author comment_is_pending_task task_blocks_thread_resolution has_pending_thread_task latest_comment_is_fido should_resolve_thread resolution_decision latest_queueable_comment resolved_thread_queue_decision".
+  "thread_comment_ids modeled_thread_comment_ids last_modeled_author_from last_modeled_author comment_is_pending_task task_blocks_thread_resolution has_pending_thread_task latest_comment_is_fido should_resolve_thread resolution_decision latest_queueable_comment resolved_thread_queue_decision bot_feedback_decision".
 
 (** * Proved invariants *)
 
@@ -373,4 +409,24 @@ Lemma bot_resolved_thread_delivery_queues :
     QueueThreadTask.
 Proof.
   reflexivity.
+Qed.
+
+(** [bot_do_takes_suggestion]: DO feedback from a bot queues work and leaves
+    the thread open until that work is completed. *)
+Lemma bot_do_takes_suggestion :
+  bot_feedback_decision BotFeedbackDo = TakeBotSuggestion /\
+  bot_feedback_creates_task BotFeedbackDo = true /\
+  bot_feedback_resolves_thread BotFeedbackDo = false.
+Proof.
+  repeat split; reflexivity.
+Qed.
+
+(** [bot_dump_closes_feedback]: DUMP feedback from a bot does not queue work;
+    Fido's reply explains why and the feedback can be considered closed. *)
+Lemma bot_dump_closes_feedback :
+  bot_feedback_decision BotFeedbackDump = DumpBotSuggestionAndClose /\
+  bot_feedback_creates_task BotFeedbackDump = false /\
+  bot_feedback_resolves_thread BotFeedbackDump = true.
+Proof.
+  repeat split; reflexivity.
 Qed.

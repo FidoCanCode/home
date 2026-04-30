@@ -224,6 +224,20 @@ def test_resolved_thread_latest_bot_comment_queues_work() -> None:
     )
 
 
+def test_bot_do_feedback_takes_suggestion() -> None:
+    assert isinstance(
+        oracle.bot_feedback_decision(oracle.BotFeedbackDo()),
+        oracle.TakeBotSuggestion,
+    )
+
+
+def test_bot_dump_feedback_closes_without_task() -> None:
+    assert isinstance(
+        oracle.bot_feedback_decision(oracle.BotFeedbackDump()),
+        oracle.DumpBotSuggestionAndClose,
+    )
+
+
 def test_unresolved_thread_always_queues_comment_task() -> None:
     thread = _thread(
         [

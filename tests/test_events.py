@@ -22,6 +22,8 @@ from fido.events import (
     _task_snapshot,
     _triage,
     _try_resolve_thread,
+    bot_feedback_creates_tasks,
+    bot_feedback_resolves_thread,
     create_task,
     dispatch,
     launch_sync,
@@ -1523,7 +1525,7 @@ class TestTriage:
         assert titles == ["add result caching"]
 
     def test_bot_categories_in_prompt(self, tmp_path: Path) -> None:
-        """Ensure bot-specific categories (DO/DEFER/DUMP) are used when is_bot=True."""
+        """Ensure bot-specific categories (DO/DUMP) are used when is_bot=True."""
         captured = {}
 
         def fake_pp(prompt, model, **kwargs):
@@ -1535,6 +1537,8 @@ class TestTriage:
         )
         assert cat == "DO"
         assert "DO" in captured["prompt"]
+        assert "DEFER" not in captured["prompt"]
+        assert "DUMP" in captured["prompt"]
         assert "TASK" not in captured["prompt"]
 
     def test_requires_agent(self) -> None:
@@ -1810,6 +1814,25 @@ class TestReplyToComment:
     ) -> None:
         assert review_outcome_creates_tasks(category) is creates_tasks
         assert review_outcome_resolves_thread(category) is resolves_thread
+
+    @pytest.mark.parametrize(
+        ("category", "creates_tasks", "resolves_thread"),
+        [
+            ("DO", True, False),
+            ("DUMP", False, True),
+            ("DEFER", False, False),
+        ],
+    )
+    def test_bot_feedback_outcome_helpers(
+        self,
+        category: str,
+        creates_tasks: bool,
+        resolves_thread: bool,
+    ) -> None:
+        assert bot_feedback_creates_tasks(category) is creates_tasks
+        assert bot_feedback_resolves_thread(category) is resolves_thread
+        assert review_outcome_creates_tasks(category, is_bot=True) is creates_tasks
+        assert review_outcome_resolves_thread(category, is_bot=True) is resolves_thread
 
     def test_review_outcome_helpers_return_false_for_unknown_category(self) -> None:
         assert review_outcome_creates_tasks("UNKNOWN") is False
@@ -3116,6 +3139,45 @@ class TestCreateTask:
             )
             == 1
         )
+
+    def test_queue_reply_tasks_uses_bot_do_dump_oracle(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
+        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
+        create_task_fn = MagicMock(
+            return_value={"title": "take it", "status": "pending"}
+        )
+
+        assert (
+            queue_reply_tasks(
+                "DO",
+                ["take it"],
+                cfg,
+                repo_cfg,
+                MagicMock(),
+                thread=thread,
+                is_bot=True,
+                create_task_fn=create_task_fn,
+            )
+            == 1
+        )
+        create_task_fn.assert_called_once()
+        create_task_fn.reset_mock()
+
+        assert (
+            queue_reply_tasks(
+                "DUMP",
+                ["skip it"],
+                cfg,
+                repo_cfg,
+                MagicMock(),
+                thread=thread,
+                is_bot=True,
+                create_task_fn=create_task_fn,
+            )
+            == 0
+        )
+        create_task_fn.assert_not_called()
 
     def test_no_abort_without_registry(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
