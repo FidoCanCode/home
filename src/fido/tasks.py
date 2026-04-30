@@ -75,7 +75,7 @@ def _thread_task_status_for_oracle(
             return thread_resolve_oracle.StatusPending()
 
 
-def _thread_task_for_oracle(
+def _thread_task_for_auto_resolve_oracle(
     task: dict[str, Any],
 ) -> thread_resolve_oracle.ThreadTask | None:
     comment_id = (task.get("thread") or {}).get("comment_id")
@@ -87,12 +87,12 @@ def _thread_task_for_oracle(
     )
 
 
-def _thread_tasks_for_oracle(
+def thread_tasks_for_auto_resolve_oracle(
     task_list: list[dict[str, Any]],
 ) -> list[thread_resolve_oracle.ThreadTask]:
     tasks: list[thread_resolve_oracle.ThreadTask] = []
     for task in task_list:
-        oracle_task = _thread_task_for_oracle(task)
+        oracle_task = _thread_task_for_auto_resolve_oracle(task)
         if oracle_task is not None:
             tasks.append(oracle_task)
     return tasks
@@ -107,7 +107,7 @@ def _thread_comment_author_for_oracle(
     return thread_resolve_oracle.CommentByHuman()
 
 
-def _review_thread_for_oracle(
+def review_thread_for_auto_resolve_oracle(
     node: dict[str, Any],
     gh_user: str,
 ) -> thread_resolve_oracle.ReviewThread:
@@ -1062,11 +1062,11 @@ class Tasks(JsonFileStore):
                 return
             owner, repo_name = repo.split("/", 1)
             threads = gh.get_review_threads(owner, repo_name, pr)
-            pending_tasks = _thread_tasks_for_oracle(self.list())
+            pending_tasks = thread_tasks_for_auto_resolve_oracle(self.list())
             for t in threads:
                 if _review_thread_contains_comment(t, int(comment_id)):
                     decision = thread_resolve_oracle.resolution_decision(
-                        _review_thread_for_oracle(t, us),
+                        review_thread_for_auto_resolve_oracle(t, us),
                         pending_tasks,
                     )
                     if not isinstance(
