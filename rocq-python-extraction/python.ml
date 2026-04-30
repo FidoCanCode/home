@@ -5156,17 +5156,18 @@ type classified_decl =
   | ClassifiedFix of classified_term_decl list
 
 let classify_term_decl_base state r typ =
-  if is_prop_type typ then TermDeclSuppressErasedProp
-  else if is_runtime_marker_ref r then TermDeclSuppressRuntimeMarker
-  else if is_native_equality_marker_ref r then TermDeclSuppressNativeEqualityMarker
-  else if is_inline_custom r then TermDeclSuppressInlineCustom
-  else
-    match rewrite_lowering_rule_of_ref state r with
-    | Some rule when rule.lowering_suppress_declaration ->
-        TermDeclSuppressInlinePrimitive
-    | Some _ | None ->
-        if is_custom r then TermDeclEmitCustomAlias (find_custom r)
-        else TermDeclEmit
+  match () with
+  | _ when is_prop_type typ -> TermDeclSuppressErasedProp
+  | _ when is_runtime_marker_ref r -> TermDeclSuppressRuntimeMarker
+  | _ when is_native_equality_marker_ref r ->
+      TermDeclSuppressNativeEqualityMarker
+  | _ when is_inline_custom r -> TermDeclSuppressInlineCustom
+  | _ -> (
+      match rewrite_lowering_rule_of_ref state r, is_custom r with
+      | Some rule, _ when rule.lowering_suppress_declaration ->
+          TermDeclSuppressInlinePrimitive
+      | (Some _ | None), true -> TermDeclEmitCustomAlias (find_custom r)
+      | (Some _ | None), false -> TermDeclEmit)
 
 let classify_term_decl state r a typ =
   match classify_term_decl_base state r typ with
@@ -5208,13 +5209,12 @@ let term_decl_is_emitted = function
       false
 
 let classify_type_decl r =
-  if is_custom r then TypeDeclSuppressCustomAlias
-  else
-    match classify_stdlib_type_ref r with
-    | Some StdlibRealType -> TypeDeclEmitDiagnostic "PYEX041"
-    | Some type_ref when stdlib_type_ref_is_remapped type_ref ->
-        TypeDeclSuppressRemappedStdlib
-    | Some _ | None -> TypeDeclUnsupported
+  match classify_stdlib_type_ref r, is_custom r with
+  | _, true -> TypeDeclSuppressCustomAlias
+  | Some StdlibRealType, false -> TypeDeclEmitDiagnostic "PYEX041"
+  | Some type_ref, false when stdlib_type_ref_is_remapped type_ref ->
+      TypeDeclSuppressRemappedStdlib
+  | (Some _ | None), false -> TypeDeclUnsupported
 
 let classify_term_decl_record state r a typ =
   { term_decl_ref = r;
@@ -5264,10 +5264,11 @@ let pp_classified_term_decl state env term_decl =
   | TermDeclSuppressRuntimeMarker ->
       mt ()
 
-let term_decl_export_names state r a typ =
-  match classify_term_decl state r a typ with
+let classified_term_decl_export_names state term_decl =
+  match term_decl.term_decl_classification with
   | action when not (term_decl_is_emitted action) -> []
-  | TermDeclEmitCustomAlias _ | TermDeclEmit -> [pp_global state Term r]
+  | TermDeclEmitCustomAlias _ | TermDeclEmit ->
+      [pp_global state Term term_decl.term_decl_ref]
   | TermDeclSuppressConstructorTagPredicate _
   | TermDeclSuppressErasedProp
   | TermDeclSuppressInlineCustom
@@ -5277,18 +5278,30 @@ let term_decl_export_names state r a typ =
   | TermDeclSuppressRuntimeMarker ->
       []
 
-let fixed_term_decl_export_names state r typ =
-  match classify_term_decl_base state r typ with
-  | action when not (term_decl_is_emitted action) -> []
-  | TermDeclEmitCustomAlias _ | TermDeclEmit -> [pp_global state Term r]
-  | TermDeclSuppressConstructorTagPredicate _
-  | TermDeclSuppressErasedProp
-  | TermDeclSuppressInlineCustom
-  | TermDeclSuppressInlinePrimitive
-  | TermDeclSuppressListMembershipPredicate _
-  | TermDeclSuppressNativeEqualityMarker
-  | TermDeclSuppressRuntimeMarker ->
-      []
+let classified_ind_export_names state ind =
+  let packet_names packet =
+    if is_std_remapped_type_ref packet.ip_typename_ref then []
+    else
+      let tname = capitalize_first (pp_global state Term packet.ip_typename_ref) in
+      let cnames =
+        Array.to_list packet.ip_consnames_ref |> List.map (pp_global state Cons)
+      in
+      tname :: cnames
+  in
+  Array.to_list ind.ind_packets |> List.concat_map packet_names
+
+let classified_decl_export_names state = function
+  | ClassifiedTerm term_decl -> classified_term_decl_export_names state term_decl
+  | ClassifiedFix term_decls ->
+      List.concat_map (classified_term_decl_export_names state) term_decls
+  | ClassifiedType (r, classification) -> (
+      match classification with
+      | TypeDeclEmitDiagnostic _
+      | TypeDeclSuppressCustomAlias
+      | TypeDeclSuppressRemappedStdlib ->
+          []
+      | TypeDeclUnsupported -> [pp_global state Type r])
+  | ClassifiedInd ind -> classified_ind_export_names state ind
 
 let pp_classified_decl state = function
   | ClassifiedInd ind -> pp_ind_decl state ind
@@ -5328,32 +5341,6 @@ let rec module_type_annotation state = function
       str "], " ++
       module_type_annotation state ret_mt ++
       str "]"
-
-let decl_export_names state = function
-  | Dterm (r, a, typ) ->
-      term_decl_export_names state r a typ
-  | Dfix (rv, _, typs) ->
-      List.init (Array.length rv) Fun.id
-      |> List.concat_map (fun i -> fixed_term_decl_export_names state rv.(i) typs.(i))
-  | Dtype (r, _, _) ->
-      (match classify_type_decl r with
-       | TypeDeclEmitDiagnostic _
-       | TypeDeclSuppressCustomAlias
-       | TypeDeclSuppressRemappedStdlib ->
-           []
-       | TypeDeclUnsupported -> [pp_global state Type r])
-  | Dind ind ->
-      let packet_names packet =
-        if is_std_remapped_type_ref packet.ip_typename_ref then []
-        else
-          let tname = capitalize_first (pp_global state Term packet.ip_typename_ref) in
-          let cnames =
-            Array.to_list packet.ip_consnames_ref
-            |> List.map (pp_global state Cons)
-          in
-          tname :: cnames
-      in
-      Array.to_list ind.ind_packets |> List.concat_map packet_names
 
 let pp_decl_exports target names indent =
   prlist
@@ -5484,8 +5471,12 @@ and pp_module_expr_return state indent local_name = function
 
 and pp_module_structure_elem_into state indent target = function
   | (_, SEdecl d) ->
-      indent_pp indent (pp_decl state d) ++
-      pp_decl_exports target (decl_export_names state d) indent
+      let classified_decl = classify_decl state d in
+      indent_pp indent (pp_classified_decl state classified_decl) ++
+      pp_decl_exports
+        target
+        (classified_decl_export_names state classified_decl)
+        indent
   | (l, SEmodule m) ->
       let name = module_binding_name state l in
       if is_std_remapped_module_name name then mt ()
