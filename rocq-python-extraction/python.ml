@@ -5156,29 +5156,17 @@ type classified_decl =
   | ClassifiedFix of classified_term_decl list
 
 let classify_term_decl_base state r typ =
-  match
-    ( is_prop_type typ,
-      is_runtime_marker_ref r,
-      is_native_equality_marker_ref r,
-      is_inline_custom r,
-      rewrite_lowering_rule_of_ref state r,
-      is_custom r )
-  with
-  | true, _, _, _, _, _ -> TermDeclSuppressErasedProp
-  | false, true, _, _, _, _ -> TermDeclSuppressRuntimeMarker
-  | false, false, true, _, _, _ ->
-      TermDeclSuppressNativeEqualityMarker
-  | false, false, false, true, _, _ -> TermDeclSuppressInlineCustom
-  | ( false,
-      false,
-      false,
-      false,
-      Some { lowering_suppress_declaration = true; _ },
-      _ ) ->
-      TermDeclSuppressInlinePrimitive
-  | false, false, false, false, (Some _ | None), true ->
-      TermDeclEmitCustomAlias (find_custom r)
-  | false, false, false, false, (Some _ | None), false -> TermDeclEmit
+  if is_prop_type typ then TermDeclSuppressErasedProp
+  else if is_runtime_marker_ref r then TermDeclSuppressRuntimeMarker
+  else if is_native_equality_marker_ref r then
+    TermDeclSuppressNativeEqualityMarker
+  else if is_inline_custom r then TermDeclSuppressInlineCustom
+  else
+    match rewrite_lowering_rule_of_ref state r, is_custom r with
+    | Some { lowering_suppress_declaration = true; _ }, _ ->
+        TermDeclSuppressInlinePrimitive
+    | (Some _ | None), true -> TermDeclEmitCustomAlias (find_custom r)
+    | (Some _ | None), false -> TermDeclEmit
 
 let classify_term_decl state r a typ =
   match classify_term_decl_base state r typ with
