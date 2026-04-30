@@ -4621,28 +4621,48 @@ let signature_data state name typ =
   in
   (pp_term_typevar_decls ++ protocol_pp, arg_annots, pp_term_type ret)
 
-let pp_def_signature ?(is_async=false) name params ret_annot =
+let pp_callable_signature ?(is_async=false) name leading_params params ret_annot =
   let def_prefix = if is_async then str "async def " else str "def " in
-  if List.length params >= 2 then
+  let pp_annotated_param (param, annot) =
+    param ++ str ": " ++ annot
+  in
+  let pp_multiline_param param =
+    str "    " ++ param
+  in
+  let signature_params =
+    leading_params @ List.map pp_annotated_param params
+  in
+  if List.length signature_params >= 2 then
     def_prefix ++ str name ++ str "(" ++ fnl () ++
     prlist_with_sep
       (fun () -> str "," ++ fnl ())
-      (fun (param, annot) -> str "    " ++ param ++ str ": " ++ annot)
-      params ++
+      pp_multiline_param
+      signature_params ++
     str "," ++ fnl () ++
     str ") -> " ++ ret_annot ++ str ":"
   else
     def_prefix ++ str name ++ str "(" ++
     prlist_with_sep
       (fun () -> str ", ")
-      (fun (param, annot) -> param ++ str ": " ++ annot)
-      params ++
+      (fun param -> param)
+      signature_params ++
     str ") -> " ++ ret_annot ++ str ":"
 
-let pp_unannotated_def_signature ?(is_async=false) name params ret_annot =
+let pp_def_signature ?(is_async=false) name params ret_annot =
+  pp_callable_signature ~is_async name [] params ret_annot
+
+let pp_unannotated_callable_signature ?(is_async=false) name leading_params params ret_annot =
   let def_prefix = if is_async then str "async def " else str "def " in
-  def_prefix ++ str name ++ str "(" ++ pp_param_list params ++ str ") -> " ++
+  let inline_params =
+    leading_params @ List.map pp_param (visible_params params)
+  in
+  def_prefix ++ str name ++ str "(" ++
+  prlist_with_sep (fun () -> str ", ") (fun param -> param) inline_params ++
+  str ") -> " ++
   ret_annot ++ str ":"
+
+let pp_unannotated_def_signature ?(is_async=false) name params ret_annot =
+  pp_unannotated_callable_signature ~is_async name [] params ret_annot
 
 let annotated_params_opt params annots =
   if Int.equal (List.length params) (List.length annots) then
@@ -4865,30 +4885,10 @@ let pp_term_decl state env name a typ =
       fnl ()
 
 let pp_method_signature ?(is_async=false) name params ret_annot =
-  let def_prefix = if is_async then str "async def " else str "def " in
-  if List.length params >= 1 then
-    def_prefix ++ str name ++ str "(" ++ fnl () ++
-    str "    self," ++ fnl () ++
-    prlist_with_sep
-      (fun () -> str "," ++ fnl ())
-      (fun (param, annot) -> str "    " ++ param ++ str ": " ++ annot)
-      params ++
-    str "," ++ fnl () ++
-    str ") -> " ++ ret_annot ++ str ":"
-  else
-    def_prefix ++ str name ++ str "(self) -> " ++ ret_annot ++ str ":"
+  pp_callable_signature ~is_async name [str "self"] params ret_annot
 
 let pp_unannotated_method_signature ?(is_async=false) name params ret_annot =
-  let def_prefix = if is_async then str "async def " else str "def " in
-  let pp_tail =
-    if List.is_empty params then
-      mt ()
-    else
-      str ", " ++
-      prlist_with_sep (fun () -> str ", ") pp_param params
-  in
-  def_prefix ++ str name ++ str "(self" ++ pp_tail ++ str ") -> " ++
-  ret_annot ++ str ":"
+  pp_unannotated_callable_signature ~is_async name [str "self"] params ret_annot
 
 let pp_method_term_decl state env method_name a typ =
   let lam_ids, body = collect_lams a in
