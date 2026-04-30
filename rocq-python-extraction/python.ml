@@ -1017,53 +1017,45 @@ let is_std_remapped_type_ref r =
   | Some type_ref -> stdlib_type_ref_is_remapped type_ref
   | None -> false
 
-let is_std_string_type = function
-  | Tglob (r, _) -> is_std_string_type_ref r
+let is_std_type predicate = function
+  | Tglob (r, _) -> predicate r
   | _ -> false
 
-let is_std_ascii_type = function
-  | Tglob (r, _) -> is_std_ascii_type_ref r
-  | _ -> false
+let is_std_string_type ty =
+  is_std_type is_std_string_type_ref ty
 
-let is_std_byte_type = function
-  | Tglob (r, _) -> is_std_byte_type_ref r
-  | _ -> false
+let is_std_ascii_type ty =
+  is_std_type is_std_ascii_type_ref ty
 
-let is_std_nat_type = function
-  | Tglob (r, _) -> is_std_nat_type_ref r
-  | _ -> false
+let is_std_byte_type ty =
+  is_std_type is_std_byte_type_ref ty
 
-let is_std_positive_type = function
-  | Tglob (r, _) -> is_std_positive_type_ref r
-  | _ -> false
+let is_std_nat_type ty =
+  is_std_type is_std_nat_type_ref ty
 
-let is_std_N_type = function
-  | Tglob (r, _) -> is_std_N_type_ref r
-  | _ -> false
+let is_std_positive_type ty =
+  is_std_type is_std_positive_type_ref ty
 
-let is_std_Z_type = function
-  | Tglob (r, _) -> is_std_Z_type_ref r
-  | _ -> false
+let is_std_N_type ty =
+  is_std_type is_std_N_type_ref ty
 
-let is_std_Q_type = function
-  | Tglob (r, _) -> is_std_Q_type_ref r
-  | _ -> false
+let is_std_Z_type ty =
+  is_std_type is_std_Z_type_ref ty
 
-let is_std_option_type = function
-  | Tglob (r, _) -> is_std_option_type_ref r
-  | _ -> false
+let is_std_Q_type ty =
+  is_std_type is_std_Q_type_ref ty
 
-let is_std_list_type = function
-  | Tglob (r, _) -> is_std_list_type_ref r
-  | _ -> false
+let is_std_option_type ty =
+  is_std_type is_std_option_type_ref ty
 
-let is_std_prod_type = function
-  | Tglob (r, _) -> is_std_prod_type_ref r
-  | _ -> false
+let is_std_list_type ty =
+  is_std_type is_std_list_type_ref ty
 
-let is_std_bool_type = function
-  | Tglob (r, _) -> is_std_bool_type_ref r
-  | _ -> false
+let is_std_prod_type ty =
+  is_std_type is_std_prod_type_ref ty
+
+let is_std_bool_type ty =
+  is_std_type is_std_bool_type_ref ty
 
 let std_bool_expr = function
   | MLcons (_, r, []) when is_std_bool_true_ref r -> Some true
