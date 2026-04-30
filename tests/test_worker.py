@@ -1329,9 +1329,41 @@ class TestWorker:
         ):
             assert worker.run() == 0
 
-    def test_run_does_not_call_post_pickup_comment(self, tmp_path: Path) -> None:
-        """post_pickup_comment is now called from find_next_issue, not run()."""
+    def test_run_ensures_pickup_comment_when_resuming_issue(
+        self, tmp_path: Path
+    ) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {
+            "title": "Test issue",
+            "body": "",
+            "state": "OPEN",
+        }
+        worker = Worker(tmp_path, gh)
+        mock_pickup = MagicMock()
+        repo_ctx = self._make_mock_repo_ctx()
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=5),
+            patch.object(worker, "post_pickup_comment", mock_pickup),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(1, "my-branch", False)
+            ),
+            patch.object(worker, "handle_ci", return_value=False),
+            patch.object(worker, "handle_threads", return_value=False),
+        ):
+            worker.run()
+        mock_pickup.assert_called_once_with("owner/repo", 5, "Test issue", "fido-bot")
+        assert State(mock_ctx.fido_dir).load()["pickup_comment_ensured"] is True
+
+    def test_run_skips_pickup_comment_when_already_ensured(
+        self, tmp_path: Path
+    ) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        State(mock_ctx.fido_dir).save({"issue": 5, "pickup_comment_ensured": True})
         gh = self._make_gh()
         gh.view_issue.return_value = {
             "title": "Test issue",
