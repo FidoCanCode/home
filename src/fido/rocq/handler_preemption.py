@@ -15,35 +15,104 @@ from typing import (
 )
 
 
+class LegacyDemand:
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class LegacyEmpty(LegacyDemand):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class LegacyNonEmpty(LegacyDemand):
+    pass
+
+
+LegacyDemandT = LegacyEmpty | LegacyNonEmpty
+
+
+class DurableDemandState:
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class DurableEmpty(DurableDemandState):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class DurableNonEmpty(DurableDemandState):
+    pass
+
+
+DurableDemandStateT = DurableEmpty | DurableNonEmpty
+
+
+class ProviderInterrupt:
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class InterruptNotRequested(ProviderInterrupt):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class InterruptWasRequested(ProviderInterrupt):
+    pass
+
+
+ProviderInterruptT = InterruptNotRequested | InterruptWasRequested
+
+
+@final
+@dataclass(frozen=True)
 class State:
-    pass
+    legacy_demand: LegacyDemand
+    durable_demand: DurableDemandState
+    provider_interrupt: ProviderInterrupt
 
 
-@final
-@dataclass(frozen=True)
-class Empty(State):
-    pass
+empty_state: State = State(
+    legacy_demand=LegacyEmpty(),
+    durable_demand=DurableEmpty(),
+    provider_interrupt=InterruptNotRequested(),
+)
 
 
-@final
-@dataclass(frozen=True)
-class NonEmpty(State):
-    pass
+legacy_state: State = State(
+    legacy_demand=LegacyNonEmpty(),
+    durable_demand=DurableEmpty(),
+    provider_interrupt=InterruptNotRequested(),
+)
 
 
-@final
-@dataclass(frozen=True)
-class DurableDemand(State):
-    pass
+durable_state: State = State(
+    legacy_demand=LegacyEmpty(),
+    durable_demand=DurableNonEmpty(),
+    provider_interrupt=InterruptNotRequested(),
+)
 
 
-@final
-@dataclass(frozen=True)
-class PreemptedDemand(State):
-    pass
+preempted_durable_state: State = State(
+    legacy_demand=LegacyEmpty(),
+    durable_demand=DurableNonEmpty(),
+    provider_interrupt=InterruptWasRequested(),
+)
 
 
-StateT = Empty | NonEmpty | DurableDemand | PreemptedDemand
+mixed_state: State = State(
+    legacy_demand=LegacyNonEmpty(),
+    durable_demand=DurableNonEmpty(),
+    provider_interrupt=InterruptWasRequested(),
+)
 
 
 class Event:
@@ -96,72 +165,80 @@ EventT = (
 )
 
 
+def with_legacy(
+    s: State,
+    legacy: LegacyDemand,
+) -> State:
+    return replace(
+        s,
+        legacy_demand=legacy,
+    )
+
+
+def with_durable(
+    s: State,
+    durable: DurableDemandState,
+) -> State:
+    return replace(
+        s,
+        durable_demand=durable,
+    )
+
+
+def with_interrupt(
+    s: State,
+    interrupt: ProviderInterrupt,
+) -> State:
+    return replace(
+        s,
+        provider_interrupt=interrupt,
+    )
+
+
 def transition(
     current: State,
     event0: Event,
 ) -> State | None:
-    match current:
-        case Empty():
-            match event0:
-                case WebhookArrives():
-                    return NonEmpty()
-                case DurableDemandRecorded():
-                    return DurableDemand()
-                case InterruptRequested():
+    match event0:
+        case WebhookArrives():
+            return with_legacy(current, LegacyNonEmpty())
+        case DurableDemandRecorded():
+            return with_durable(current, DurableNonEmpty())
+        case InterruptRequested():
+            match current.durable_demand:
+                case DurableEmpty():
                     return None
-                case HandlerDone():
-                    return None
-                case DurableDemandDrained():
-                    return None
-                case WorkerTurnStart():
-                    return Empty()
+                case DurableNonEmpty():
+                    return with_interrupt(current, InterruptWasRequested())
                 case __impossible:
                     assert_never(__impossible)
-        case NonEmpty():
-            match event0:
-                case WebhookArrives():
-                    return NonEmpty()
-                case DurableDemandRecorded():
-                    return DurableDemand()
-                case InterruptRequested():
+        case HandlerDone():
+            match current.legacy_demand:
+                case LegacyEmpty():
                     return None
-                case HandlerDone():
-                    return NonEmpty()
-                case DurableDemandDrained():
-                    return NonEmpty()
-                case WorkerTurnStart():
-                    return None
+                case LegacyNonEmpty():
+                    return with_legacy(current, LegacyEmpty())
                 case __impossible:
                     assert_never(__impossible)
-        case DurableDemand():
-            match event0:
-                case WebhookArrives():
-                    return DurableDemand()
-                case DurableDemandRecorded():
-                    return DurableDemand()
-                case InterruptRequested():
-                    return PreemptedDemand()
-                case HandlerDone():
-                    return DurableDemand()
-                case DurableDemandDrained():
-                    return Empty()
-                case WorkerTurnStart():
+        case DurableDemandDrained():
+            match current.durable_demand:
+                case DurableEmpty():
                     return None
+                case DurableNonEmpty():
+                    return with_durable(current, DurableEmpty())
                 case __impossible:
                     assert_never(__impossible)
-        case PreemptedDemand():
-            match event0:
-                case WebhookArrives():
-                    return PreemptedDemand()
-                case DurableDemandRecorded():
-                    return PreemptedDemand()
-                case InterruptRequested():
-                    return PreemptedDemand()
-                case HandlerDone():
-                    return PreemptedDemand()
-                case DurableDemandDrained():
-                    return Empty()
-                case WorkerTurnStart():
+        case WorkerTurnStart():
+            match current.legacy_demand:
+                case LegacyEmpty():
+                    match current.durable_demand:
+                        case DurableEmpty():
+                            return current
+                        case DurableNonEmpty():
+                            return None
+                        case __impossible:
+                            assert_never(__impossible)
+                case LegacyNonEmpty():
                     return None
                 case __impossible:
                     assert_never(__impossible)

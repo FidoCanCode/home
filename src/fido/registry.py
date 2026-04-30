@@ -461,6 +461,22 @@ class WorkerRegistry:
 
     # ── untriaged-webhook inbox (#1067) ──────────────────────────────────
 
+    def _preemption_state(self, repo_name: str) -> preemption_fsm.State:
+        """Return the repo's handler-preemption oracle state."""
+        return self._preemption_fsm_states.get(repo_name, preemption_fsm.empty_state)
+
+    def _preemption_state_name(self, state: preemption_fsm.State) -> str:
+        """Return a compact product-state label for debug logging."""
+        return (
+            f"legacy={type(state.legacy_demand).__name__},"
+            f"durable={type(state.durable_demand).__name__},"
+            f"interrupt={type(state.provider_interrupt).__name__}"
+        )
+
+    def _preemption_has_durable_demand(self, state: preemption_fsm.State) -> bool:
+        """Return True when the oracle state has durable queued demand."""
+        return isinstance(state.durable_demand, preemption_fsm.DurableNonEmpty)
+
     def _preemption_fsm_transition(
         self, repo_name: str, event: preemption_fsm.Event
     ) -> preemption_fsm.State:
@@ -470,21 +486,21 @@ class WorkerRegistry:
         as :meth:`_registry_fsm_transition`.  Must be called under
         ``_untriaged_lock``.
 
-        Initialises the repo's FSM state to ``Empty`` on first access.
+        Initialises the repo's FSM state to ``empty_state`` on first access.
         """
-        prev = self._preemption_fsm_states.get(repo_name, preemption_fsm.Empty())
+        prev = self._preemption_state(repo_name)
         new_state = preemption_fsm.transition(prev, event)
         if new_state is None:
             raise AssertionError(
                 f"handler_preemption FSM: {type(event).__name__} rejected in "
-                f"state {type(prev).__name__} for repo {repo_name!r}"
+                f"state {self._preemption_state_name(prev)} for repo {repo_name!r}"
             )
         self._preemption_fsm_states[repo_name] = new_state
         log.debug(
             "preemption[%s]: FSM %s →%s via %s",
             repo_name,
-            type(prev).__name__,
-            type(new_state).__name__,
+            self._preemption_state_name(prev),
+            self._preemption_state_name(new_state),
             type(event).__name__,
         )
         return new_state
@@ -528,20 +544,19 @@ class WorkerRegistry:
                 return
             new = old - 1
             self._untriaged[repo_name] = new
-            # HandlerDone preserves the active demand state.  When legacy
-            # untriaged demand is the only blocker and the count reaches 0,
-            # reset to Empty; durable demand must remain until its store drains.
-            self._preemption_fsm_transition(repo_name, preemption_fsm.HandlerDone())
-            if new == 0:
-                current = self._preemption_fsm_states.get(
-                    repo_name, preemption_fsm.Empty()
+            new_state = self._preemption_fsm_transition(
+                repo_name, preemption_fsm.HandlerDone()
+            )
+            if new > 0:
+                self._preemption_fsm_states[repo_name] = preemption_fsm.with_legacy(
+                    new_state, preemption_fsm.LegacyNonEmpty()
                 )
-                if isinstance(current, preemption_fsm.NonEmpty):
-                    self._preemption_fsm_states[repo_name] = preemption_fsm.Empty()
-                    log.debug(
-                        "preemption[%s]: FSM NonEmpty →Empty (count reached 0)",
-                        repo_name,
-                    )
+                log.debug(
+                    "preemption[%s]: FSM legacy remains non-empty (count is %d)",
+                    repo_name,
+                    new,
+                )
+            else:
                 ev = self._untriaged_drained.get(repo_name)
                 if ev is not None:
                     ev.set()
@@ -559,35 +574,29 @@ class WorkerRegistry:
     def note_durable_demand(self, repo_name: str) -> None:
         """Record that durable webhook demand is queued for *repo_name*."""
         with self._untriaged_lock:
-            current = self._preemption_fsm_states.get(repo_name, preemption_fsm.Empty())
-            if isinstance(
-                current,
-                preemption_fsm.DurableDemand | preemption_fsm.PreemptedDemand,
-            ):
+            current = self._preemption_state(repo_name)
+            if self._preemption_has_durable_demand(current):
                 return
             self._preemption_fsm_transition(
                 repo_name, preemption_fsm.DurableDemandRecorded()
             )
 
+    def note_provider_interrupt_requested(self, repo_name: str) -> None:
+        """Record that a queued durable demand requested provider interrupt."""
+        with self._untriaged_lock:
+            self._preemption_fsm_transition(
+                repo_name, preemption_fsm.InterruptRequested()
+            )
+
     def note_durable_demand_drained(self, repo_name: str) -> None:
         """Record that durable webhook demand for *repo_name* has drained."""
         with self._untriaged_lock:
-            current = self._preemption_fsm_states.get(repo_name, preemption_fsm.Empty())
-            if isinstance(current, preemption_fsm.Empty):
+            current = self._preemption_state(repo_name)
+            if not self._preemption_has_durable_demand(current):
                 return
-            new_state = self._preemption_fsm_transition(
+            self._preemption_fsm_transition(
                 repo_name, preemption_fsm.DurableDemandDrained()
             )
-            if self._untriaged.get(repo_name, 0) > 0 and not isinstance(
-                new_state, preemption_fsm.NonEmpty
-            ):
-                self._preemption_fsm_states[repo_name] = preemption_fsm.NonEmpty()
-                log.debug(
-                    "preemption[%s]: FSM %s →NonEmpty (durable drained; "
-                    "untriaged count remains)",
-                    repo_name,
-                    type(new_state).__name__,
-                )
 
     def wait_for_inbox_drain(
         self, repo_name: str, timeout: float | None = None
@@ -613,8 +622,8 @@ class WorkerRegistry:
         """Assert that the worker may start a provider turn for *repo_name*.
 
         Fires ``WorkerTurnStart`` through the handler-preemption FSM oracle.
-        If the inbox is non-empty (FSM state ``NonEmpty``), the transition is
-        rejected and an ``AssertionError`` surfaces the coordination violation.
+        If the inbox or durable queue is non-empty, the transition is rejected
+        and an ``AssertionError`` surfaces the coordination violation.
 
         Called by the worker before each ``provider_run()`` — after the
         yield-for-untriaged wait has drained the inbox.
