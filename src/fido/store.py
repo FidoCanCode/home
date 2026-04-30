@@ -13,10 +13,11 @@ from typing import Any, Literal, cast
 ReplyOwner = Literal["webhook", "worker", "recovery"]
 ClaimState = Literal["in_progress", "completed", "retryable_failed"]
 PromiseState = Literal["prepared", "posted", "acked", "failed"]
+PRCommentQueueState = Literal["pending", "in_progress", "completed", "retryable_failed"]
 
 REPLY_PROMISE_MARKER_PREFIX = "fido:reply-promise:"
 _PROMISE_MARKER_RE = re.compile(r"<!--\s*fido:reply-promise:([0-9a-fA-F-]{36})\s*-->")
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,27 @@ class ReplyArtifactRecord:
     comment_type: str
     lane_key: str
     promise_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PRCommentQueueRecord:
+    """One durable queued PR comment waiting for triage."""
+
+    queue_id: str
+    delivery_id: str
+    repo: str
+    pr_number: int
+    comment_type: str
+    comment_id: int
+    author: str
+    is_bot: bool
+    body: str
+    github_created_at: str
+    state: PRCommentQueueState
+    claim_owner: str | None
+    retry_count: int
+    next_retry_after: str | None
+    payload_json: str
 
 
 def append_reply_promise_marker(body: str, promise_id: str | None) -> str:
@@ -258,6 +280,184 @@ class FidoStore:
             ),
         )
 
+    def enqueue_pr_comment(
+        self,
+        *,
+        delivery_id: str,
+        repo: str,
+        pr_number: int,
+        comment_type: str,
+        comment_id: int,
+        author: str,
+        is_bot: bool,
+        body: str,
+        github_created_at: str,
+        payload_json: str = "{}",
+    ) -> PRCommentQueueRecord:
+        """Durably enqueue one normalized PR comment, idempotently.
+
+        ``delivery_id`` deduplicates GitHub redelivery.  The comment identity
+        also stays unique so a safety-net enqueue with a distinct delivery id
+        cannot create duplicate triage work for the same GitHub comment.
+        """
+        now = _utcnow()
+        queue_id = str(uuid.uuid4())
+        with self._transaction() as conn:
+            existing = self._pr_comment_by_delivery(conn, delivery_id)
+            if existing is not None:
+                return self._pr_comment_record_from_row(existing)
+            existing = self._pr_comment_by_comment(
+                conn, repo, pr_number, comment_type, comment_id
+            )
+            if existing is not None:
+                return self._pr_comment_record_from_row(existing)
+            conn.execute(
+                """
+                INSERT INTO pr_comment_queue (
+                    queue_id, delivery_id, repo, pr_number, comment_type,
+                    comment_id, author, is_bot, body, github_created_at,
+                    state, retry_count, payload_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+                """,
+                (
+                    queue_id,
+                    delivery_id,
+                    repo,
+                    int(pr_number),
+                    comment_type,
+                    int(comment_id),
+                    author,
+                    1 if is_bot else 0,
+                    body,
+                    github_created_at,
+                    payload_json,
+                    now,
+                    now,
+                ),
+            )
+            row = self._pr_comment_by_queue_id(conn, queue_id)
+            assert row is not None
+            return self._pr_comment_record_from_row(row)
+
+    def pending_pr_comments(
+        self, *, repo: str | None = None, pr_number: int | None = None
+    ) -> list[PRCommentQueueRecord]:
+        """Return retryable pending comments in FIFO order."""
+        self.ensure_schema()
+        where = ["state IN ('pending', 'retryable_failed')"]
+        params: list[object] = []
+        if repo is not None:
+            where.append("repo = ?")
+            params.append(repo)
+        if pr_number is not None:
+            where.append("pr_number = ?")
+            params.append(int(pr_number))
+        where.append("(next_retry_after IS NULL OR next_retry_after <= ?)")
+        params.append(_utcnow())
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM pr_comment_queue
+                WHERE {" AND ".join(where)}
+                ORDER BY github_created_at, comment_id, queue_id
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._pr_comment_record_from_row(row) for row in rows]
+
+    def has_pending_pr_comments(self, repo: str) -> bool:
+        """Return whether *repo* has any currently retryable queued comments."""
+        return bool(self.pending_pr_comments(repo=repo))
+
+    def claim_next_pr_comment(
+        self, *, owner: str, repo: str | None = None, pr_number: int | None = None
+    ) -> PRCommentQueueRecord | None:
+        """Claim the oldest currently retryable PR comment for processing."""
+        with self._transaction() as conn:
+            where = ["state IN ('pending', 'retryable_failed')"]
+            params: list[object] = []
+            if repo is not None:
+                where.append("repo = ?")
+                params.append(repo)
+            if pr_number is not None:
+                where.append("pr_number = ?")
+                params.append(int(pr_number))
+            where.append("(next_retry_after IS NULL OR next_retry_after <= ?)")
+            params.append(_utcnow())
+            row = conn.execute(
+                f"""
+                SELECT *
+                FROM pr_comment_queue
+                WHERE {" AND ".join(where)}
+                ORDER BY github_created_at, comment_id, queue_id
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+            if row is None:
+                return None
+            now = _utcnow()
+            conn.execute(
+                """
+                UPDATE pr_comment_queue
+                SET state = 'in_progress', claim_owner = ?, updated_at = ?
+                WHERE queue_id = ?
+                """,
+                (owner, now, row["queue_id"]),
+            )
+            claimed = self._pr_comment_by_queue_id(conn, row["queue_id"])
+            assert claimed is not None
+            return self._pr_comment_record_from_row(claimed)
+
+    def complete_pr_comment(self, queue_id: str) -> PRCommentQueueRecord | None:
+        """Mark a queued PR comment completed."""
+        return self._set_pr_comment_state(
+            queue_id,
+            state="completed",
+            claim_owner=None,
+            retry_count=None,
+            next_retry_after=None,
+        )
+
+    def retry_pr_comment(
+        self, queue_id: str, *, failure_reason: str | None = None
+    ) -> PRCommentQueueRecord | None:
+        """Mark a queued PR comment retryable with exponential backoff."""
+        with self._transaction() as conn:
+            row = self._pr_comment_by_queue_id(conn, queue_id)
+            if row is None:
+                return None
+            retry_count = int(row["retry_count"]) + 1
+            next_retry_after = _retry_after(retry_count)
+            now = _utcnow()
+            conn.execute(
+                """
+                UPDATE pr_comment_queue
+                SET state = 'retryable_failed', claim_owner = NULL,
+                    retry_count = ?, next_retry_after = ?, failure_reason = ?,
+                    updated_at = ?
+                WHERE queue_id = ?
+                """,
+                (retry_count, next_retry_after, failure_reason, now, queue_id),
+            )
+            retried = self._pr_comment_by_queue_id(conn, queue_id)
+            assert retried is not None
+            return self._pr_comment_record_from_row(retried)
+
+    def clear_pr_comment_queue(self, *, repo: str, pr_number: int) -> int:
+        """Delete queued comment state for a PR after merge/close cleanup."""
+        with self._transaction() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM pr_comment_queue
+                WHERE repo = ? AND pr_number = ?
+                """,
+                (repo, int(pr_number)),
+            )
+            return cursor.rowcount
+
     def ack_promise(self, promise_id: str) -> None:
         """Complete a promise and every covered raw comment id."""
         now = _utcnow()
@@ -292,8 +492,7 @@ class FidoStore:
             if row is None:
                 return
             retry_count = int(row["retry_count"]) + 1
-            delay = min(3600, 2 ** min(retry_count, 12))
-            next_retry_after = (now_dt + timedelta(seconds=delay)).isoformat()
+            next_retry_after = _retry_after(retry_count)
             covered = self._covered_comments(conn, promise_id)
             conn.execute(
                 """
@@ -457,6 +656,92 @@ class FidoStore:
             next_retry_after=row["next_retry_after"],
         )
 
+    def _set_pr_comment_state(
+        self,
+        queue_id: str,
+        *,
+        state: PRCommentQueueState,
+        claim_owner: str | None,
+        retry_count: int | None,
+        next_retry_after: str | None,
+    ) -> PRCommentQueueRecord | None:
+        now = _utcnow()
+        with self._transaction() as conn:
+            row = self._pr_comment_by_queue_id(conn, queue_id)
+            if row is None:
+                return None
+            conn.execute(
+                """
+                UPDATE pr_comment_queue
+                SET state = ?, claim_owner = ?, retry_count = ?,
+                    next_retry_after = ?, updated_at = ?
+                WHERE queue_id = ?
+                """,
+                (
+                    state,
+                    claim_owner,
+                    int(row["retry_count"]) if retry_count is None else retry_count,
+                    next_retry_after,
+                    now,
+                    queue_id,
+                ),
+            )
+            updated = self._pr_comment_by_queue_id(conn, queue_id)
+            assert updated is not None
+            return self._pr_comment_record_from_row(updated)
+
+    def _pr_comment_by_delivery(
+        self, conn: sqlite3.Connection, delivery_id: str
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            "SELECT * FROM pr_comment_queue WHERE delivery_id = ?",
+            (delivery_id,),
+        ).fetchone()
+
+    def _pr_comment_by_comment(
+        self,
+        conn: sqlite3.Connection,
+        repo: str,
+        pr_number: int,
+        comment_type: str,
+        comment_id: int,
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            """
+            SELECT *
+            FROM pr_comment_queue
+            WHERE repo = ? AND pr_number = ? AND comment_type = ? AND comment_id = ?
+            """,
+            (repo, int(pr_number), comment_type, int(comment_id)),
+        ).fetchone()
+
+    def _pr_comment_by_queue_id(
+        self, conn: sqlite3.Connection, queue_id: str
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            "SELECT * FROM pr_comment_queue WHERE queue_id = ?",
+            (queue_id,),
+        ).fetchone()
+
+    def _pr_comment_record_from_row(self, row: sqlite3.Row) -> PRCommentQueueRecord:
+        return PRCommentQueueRecord(
+            queue_id=row["queue_id"],
+            delivery_id=row["delivery_id"],
+            repo=row["repo"],
+            pr_number=int(row["pr_number"]),
+            comment_type=row["comment_type"],
+            comment_id=int(row["comment_id"]),
+            author=row["author"],
+            is_bot=bool(row["is_bot"]),
+            body=row["body"],
+            github_created_at=row["github_created_at"],
+            state=cast(PRCommentQueueState, row["state"]),
+            claim_owner=row["claim_owner"],
+            retry_count=int(row["retry_count"]),
+            next_retry_after=row["next_retry_after"],
+            payload_json=row["payload_json"],
+        )
+
 
 class _FidoTransaction:
     def __init__(self, store: FidoStore) -> None:
@@ -484,6 +769,11 @@ def _normalize_comment_ids(comment_ids: Iterable[int]) -> tuple[int, ...]:
 
 def _utcnow() -> str:
     return datetime.now(tz=UTC).isoformat()
+
+
+def _retry_after(retry_count: int) -> str:
+    delay = min(3600, 2 ** min(retry_count, 12))
+    return (datetime.now(tz=UTC) + timedelta(seconds=delay)).isoformat()
 
 
 _SCHEMA = """
@@ -552,6 +842,36 @@ CREATE TABLE IF NOT EXISTS command_queue (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS pr_comment_queue (
+    queue_id TEXT PRIMARY KEY,
+    delivery_id TEXT NOT NULL UNIQUE,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    comment_type TEXT NOT NULL CHECK(comment_type IN ('issues', 'pulls')),
+    comment_id INTEGER NOT NULL,
+    author TEXT NOT NULL,
+    is_bot INTEGER NOT NULL CHECK(is_bot IN (0, 1)),
+    body TEXT NOT NULL,
+    github_created_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN (
+        'pending', 'in_progress', 'completed', 'retryable_failed'
+    )),
+    claim_owner TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    next_retry_after TEXT,
+    failure_reason TEXT,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(repo, pr_number, comment_type, comment_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pr_comment_queue_pending
+ON pr_comment_queue(state, next_retry_after, github_created_at, comment_id);
+
+CREATE INDEX IF NOT EXISTS idx_pr_comment_queue_pr
+ON pr_comment_queue(repo, pr_number, github_created_at, comment_id);
 
 CREATE TABLE IF NOT EXISTS implementation_tasks (
     task_id TEXT PRIMARY KEY,
