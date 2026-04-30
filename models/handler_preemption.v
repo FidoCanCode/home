@@ -1,106 +1,97 @@
 (** Handler-preemption FSM: per-repo webhook-interrupt turn admission.
 
-    Models the coordination contract between webhook-triggered interrupt
-    work (comment/review triage, CI failure handling, and any rescope
-    launched by that triage) and the worker turn boundary.  When interrupt
-    work is waiting, the worker must not start a new provider turn — it
-    yields until the interrupt blocker drains.
+    Models the coordination contract between webhook-triggered interrupt work
+    (comment/review triage, CI failure handling, and handler-owned rescope
+    work) and the worker turn boundary.  When either legacy in-memory handler
+    demand or durable queued demand exists, the worker must not start a new
+    provider turn.
 
-    [Empty]          — no webhook interrupt work pending for this repo.
-                       The worker may start its next provider turn.
-    [NonEmpty]       — one or more legacy in-memory webhook interrupt units
-                       are pending.  The worker must yield; only handlers may
-                       run.  Runtime code still uses this while the durable
-                       FIFO migration lands.
-    [DurableDemand]  — a webhook/comment demand has been committed to durable
-                       state before provider cancellation.  Worker turns are
-                       blocked even if no handler thread has acquired the
-                       provider session yet.
-    [PreemptedDemand] — durable demand exists and the provider interrupt signal
-                        has been requested.  This is still a blocked state:
-                        interrupt success is a latency detail, not the source
-                        of correctness.
+    The state is a product, not a phase enum:
+
+    [legacy_demand]       — whether the current in-memory untriaged handler
+                            counter is empty or non-empty.
+    [durable_demand]      — whether durable queued webhook/comment demand is
+                            empty or non-empty.
+    [provider_interrupt]  — whether a provider interrupt has been requested.
+
+    Provider interrupt state is observable because the adapter must fire the
+    oracle when the runtime asks the provider to preempt.  It is not authority
+    for demand existence: [WorkerTurnStart] is accepted exactly when both
+    demand fields are empty, regardless of interrupt state.
 
     Six events name the observable transitions:
 
-    [WebhookArrives]  — [enter_untriaged()] called on the HTTP thread
-                        or by handler-owned rescope work in the current
-                        in-memory path.
-                        [Empty] → [NonEmpty], [NonEmpty] → [NonEmpty].
-    [DurableDemandRecorded] — a normalized webhook/comment demand was written
-                              to durable local state.  This is the future
-                              scheduler gate and must happen before interrupt.
-    [InterruptRequested] — provider cancellation was requested after durable
-                           demand was recorded.  Rejected from states without
-                           durable demand.
-    [HandlerDone]     — [exit_untriaged()] called when the handler
-                        finishes processing.
-                        [NonEmpty] → [NonEmpty] (if count > 1) or
-                        [NonEmpty] → [Empty] (if count reaches 0).
-                        Rejected from [Empty] (underflow).
-    [DurableDemandDrained] — all durable demand for this repo has been claimed
-                             and completed or made retryable.  Durable blocked
-                             states return to [Empty].
-    [WorkerTurnStart] — worker is about to call [provider_run()].
-                        [Empty] → [Empty] (turn proceeds).
-                        Rejected from every demand state — this is the core
-                        scheduler-priority invariant.
-
-    The legacy in-memory path still tracks only {Empty, NonEmpty} and not the
-    exact count.  For that path, [WebhookArrives] from [NonEmpty] stays
-    [NonEmpty] and [HandlerDone] from [NonEmpty] must be modeled as a
-    transition back to [NonEmpty] — the runtime guards the [NonEmpty] →
-    [Empty] transition on the actual count.  The durable path names the future
-    store-backed gate explicitly: [DurableDemandRecorded] must happen before
-    [InterruptRequested], and [WorkerTurnStart] is rejected until
-    [DurableDemandDrained].
-
-    Proved invariants:
-
-      [worker_blocked_when_nonempty]  — [WorkerTurnStart] is rejected from
-                                       [NonEmpty].  The worker must not start a
-                                       new turn while the inbox has untriaged
-                                       webhooks.
-      [worker_blocked_until_durable_demand_drains] — [WorkerTurnStart] is
-                                       rejected from [DurableDemand] and
-                                       [PreemptedDemand].  Durable webhook
-                                       demand owns scheduler priority.
-      [interrupt_requires_durable_demand] — [InterruptRequested] is rejected
-                                       until demand has been durably recorded.
-      [handler_done_rejected_from_empty] — [HandlerDone] is rejected
-                                           from [Empty].  Underflow is
-                                           a bug.
-      [worker_turn_proceeds_when_empty]  — [WorkerTurnStart] from [Empty]
-                                           yields [Some Empty].  When no
-                                           webhooks are pending, the
-                                           worker proceeds normally.
-      [webhook_arrival_always_accepted]  — [WebhookArrives] is accepted
-                                           from both [Empty] and
-                                           [NonEmpty].  A new webhook can
-                                           always enter the inbox. *)
+    [WebhookArrives]        — legacy in-memory demand enters the untriaged
+                              inbox.  Sets [legacy_demand] to non-empty and
+                              preserves durable demand.
+    [DurableDemandRecorded] — durable queue/store demand has been committed.
+                              Sets [durable_demand] to non-empty and preserves
+                              legacy demand.
+    [InterruptRequested]    — provider cancellation was requested after
+                              durable demand was recorded.  Sets only
+                              [provider_interrupt].
+    [HandlerDone]           — one legacy handler completes.  Clears only
+                              [legacy_demand] in this boolean abstraction.
+    [DurableDemandDrained]  — durable demand drains.  Clears only
+                              [durable_demand].
+    [WorkerTurnStart]       — worker is about to call [provider_run()].
+                              Accepted exactly when both demand fields are
+                              empty. *)
 
 From FidoModels Require Import preamble.
 
-(** * State
+(** * State *)
 
-    Four phases of the per-repo webhook interrupt blocker. *)
-Inductive State : Type :=
-| Empty           : State
-| NonEmpty        : State
-| DurableDemand   : State
-| PreemptedDemand : State.
+Inductive LegacyDemand : Type :=
+| LegacyEmpty    : LegacyDemand
+| LegacyNonEmpty : LegacyDemand.
 
-(** * Event
+Inductive DurableDemandState : Type :=
+| DurableEmpty    : DurableDemandState
+| DurableNonEmpty : DurableDemandState.
 
-    [WebhookArrives]  — [enter_untriaged()]; legacy in-memory demand.
-    [DurableDemandRecorded] — durable queue/store write committed before
-                              interrupt.
-    [InterruptRequested] — provider cancellation requested after durable write.
-    [HandlerDone]     — [exit_untriaged()]; [NonEmpty] → [NonEmpty]
-                        (count-aware reduction handled at runtime).
-    [DurableDemandDrained] — durable demand is fully drained.
-    [WorkerTurnStart] — worker about to call [provider_run()];
-                        [Empty] → [Empty]; rejected from every demand state. *)
+Inductive ProviderInterrupt : Type :=
+| InterruptNotRequested : ProviderInterrupt
+| InterruptWasRequested : ProviderInterrupt.
+
+Record State : Type := {
+  legacy_demand : LegacyDemand;
+  durable_demand : DurableDemandState;
+  provider_interrupt : ProviderInterrupt
+}.
+
+Definition empty_state : State := {|
+  legacy_demand := LegacyEmpty;
+  durable_demand := DurableEmpty;
+  provider_interrupt := InterruptNotRequested
+|}.
+
+Definition legacy_state : State := {|
+  legacy_demand := LegacyNonEmpty;
+  durable_demand := DurableEmpty;
+  provider_interrupt := InterruptNotRequested
+|}.
+
+Definition durable_state : State := {|
+  legacy_demand := LegacyEmpty;
+  durable_demand := DurableNonEmpty;
+  provider_interrupt := InterruptNotRequested
+|}.
+
+Definition preempted_durable_state : State := {|
+  legacy_demand := LegacyEmpty;
+  durable_demand := DurableNonEmpty;
+  provider_interrupt := InterruptWasRequested
+|}.
+
+Definition mixed_state : State := {|
+  legacy_demand := LegacyNonEmpty;
+  durable_demand := DurableNonEmpty;
+  provider_interrupt := InterruptWasRequested
+|}.
+
+(** * Event *)
+
 Inductive Event : Type :=
 | WebhookArrives        : Event
 | DurableDemandRecorded : Event
@@ -109,153 +100,163 @@ Inductive Event : Type :=
 | DurableDemandDrained  : Event
 | WorkerTurnStart       : Event.
 
-(** * Transition function
+(** * Helpers *)
 
-    [transition current event] returns [Some new_state] when [event] is
-    valid in [current], or [None] when it is rejected.
+Definition with_legacy (s : State) (legacy : LegacyDemand) : State := {|
+  legacy_demand := legacy;
+  durable_demand := durable_demand s;
+  provider_interrupt := provider_interrupt s
+|}.
 
-    Key rejection: [WorkerTurnStart] from [NonEmpty], [DurableDemand], and
-    [PreemptedDemand] — the core invariant.  The worker must yield when
-    webhook interrupt work is pending, whether the blocker is still the legacy
-    in-memory count or the future durable queue.
+Definition with_durable
+    (s : State)
+    (durable : DurableDemandState) : State := {|
+  legacy_demand := legacy_demand s;
+  durable_demand := durable;
+  provider_interrupt := provider_interrupt s
+|}.
 
-    Key ordering: [InterruptRequested] is accepted only after
-    [DurableDemandRecorded].  Provider cancellation is useful for latency, but
-    it cannot be the precondition that makes webhook handling durable.
+Definition with_interrupt
+    (s : State)
+    (interrupt : ProviderInterrupt) : State := {|
+  legacy_demand := legacy_demand s;
+  durable_demand := durable_demand s;
+  provider_interrupt := interrupt
+|}.
 
-    [HandlerDone] from [NonEmpty] stays [NonEmpty] in the FSM; the
-    runtime uses the actual counter to decide when to flip to [Empty].
-    [HandlerDone] is also accepted from durable-demand states because the
-    legacy untriaged inbox and durable queue can overlap: finishing the
-    handler must not clear the durable blocker.  This is safe because the
-    invariant ([WorkerTurnStart] rejected from all demand states) holds
-    regardless of count. *)
+(** * Transition function *)
+
 Definition transition (current : State) (event : Event) : option State :=
-  match current, event with
-  | Empty,           WebhookArrives        => Some NonEmpty
-  | Empty,           DurableDemandRecorded => Some DurableDemand
-  | Empty,           WorkerTurnStart       => Some Empty
+  match event with
+  | WebhookArrives =>
+      Some (with_legacy current LegacyNonEmpty)
 
-  | NonEmpty,        WebhookArrives        => Some NonEmpty
-  | NonEmpty,        DurableDemandRecorded => Some DurableDemand
-  | NonEmpty,        HandlerDone           => Some NonEmpty
-  | NonEmpty,        DurableDemandDrained  => Some NonEmpty
+  | DurableDemandRecorded =>
+      Some (with_durable current DurableNonEmpty)
 
-  | DurableDemand,   WebhookArrives        => Some DurableDemand
-  | DurableDemand,   DurableDemandRecorded => Some DurableDemand
-  | DurableDemand,   InterruptRequested    => Some PreemptedDemand
-  | DurableDemand,   HandlerDone           => Some DurableDemand
-  | DurableDemand,   DurableDemandDrained  => Some Empty
+  | InterruptRequested =>
+      match durable_demand current with
+      | DurableNonEmpty =>
+          Some (with_interrupt current InterruptWasRequested)
+      | DurableEmpty => None
+      end
 
-  | PreemptedDemand, WebhookArrives        => Some PreemptedDemand
-  | PreemptedDemand, DurableDemandRecorded => Some PreemptedDemand
-  | PreemptedDemand, InterruptRequested    => Some PreemptedDemand
-  | PreemptedDemand, HandlerDone           => Some PreemptedDemand
-  | PreemptedDemand, DurableDemandDrained  => Some Empty
+  | HandlerDone =>
+      match legacy_demand current with
+      | LegacyNonEmpty => Some (with_legacy current LegacyEmpty)
+      | LegacyEmpty => None
+      end
 
-  | _,               _                     => None
+  | DurableDemandDrained =>
+      match durable_demand current with
+      | DurableNonEmpty => Some (with_durable current DurableEmpty)
+      | DurableEmpty => None
+      end
+
+  | WorkerTurnStart =>
+      match legacy_demand current, durable_demand current with
+      | LegacyEmpty, DurableEmpty => Some current
+      | _, _ => None
+      end
   end.
 
-Python File Extraction handler_preemption "transition".
+Python File Extraction handler_preemption
+  "empty_state legacy_state durable_state preempted_durable_state mixed_state transition".
 
 (** * Proved invariants *)
 
-(** [worker_blocked_when_nonempty]: [WorkerTurnStart] is rejected from
-    [NonEmpty].  This is the core guarantee — a worker must not start
-    a new provider turn while the webhook interrupt blocker is non-empty.
-    The worker yields at every turn boundary when [has_untriaged()]
-    returns true, blocking until [wait_for_inbox_drain()] signals
-    that all pending handlers and handler-owned rescope work have
-    finished. *)
-Lemma worker_blocked_when_nonempty :
-  transition NonEmpty WorkerTurnStart = None.
+Lemma worker_blocked_when_legacy_nonempty :
+  transition legacy_state WorkerTurnStart = None.
 Proof.
   reflexivity.
 Qed.
 
-(** [worker_blocked_until_durable_demand_drains]: [WorkerTurnStart] is rejected
-    while durable webhook/comment demand exists.  This prevents the worker
-    release/reacquire race: once demand is committed to durable state, no new
-    worker provider turn may start until that demand drains, regardless of
-    whether provider interruption has already been requested. *)
 Lemma worker_blocked_until_durable_demand_drains :
-  transition DurableDemand WorkerTurnStart = None /\
-  transition PreemptedDemand WorkerTurnStart = None.
-Proof.
-  split; reflexivity.
-Qed.
-
-(** [interrupt_requires_durable_demand]: [InterruptRequested] is rejected from
-    [Empty] and [NonEmpty].  The interrupt RPC cannot be the first
-    correctness step; demand must be recorded durably before cancellation is
-    requested. *)
-Lemma interrupt_requires_durable_demand :
-  transition Empty    InterruptRequested = None /\
-  transition NonEmpty InterruptRequested = None.
-Proof.
-  split; reflexivity.
-Qed.
-
-(** [durable_demand_precedes_preempted_demand]: recording demand moves to
-    [DurableDemand], and only then can [InterruptRequested] move to
-    [PreemptedDemand]. *)
-Lemma durable_demand_precedes_preempted_demand :
-  transition Empty         DurableDemandRecorded = Some DurableDemand /\
-  transition DurableDemand InterruptRequested    = Some PreemptedDemand.
-Proof.
-  split; reflexivity.
-Qed.
-
-(** [handler_done_rejected_from_empty]: [HandlerDone] is rejected from
-    [Empty].  An [exit_untriaged()] call without a matching
-    [enter_untriaged()] is a count underflow — the runtime logs a
-    warning and refuses the decrement.  This proves the underflow
-    check is correct: the FSM also rejects it. *)
-Lemma handler_done_rejected_from_empty :
-  transition Empty HandlerDone = None.
-Proof.
-  reflexivity.
-Qed.
-
-(** [handler_done_preserves_durable_gate]: a handler may finish while durable
-    demand remains pending.  The legacy untriaged counter is count-aware at
-    runtime, but [HandlerDone] must not clear durable scheduler priority. *)
-Lemma handler_done_preserves_durable_gate :
-  transition DurableDemand   HandlerDone = Some DurableDemand /\
-  transition PreemptedDemand HandlerDone = Some PreemptedDemand.
-Proof.
-  split; reflexivity.
-Qed.
-
-(** [durable_drain_preserves_legacy_gate]: durable demand can drain while the
-    legacy untriaged inbox still has handlers in flight.  The durable drain
-    event must not unblock worker turns while legacy demand remains. *)
-Lemma durable_drain_preserves_legacy_gate :
-  transition NonEmpty DurableDemandDrained = Some NonEmpty.
-Proof.
-  reflexivity.
-Qed.
-
-(** [worker_turn_proceeds_when_empty]: [WorkerTurnStart] from [Empty]
-    yields [Some Empty].  When no untriaged webhooks are pending, the
-    worker proceeds to its next provider turn without yielding.  The
-    state remains [Empty] — a worker turn does not change the inbox
-    state. *)
-Lemma worker_turn_proceeds_when_empty :
-  transition Empty WorkerTurnStart = Some Empty.
-Proof.
-  reflexivity.
-Qed.
-
-(** [webhook_arrival_always_accepted]: [WebhookArrives] is accepted
-    from both [Empty] and [NonEmpty], always yielding [NonEmpty].
-    A new webhook can always enter the inbox regardless of whether
-    other untriaged webhooks are already pending. *)
-Lemma webhook_arrival_always_accepted :
-  transition Empty           WebhookArrives = Some NonEmpty /\
-  transition NonEmpty        WebhookArrives = Some NonEmpty /\
-  transition DurableDemand   WebhookArrives = Some DurableDemand /\
-  transition PreemptedDemand WebhookArrives = Some PreemptedDemand.
+  transition durable_state WorkerTurnStart = None /\
+  transition preempted_durable_state WorkerTurnStart = None /\
+  transition mixed_state WorkerTurnStart = None.
 Proof.
   repeat split; reflexivity.
+Qed.
+
+Lemma worker_admission_ignores_interrupt_state :
+  transition {|
+    legacy_demand := LegacyEmpty;
+    durable_demand := DurableEmpty;
+    provider_interrupt := InterruptWasRequested
+  |} WorkerTurnStart =
+  Some {|
+    legacy_demand := LegacyEmpty;
+    durable_demand := DurableEmpty;
+    provider_interrupt := InterruptWasRequested
+  |}.
+Proof.
+  reflexivity.
+Qed.
+
+Lemma interrupt_requires_durable_demand :
+  transition empty_state InterruptRequested = None /\
+  transition legacy_state InterruptRequested = None.
+Proof.
+  split; reflexivity.
+Qed.
+
+Lemma durable_demand_precedes_interrupt_request :
+  transition empty_state DurableDemandRecorded = Some durable_state /\
+  transition durable_state InterruptRequested = Some preempted_durable_state.
+Proof.
+  split; reflexivity.
+Qed.
+
+Lemma handler_done_rejected_without_legacy_demand :
+  transition empty_state HandlerDone = None /\
+  transition durable_state HandlerDone = None.
+Proof.
+  split; reflexivity.
+Qed.
+
+Lemma handler_done_clears_only_legacy_demand :
+  transition mixed_state HandlerDone = Some {|
+    legacy_demand := LegacyEmpty;
+    durable_demand := DurableNonEmpty;
+    provider_interrupt := InterruptWasRequested
+  |}.
+Proof.
+  reflexivity.
+Qed.
+
+Lemma durable_drain_clears_only_durable_demand :
+  transition mixed_state DurableDemandDrained = Some {|
+    legacy_demand := LegacyNonEmpty;
+    durable_demand := DurableEmpty;
+    provider_interrupt := InterruptWasRequested
+  |}.
+Proof.
+  reflexivity.
+Qed.
+
+Lemma worker_turn_proceeds_when_demands_empty :
+  transition empty_state WorkerTurnStart = Some empty_state.
+Proof.
+  reflexivity.
+Qed.
+
+Lemma webhook_arrival_preserves_durable_demand :
+  transition durable_state WebhookArrives = Some {|
+    legacy_demand := LegacyNonEmpty;
+    durable_demand := DurableNonEmpty;
+    provider_interrupt := InterruptNotRequested
+  |}.
+Proof.
+  reflexivity.
+Qed.
+
+Lemma durable_record_preserves_legacy_demand :
+  transition legacy_state DurableDemandRecorded = Some {|
+    legacy_demand := LegacyNonEmpty;
+    durable_demand := DurableNonEmpty;
+    provider_interrupt := InterruptNotRequested
+  |}.
+Proof.
+  reflexivity.
 Qed.
