@@ -1,9 +1,11 @@
+import json
 import logging
 import re
 import subprocess
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -322,6 +324,57 @@ def _review_lane_key(repo: str, pr_number: int, root_comment_id: int) -> str:
 
 def _issue_lane_key(repo: str, pr_number: int) -> str:
     return f"issues:{repo}:{pr_number}"
+
+
+def _comment_created_at(comment: dict[str, Any]) -> str:
+    """Return a stable GitHub timestamp for FIFO ordering."""
+    created_at = comment.get("created_at") or comment.get("updated_at")
+    if created_at:
+        return str(created_at)
+    return datetime.now(tz=UTC).isoformat()
+
+
+def _enqueue_pr_comment_webhook(
+    *,
+    repo_cfg: RepoConfig,
+    repo: str,
+    pr_number: int,
+    comment_type: str,
+    comment: dict[str, Any],
+    author: str,
+    is_bot: bool,
+    body: str,
+    delivery_id: str | None,
+    payload: dict[str, Any],
+) -> None:
+    """Persist one normalized PR comment webhook before acting on it."""
+    comment_id = comment.get("id")
+    if delivery_id is None or comment_id is None:
+        return
+    FidoStore(repo_cfg.work_dir).enqueue_pr_comment(
+        delivery_id=delivery_id,
+        repo=repo,
+        pr_number=pr_number,
+        comment_type=comment_type,
+        comment_id=int(comment_id),
+        author=author,
+        is_bot=is_bot,
+        body=body,
+        github_created_at=_comment_created_at(comment),
+        payload_json=json.dumps(
+            {
+                "event": (
+                    "pull_request_review_comment"
+                    if comment_type == "pulls"
+                    else "issue_comment"
+                ),
+                "delivery_id": delivery_id,
+                "payload": payload,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
 
 
 def _review_outcome(category: str) -> oracle.ReviewReplyOutcome:
@@ -752,6 +805,18 @@ def dispatch(
             cmd = wct_oracle.translate(wev)
             assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
             assert isinstance(cmd.cmd_kind, wct_oracle.ReviewLine), "translate_total"
+            _enqueue_pr_comment_webhook(
+                repo_cfg=repo_cfg,
+                repo=repo,
+                pr_number=number,
+                comment_type="pulls",
+                comment=comment,
+                author=user,
+                is_bot=is_bot,
+                body=comment_body,
+                delivery_id=delivery_id,
+                payload=payload,
+            )
         return Action(
             prompt=f"Review comment on PR #{number} by {user} ({'bot' if is_bot else 'human/owner'}):\n\n{comment_body}",
             reply_to={
@@ -797,6 +862,18 @@ def dispatch(
             cmd = wct_oracle.translate(wev)
             assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
             assert isinstance(cmd.cmd_kind, wct_oracle.TopLevelPR), "translate_total"
+            _enqueue_pr_comment_webhook(
+                repo_cfg=repo_cfg,
+                repo=repo,
+                pr_number=number,
+                comment_type="issues",
+                comment=comment,
+                author=user,
+                is_bot=is_bot,
+                body=comment_body,
+                delivery_id=delivery_id,
+                payload=payload,
+            )
         return Action(
             prompt=f"PR top-level comment on #{number} by {user}:\n\n{comment_body}",
             reply_to=None,  # top-level comments use issues API, not pulls

@@ -1270,6 +1270,85 @@ class TestDispatchReviewComment:
         assert result.reply_to["author"] == "owner"
         assert result.reply_to["comment_type"] == "pulls"
 
+    def test_review_comment_webhook_enqueues_fifo_record(self, tmp_path: Path) -> None:
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        payload = {
+            **_payload(),
+            "action": "created",
+            "comment": {
+                "id": 125,
+                "body": "please keep this durable",
+                "created_at": "2026-04-30T12:00:00Z",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com/comment",
+                "path": "test.py",
+                "line": 1,
+                "diff_hunk": "@@ -1 +1 @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+
+        result = dispatch(
+            "pull_request_review_comment",
+            payload,
+            cfg,
+            repo_cfg,
+            delivery_id="delivery-review-125",
+        )
+
+        assert result is not None
+        records = FidoStore(tmp_path).pending_pr_comments(repo="owner/repo")
+        assert len(records) == 1
+        record = records[0]
+        assert record.delivery_id == "delivery-review-125"
+        assert record.pr_number == 5
+        assert record.comment_type == "pulls"
+        assert record.comment_id == 125
+        assert record.author == "owner"
+        assert record.body == "please keep this durable"
+        assert record.github_created_at == "2026-04-30T12:00:00Z"
+        assert record.payload_json
+
+    def test_review_comment_webhook_deduplicates_fifo_record(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        payload = {
+            **_payload(),
+            "action": "created",
+            "comment": {
+                "id": 126,
+                "body": "only once",
+                "created_at": "2026-04-30T12:00:00Z",
+                "user": {"login": "owner"},
+                "html_url": "https://example.com/comment",
+                "path": "test.py",
+                "line": 1,
+                "diff_hunk": "@@ -1 +1 @@",
+            },
+            "pull_request": {"number": 5, "title": "My PR", "body": ""},
+        }
+
+        dispatch(
+            "pull_request_review_comment",
+            payload,
+            cfg,
+            repo_cfg,
+            delivery_id="delivery-review-126-a",
+        )
+        dispatch(
+            "pull_request_review_comment",
+            payload,
+            cfg,
+            repo_cfg,
+            delivery_id="delivery-review-126-b",
+        )
+
+        records = FidoStore(tmp_path).pending_pr_comments(repo="owner/repo")
+        assert [record.comment_id for record in records] == [126]
+
     def test_self_comment_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
         payload = {
@@ -1377,6 +1456,49 @@ class TestDispatchIssueComment:
         )
         assert result.thread["author"] == "owner"
         assert result.thread["comment_type"] == "issues"
+
+    def test_pr_issue_comment_webhook_enqueues_fifo_record(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        payload = {
+            **_payload(),
+            "action": "created",
+            "comment": {
+                "id": 457,
+                "body": "top-level durability",
+                "created_at": "2026-04-30T12:01:00Z",
+                "user": {"login": "owner"},
+                "html_url": "https://github.com/owner/repo/pull/10#issuecomment-457",
+            },
+            "issue": {
+                "number": 10,
+                "title": "test pr",
+                "body": "desc",
+                "pull_request": {"url": "https://api.github.com/..."},
+            },
+        }
+
+        result = dispatch(
+            "issue_comment",
+            payload,
+            cfg,
+            repo_cfg,
+            delivery_id="delivery-issue-457",
+        )
+
+        assert result is not None
+        records = FidoStore(tmp_path).pending_pr_comments(repo="owner/repo")
+        assert len(records) == 1
+        record = records[0]
+        assert record.delivery_id == "delivery-issue-457"
+        assert record.pr_number == 10
+        assert record.comment_type == "issues"
+        assert record.comment_id == 457
+        assert record.author == "owner"
+        assert record.body == "top-level durability"
+        assert record.github_created_at == "2026-04-30T12:01:00Z"
 
     def test_non_pr_ignored(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
