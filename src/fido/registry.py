@@ -234,6 +234,13 @@ class WorkerRegistry:
         if thread:
             thread.abort_task()
 
+    def recover_provider(self, repo_name: str) -> bool:
+        """Recover the attached provider session for *repo_name*, if present."""
+        thread = self._threads.get(repo_name)
+        if thread is None:
+            return False
+        return thread.recover_provider()
+
     def report_activity(
         self,
         repo_name: str,

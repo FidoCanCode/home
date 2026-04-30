@@ -962,6 +962,10 @@ class ProviderAgent(Protocol):
         """Stop and detach any currently attached persistent session."""
         ...
 
+    def recover_session(self) -> bool:
+        """Recover the currently attached persistent session, if any."""
+        ...
+
     def run_turn(
         self,
         content: str,

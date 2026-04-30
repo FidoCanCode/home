@@ -3659,6 +3659,14 @@ class WorkerThread(threading.Thread):
         with self._provider_lock:
             return self._provider
 
+    def recover_provider(self) -> bool:
+        """Recover the attached provider session, if any."""
+        with self._provider_lock:
+            provider = self._provider
+        if provider is None:
+            return False
+        return provider.agent.recover_session()
+
     @property
     def session_owner(self) -> str | None:
         """Name of the thread currently holding the provider session lock, or ``None``.

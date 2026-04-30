@@ -159,6 +159,20 @@ class TestWorkerRegistry:
         reg.abort_task("unknown/repo")  # must not raise
         factory.return_value.abort_task.assert_not_called()
 
+    def test_recover_provider_calls_thread_recover_provider(
+        self, tmp_path: Path
+    ) -> None:
+        reg, factory = self._make_registry()
+        factory.return_value.recover_provider.return_value = True
+        reg.start(_repo("foo/bar", tmp_path))
+        assert reg.recover_provider("foo/bar") is True
+        factory.return_value.recover_provider.assert_called_once_with()
+
+    def test_recover_provider_unknown_repo_returns_false(self) -> None:
+        reg, factory = self._make_registry()
+        assert reg.recover_provider("unknown/repo") is False
+        factory.return_value.recover_provider.assert_not_called()
+
     def test_stop_and_join_default_timeout(self, tmp_path: Path) -> None:
         reg, factory = self._make_registry()
         reg.start(_repo("foo/bar", tmp_path))

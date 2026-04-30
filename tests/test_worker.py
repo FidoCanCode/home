@@ -13187,6 +13187,20 @@ class TestWorkerThread:
         assert wt.detach_provider() is provider
         assert wt.current_provider() is None
 
+    def test_recover_provider_returns_false_without_provider(
+        self, tmp_path: Path
+    ) -> None:
+        wt = self._make_thread(tmp_path)
+        wt.detach_provider()
+        assert wt.recover_provider() is False
+
+    def test_recover_provider_delegates_to_provider_agent(self, tmp_path: Path) -> None:
+        provider = MagicMock()
+        provider.agent.recover_session.return_value = True
+        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), provider=provider)
+        assert wt.recover_provider() is True
+        provider.agent.recover_session.assert_called_once_with()
+
     def test_session_setter_recreates_provider_when_detached(
         self, tmp_path: Path
     ) -> None:
