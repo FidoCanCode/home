@@ -459,23 +459,105 @@ let is_std_positive_ref r name =
   global_path_has_suffix r (".PArith.BinPos.Pos." ^ name) ||
   global_path_has_suffix r (".PArith.BinPosDef.Pos." ^ name)
 
-let primitive_comparison_operators r =
-  if is_std_bool_ref r "eqb" || is_std_nat_ref r "eqb" ||
-     is_std_positive_ref r "eqb" || is_std_ascii_ref r "eqb" ||
-     is_std_string_ref r "eqb"
-  then Some ("==", "!=")
-  else if is_std_nat_ref r "leb" || is_std_positive_ref r "leb" ||
-          is_std_ascii_ref r "leb" || is_std_string_ref r "leb"
-  then Some ("<=", ">")
-  else if is_std_nat_ref r "ltb" || is_std_positive_ref r "ltb" ||
-          is_std_ascii_ref r "ltb" || is_std_string_ref r "ltb"
-  then Some ("<", ">=")
-  else None
+let is_std_bool_true_ref r =
+  global_path_has_suffix r ".Init.Datatypes.true"
 
-let is_std_primitive_compare_ref r =
-  match primitive_comparison_operators r with
-  | Some _ -> true
+let is_std_bool_false_ref r =
+  global_path_has_suffix r ".Init.Datatypes.false"
+
+let std_byte_constructor_value r =
+  let name = global_basename r in
+  if String.length name = 3 && name.[0] = 'x' then
+    int_of_string_opt ("0x" ^ String.sub name 1 2)
+  else
+    None
+
+let is_std_byte_cons_ref r =
+  match std_byte_constructor_value r with
+  | Some n -> n >= 0 && n <= 255
   | None -> false
+
+type stdlib_type_ref =
+  | StdlibStringType
+  | StdlibAsciiType
+  | StdlibByteType
+  | StdlibPrimStringType
+  | StdlibNatType
+  | StdlibPositiveType
+  | StdlibNType
+  | StdlibZType
+  | StdlibQType
+  | StdlibRealType
+  | StdlibOptionType
+  | StdlibListType
+  | StdlibProdType
+  | StdlibPositiveMapType
+  | StdlibPositiveSetType
+  | StdlibStringMapType
+  | StdlibStringSetType
+  | StdlibBoolType
+
+type stdlib_constructor_ref =
+  | StdlibStringEmpty
+  | StdlibStringCons
+  | StdlibAsciiCons
+  | StdlibByteCons of int
+  | StdlibNatZero
+  | StdlibNatSucc
+  | StdlibPositiveXH
+  | StdlibPositiveXO
+  | StdlibPositiveXI
+  | StdlibNZero
+  | StdlibNPos
+  | StdlibZZero
+  | StdlibZPos
+  | StdlibZNeg
+  | StdlibQMake
+  | StdlibOptionNone
+  | StdlibOptionSome
+  | StdlibListNil
+  | StdlibListCons
+  | StdlibProdPair
+  | StdlibBoolTrue
+  | StdlibBoolFalse
+
+type stdlib_primitive_comparison =
+  | StdlibCompareEq
+  | StdlibCompareLe
+  | StdlibCompareLt
+
+type stdlib_term_ref =
+  | StdlibBoolOperation of string
+  | StdlibPrimitiveComparison of stdlib_primitive_comparison
+  | StdlibListApp
+  | StdlibProdFst
+  | StdlibProdSnd
+  | StdlibPositiveMapOperation of string
+  | StdlibStringMapOperation of string
+  | StdlibPositiveSetOperation of string
+  | StdlibStringSetOperation of string
+
+type stdlib_ref =
+  | StdlibTypeRef of stdlib_type_ref
+  | StdlibConstructorRef of stdlib_constructor_ref
+  | StdlibTermRef of stdlib_term_ref
+
+let stdlib_map_operation_names =
+  ["empty"; "add"; "remove"; "find"; "mem"; "cardinal"; "elements"; "fold"]
+
+let stdlib_set_operation_names =
+  [
+    "empty";
+    "add";
+    "remove";
+    "mem";
+    "union";
+    "inter";
+    "diff";
+    "cardinal";
+    "elements";
+    "fold";
+  ]
 
 let is_positive_map_type_ref r =
   global_path_has_suffix r ".FSets.FMapPositive.PositiveMap.t"
@@ -505,6 +587,152 @@ let is_string_set_ref r name =
   let p = global_path r in
   has_suffix p ("." ^ name) && string_contains p ".StringSet."
 
+let rec classify_first_matching_stdlib_ref r = function
+  | [] -> None
+  | (matches, classified_ref) :: rest ->
+      (match matches r with
+       | true -> Some classified_ref
+       | false -> classify_first_matching_stdlib_ref r rest)
+
+let stdlib_ref_matches_any r predicates =
+  List.exists (fun predicate -> predicate r) predicates
+
+let classify_named_stdlib_operation ref_match operations =
+  List.find_opt ref_match operations
+
+let classify_stdlib_type_ref r =
+  classify_first_matching_stdlib_ref r [
+    (is_std_string_type_ref, StdlibStringType);
+    (is_std_ascii_type_ref, StdlibAsciiType);
+    (is_std_byte_type_ref, StdlibByteType);
+    (is_prim_string_type_ref, StdlibPrimStringType);
+    (is_std_nat_type_ref, StdlibNatType);
+    (is_std_positive_type_ref, StdlibPositiveType);
+    (is_std_N_type_ref, StdlibNType);
+    (is_std_Z_type_ref, StdlibZType);
+    (is_std_Q_type_ref, StdlibQType);
+    (is_std_real_type_ref, StdlibRealType);
+    (is_std_option_type_ref, StdlibOptionType);
+    (is_std_list_type_ref, StdlibListType);
+    (is_std_prod_type_ref, StdlibProdType);
+    (is_positive_map_type_ref, StdlibPositiveMapType);
+    (is_positive_set_type_ref, StdlibPositiveSetType);
+    (is_string_map_type_ref, StdlibStringMapType);
+    (is_string_set_type_ref, StdlibStringSetType);
+    (is_std_bool_type_ref, StdlibBoolType);
+  ]
+
+let classify_stdlib_constructor_ref r =
+  match std_byte_constructor_value r with
+  | Some n when n >= 0 && n <= 255 -> Some (StdlibByteCons n)
+  | Some _ | None ->
+      classify_first_matching_stdlib_ref r [
+        (is_std_string_empty_ref, StdlibStringEmpty);
+        (is_std_string_cons_ref, StdlibStringCons);
+        (is_std_ascii_cons_ref, StdlibAsciiCons);
+        (is_std_nat_zero_ref, StdlibNatZero);
+        (is_std_nat_succ_ref, StdlibNatSucc);
+        (is_std_positive_xh_ref, StdlibPositiveXH);
+        (is_std_positive_xo_ref, StdlibPositiveXO);
+        (is_std_positive_xi_ref, StdlibPositiveXI);
+        (is_std_N_zero_ref, StdlibNZero);
+        (is_std_N_pos_ref, StdlibNPos);
+        (is_std_Z_zero_ref, StdlibZZero);
+        (is_std_Z_pos_ref, StdlibZPos);
+        (is_std_Z_neg_ref, StdlibZNeg);
+        (is_std_Q_make_ref, StdlibQMake);
+        (is_std_option_none_ref, StdlibOptionNone);
+        (is_std_option_some_ref, StdlibOptionSome);
+        (is_std_list_nil_ref, StdlibListNil);
+        (is_std_list_cons_ref, StdlibListCons);
+        (is_std_prod_pair_ref, StdlibProdPair);
+        (is_std_bool_true_ref, StdlibBoolTrue);
+        (is_std_bool_false_ref, StdlibBoolFalse);
+      ]
+
+let classify_stdlib_primitive_comparison_ref r =
+  let matches_name name predicates =
+    fun r ->
+      stdlib_ref_matches_any r
+        (List.map (fun predicate -> fun r -> predicate r name) predicates)
+  in
+  classify_first_matching_stdlib_ref r [
+    (matches_name "eqb"
+       [is_std_bool_ref; is_std_nat_ref; is_std_positive_ref; is_std_ascii_ref;
+        is_std_string_ref],
+     StdlibCompareEq);
+    (matches_name "leb"
+       [is_std_nat_ref; is_std_positive_ref; is_std_ascii_ref; is_std_string_ref],
+     StdlibCompareLe);
+    (matches_name "ltb"
+       [is_std_nat_ref; is_std_positive_ref; is_std_ascii_ref; is_std_string_ref],
+     StdlibCompareLt);
+  ]
+
+let classify_stdlib_term_ref r =
+  let classify_operation ref_match make operations =
+    Option.map make (classify_named_stdlib_operation ref_match operations)
+  in
+  match classify_first_matching_stdlib_ref r [
+    ((fun r -> is_std_bool_ref r "negb"), StdlibBoolOperation "negb");
+    ((fun r -> is_std_bool_ref r "andb"), StdlibBoolOperation "andb");
+    ((fun r -> is_std_bool_ref r "orb"), StdlibBoolOperation "orb");
+    ((fun r -> is_std_bool_ref r "eqb"), StdlibBoolOperation "eqb");
+  ] with
+  | Some _ as term_ref -> term_ref
+  | None ->
+    match classify_stdlib_primitive_comparison_ref r with
+    | Some comparison -> Some (StdlibPrimitiveComparison comparison)
+    | None ->
+        match classify_first_matching_stdlib_ref r [
+          (is_std_list_app_ref, StdlibListApp);
+          (is_std_prod_fst_ref, StdlibProdFst);
+          (is_std_prod_snd_ref, StdlibProdSnd);
+        ] with
+        | Some _ as term_ref -> term_ref
+        | None ->
+            (match classify_operation (is_positive_map_ref r)
+                     (fun name -> StdlibPositiveMapOperation name)
+                     stdlib_map_operation_names with
+             | Some _ as operation -> operation
+             | None ->
+                 (match classify_operation (is_string_map_ref r)
+                          (fun name -> StdlibStringMapOperation name)
+                          stdlib_map_operation_names with
+                  | Some _ as operation -> operation
+                  | None ->
+                      (match classify_operation (is_positive_set_ref r)
+                               (fun name -> StdlibPositiveSetOperation name)
+                               stdlib_set_operation_names with
+                       | Some _ as operation -> operation
+                       | None ->
+                           classify_operation (is_string_set_ref r)
+                             (fun name -> StdlibStringSetOperation name)
+                             stdlib_set_operation_names)))
+
+let primitive_comparison_operators_of_ref = function
+  | StdlibCompareEq -> ("==", "!=")
+  | StdlibCompareLe -> ("<=", ">")
+  | StdlibCompareLt -> ("<", ">=")
+
+let primitive_comparison_operators r =
+  match classify_stdlib_term_ref r with
+  | Some (StdlibBoolOperation "eqb") -> Some ("==", "!=")
+  | Some (StdlibPrimitiveComparison comparison) ->
+      Some (primitive_comparison_operators_of_ref comparison)
+  | Some _ | None -> None
+
+let classify_stdlib_ref r =
+  match classify_stdlib_type_ref r with
+  | Some type_ref -> Some (StdlibTypeRef type_ref)
+  | None ->
+      (match classify_stdlib_constructor_ref r with
+       | Some constructor_ref -> Some (StdlibConstructorRef constructor_ref)
+       | None ->
+           Option.map
+             (fun term_ref -> StdlibTermRef term_ref)
+             (classify_stdlib_term_ref r))
+
 let is_std_collection_module_name name =
   name = "PositiveMap" || name = "PositiveSet" ||
   name = "StringMap" || name = "StringSet" ||
@@ -518,6 +746,7 @@ type lowering_family =
   | LoweringBool
   | LoweringPrimitiveComparison
   | LoweringList
+  | LoweringProduct
   | LoweringPositiveMap
   | LoweringStringMap
   | LoweringPositiveSet
@@ -529,6 +758,7 @@ type lowering_ref_match =
   | LoweringBoolRef of string
   | LoweringPrimitiveCompareRef
   | LoweringListAppRef
+  | LoweringProdRef of string
   | LoweringPositiveMapRef of string
   | LoweringStringMapRef of string
   | LoweringPositiveSetRef of string
@@ -611,6 +841,10 @@ let primitive_collection_lowering_rules =
       "primitive comparison" [2] (LoweringEmitInfix "<compare>");
     lowering_rule LoweringListAppRef LoweringList "List.app" [2]
       (LoweringEmitInfix "+");
+    lowering_rule (LoweringProdRef "fst") LoweringProduct "prod.fst" [1]
+      (LoweringEmitIndex 0);
+    lowering_rule (LoweringProdRef "snd") LoweringProduct "prod.snd" [1]
+      (LoweringEmitIndex 1);
   ] @
   lowering_rules_for_operations
     (fun name -> LoweringPositiveMapRef name)
@@ -625,20 +859,42 @@ let primitive_collection_lowering_rules =
     (fun name -> LoweringStringSetRef name)
     LoweringStringSet "StringSet" set_lowering_specs
 
-let lowering_rule_matches r rule =
-  match rule.lowering_match with
-  | LoweringBoolRef name -> is_std_bool_ref r name
-  | LoweringPrimitiveCompareRef -> is_std_primitive_compare_ref r
-  | LoweringListAppRef -> is_std_list_app_ref r
-  | LoweringPositiveMapRef name -> is_positive_map_ref r name
-  | LoweringStringMapRef name -> is_string_map_ref r name
-  | LoweringPositiveSetRef name -> is_positive_set_ref r name
-  | LoweringStringSetRef name -> is_string_set_ref r name
-  | LoweringMarkerRef marker -> is_custom r && String.equal (find_custom r) marker
-  | LoweringRecordFieldRef _ -> false
+let lowering_match_matches_stdlib_term lowering_match term_ref =
+  match lowering_match, term_ref with
+  | LoweringBoolRef expected, StdlibBoolOperation actual ->
+      String.equal expected actual
+  | LoweringPrimitiveCompareRef, StdlibPrimitiveComparison _ ->
+      true
+  | LoweringListAppRef, StdlibListApp ->
+      true
+  | LoweringProdRef "fst", StdlibProdFst ->
+      true
+  | LoweringProdRef "snd", StdlibProdSnd ->
+      true
+  | LoweringPositiveMapRef expected, StdlibPositiveMapOperation actual ->
+      String.equal expected actual
+  | LoweringStringMapRef expected, StdlibStringMapOperation actual ->
+      String.equal expected actual
+  | LoweringPositiveSetRef expected, StdlibPositiveSetOperation actual ->
+      String.equal expected actual
+  | LoweringStringSetRef expected, StdlibStringSetOperation actual ->
+      String.equal expected actual
+  | (LoweringBoolRef _ | LoweringPrimitiveCompareRef | LoweringListAppRef
+    | LoweringProdRef _ | LoweringPositiveMapRef _ | LoweringStringMapRef _
+    | LoweringPositiveSetRef _ | LoweringStringSetRef _
+    | LoweringMarkerRef _ | LoweringRecordFieldRef _), _ ->
+      false
+
+let stdlib_lowering_rule_of_ref r =
+  match classify_stdlib_term_ref r with
+  | Some term_ref ->
+      List.find_opt
+        (fun rule -> lowering_match_matches_stdlib_term rule.lowering_match term_ref)
+        primitive_collection_lowering_rules
+  | None -> None
 
 let lowering_rule_of_ref r =
-  List.find_opt (lowering_rule_matches r) primitive_collection_lowering_rules
+  stdlib_lowering_rule_of_ref r
 
 let lowering_rule_has_family family rule =
   rule.lowering_family = family
@@ -654,39 +910,37 @@ let lowering_rule_is_collection rule =
   lowering_rule_has_family LoweringPositiveSet rule ||
   lowering_rule_has_family LoweringStringSet rule
 
+let lowering_rule_is_product rule =
+  lowering_rule_has_family LoweringProduct rule
+
 let lowering_collection_key_kind = function
   | LoweringPositiveMap | LoweringPositiveSet -> Some `Positive
   | LoweringStringMap | LoweringStringSet -> Some `String
   | _ -> None
 
-let lowering_rule_is_primitive_or_collection rule =
-  lowering_rule_is_bool_or_primitive rule || lowering_rule_is_collection rule
+let lowering_rule_is_expression_lowering rule =
+  lowering_rule_is_bool_or_primitive rule || lowering_rule_is_product rule ||
+  lowering_rule_is_collection rule
 
-let primitive_or_collection_lowering_rule_of_ref r =
+let expression_lowering_rule_of_ref r =
   match lowering_rule_of_ref r with
-  | Some rule when lowering_rule_is_primitive_or_collection rule -> Some rule
+  | Some rule when lowering_rule_is_expression_lowering rule -> Some rule
   | Some _ | None -> None
 
-let std_byte_constructor_value r =
-  let name = global_basename r in
-  if String.length name = 3 && name.[0] = 'x' then
-    int_of_string_opt ("0x" ^ String.sub name 1 2)
-  else
-    None
-
-let is_std_byte_cons_ref r =
-  match std_byte_constructor_value r with
-  | Some n -> n >= 0 && n <= 255
-  | None -> false
+let stdlib_type_ref_is_remapped = function
+  | StdlibRealType ->
+      false
+  | (StdlibStringType | StdlibAsciiType | StdlibByteType | StdlibPrimStringType
+    | StdlibNatType | StdlibPositiveType | StdlibNType | StdlibZType
+    | StdlibQType | StdlibOptionType | StdlibListType | StdlibProdType
+    | StdlibPositiveMapType | StdlibPositiveSetType | StdlibStringMapType
+    | StdlibStringSetType | StdlibBoolType) ->
+      true
 
 let is_std_remapped_type_ref r =
-  is_std_string_type_ref r || is_std_ascii_type_ref r || is_std_byte_type_ref r ||
-  is_prim_string_type_ref r || is_std_nat_type_ref r ||
-  is_std_positive_type_ref r || is_std_N_type_ref r || is_std_Z_type_ref r ||
-  is_std_Q_type_ref r || is_std_option_type_ref r || is_std_list_type_ref r ||
-  is_std_prod_type_ref r || is_positive_map_type_ref r ||
-  is_positive_set_type_ref r || is_string_map_type_ref r ||
-  is_string_set_type_ref r || is_std_bool_type_ref r
+  match classify_stdlib_type_ref r with
+  | Some type_ref -> stdlib_type_ref_is_remapped type_ref
+  | None -> false
 
 let is_std_string_type = function
   | Tglob (r, _) -> is_std_string_type_ref r
@@ -731,12 +985,6 @@ let is_std_list_type = function
 let is_std_prod_type = function
   | Tglob (r, _) -> is_std_prod_type_ref r
   | _ -> false
-
-let is_std_bool_true_ref r =
-  global_path_has_suffix r ".Init.Datatypes.true"
-
-let is_std_bool_false_ref r =
-  global_path_has_suffix r ".Init.Datatypes.false"
 
 let is_std_bool_type = function
   | Tglob (r, _) -> is_std_bool_type_ref r
@@ -1731,7 +1979,7 @@ let rec py_expr_precedence expr =
       let app_args = List.filter (fun a -> not (is_erased_arg a)) app_args in
       (match app_head, app_args with
        | MLglob r, _ -> (
-           match primitive_or_collection_lowering_rule_of_ref r with
+           match expression_lowering_rule_of_ref r with
            | Some rule -> lowering_rule_app_precedence rule app_args
            | None when List.length app_args = 2 && is_native_equality_marker_ref r ->
                py_prec_compare
@@ -1828,6 +2076,8 @@ and rendered_lowering_rule_app state env r rule args =
            (lowering_infix_precedence operator)
            (rendered_expr left)
            (rendered_expr right))
+  | LoweringProduct, LoweringEmitIndex index, [pair] ->
+      Some (py_index (rendered_expr pair) (string_of_int index))
   | (LoweringPositiveMap | LoweringStringMap), LoweringEmitLiteral literal, [] ->
       Some (py_rendered (str literal))
   | (LoweringPositiveSet | LoweringStringSet), LoweringEmitLiteral literal, [] ->
@@ -1987,14 +2237,6 @@ and pp_expr state env expr =
             | None -> None)
         | _ -> None
       in
-      let pp_prod_projection r =
-        match all_args with
-        | [pair] when is_std_prod_fst_ref r ->
-            Some (py_index (rendered_expr pair) "0")
-        | [pair] when is_std_prod_snd_ref r ->
-            Some (py_index (rendered_expr pair) "1")
-        | _ -> None
-      in
       let pp_primitive_or_collection_lowering_app r rule =
         rendered_lowering_rule_app state env r rule all_args
       in
@@ -2032,7 +2274,7 @@ and pp_expr state env expr =
       let pp_collection_expr =
         match head with
         | MLglob r -> (
-            match primitive_or_collection_lowering_rule_of_ref r with
+            match expression_lowering_rule_of_ref r with
             | Some rule -> pp_primitive_or_collection_lowering_app r rule
             | None when is_native_equality_marker_ref r ->
                 pp_native_equality_app r
@@ -2040,8 +2282,6 @@ and pp_expr state env expr =
                 pp_constructor_tag_predicate_app r
             | None when is_active_list_membership_predicate (pp_global state Term r) ->
                 pp_list_membership_predicate_app r
-            | None when is_std_prod_fst_ref r || is_std_prod_snd_ref r ->
-                pp_prod_projection r
             | None -> None)
         | _ -> None
       in
@@ -3056,7 +3296,7 @@ let rec pp_statement_expr state env indent = function
                    (pp_rendered_expr state env target)
                    (pp_rendered_expr state env items))
           | MLglob r, _ -> (
-              match primitive_or_collection_lowering_rule_of_ref r with
+              match expression_lowering_rule_of_ref r with
               | Some rule -> (
                   match pp_statement_lowering_rule_app r rule with
                   | Some pp -> pp
@@ -4037,79 +4277,78 @@ let rec pp_type_with state pp_tvar = function
          (e.g. [option → ""]); fall back to [object] in that case.
          Inductive type names are capitalized to match the class names
          emitted by [pp_ind_decl] (PEP 8 PascalCase convention). *)
+      let stdlib_type_ref = classify_stdlib_type_ref r in
+      let marker = marker_of_ast (MLglob r) in
       let name =
-        if is_std_real_type_ref r then extraction_diagnostic_error "PYEX041"
-        else if is_std_bool_type_ref r then "bool"
-        else if is_std_string_type_ref r then "str"
-        else if is_prim_string_type_ref r then "bytes"
-        else if is_std_ascii_type_ref r then "str"
-        else if is_std_byte_type_ref r then "int"
-        else if is_std_nat_type_ref r || is_std_positive_type_ref r ||
-                is_std_N_type_ref r || is_std_Z_type_ref r then "int"
-        else if is_std_Q_type_ref r then "Fraction"
-        else if is_std_option_type_ref r then
-          (match args with
-           | [arg] ->
-               Pp.string_of_ppcmds (pp_type_with state pp_tvar arg) ^ " | None"
-           | _ -> "object | None")
-        else if is_std_list_type_ref r then "list"
-        else if is_std_prod_type_ref r then "tuple"
-        else if is_positive_map_type_ref r then "dict[int, object]"
-        else if is_positive_set_type_ref r then "frozenset[int]"
-        else if is_string_map_type_ref r then "dict[str, object]"
-        else if is_string_set_type_ref r then "frozenset[str]"
-        else if is_custom r && String.equal (find_custom r) marker_io_type then "IO"
-        else if is_custom r && String.equal (find_custom r) marker_mutex_type then "Mutex"
-        else if is_custom r && String.equal (find_custom r) marker_channel_type then "Channel"
-        else if is_custom r && String.equal (find_custom r) marker_future_type then "Future"
-        else if is_custom r then find_custom r
-        else
-          let n = pp_global state Term r in
-          let open GlobRef in
-          match r.glob with
-          | IndRef _ -> capitalize_first n
-          | _        -> n
+        match stdlib_type_ref with
+        | Some StdlibRealType -> extraction_diagnostic_error "PYEX041"
+        | Some StdlibBoolType -> "bool"
+        | Some (StdlibStringType | StdlibAsciiType) -> "str"
+        | Some StdlibPrimStringType -> "bytes"
+        | Some (StdlibByteType | StdlibNatType | StdlibPositiveType
+               | StdlibNType | StdlibZType) -> "int"
+        | Some StdlibQType -> "Fraction"
+        | Some StdlibOptionType ->
+            (match args with
+             | [arg] ->
+                 Pp.string_of_ppcmds (pp_type_with state pp_tvar arg) ^ " | None"
+             | _ -> "object | None")
+        | Some StdlibListType -> "list"
+        | Some StdlibProdType -> "tuple"
+        | Some StdlibPositiveMapType -> "dict[int, object]"
+        | Some StdlibPositiveSetType -> "frozenset[int]"
+        | Some StdlibStringMapType -> "dict[str, object]"
+        | Some StdlibStringSetType -> "frozenset[str]"
+        | None ->
+            (match marker, is_custom r with
+             | Some marker, _ when String.equal marker marker_io_type -> "IO"
+             | Some marker, _ when String.equal marker marker_mutex_type -> "Mutex"
+             | Some marker, _ when String.equal marker marker_channel_type -> "Channel"
+             | Some marker, _ when String.equal marker marker_future_type -> "Future"
+             | _, true -> find_custom r
+             | _, false ->
+                 let n = pp_global state Term r in
+                 let open GlobRef in
+                 match r.glob with
+                 | IndRef _ -> capitalize_first n
+                 | _        -> n)
       in
-      if String.contains name '|' then str name
-      else if String.equal "" name then str "object"
-      else if is_std_list_type_ref r then
-        (match args with
-         | [arg] -> str "list[" ++ pp_type_with state pp_tvar arg ++ str "]"
-         | _ -> str "list[object]")
-      else if is_std_prod_type_ref r then
-        (match args with
-         | [left; right] ->
-             str "tuple[" ++ pp_type_with state pp_tvar left ++ str ", " ++
-             pp_type_with state pp_tvar right ++ str "]"
-         | _ -> str "tuple[object, object]")
-      else if is_positive_map_type_ref r then
-        (match args with
-         | [arg] -> str "dict[int, " ++ pp_type_with state pp_tvar arg ++ str "]"
-         | _ -> str "dict[int, object]")
-      else if is_string_map_type_ref r then
-        (match args with
-         | [arg] -> str "dict[str, " ++ pp_type_with state pp_tvar arg ++ str "]"
-         | _ -> str "dict[str, object]")
-      else if is_custom r && String.equal (find_custom r) marker_io_type then
-        (match args with
-         | [arg] -> str "IO[" ++ pp_type_with state pp_tvar arg ++ str "]"
-         | _ -> str "IO[object]")
-      else if is_custom r && String.equal (find_custom r) marker_mutex_type then
-        str "Mutex"
-      else if is_custom r && String.equal (find_custom r) marker_channel_type then
-        (match args with
-         | [arg] -> str "Channel[" ++ pp_type_with state pp_tvar arg ++ str "]"
-         | _ -> str "Channel[object]")
-      else if is_custom r && String.equal (find_custom r) marker_future_type then
-        (match args with
-         | [arg] -> str "Future[" ++ pp_type_with state pp_tvar arg ++ str "]"
-         | _ -> str "Future[object]")
-      else if is_positive_set_type_ref r || is_string_set_type_ref r then str name
-      else if List.is_empty args then str name
-      else
-        str name ++ str "[" ++
-        prlist_with_sep (fun () -> str ", ") (pp_type_with state pp_tvar) args ++
-        str "]"
+      (match name, stdlib_type_ref, marker, args with
+      | name, _, _, _ when String.contains name '|' -> str name
+      | "", _, _, _ -> str "object"
+      | _, Some StdlibListType, _, [arg] ->
+          str "list[" ++ pp_type_with state pp_tvar arg ++ str "]"
+      | _, Some StdlibListType, _, _ -> str "list[object]"
+      | _, Some StdlibProdType, _, [left; right] ->
+          str "tuple[" ++ pp_type_with state pp_tvar left ++ str ", " ++
+          pp_type_with state pp_tvar right ++ str "]"
+      | _, Some StdlibProdType, _, _ -> str "tuple[object, object]"
+      | _, Some StdlibPositiveMapType, _, [arg] ->
+          str "dict[int, " ++ pp_type_with state pp_tvar arg ++ str "]"
+      | _, Some StdlibPositiveMapType, _, _ -> str "dict[int, object]"
+      | _, Some StdlibStringMapType, _, [arg] ->
+          str "dict[str, " ++ pp_type_with state pp_tvar arg ++ str "]"
+      | _, Some StdlibStringMapType, _, _ -> str "dict[str, object]"
+      | _, Some (StdlibPositiveSetType | StdlibStringSetType), _, _ -> str name
+      | _, _, Some marker, [arg] when String.equal marker marker_io_type ->
+          str "IO[" ++ pp_type_with state pp_tvar arg ++ str "]"
+      | _, _, Some marker, _ when String.equal marker marker_io_type ->
+          str "IO[object]"
+      | _, _, Some marker, _ when String.equal marker marker_mutex_type ->
+          str "Mutex"
+      | _, _, Some marker, [arg] when String.equal marker marker_channel_type ->
+          str "Channel[" ++ pp_type_with state pp_tvar arg ++ str "]"
+      | _, _, Some marker, _ when String.equal marker marker_channel_type ->
+          str "Channel[object]"
+      | _, _, Some marker, [arg] when String.equal marker marker_future_type ->
+          str "Future[" ++ pp_type_with state pp_tvar arg ++ str "]"
+      | _, _, Some marker, _ when String.equal marker marker_future_type ->
+          str "Future[object]"
+      | _, _, _, [] -> str name
+      | _, _, _, _ ->
+          str name ++ str "[" ++
+          prlist_with_sep (fun () -> str ", ") (pp_type_with state pp_tvar) args ++
+          str "]")
   | Tvar i | Tvar' i ->
       (* Emit the TypeVar name corresponding to the [i]-th type parameter.
          The TypeVar declaration itself is emitted by [pp_ind_decl]. *)
@@ -4924,9 +5163,12 @@ let register_inline_term_decl state r a action =
       action
 
 let classify_type_decl r =
-  if is_std_real_type_ref r then TypeDeclError "PYEX041"
-  else if is_custom r || is_std_remapped_type_ref r then TypeDeclSuppress
-  else TypeDeclUnsupported
+  if is_custom r then TypeDeclSuppress
+  else
+    match classify_stdlib_type_ref r with
+    | Some StdlibRealType -> TypeDeclError "PYEX041"
+    | Some type_ref when stdlib_type_ref_is_remapped type_ref -> TypeDeclSuppress
+    | Some _ | None -> TypeDeclUnsupported
 
 let pp_classified_term_decl state env r a typ =
   match register_inline_term_decl state r a (classify_term_decl state r typ) with
