@@ -12,7 +12,7 @@ import sys
 import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -65,6 +65,7 @@ log = logging.getLogger(__name__)
 _PULL_BACKOFF_DELAYS: tuple[int, ...] = (10, 30, 60)
 _PULL_BUDGET_SECONDS: float = 600.0
 _RESTART_EXIT_CODE = 75
+_REQUEST_TIMEOUT_SECONDS = 10.0
 
 # XML namespace URIs for the /status endpoint structural XML.
 _NS_FIDO = "https://fidocancode.dog/fido"
@@ -82,6 +83,26 @@ class PreflightError(RuntimeError):
     Caught by :func:`run` and converted to :exc:`SystemExit` so individual
     preflight functions remain testable without triggering process exit.
     """
+
+
+class FidoHTTPServer(ThreadingHTTPServer):
+    """Threaded webhook server with bounded per-connection reads.
+
+    The standard ``HTTPServer`` handles one request at a time. A client that
+    connects and stalls before sending a full HTTP request can otherwise block
+    every webhook and status request behind it.
+    """
+
+    allow_reuse_address = True
+    block_on_close = False
+    daemon_threads = True
+    request_queue_size = 64
+    request_timeout_seconds = _REQUEST_TIMEOUT_SECONDS
+
+    def get_request(self) -> tuple[Any, Any]:
+        request, client_address = super().get_request()
+        request.settimeout(self.request_timeout_seconds)
+        return request, client_address
 
 
 def _runner_dir() -> Path:
@@ -1346,7 +1367,7 @@ def bootstrap_issue_caches(
 def run(
     *,
     _from_args: Callable[..., Config] = Config.from_args,
-    _HTTPServer: Callable[..., HTTPServer] = HTTPServer,
+    _HTTPServer: Callable[..., HTTPServer] = FidoHTTPServer,
     _make_registry: Callable[..., WorkerRegistry] = make_registry,
     _path_home: Callable[[], Path] = Path.home,
     _basic_config: Callable[..., None] = logging.basicConfig,
