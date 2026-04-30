@@ -799,6 +799,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
     def _preempt_worker_best_effort(self, repo_name: str) -> None:
         """Try to interrupt the current worker after durable demand is recorded."""
+        self.registry.note_durable_demand(repo_name)
         session = self.registry.get_session(repo_name)
         if session is None:
             return

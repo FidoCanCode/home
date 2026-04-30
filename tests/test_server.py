@@ -3082,6 +3082,11 @@ class TestSynchronousPreemption:
             },
         }
 
+    def _record_durable_demand_order(self, call_order: list[str]) -> None:
+        WebhookHandler.registry.note_durable_demand.side_effect = lambda repo: (
+            call_order.append(f"durable:{repo}")
+        )
+
     def test_preempt_fires_before_background_spawn(self, server: tuple) -> None:
         """``session.preempt_worker()`` must be called before ``_fn_spawn_bg``
         for a webhook action that reports durable demand."""
@@ -3090,6 +3095,7 @@ class TestSynchronousPreemption:
         call_order: list[str] = []
 
         mock_session = MagicMock()
+        self._record_durable_demand_order(call_order)
         mock_session.preempt_worker.side_effect = lambda: call_order.append("preempt")
         WebhookHandler.registry.get_session.return_value = mock_session
 
@@ -3108,7 +3114,10 @@ class TestSynchronousPreemption:
 
         status = _post_webhook(url, cfg, "issue_comment", self._issue_comment_payload())
         assert status == 200
-        assert call_order == ["preempt", "spawn"]
+        assert call_order == ["durable:owner/repo", "preempt", "spawn"]
+        WebhookHandler.registry.note_durable_demand.assert_called_once_with(
+            "owner/repo"
+        )
 
     def test_preempt_failure_keeps_enqueued_comment_and_spawns(
         self, server: tuple
@@ -3119,6 +3128,7 @@ class TestSynchronousPreemption:
         call_order: list[str] = []
 
         mock_session = MagicMock()
+        self._record_durable_demand_order(call_order)
         WebhookHandler.registry.get_session.return_value = mock_session
 
         original_spawn = _capturing_spawn_bg
@@ -3144,7 +3154,10 @@ class TestSynchronousPreemption:
         )
 
         assert status == 200
-        assert call_order == ["preempt", "spawn"]
+        assert call_order == ["durable:owner/repo", "preempt", "spawn"]
+        WebhookHandler.registry.note_durable_demand.assert_called_once_with(
+            "owner/repo"
+        )
         WebhookHandler.registry.enter_untriaged.assert_called_with("owner/repo")
         WebhookHandler.registry.recover_provider.assert_not_called()
         queued = FidoStore(cfg.repos["owner/repo"].work_dir).pending_pr_comments(
@@ -3159,6 +3172,7 @@ class TestSynchronousPreemption:
         call_order: list[str] = []
 
         mock_session = MagicMock()
+        self._record_durable_demand_order(call_order)
         WebhookHandler.registry.get_session.return_value = mock_session
         WebhookHandler.registry.recover_provider.side_effect = lambda repo: (
             call_order.append(f"recover:{repo}") or True
@@ -3187,7 +3201,15 @@ class TestSynchronousPreemption:
         )
 
         assert status == 200
-        assert call_order == ["preempt", "recover:owner/repo", "spawn"]
+        assert call_order == [
+            "durable:owner/repo",
+            "preempt",
+            "recover:owner/repo",
+            "spawn",
+        ]
+        WebhookHandler.registry.note_durable_demand.assert_called_once_with(
+            "owner/repo"
+        )
         WebhookHandler.registry.recover_provider.assert_called_once_with("owner/repo")
         WebhookHandler.registry.enter_untriaged.assert_called_with("owner/repo")
         queued = FidoStore(cfg.repos["owner/repo"].work_dir).pending_pr_comments(
@@ -3212,6 +3234,7 @@ class TestSynchronousPreemption:
         }
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
+        WebhookHandler.registry.note_durable_demand.assert_not_called()
         mock_session.preempt_worker.assert_not_called()
 
     def test_no_preempt_when_session_is_none(self, server: tuple) -> None:
