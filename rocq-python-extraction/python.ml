@@ -5156,18 +5156,29 @@ type classified_decl =
   | ClassifiedFix of classified_term_decl list
 
 let classify_term_decl_base state r typ =
-  match () with
-  | _ when is_prop_type typ -> TermDeclSuppressErasedProp
-  | _ when is_runtime_marker_ref r -> TermDeclSuppressRuntimeMarker
-  | _ when is_native_equality_marker_ref r ->
+  match
+    ( is_prop_type typ,
+      is_runtime_marker_ref r,
+      is_native_equality_marker_ref r,
+      is_inline_custom r,
+      rewrite_lowering_rule_of_ref state r,
+      is_custom r )
+  with
+  | true, _, _, _, _, _ -> TermDeclSuppressErasedProp
+  | false, true, _, _, _, _ -> TermDeclSuppressRuntimeMarker
+  | false, false, true, _, _, _ ->
       TermDeclSuppressNativeEqualityMarker
-  | _ when is_inline_custom r -> TermDeclSuppressInlineCustom
-  | _ -> (
-      match rewrite_lowering_rule_of_ref state r, is_custom r with
-      | Some rule, _ when rule.lowering_suppress_declaration ->
-          TermDeclSuppressInlinePrimitive
-      | (Some _ | None), true -> TermDeclEmitCustomAlias (find_custom r)
-      | (Some _ | None), false -> TermDeclEmit)
+  | false, false, false, true, _, _ -> TermDeclSuppressInlineCustom
+  | ( false,
+      false,
+      false,
+      false,
+      Some { lowering_suppress_declaration = true; _ },
+      _ ) ->
+      TermDeclSuppressInlinePrimitive
+  | false, false, false, false, (Some _ | None), true ->
+      TermDeclEmitCustomAlias (find_custom r)
+  | false, false, false, false, (Some _ | None), false -> TermDeclEmit
 
 let classify_term_decl state r a typ =
   match classify_term_decl_base state r typ with
@@ -5212,9 +5223,11 @@ let classify_type_decl r =
   match classify_stdlib_type_ref r, is_custom r with
   | _, true -> TypeDeclSuppressCustomAlias
   | Some StdlibRealType, false -> TypeDeclEmitDiagnostic "PYEX041"
-  | Some type_ref, false when stdlib_type_ref_is_remapped type_ref ->
-      TypeDeclSuppressRemappedStdlib
-  | (Some _ | None), false -> TypeDeclUnsupported
+  | Some type_ref, false -> (
+      match stdlib_type_ref_is_remapped type_ref with
+      | true -> TypeDeclSuppressRemappedStdlib
+      | false -> TypeDeclUnsupported)
+  | None, false -> TypeDeclUnsupported
 
 let classify_term_decl_record state r a typ =
   { term_decl_ref = r;
