@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import logging
 import socket
 import subprocess
 import threading
@@ -3087,6 +3088,15 @@ class TestSynchronousPreemption:
             call_order.append(f"durable:{repo}")
         )
 
+    def _record_background_spawn_order(self, call_order: list[str]) -> None:
+        original_spawn = _capturing_spawn_bg
+
+        def tracking_spawn(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
+            call_order.append("spawn")
+            original_spawn(fn, args)
+
+        WebhookHandler._fn_spawn_bg = staticmethod(tracking_spawn)  # type: ignore[assignment]
+
     def test_preempt_fires_before_background_spawn(self, server: tuple) -> None:
         """``session.preempt_worker()`` must be called before ``_fn_spawn_bg``
         for a webhook action that reports durable demand."""
@@ -3099,13 +3109,7 @@ class TestSynchronousPreemption:
         mock_session.preempt_worker.side_effect = lambda: call_order.append("preempt")
         WebhookHandler.registry.get_session.return_value = mock_session
 
-        original_spawn = _capturing_spawn_bg
-
-        def tracking_spawn(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
-            call_order.append("spawn")
-            original_spawn(fn, args)
-
-        WebhookHandler._fn_spawn_bg = staticmethod(tracking_spawn)  # type: ignore[assignment]
+        self._record_background_spawn_order(call_order)
         WebhookHandler._fn_reply_to_issue_comment = MagicMock(
             return_value=("ANSWER", [])
         )
@@ -3120,7 +3124,7 @@ class TestSynchronousPreemption:
         )
 
     def test_preempt_failure_keeps_enqueued_comment_and_spawns(
-        self, server: tuple
+        self, server: tuple, caplog: pytest.LogCaptureFixture
     ) -> None:
         """A provider interrupt failure must not discard durable webhook demand."""
         url, cfg = server
@@ -3131,27 +3135,22 @@ class TestSynchronousPreemption:
         self._record_durable_demand_order(call_order)
         WebhookHandler.registry.get_session.return_value = mock_session
 
-        original_spawn = _capturing_spawn_bg
-
-        def tracking_spawn(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
-            call_order.append("spawn")
-            original_spawn(fn, args)
-
         def failing_preempt() -> None:
             call_order.append("preempt")
             raise RuntimeError("interrupt failed")
 
         mock_session.preempt_worker.side_effect = failing_preempt
-        WebhookHandler._fn_spawn_bg = staticmethod(tracking_spawn)  # type: ignore[assignment]
+        self._record_background_spawn_order(call_order)
         WebhookHandler._fn_reply_to_issue_comment = MagicMock(
             return_value=("ANSWER", [])
         )
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
 
-        status = _post_webhook(
-            url, cfg, "issue_comment", self._issue_comment_payload(901)
-        )
+        with caplog.at_level(logging.ERROR, logger="fido.server"):
+            status = _post_webhook(
+                url, cfg, "issue_comment", self._issue_comment_payload(901)
+            )
 
         assert status == 200
         assert call_order == ["durable:owner/repo", "preempt", "spawn"]
@@ -3164,8 +3163,16 @@ class TestSynchronousPreemption:
             repo="owner/repo"
         )
         assert [entry.comment_id for entry in queued] == [901]
+        assert (
+            "provider preempt failed for owner/repo after durable webhook enqueue"
+            in caplog.text
+        )
+        assert "provider preempt wedged" not in caplog.text
+        assert "provider recovery requested" not in caplog.text
 
-    def test_preempt_wedge_recovers_provider_and_spawns(self, server: tuple) -> None:
+    def test_preempt_wedge_recovers_provider_and_spawns(
+        self, server: tuple, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """Recoverable provider wedges trigger provider recovery after enqueue."""
         url, cfg = server
 
@@ -3178,27 +3185,22 @@ class TestSynchronousPreemption:
             call_order.append(f"recover:{repo}") or True
         )
 
-        original_spawn = _capturing_spawn_bg
-
-        def tracking_spawn(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
-            call_order.append("spawn")
-            original_spawn(fn, args)
-
         def wedged_preempt() -> None:
             call_order.append("preempt")
             raise provider.ProviderInterruptTimeout("interrupt timed out")
 
         mock_session.preempt_worker.side_effect = wedged_preempt
-        WebhookHandler._fn_spawn_bg = staticmethod(tracking_spawn)  # type: ignore[assignment]
+        self._record_background_spawn_order(call_order)
         WebhookHandler._fn_reply_to_issue_comment = MagicMock(
             return_value=("ANSWER", [])
         )
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
 
-        status = _post_webhook(
-            url, cfg, "issue_comment", self._issue_comment_payload(902)
-        )
+        with caplog.at_level(logging.WARNING, logger="fido.server"):
+            status = _post_webhook(
+                url, cfg, "issue_comment", self._issue_comment_payload(902)
+            )
 
         assert status == 200
         assert call_order == [
@@ -3216,6 +3218,61 @@ class TestSynchronousPreemption:
             repo="owner/repo"
         )
         assert [entry.comment_id for entry in queued] == [902]
+        assert (
+            "provider preempt wedged for owner/repo after durable webhook enqueue "
+            "— recovering provider"
+        ) in caplog.text
+        assert (
+            "provider recovery requested for owner/repo after preempt wedge"
+            in caplog.text
+        )
+        assert "provider preempt failed" not in caplog.text
+
+    def test_preempt_wedge_logs_unavailable_recovery(
+        self, server: tuple, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Recoverable wedges log loudly when no provider recovery is available."""
+        url, cfg = server
+
+        call_order: list[str] = []
+
+        mock_session = MagicMock()
+        self._record_durable_demand_order(call_order)
+        WebhookHandler.registry.get_session.return_value = mock_session
+        WebhookHandler.registry.recover_provider.side_effect = lambda repo: (
+            call_order.append(f"recover:{repo}") or False
+        )
+
+        def wedged_preempt() -> None:
+            call_order.append("preempt")
+            raise provider.ProviderInterruptTimeout("interrupt timed out")
+
+        mock_session.preempt_worker.side_effect = wedged_preempt
+        self._record_background_spawn_order(call_order)
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            return_value=("ANSWER", [])
+        )
+        WebhookHandler._fn_create_task = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+
+        with caplog.at_level(logging.WARNING, logger="fido.server"):
+            status = _post_webhook(
+                url, cfg, "issue_comment", self._issue_comment_payload(903)
+            )
+
+        assert status == 200
+        assert call_order == [
+            "durable:owner/repo",
+            "preempt",
+            "recover:owner/repo",
+            "spawn",
+        ]
+        WebhookHandler.registry.recover_provider.assert_called_once_with("owner/repo")
+        assert (
+            "provider recovery unavailable for owner/repo after preempt wedge"
+            in caplog.text
+        )
+        assert "provider recovery requested" not in caplog.text
 
     def test_no_preempt_for_non_model_action(self, server: tuple) -> None:
         """A PR-merge webhook does not use the model — ``preempt_worker`` must
