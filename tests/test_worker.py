@@ -11422,6 +11422,85 @@ class TestHandlePromoteMerge:
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_called_once_with("rhencke/myrepo", 9)
 
+    def test_draft_refuses_pr_ready_when_branch_has_no_diff(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #1194: don't promote a PR whose remote diff is empty."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        gh.get_review_threads.return_value = []
+        completed = [{"id": "t1", "title": "Done", "status": "completed"}]
+        with (
+            patch("fido.tasks.Tasks.list", return_value=completed),
+            patch.object(worker, "_pr_has_real_diff", return_value=False),
+        ):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        gh.pr_ready.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
+        assert result == 0
+
+    def test_changes_requested_refuses_promote_when_branch_has_no_diff(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #1194: same guard fires on the CHANGES_REQUESTED+draft path."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {
+                    "author": {"login": "rhencke"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2026-05-01T10:00:00Z",
+                }
+            ],
+            "commits": [{"committedDate": "2026-05-01T09:00:00Z"}],
+            "isDraft": True,
+        }
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        completed = [{"id": "t1", "title": "Done", "status": "completed"}]
+        with (
+            patch("fido.tasks.Tasks.list", return_value=completed),
+            patch.object(worker, "_pr_has_real_diff", return_value=False),
+        ):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        gh.pr_ready.assert_not_called()
+        assert result == 0
+
+    def test_pr_has_real_diff_returns_true_when_git_reports_diff(
+        self, tmp_path: Path
+    ) -> None:
+        """`git diff --quiet` exit 1 means diff present → True."""
+        worker, _ = self._make_worker(tmp_path)
+        fake_git = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr=""))
+        with patch.object(worker, "_git", fake_git):
+            assert worker._pr_has_real_diff("origin", "fix", "main") is True
+
+    def test_pr_has_real_diff_returns_false_on_clean_diff(self, tmp_path: Path) -> None:
+        """`git diff --quiet` exit 0 means no diff → False."""
+        worker, _ = self._make_worker(tmp_path)
+        fake_git = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+        with patch.object(worker, "_git", fake_git):
+            assert worker._pr_has_real_diff("origin", "fix", "main") is False
+
+    def test_pr_has_real_diff_fails_closed_on_unexpected_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Unknown git exit code → fail closed (False)."""
+        worker, _ = self._make_worker(tmp_path)
+        fake_git = MagicMock(
+            return_value=MagicMock(returncode=128, stdout="", stderr="bad ref")
+        )
+        with patch.object(worker, "_git", fake_git):
+            assert worker._pr_has_real_diff("origin", "fix", "main") is False
+
     def test_draft_with_completed_tasks_adds_reviewer(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)

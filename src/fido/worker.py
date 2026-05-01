@@ -2647,6 +2647,39 @@ class Worker:
                     pr_number,
                 )
 
+    def _pr_has_real_diff(self, remote: str, slug: str, default_branch: str) -> bool:
+        """Return True iff the branch has any file diff vs the default branch.
+
+        Used as a guard before promoting a draft PR to ready-for-review
+        (closes #1194).  A PR whose only commit is the ``wip: start``
+        placeholder, or whose branch has no commits ahead of base, has
+        nothing to review — promoting it advertises broken state to
+        reviewers.
+
+        Compares ``remote/default_branch`` to ``remote/slug`` because
+        that's what reviewers actually see; a local commit not yet pushed
+        does not count.
+
+        Fails closed: any git error returns ``False`` (treat as no diff,
+        do not promote).
+        """
+        diff = self._git(
+            ["diff", "--quiet", f"{remote}/{default_branch}", f"{remote}/{slug}"],
+            check=False,
+        )
+        # `git diff --quiet`: exit 0 = no diff, 1 = diff present.
+        if diff.returncode == 0:
+            return False
+        if diff.returncode == 1:
+            return True
+        log.warning(
+            "_pr_has_real_diff: git diff %s..%s returned %s — treating as no diff",
+            default_branch,
+            slug,
+            diff.returncode,
+        )
+        return False
+
     def _squash_wip_commit(self, remote: str, slug: str, default_branch: str) -> bool:
         """Drop the empty 'wip: start' sentinel if it is the branch root.
 
@@ -3293,6 +3326,14 @@ class Worker:
                 return 0
             promoted_from_draft = False
             if is_draft:
+                if not self._pr_has_real_diff("origin", slug, repo_ctx.default_branch):
+                    log.warning(
+                        "PR #%s: refusing ready_for_review — branch has no diff "
+                        "vs %s (#1194)",
+                        pr_number,
+                        repo_ctx.default_branch,
+                    )
+                    return 0
                 log.info(
                     "PR #%s: changes requested — all addressed, CI passing — marking ready",
                     pr_number,
@@ -3343,6 +3384,14 @@ class Worker:
                 log.info(
                     "PR #%s: work complete but unresolved review threads remain — deferring promote",
                     pr_number,
+                )
+                return 0
+            if not self._pr_has_real_diff("origin", slug, repo_ctx.default_branch):
+                log.warning(
+                    "PR #%s: refusing ready_for_review — branch has no diff "
+                    "vs %s (#1194)",
+                    pr_number,
+                    repo_ctx.default_branch,
                 )
                 return 0
             log.info("PR #%s: work complete, CI green — marking ready", pr_number)
