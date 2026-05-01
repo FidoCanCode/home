@@ -330,11 +330,16 @@ class SessionBackedAgent:
         model: ProviderModel,
         system_prompt: str | None = None,
     ) -> tuple[str, str]:
+        # Route through _prompt_with_recovery so a stale subprocess (BrokenPipe
+        # on stdin write) recovers and retries instead of killing the worker
+        # and leaving the persistent ClaudeSession FSM stuck in Sending.
         session = self._resolve_turn_session(
             model=model,
             session_mode=TurnSessionMode.REUSE,
         )
-        text = session.prompt(content, model=model, system_prompt=system_prompt)
+        text = self._prompt_with_recovery(
+            session, content, model=model, system_prompt=system_prompt
+        )
         session_id = getattr(session, "session_id", None)
         return text, session_id if isinstance(session_id, str) else ""
 
