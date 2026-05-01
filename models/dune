@@ -12,6 +12,7 @@
   coord_index
   concurrency_primitives
   replied_comment_claims
+  reply_outbox_protocol
   task_queue_rescope
   ci_task_lifecycle
   thread_auto_resolve
