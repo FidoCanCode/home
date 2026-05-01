@@ -982,6 +982,10 @@ class TestWorker:
             order.append("ci")
             return False
 
+        def mark_queued_comments(*args, **kwargs):
+            order.append("queued_comments")
+            return False
+
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -998,13 +1002,16 @@ class TestWorker:
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.events.recover_reply_promises", side_effect=mark_recover),
+            patch.object(
+                worker, "handle_queued_comments", side_effect=mark_queued_comments
+            ),
             patch.object(worker, "handle_ci", side_effect=mark_ci),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=False),
             patch.object(worker, "handle_promote_merge", return_value=0),
         ):
             worker.run()
-        assert order[:2] == ["recover", "ci"]
+        assert order[:3] == ["recover", "queued_comments", "ci"]
 
     def test_run_does_not_switch_model_for_carry_over_session(
         self, tmp_path: Path
@@ -6573,6 +6580,7 @@ class TestRunHandleCiIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_ci", mock_handle_ci),
             patch.object(worker, "handle_threads", return_value=False),
         ):
@@ -6598,6 +6606,7 @@ class TestRunHandleCiIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_ci", return_value=True),
         ):
             result = worker.run()
@@ -6620,6 +6629,7 @@ class TestRunHandleCiIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
         ):
@@ -6653,6 +6663,70 @@ class TestRunHandleCiIntegration:
             pytest.raises(RuntimeError),
         ):
             worker.run()
+        mock_handle_ci.assert_not_called()
+
+    def test_queued_comments_drain_before_ci(self, tmp_path: Path) -> None:
+        """Human PR comments in the durable FIFO preempt stale CI provider work."""
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        call_order: list[str] = []
+
+        def record_queued(*_a: object, **_kw: object) -> bool:
+            call_order.append("queued_comments")
+            return False
+
+        def record_ci(*_a: object, **_kw: object) -> bool:
+            call_order.append("ci")
+            return False
+
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", side_effect=record_queued),
+            patch.object(worker, "handle_ci", side_effect=record_ci),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+        ):
+            worker.run()
+
+        assert call_order == ["queued_comments", "ci"]
+
+    def test_ci_not_called_when_queued_comments_handled(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        mock_handle_ci = MagicMock(return_value=True)
+
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=True),
+            patch.object(worker, "handle_ci", mock_handle_ci),
+        ):
+            result = worker.run()
+
+        assert result == 1
         mock_handle_ci.assert_not_called()
 
 
@@ -7872,7 +7946,7 @@ class TestHandleQueuedComments:
 
 
 class TestRunThreadsIntegration:
-    """Tests that Worker.run() calls handle_threads after handle_ci."""
+    """Tests that Worker.run() calls handle_threads after comment/CI checks."""
 
     def _make_gh(self) -> MagicMock:
         gh = MagicMock()
@@ -7916,6 +7990,7 @@ class TestRunThreadsIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", mock_threads),
         ):
@@ -7939,6 +8014,7 @@ class TestRunThreadsIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=True),
         ):
@@ -7962,6 +8038,7 @@ class TestRunThreadsIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=False),
@@ -8302,8 +8379,8 @@ class TestRunRescopeIntegration:
             worker.run()
         mock_rescope.assert_called_once_with()
 
-    def test_rescope_called_before_handle_ci(self, tmp_path: Path) -> None:
-        """rescope_before_pick must execute before handle_ci sees the task list."""
+    def test_rescope_called_before_queued_comments(self, tmp_path: Path) -> None:
+        """rescope_before_pick must execute before queued comments drain."""
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
@@ -8314,8 +8391,8 @@ class TestRunRescopeIntegration:
         def record_rescope() -> None:
             call_order.append("rescope")
 
-        def record_ci(*_a: object, **_kw: object) -> bool:
-            call_order.append("handle_ci")
+        def record_queued_comments(*_a: object, **_kw: object) -> bool:
+            call_order.append("handle_queued_comments")
             return False
 
         with (
@@ -8330,12 +8407,13 @@ class TestRunRescopeIntegration:
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "rescope_before_pick", record_rescope),
-            patch.object(worker, "handle_ci", record_ci),
+            patch.object(worker, "handle_queued_comments", record_queued_comments),
+            patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=False),
         ):
             worker.run()
-        assert call_order == ["rescope", "handle_ci"]
+        assert call_order == ["rescope", "handle_queued_comments"]
 
 
 class TestEnsurePushed:

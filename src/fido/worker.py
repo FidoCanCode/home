@@ -3562,9 +3562,9 @@ class Worker:
                 self.rescope_before_pick()
                 if self.handle_merge_conflict(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
-                if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
-                    return 1
                 if self.handle_queued_comments(ctx.fido_dir, repo_ctx, pr_number, slug):
+                    return 1
+                if self.handle_ci(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
                 if self.handle_threads(ctx.fido_dir, repo_ctx, pr_number, slug):
                     return 1
