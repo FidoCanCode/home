@@ -162,10 +162,22 @@ before acking a promise.
 substance-already-covered should also dedup).
 
 **Status.** Partially modeled in **D1 (#739) — `_replied_comments` claim
-set** and **D2 (#740) — reply-promise lifecycle**. The model needs to
-explicitly cover: `(a)` post-side and check-side use the same identity,
-`(b)` author validation in marker recovery, `(c)` substance-equivalence
-dedup vs. queued thread tasks.
+set**, **D2 (#740) — reply-promise lifecycle**, and **D14 (#752) —
+durable reply/outbox protocol**. D14 is live as a runtime oracle around visible
+reply posting and deferred tracking issue creation: Python projects durable
+reply promises, semantic origins, delivery ids, and outbox effects into the
+model before it records or reuses the external artifact. The remaining model
+surface is `(a)` author validation in marker recovery and `(b)`
+substance-equivalence dedup vs. queued thread tasks.
+
+**E1 flip point.** D14 currently checks the handwritten Python side-effect
+order: the durable promise exists first, the oracle accepts a reply-post or
+deferred-issue effect, and Python then records the visible artifact or
+deferred issue row for reuse. At E1, that extracted transition should become
+the authoritative reducer/outbox boundary: Python commits the modeled reply
+promise and outbox decision first, then posts the GitHub reply or opens the
+tracking issue only as an emitted outbox effect, with delivered external ids
+fed back through the same transition for idempotent reuse.
 
 ---
 
@@ -405,7 +417,7 @@ demand modeling and enqueue-time wiring are tracked by
 | C | Talker-kind coherence | 1 | folded into A? | audit session_lock.v |
 | D | Task status FSM | 2 | partial in D3 | extend D3 (#741) |
 | E | PR body ↔ tasks.json | 2 | D10 (#748) | cite bugs in issue |
-| F | Reply / claim dedup | 6 | D1 (#739), D2 (#740) | extend with author + substance dedup |
+| F | Reply / claim dedup | 6 | D1 (#739), D2 (#740), D14 (#752) | author + substance dedup remain |
 | G | Picker + fresh-retry | 2 | D16 (#888) | cite bugs |
 | H | Webhook ingress dedup + no-inline-impl | 4 | D9 (#747) for ids; **#1042 filed** | D9b done |
 | I | Cache bootstrap + worker wake | 1 | D16 (#888) | explicit theorem |

@@ -1198,6 +1198,11 @@ class TestReplyPromiseHelpers:
             owner="worker", comment_type="issues", anchor_comment_id=700
         )
         assert promise is not None
+        store.claim_reply_outbox_effect(
+            promise_id=promise.promise_id,
+            delivery_id="delivery-700",
+            origin_id=700,
+        )
 
         _record_reply_artifact(
             repo_cfg,
@@ -1249,6 +1254,11 @@ class TestReplyPromiseHelpers:
 
         assert _existing_reply_artifact(repo_cfg, ()) is None
         assert _existing_reply_artifact(repo_cfg, (first.promise_id,)) is None
+        store.claim_reply_outbox_effect(
+            promise_id=first.promise_id,
+            delivery_id="delivery-702",
+            origin_id=702,
+        )
         _record_reply_artifact(
             repo_cfg,
             artifact_comment_id=9702,
@@ -1276,6 +1286,16 @@ class TestReplyPromiseHelpers:
         )
         assert first is not None
         assert second is not None
+        store.claim_reply_outbox_effect(
+            promise_id=first.promise_id,
+            delivery_id="delivery-704",
+            origin_id=704,
+        )
+        store.claim_reply_outbox_effect(
+            promise_id=second.promise_id,
+            delivery_id="delivery-705",
+            origin_id=705,
+        )
         _record_reply_artifact(
             repo_cfg,
             artifact_comment_id=9704,
@@ -1305,9 +1325,13 @@ class TestReplyPromiseHelpers:
     ) -> None:
         repo_cfg = _repo_cfg(tmp_path)
         store = FidoStore(tmp_path)
-        promise_id = "00000000-0000-0000-0000-000000000001"
+        promise = store.prepare_reply(
+            owner="worker",
+            comment_type="pulls",
+            anchor_comment_id=321,
+        )
         store.record_deferred_issue(
-            idempotence_key=f"deferred-issue:{promise_id}",
+            idempotence_key=f"deferred-issue:{promise.promise_id}",
             repo="owner/repo",
             title="later",
             body="Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
@@ -1322,11 +1346,45 @@ class TestReplyPromiseHelpers:
             "https://github.com/owner/repo/pull/7",
             "later",
             "big refactor",
-            (promise_id,),
+            (promise.promise_id,),
         )
 
         assert url == "https://github.com/owner/repo/issues/7"
         gh.create_issue.assert_not_called()
+
+    def test_open_defer_issue_idempotent_records_created_issue(
+        self, tmp_path: Path
+    ) -> None:
+        repo_cfg = _repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="worker",
+            comment_type="issues",
+            anchor_comment_id=654,
+        )
+        gh = MagicMock()
+        gh.create_issue.return_value = "https://github.com/owner/repo/issues/8"
+
+        url = _open_defer_issue_idempotent(
+            repo_cfg,
+            gh,
+            "owner/repo",
+            "https://github.com/owner/repo/pull/7",
+            "later",
+            "big refactor",
+            (promise.promise_id,),
+        )
+
+        key = f"deferred-issue:{promise.promise_id}"
+        assert url == "https://github.com/owner/repo/issues/8"
+        gh.create_issue.assert_called_once_with(
+            "owner/repo",
+            "later",
+            "Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
+        )
+        record = store.deferred_issue(key)
+        assert record is not None
+        assert record.issue_url == "https://github.com/owner/repo/issues/8"
 
     def test_open_defer_issue_without_key_posts_directly(self, tmp_path: Path) -> None:
         gh = MagicMock()
@@ -2172,6 +2230,106 @@ class TestReplyToComment:
         assert cat == "ACT"
         assert "logging" in titles[0].lower()
 
+    def test_claims_review_reply_outbox_before_posting(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="worker", comment_type="pulls", anchor_comment_id=10
+        )
+        assert promise is not None
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 10},
+            comment_body="please add logging",
+            is_bot=False,
+            context={
+                "delivery_id": "github-delivery-10",
+                "reply_promise_id": promise.promise_id,
+            },
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ANSWER: yep"
+            return "Yep."
+
+        mock_gh = MagicMock()
+        mock_gh.fetch_comment_thread.return_value = []
+
+        def reply_to_review_comment(repo, pr, body, comment_id):
+            effect = store.reply_outbox_effect(promise.promise_id)
+            assert effect is not None
+            assert effect.delivery_id == "github-delivery-10"
+            assert effect.origin_id == 10
+            assert effect.state == "claimed"
+            assert effect.external_id is None
+            return {"id": 9010}
+
+        mock_gh.reply_to_review_comment.side_effect = reply_to_review_comment
+
+        reply_to_comment(
+            action,
+            cfg,
+            repo_cfg,
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+
+        effect = store.reply_outbox_effect(promise.promise_id)
+        assert effect is not None
+        assert effect.state == "delivered"
+        assert effect.external_id == 9010
+
+    def test_rejects_review_reply_when_outbox_already_claimed(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="worker", comment_type="pulls", anchor_comment_id=10
+        )
+        assert promise is not None
+        store.claim_reply_outbox_effect(
+            promise_id=promise.promise_id,
+            delivery_id="github-delivery-10",
+            origin_id=10,
+        )
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 10},
+            comment_body="please add logging",
+            is_bot=False,
+            context={
+                "delivery_id": "github-delivery-10",
+                "reply_promise_id": promise.promise_id,
+            },
+        )
+
+        def fake_pp(prompt, model, **kwargs):
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ANSWER: yep"
+            return "Yep."
+
+        mock_gh = MagicMock()
+        mock_gh.fetch_comment_thread.return_value = []
+
+        with pytest.raises(RuntimeError, match="already claimed"):
+            reply_to_comment(
+                action,
+                cfg,
+                repo_cfg,
+                mock_gh,
+                agent=_client(side_effect=fake_pp),
+            )
+
+        mock_gh.reply_to_review_comment.assert_not_called()
+
     def test_full_flow_ask(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(
@@ -3007,6 +3165,53 @@ class TestReplyToIssueComment:
         )
         assert cat == "ANSWER"
 
+    def test_claims_issue_reply_outbox_before_posting(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        store = FidoStore(tmp_path)
+        promise = store.prepare_reply(
+            owner="worker", comment_type="issues", anchor_comment_id=42
+        )
+        assert promise is not None
+        action = self._action("why?")
+        action.context = {
+            **(action.context or {}),
+            "delivery_id": "github-delivery-42",
+            "reply_promise_id": promise.promise_id,
+        }
+
+        def fake_pp(prompt, model, **kwargs):
+            if "Triage" in prompt:
+                return "ANSWER: it works this way"
+            return "Yes, because..."
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo_info.return_value = "owner/repo"
+
+        def comment_issue(repo, number, body):
+            effect = store.reply_outbox_effect(promise.promise_id)
+            assert effect is not None
+            assert effect.delivery_id == "github-delivery-42"
+            assert effect.origin_id == 42
+            assert effect.state == "claimed"
+            assert effect.external_id is None
+            return {"id": 9042}
+
+        mock_gh.comment_issue.side_effect = comment_issue
+
+        reply_to_issue_comment(
+            action,
+            cfg,
+            repo_cfg,
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+
+        effect = store.reply_outbox_effect(promise.promise_id)
+        assert effect is not None
+        assert effect.state == "delivered"
+        assert effect.external_id == 9042
+
     def test_dump_reply(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
 
@@ -3125,6 +3330,11 @@ class TestReplyToIssueComment:
             owner="worker", comment_type="issues", anchor_comment_id=44
         )
         assert promise is not None
+        store.claim_reply_outbox_effect(
+            promise_id=promise.promise_id,
+            delivery_id="delivery-44",
+            origin_id=44,
+        )
         _record_reply_artifact(
             repo_cfg,
             artifact_comment_id=9044,
@@ -5737,6 +5947,11 @@ class TestReplyToCommentElseBranch:
             owner="worker", comment_type="pulls", anchor_comment_id=52
         )
         assert promise is not None
+        store.claim_reply_outbox_effect(
+            promise_id=promise.promise_id,
+            delivery_id="delivery-52",
+            origin_id=52,
+        )
         _record_reply_artifact(
             repo_cfg,
             artifact_comment_id=9052,
