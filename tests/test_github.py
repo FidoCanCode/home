@@ -1327,6 +1327,7 @@ class TestGitHubClass:
             "title": "Bug",
             "body": "desc",
             "created_at": "2024-01-01T00:00:00Z",
+            "labels": [{"name": "Blog"}, {"name": "enhancement"}],
         }
         mock_s.get.return_value = mock_resp
         result = gh.view_issue("o/r", 5)
@@ -1335,7 +1336,38 @@ class TestGitHubClass:
             "title": "Bug",
             "body": "desc",
             "created_at": "2024-01-01T00:00:00Z",
+            "labels": ["Blog", "enhancement"],
         }
+
+    def test_view_issue_no_labels(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "state": "closed",
+            "title": "Old thing",
+            "body": None,
+            "created_at": "2024-06-01T00:00:00Z",
+            "labels": [],
+        }
+        mock_s.get.return_value = mock_resp
+        result = gh.view_issue("o/r", 7)
+        assert result["labels"] == []
+        assert result["body"] == ""
+        assert result["state"] == "CLOSED"
+
+    def test_view_issue_labels_key_absent(self) -> None:
+        # Older API responses or mocks that omit "labels" should not crash.
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "state": "open",
+            "title": "No labels key",
+            "body": "hi",
+            "created_at": "2025-01-01T00:00:00Z",
+        }
+        mock_s.get.return_value = mock_resp
+        result = gh.view_issue("o/r", 99)
+        assert result["labels"] == []
 
     def test_get_issue_comments(self) -> None:
         gh, mock_s = self._gh()

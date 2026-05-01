@@ -681,13 +681,14 @@ class GitHub:
         return data["resources"]
 
     def view_issue(self, repo: str, number: int | str) -> dict[str, Any]:
-        """Return issue data (state, title, body, created_at)."""
+        """Return issue data (state, title, body, created_at, labels)."""
         data = self._get(f"/repos/{repo}/issues/{number}")
         return {
             "state": data["state"].upper(),
             "title": data["title"],
             "body": data["body"] or "",
             "created_at": data.get("created_at", ""),
+            "labels": [lbl["name"] for lbl in data.get("labels", [])],
         }
 
     def get_issue_comments(self, repo: str, number: int | str) -> list[dict[str, Any]]:
