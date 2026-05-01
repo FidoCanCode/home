@@ -2030,6 +2030,8 @@ class Worker:
             f" (JSON — may be empty):\n{json.dumps(ci_threads)}"
         )
         build_prompt(fido_dir, "ci", context)
+        if not self._admit_worker_turn(pr_number):
+            return True
         session_id, _ = provider_run(
             fido_dir,
             agent=self._provider_agent,

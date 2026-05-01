@@ -72,6 +72,21 @@ from fido.worker import (
 _MISSING = object()
 
 
+def _enqueue_pr_comment(tmp_path: Path, *, pr_number: int = 1) -> None:
+    FidoStore(tmp_path).enqueue_pr_comment(
+        delivery_id=f"delivery-{pr_number}",
+        repo="owner/repo",
+        pr_number=pr_number,
+        comment_type="issues",
+        comment_id=100 + pr_number,
+        author="owner",
+        is_bot=False,
+        body="please triage first",
+        github_created_at="2026-04-30T12:00:00Z",
+        payload_json="{}",
+    )
+
+
 def _default_repo_cfg(
     work_dir: Path,
     *,
@@ -6413,6 +6428,58 @@ class TestHandleCi:
             session_mode=TurnSessionMode.REUSE,
         )
 
+    def test_yields_when_current_pr_comment_queues_before_ci_turn(
+        self, tmp_path: Path
+    ) -> None:
+        _enqueue_pr_comment(tmp_path, pr_number=1)
+        gh = MagicMock()
+        gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
+        gh.pr_checks.return_value = [
+            {"name": "test", "state": "FAILURE", "link": ""},
+        ]
+        gh.get_review_threads.return_value = []
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = False
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run") as mock_provider_run,
+            patch("fido.tasks.sync_tasks") as mock_sync,
+        ):
+            result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+        registry.note_durable_demand.assert_called_once_with("owner/repo")
+        registry.assert_worker_turn_ok.assert_not_called()
+        mock_provider_run.assert_not_called()
+        mock_sync.assert_not_called()
+
+    def test_ignores_other_pr_comments_before_ci_turn(self, tmp_path: Path) -> None:
+        _enqueue_pr_comment(tmp_path, pr_number=2)
+        gh = MagicMock()
+        gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
+        gh.pr_checks.return_value = [
+            {"name": "test", "state": "FAILURE", "link": ""},
+        ]
+        gh.get_review_threads.return_value = []
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = False
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sess-1", "")),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+        registry.note_durable_demand.assert_not_called()
+        registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
+
     def test_does_not_complete_ci_task(self, tmp_path: Path) -> None:
         """CI failures have no task entry — no complete call needed."""
         worker, gh = self._make_worker(tmp_path)
@@ -10034,20 +10101,6 @@ class TestAssertWorkerTurnOk:
 class TestAdmitWorkerTurn:
     """Tests for Worker._admit_worker_turn — the pre-provider gate."""
 
-    def _enqueue_comment(self, tmp_path: Path, *, pr_number: int = 1) -> None:
-        FidoStore(tmp_path).enqueue_pr_comment(
-            delivery_id=f"delivery-{pr_number}",
-            repo="owner/repo",
-            pr_number=pr_number,
-            comment_type="issues",
-            comment_id=100 + pr_number,
-            author="owner",
-            is_bot=False,
-            body="please triage first",
-            github_created_at="2026-04-30T12:00:00Z",
-            payload_json="{}",
-        )
-
     def test_waits_before_asserting_when_inbox_non_empty(self, tmp_path: Path) -> None:
         gh = MagicMock()
         registry = MagicMock()
@@ -10075,7 +10128,7 @@ class TestAdmitWorkerTurn:
         registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
 
     def test_yields_when_durable_webhook_demand_pending(self, tmp_path: Path) -> None:
-        self._enqueue_comment(tmp_path)
+        _enqueue_pr_comment(tmp_path)
         gh = MagicMock()
         registry = MagicMock()
         registry.assert_worker_turn_ok = MagicMock()
@@ -10089,7 +10142,7 @@ class TestAdmitWorkerTurn:
         registry.assert_worker_turn_ok.assert_not_called()
 
     def test_ignores_durable_webhook_demand_for_other_pr(self, tmp_path: Path) -> None:
-        self._enqueue_comment(tmp_path, pr_number=2)
+        _enqueue_pr_comment(tmp_path, pr_number=2)
         gh = MagicMock()
         registry = MagicMock()
         registry.assert_worker_turn_ok = MagicMock()
@@ -10105,7 +10158,7 @@ class TestAdmitWorkerTurn:
     def test_execute_task_defers_pickup_when_durable_webhook_demand_pending(
         self, tmp_path: Path
     ) -> None:
-        self._enqueue_comment(tmp_path)
+        _enqueue_pr_comment(tmp_path)
         gh = MagicMock()
         registry = MagicMock()
         registry.assert_worker_turn_ok = MagicMock()
@@ -10140,7 +10193,7 @@ class TestAdmitWorkerTurn:
     def test_execute_task_ignores_durable_webhook_demand_for_other_pr(
         self, tmp_path: Path
     ) -> None:
-        self._enqueue_comment(tmp_path, pr_number=2)
+        _enqueue_pr_comment(tmp_path, pr_number=2)
         gh = MagicMock()
         registry = MagicMock()
         registry.assert_worker_turn_ok = MagicMock()
