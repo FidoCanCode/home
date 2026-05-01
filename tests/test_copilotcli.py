@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -18,6 +19,7 @@ from fido import provider
 from fido.copilotcli import (
     _ACP_STREAM_LIMIT,
     _COPILOT_CANCEL_SENTINEL,
+    _COPILOT_QUOTA_PAUSE_SECONDS,
     CopilotACPRuntime,
     CopilotCLI,
     CopilotCLIAPI,
@@ -26,6 +28,7 @@ from fido.copilotcli import (
     _combine_prompt,
     _CopilotACPClient,
     _is_cancel_sentinel,
+    _is_copilot_quota_error,
     _is_line_limit_overrun_error,
     _normalize_model,
     _preview_log_value,
@@ -1253,11 +1256,112 @@ class TestCopilotCLISession:
         assert "copilot result >>>\ndone\n<<< copilot result" in caplog.text
 
 
+class TestIsCopilotQuotaError:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "rate limit exceeded",
+            "Rate Limit hit",
+            "rate_limit reached",
+            "quota exhausted",
+            "Too Many Requests",
+            "429 error from server",
+            "limit exceeded for user",
+            "usage limit reached",
+        ],
+    )
+    def test_quota_patterns_match(self, message: str) -> None:
+        assert _is_copilot_quota_error(RuntimeError(message))
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "session not found",
+            "BrokenPipeError",
+            "authentication failed",
+            "context window overflow",
+            "",
+        ],
+    )
+    def test_non_quota_errors_do_not_match(self, message: str) -> None:
+        assert not _is_copilot_quota_error(RuntimeError(message))
+
+
 class TestCopilotCLIAPI:
-    def test_limit_snapshot_is_unknown(self) -> None:
-        assert CopilotCLIAPI().get_limit_snapshot() == ProviderLimitSnapshot(
+    _FIXED_NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _api(
+        self,
+        *,
+        monotonic_start: float = 0.0,
+        pause_seconds: float = _COPILOT_QUOTA_PAUSE_SECONDS,
+    ) -> tuple["CopilotCLIAPI", list[float]]:
+        """Return an API instance with injectable monotonic clock."""
+        clock = [monotonic_start]
+        now_clock = [self._FIXED_NOW]
+        api = CopilotCLIAPI(
+            monotonic=lambda: clock[0],
+            now=lambda: now_clock[0],
+            pause_seconds=pause_seconds,
+        )
+        return api, clock
+
+    def test_limit_snapshot_is_unknown_by_default(self) -> None:
+        api, _ = self._api()
+        assert api.get_limit_snapshot() == ProviderLimitSnapshot(
             provider=ProviderID.COPILOT_CLI
         )
+
+    def test_record_quota_error_returns_true_for_quota_error(self) -> None:
+        api, _ = self._api()
+        assert api.record_quota_error(RuntimeError("rate limit exceeded")) is True
+
+    def test_record_quota_error_returns_false_for_non_quota_error(self) -> None:
+        api, _ = self._api()
+        assert api.record_quota_error(RuntimeError("session not found")) is False
+
+    def test_snapshot_shows_100_percent_after_quota_error(self) -> None:
+        api, clock = self._api(monotonic_start=0.0, pause_seconds=3600.0)
+        api.record_quota_error(RuntimeError("quota exhausted"))
+        clock[0] = 60.0  # 60 seconds into the pause window
+        snapshot = api.get_limit_snapshot()
+        assert len(snapshot.windows) == 1
+        window = snapshot.windows[0]
+        assert window.name == "quota"
+        assert window.used == 100
+        assert window.limit == 100
+        assert window.unit == "%"
+        assert window.pressure == 1.0
+
+    def test_snapshot_reset_time_is_recorded_at_plus_pause(self) -> None:
+        from datetime import timedelta
+
+        pause = 3600.0
+        api, _ = self._api(monotonic_start=0.0, pause_seconds=pause)
+        api.record_quota_error(RuntimeError("rate limit"))
+        snapshot = api.get_limit_snapshot()
+        assert snapshot.windows[0].resets_at == self._FIXED_NOW + timedelta(
+            seconds=pause
+        )
+
+    def test_snapshot_reverts_to_unknown_after_pause_expires(self) -> None:
+        pause = 3600.0
+        api, clock = self._api(monotonic_start=0.0, pause_seconds=pause)
+        api.record_quota_error(RuntimeError("quota exceeded"))
+        clock[0] = pause  # exactly at the boundary — expired
+        snapshot = api.get_limit_snapshot()
+        assert snapshot == ProviderLimitSnapshot(provider=ProviderID.COPILOT_CLI)
+
+    def test_non_quota_error_does_not_change_snapshot(self) -> None:
+        api, _ = self._api()
+        api.record_quota_error(RuntimeError("connection reset"))
+        assert api.get_limit_snapshot() == ProviderLimitSnapshot(
+            provider=ProviderID.COPILOT_CLI
+        )
+
+    def test_provider_id(self) -> None:
+        api = CopilotCLIAPI()
+        assert api.provider_id == ProviderID.COPILOT_CLI
 
 
 class TestCopilotCLIClient:

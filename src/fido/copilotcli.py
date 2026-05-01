@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,7 @@ from fido.provider import (
     ProviderAPI,
     ProviderID,
     ProviderLimitSnapshot,
+    ProviderLimitWindow,
     ProviderModel,
     ReasoningEffort,
     coerce_provider_model,
@@ -140,6 +142,35 @@ def extract_session_id(output: str) -> str:
 _COPILOT_SUPPORTED_MODELS: frozenset[str] = frozenset(
     {"auto", "gpt-5-mini", "gpt-4.1", "claude-haiku-4.5"}
 )
+
+# How long to treat a recorded quota error as an active pause.  Copilot
+# does not expose a reset timestamp, so we use a conservative one-hour
+# window.  Update when real quota reset semantics are confirmed.
+_COPILOT_QUOTA_PAUSE_SECONDS = 3600.0
+
+# Strings that identify a Copilot error as quota / rate-limit related.
+# Copilot CLI has not (yet) been observed hitting quota in the wild, so
+# this list is speculative.  Expand it as real error messages appear.
+_COPILOT_QUOTA_PATTERNS: tuple[str, ...] = (
+    "rate limit",
+    "rate_limit",
+    "quota",
+    "too many requests",
+    "429",
+    "limit exceeded",
+    "usage limit",
+)
+
+
+def _is_copilot_quota_error(exc: Exception) -> bool:
+    """Return True when *exc* looks like a Copilot quota or rate-limit error.
+
+    The check is intentionally broad because Copilot CLI has not yet been
+    observed surfacing quota failures in production.  The patterns will be
+    tightened once real error messages are confirmed.
+    """
+    lowered = str(exc).lower()
+    return any(pat in lowered for pat in _COPILOT_QUOTA_PATTERNS)
 
 
 def _normalize_model(model: ProviderModel | str | None) -> ProviderModel | None:
@@ -1142,14 +1173,71 @@ class CopilotCLISession(OwnedSession):
 
 
 class CopilotCLIAPI(ProviderAPI):
-    """Read-only account API for Copilot CLI."""
+    """Read-only account API for Copilot CLI.
+
+    Copilot CLI exposes no native quota endpoint, so limit state is derived
+    from observed errors: when a caller records a quota-shaped error via
+    :meth:`record_quota_error`, :meth:`get_limit_snapshot` returns a 100%-
+    usage window that expires after :data:`_COPILOT_QUOTA_PAUSE_SECONDS`.
+    Once the pause window expires the snapshot reverts to "unknown".
+    """
+
+    def __init__(
+        self,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        pause_seconds: float = _COPILOT_QUOTA_PAUSE_SECONDS,
+    ) -> None:
+        self._monotonic = monotonic
+        self._now = now
+        self._pause_seconds = pause_seconds
+        self._lock = threading.Lock()
+        self._quota_error_at_monotonic: float | None = None
+        self._quota_error_at_wall: datetime | None = None
 
     @property
     def provider_id(self) -> ProviderID:
         return ProviderID.COPILOT_CLI
 
+    def record_quota_error(self, exc: Exception) -> bool:
+        """Record *exc* as a quota error if it looks quota-shaped.
+
+        Returns ``True`` when the error was classified as quota-related and
+        the pause window was (re)started, ``False`` otherwise.
+        """
+        if not _is_copilot_quota_error(exc):
+            return False
+        with self._lock:
+            self._quota_error_at_monotonic = self._monotonic()
+            self._quota_error_at_wall = self._now()
+        log.warning(
+            "copilot-cli quota error recorded — pausing for %.0fs", self._pause_seconds
+        )
+        return True
+
     def get_limit_snapshot(self) -> ProviderLimitSnapshot:
-        return ProviderLimitSnapshot(provider=self.provider_id)
+        with self._lock:
+            recorded_at = self._quota_error_at_monotonic
+            wall = self._quota_error_at_wall
+        if recorded_at is None or wall is None:
+            return ProviderLimitSnapshot(provider=self.provider_id)
+        elapsed = self._monotonic() - recorded_at
+        if elapsed >= self._pause_seconds:
+            return ProviderLimitSnapshot(provider=self.provider_id)
+        resets_at = wall + timedelta(seconds=self._pause_seconds)
+        return ProviderLimitSnapshot(
+            provider=self.provider_id,
+            windows=(
+                ProviderLimitWindow(
+                    name="quota",
+                    used=100,
+                    limit=100,
+                    resets_at=resets_at,
+                    unit="%",
+                ),
+            ),
+        )
 
 
 class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
