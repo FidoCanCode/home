@@ -2739,10 +2739,12 @@ class Worker:
     ) -> None:
         """Discard uncommitted changes and remove task after an abort signal.
 
-        Called when ``self._abort_task`` is set mid-execution.  Runs
-        ``git_clean`` to restore the working tree, removes the task from the
-        queue, clears ``current_task_id`` from state, resets the abort event,
-        and syncs the PR work queue.
+        Called when ``self._abort_task`` is *active for* this task —
+        i.e. an abort was requested with this ``task_id`` (or untargeted)
+        and ``execute_task`` observed it mid-execution.  Runs
+        ``git_clean`` to restore the working tree, removes the task from
+        the queue, clears ``current_task_id`` from state, clears the
+        abort handle, and syncs the PR work queue.
         """
         log.info("task aborted: %s", task_title)
         self.git_clean()

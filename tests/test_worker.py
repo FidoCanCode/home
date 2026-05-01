@@ -39,6 +39,7 @@ from fido.tasks import (
 from fido.types import GitIdentity
 from fido.worker import (
     _RETRY_COMMENT_MARKER,
+    AbortHandle,
     GitIdentityError,
     LockHeld,
     RepoContext,
@@ -8830,6 +8831,53 @@ class TestSquashWipCommit:
         assert rebase_call == ["rebase", "--onto", base, wip, "my-branch"]
 
 
+class TestAbortHandle:
+    """Tests for the per-task abort signal (closes #1193)."""
+
+    def test_request_then_is_active_for_matches(self) -> None:
+        h = AbortHandle()
+        h.request("task-A")
+        assert h.is_active_for("task-A") is True
+        assert h.is_set() is True
+
+    def test_request_then_is_active_for_other_task_is_false(self) -> None:
+        """The bug-fix invariant: an abort targeted at A doesn't fire on B."""
+        h = AbortHandle()
+        h.request("task-A")
+        assert h.is_active_for("task-B") is False
+        # The signal is still set — only its target is wrong for B.
+        assert h.is_set() is True
+
+    def test_untargeted_set_matches_any_task(self) -> None:
+        """Legacy untargeted form (set / request(None)) matches any task."""
+        h = AbortHandle()
+        h.set()
+        assert h.is_active_for("any-task") is True
+        h.clear()
+        h.request(None)
+        assert h.is_active_for("other-task") is True
+
+    def test_clear_resets_signal_and_target(self) -> None:
+        h = AbortHandle()
+        h.request("task-A")
+        h.clear()
+        assert h.is_set() is False
+        assert h.is_active_for("task-A") is False
+
+    def test_request_overwrites_prior_target(self) -> None:
+        """A second request changes the target; prior target no longer active."""
+        h = AbortHandle()
+        h.request("task-A")
+        h.request("task-B")
+        assert h.is_active_for("task-A") is False
+        assert h.is_active_for("task-B") is True
+
+    def test_default_state_is_inactive(self) -> None:
+        h = AbortHandle()
+        assert h.is_set() is False
+        assert h.is_active_for("anything") is False
+
+
 class TestExecuteTask:
     """Tests for Worker.execute_task."""
 
@@ -9703,6 +9751,53 @@ class TestExecuteTask:
 
         orig.side_effect = side_effect
         return orig
+
+    def test_stale_abort_targeting_removed_task_does_not_clobber_next_task(
+        self, tmp_path: Path
+    ) -> None:
+        """End-to-end regression for #1193: an abort signal targeted at a
+        prior task that has since been removed (e.g. rescope marked it
+        completed without running cleanup) must NOT cause the next task
+        to be aborted on entry.
+
+        Pre-fix: `_abort_task` was a per-worker `threading.Event` that
+        stayed set across task boundaries; the next task hit
+        `_abort_task.is_set()` at the top of `execute_task` and was
+        cleaned up before any work ran (this is what dropped the
+        follow-up thread task on PR #1191).
+
+        Post-fix: the abort handle is per-task; an abort targeted at
+        "t-prior" does not match "t-next", so `is_active_for("t-next")`
+        is False and `execute_task` proceeds normally.
+        """
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 1})
+        next_task = {"id": "t-next", "title": "Next task", "status": "pending"}
+        # Stale abort from a prior task that's already been removed by rescope.
+        worker._abort_task.request("t-prior-removed")
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[next_task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")) as mock_run,
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch.object(worker, "git_clean") as mock_clean,
+            patch("fido.tasks.Tasks.remove") as mock_remove,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        # The stale abort was for a different task — t-next must NOT have
+        # been auto-cleaned up.  provider_run runs.  git_clean and
+        # Tasks.remove (the abort-cleanup side effects) are NOT called.
+        mock_run.assert_called()
+        mock_clean.assert_not_called()
+        mock_remove.assert_not_called()
+        # The stale abort signal stays set (no cleanup ran for t-prior-removed)
+        # and remains scoped to t-prior-removed — not active for t-next.
+        assert worker._abort_task.is_active_for("t-next") is False
 
     def test_abort_after_initial_run_removes_task_and_returns_true(
         self, tmp_path: Path
