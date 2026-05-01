@@ -72,6 +72,21 @@ from fido.worker import (
 _MISSING = object()
 
 
+def _enqueue_pr_comment(tmp_path: Path, *, pr_number: int = 1) -> None:
+    FidoStore(tmp_path).enqueue_pr_comment(
+        delivery_id=f"delivery-{pr_number}",
+        repo="owner/repo",
+        pr_number=pr_number,
+        comment_type="issues",
+        comment_id=100 + pr_number,
+        author="owner",
+        is_bot=False,
+        body="please triage first",
+        github_created_at="2026-04-30T12:00:00Z",
+        payload_json="{}",
+    )
+
+
 def _default_repo_cfg(
     work_dir: Path,
     *,
@@ -982,6 +997,10 @@ class TestWorker:
             order.append("ci")
             return False
 
+        def mark_queued_comments(*args, **kwargs):
+            order.append("queued_comments")
+            return False
+
         with (
             patch.object(worker, "create_context", return_value=mock_ctx),
             patch.object(
@@ -998,13 +1017,16 @@ class TestWorker:
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.events.recover_reply_promises", side_effect=mark_recover),
+            patch.object(
+                worker, "handle_queued_comments", side_effect=mark_queued_comments
+            ),
             patch.object(worker, "handle_ci", side_effect=mark_ci),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=False),
             patch.object(worker, "handle_promote_merge", return_value=0),
         ):
             worker.run()
-        assert order[:2] == ["recover", "ci"]
+        assert order[:3] == ["recover", "queued_comments", "ci"]
 
     def test_run_does_not_switch_model_for_carry_over_session(
         self, tmp_path: Path
@@ -6406,6 +6428,58 @@ class TestHandleCi:
             session_mode=TurnSessionMode.REUSE,
         )
 
+    def test_yields_when_current_pr_comment_queues_before_ci_turn(
+        self, tmp_path: Path
+    ) -> None:
+        _enqueue_pr_comment(tmp_path, pr_number=1)
+        gh = MagicMock()
+        gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
+        gh.pr_checks.return_value = [
+            {"name": "test", "state": "FAILURE", "link": ""},
+        ]
+        gh.get_review_threads.return_value = []
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = False
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run") as mock_provider_run,
+            patch("fido.tasks.sync_tasks") as mock_sync,
+        ):
+            result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+        registry.note_durable_demand.assert_called_once_with("owner/repo")
+        registry.assert_worker_turn_ok.assert_not_called()
+        mock_provider_run.assert_not_called()
+        mock_sync.assert_not_called()
+
+    def test_ignores_other_pr_comments_before_ci_turn(self, tmp_path: Path) -> None:
+        _enqueue_pr_comment(tmp_path, pr_number=2)
+        gh = MagicMock()
+        gh.get_pr.return_value = {"mergeStateStatus": "BLOCKED"}
+        gh.pr_checks.return_value = [
+            {"name": "test", "state": "FAILURE", "link": ""},
+        ]
+        gh.get_review_threads.return_value = []
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = False
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sess-1", "")),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.handle_ci(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+        registry.note_durable_demand.assert_not_called()
+        registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
+
     def test_does_not_complete_ci_task(self, tmp_path: Path) -> None:
         """CI failures have no task entry — no complete call needed."""
         worker, gh = self._make_worker(tmp_path)
@@ -6573,6 +6647,7 @@ class TestRunHandleCiIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_ci", mock_handle_ci),
             patch.object(worker, "handle_threads", return_value=False),
         ):
@@ -6598,6 +6673,7 @@ class TestRunHandleCiIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_ci", return_value=True),
         ):
             result = worker.run()
@@ -6620,6 +6696,7 @@ class TestRunHandleCiIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
         ):
@@ -6653,6 +6730,70 @@ class TestRunHandleCiIntegration:
             pytest.raises(RuntimeError),
         ):
             worker.run()
+        mock_handle_ci.assert_not_called()
+
+    def test_queued_comments_drain_before_ci(self, tmp_path: Path) -> None:
+        """Human PR comments in the durable FIFO preempt stale CI provider work."""
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        call_order: list[str] = []
+
+        def record_queued(*_a: object, **_kw: object) -> bool:
+            call_order.append("queued_comments")
+            return False
+
+        def record_ci(*_a: object, **_kw: object) -> bool:
+            call_order.append("ci")
+            return False
+
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", side_effect=record_queued),
+            patch.object(worker, "handle_ci", side_effect=record_ci),
+            patch.object(worker, "handle_threads", return_value=False),
+            patch.object(worker, "execute_task", return_value=False),
+        ):
+            worker.run()
+
+        assert call_order == ["queued_comments", "ci"]
+
+    def test_ci_not_called_when_queued_comments_handled(self, tmp_path: Path) -> None:
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh)
+        repo_ctx = self._make_mock_repo_ctx()
+        mock_handle_ci = MagicMock(return_value=True)
+
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "get_current_issue", return_value=7),
+            patch.object(worker, "post_pickup_comment"),
+            patch.object(
+                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
+            ),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=True),
+            patch.object(worker, "handle_ci", mock_handle_ci),
+        ):
+            result = worker.run()
+
+        assert result == 1
         mock_handle_ci.assert_not_called()
 
 
@@ -7872,7 +8013,7 @@ class TestHandleQueuedComments:
 
 
 class TestRunThreadsIntegration:
-    """Tests that Worker.run() calls handle_threads after handle_ci."""
+    """Tests that Worker.run() calls handle_threads after comment/CI checks."""
 
     def _make_gh(self) -> MagicMock:
         gh = MagicMock()
@@ -7916,6 +8057,7 @@ class TestRunThreadsIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", mock_threads),
         ):
@@ -7939,6 +8081,7 @@ class TestRunThreadsIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=True),
         ):
@@ -7962,6 +8105,7 @@ class TestRunThreadsIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
+            patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=False),
@@ -8302,8 +8446,8 @@ class TestRunRescopeIntegration:
             worker.run()
         mock_rescope.assert_called_once_with()
 
-    def test_rescope_called_before_handle_ci(self, tmp_path: Path) -> None:
-        """rescope_before_pick must execute before handle_ci sees the task list."""
+    def test_rescope_called_before_queued_comments(self, tmp_path: Path) -> None:
+        """rescope_before_pick must execute before queued comments drain."""
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Fix it", "body": "", "state": "OPEN"}
@@ -8314,8 +8458,8 @@ class TestRunRescopeIntegration:
         def record_rescope() -> None:
             call_order.append("rescope")
 
-        def record_ci(*_a: object, **_kw: object) -> bool:
-            call_order.append("handle_ci")
+        def record_queued_comments(*_a: object, **_kw: object) -> bool:
+            call_order.append("handle_queued_comments")
             return False
 
         with (
@@ -8330,12 +8474,13 @@ class TestRunRescopeIntegration:
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "rescope_before_pick", record_rescope),
-            patch.object(worker, "handle_ci", record_ci),
+            patch.object(worker, "handle_queued_comments", record_queued_comments),
+            patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
             patch.object(worker, "execute_task", return_value=False),
         ):
             worker.run()
-        assert call_order == ["rescope", "handle_ci"]
+        assert call_order == ["rescope", "handle_queued_comments"]
 
 
 class TestEnsurePushed:
@@ -9956,20 +10101,6 @@ class TestAssertWorkerTurnOk:
 class TestAdmitWorkerTurn:
     """Tests for Worker._admit_worker_turn — the pre-provider gate."""
 
-    def _enqueue_comment(self, tmp_path: Path) -> None:
-        FidoStore(tmp_path).enqueue_pr_comment(
-            delivery_id="delivery-1",
-            repo="owner/repo",
-            pr_number=1,
-            comment_type="issues",
-            comment_id=101,
-            author="owner",
-            is_bot=False,
-            body="please triage first",
-            github_created_at="2026-04-30T12:00:00Z",
-            payload_json="{}",
-        )
-
     def test_waits_before_asserting_when_inbox_non_empty(self, tmp_path: Path) -> None:
         gh = MagicMock()
         registry = MagicMock()
@@ -9977,7 +10108,7 @@ class TestAdmitWorkerTurn:
         registry.has_untriaged.return_value = True
         worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
 
-        worker._admit_worker_turn()  # pyright: ignore[reportPrivateUsage]
+        worker._admit_worker_turn(1)  # pyright: ignore[reportPrivateUsage]
 
         registry.wait_for_inbox_drain.assert_called_once_with(
             "owner/repo", timeout=None
@@ -9991,31 +10122,46 @@ class TestAdmitWorkerTurn:
         registry.has_untriaged.return_value = False
         worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
 
-        worker._admit_worker_turn()  # pyright: ignore[reportPrivateUsage]
+        worker._admit_worker_turn(1)  # pyright: ignore[reportPrivateUsage]
 
         registry.wait_for_inbox_drain.assert_not_called()
         registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
 
     def test_yields_when_durable_webhook_demand_pending(self, tmp_path: Path) -> None:
-        self._enqueue_comment(tmp_path)
+        _enqueue_pr_comment(tmp_path)
         gh = MagicMock()
         registry = MagicMock()
         registry.assert_worker_turn_ok = MagicMock()
         registry.has_untriaged.return_value = False
         worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
 
-        admitted = worker._admit_worker_turn()  # pyright: ignore[reportPrivateUsage]
+        admitted = worker._admit_worker_turn(1)  # pyright: ignore[reportPrivateUsage]
 
         assert admitted is False
         registry.note_durable_demand.assert_called_once_with("owner/repo")
         registry.assert_worker_turn_ok.assert_not_called()
 
+    def test_ignores_durable_webhook_demand_for_other_pr(self, tmp_path: Path) -> None:
+        _enqueue_pr_comment(tmp_path, pr_number=2)
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = False
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+
+        admitted = worker._admit_worker_turn(1)  # pyright: ignore[reportPrivateUsage]
+
+        assert admitted is True
+        registry.note_durable_demand.assert_not_called()
+        registry.assert_worker_turn_ok.assert_called_once_with("owner/repo")
+
     def test_execute_task_defers_pickup_when_durable_webhook_demand_pending(
         self, tmp_path: Path
     ) -> None:
-        self._enqueue_comment(tmp_path)
+        _enqueue_pr_comment(tmp_path)
         gh = MagicMock()
         registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
         registry.has_untriaged.return_value = False
         worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
         task = {"id": "t1", "title": "Do work", "status": "pending", "type": "spec"}
@@ -10043,6 +10189,56 @@ class TestAdmitWorkerTurn:
         registry.note_durable_demand.assert_called_once_with("owner/repo")
         mock_status.assert_not_called()
         mock_provider_run.assert_not_called()
+
+    def test_execute_task_ignores_durable_webhook_demand_for_other_pr(
+        self, tmp_path: Path
+    ) -> None:
+        _enqueue_pr_comment(tmp_path, pr_number=2)
+        gh = MagicMock()
+        registry = MagicMock()
+        registry.assert_worker_turn_ok = MagicMock()
+        registry.has_untriaged.return_value = False
+        worker = Worker(tmp_path, gh, repo_name="owner/repo", registry=registry)
+        task = {"id": "t1", "title": "Do work", "status": "pending", "type": "spec"}
+
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch.object(worker, "_git") as mock_git,
+            patch.object(
+                worker, "_snapshot_fido_issue_comment_ids", return_value=set()
+            ),
+            patch("fido.worker.build_prompt"),
+            patch.object(worker, "_task_still_current", return_value=True),
+            patch("fido.worker.provider_run", return_value=("session-1", "")),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=False),
+            patch.object(
+                worker, "_commit_provider_leftovers_if_any", return_value="new-head"
+            ),
+            patch.object(worker, "_yield_for_untriaged"),
+            patch.object(worker, "_squash_wip_commit"),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+            patch.object(worker, "_delete_leaked_task_comments"),
+        ):
+            mock_git.return_value.stdout = "head\n"
+            result = worker.execute_task(
+                tmp_path / ".git" / "fido",
+                RepoContext(
+                    repo="owner/repo",
+                    owner="owner",
+                    repo_name="repo",
+                    gh_user="fido-bot",
+                    default_branch="main",
+                    membership=RepoMembership(collaborators=frozenset({"owner"})),
+                ),
+                1,
+                "branch",
+            )
+
+        assert result is True
+        registry.note_durable_demand.assert_not_called()
 
 
 class TestRunExecuteTaskIntegration:
