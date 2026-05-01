@@ -59,6 +59,28 @@ class TestWorkerRegistry:
         assert kwargs["session_issue"] == 42
         threads[0].detach_provider.assert_called_once_with()
 
+    def test_start_recovers_rescued_session_to_clear_stuck_fsm(
+        self, tmp_path: Path
+    ) -> None:
+        """Rescued provider's session is recovered before the new worker runs.
+
+        Without this, a worker that crashed mid-turn leaves the persistent
+        ClaudeSession FSM in a non-Idle state (e.g. Sending after BrokenPipe),
+        and the replacement worker's first send() hits "Send rejected in
+        state Sending" — turning a single crash into a permanent loop.
+        """
+        mock_provider = MagicMock()
+        threads = [MagicMock(), MagicMock()]
+        factory = MagicMock(side_effect=threads)
+        reg = WorkerRegistry(factory)
+        cfg = _repo("foo/bar", tmp_path)
+        reg.start(cfg)
+        threads[0].is_alive.return_value = False
+        threads[0]._stop = False
+        threads[0].detach_provider.return_value = mock_provider
+        reg.start(cfg)
+        mock_provider.agent.recover_session.assert_called_once_with()
+
     def test_start_does_not_rescue_session_from_orderly_shutdown_thread(
         self, tmp_path: Path
     ) -> None:

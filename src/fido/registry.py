@@ -195,6 +195,15 @@ class WorkerRegistry:
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Rescue())
             provider = old_thread.detach_provider()
             session_issue, old_thread._session_issue = old_thread._session_issue, None  # pyright: ignore[reportPrivateUsage]
+            # Heal the rescued session before the new worker runs.  A worker
+            # crash mid-turn can leave the ClaudeSession FSM in a non-Idle state
+            # (e.g. Sending after BrokenPipe on stdin write); without this
+            # respawn the next worker's first send() hits "Send rejected in
+            # state Sending" and the watchdog rescues into a permanent crash
+            # loop.  recover() respawns the subprocess with --resume so
+            # conversation context is preserved.
+            if provider is not None:
+                provider.agent.recover_session()
         elif not old_thread.is_alive():
             # Orderly-stopped predecessor (_stop is True):
             # Active → Stopped (ThreadStops) → Active (Launch).

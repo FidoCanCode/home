@@ -238,6 +238,18 @@ class TestSessionBackedAgent:
             agent.run_turn("hi", model=agent.voice_model)
         session.recover.assert_called_once_with()
 
+    def test_generate_reply_recovers_after_dead_prompt_failure(self) -> None:
+        # Regression: _run_shared_turn used to call session.prompt directly
+        # without recovery, so a BrokenPipe from a stale subprocess killed
+        # the worker thread and left the persistent ClaudeSession FSM stuck
+        # in Sending forever.
+        session = MagicMock()
+        session.prompt.side_effect = [BrokenPipeError("boom"), "ok"]
+        session.is_alive.return_value = False
+        agent = _FakeAgent(session=session)
+        assert agent.generate_reply("hi") == "ok"
+        session.recover.assert_called_once_with()
+
     def test_run_turn_retries_after_preempt(self) -> None:
         session = MagicMock()
         session.last_turn_cancelled = False
