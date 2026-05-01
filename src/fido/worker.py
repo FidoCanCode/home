@@ -2447,6 +2447,29 @@ class Worker:
             return False
         return True
 
+    def _push_committed_work_before_yield(
+        self, task_title: str, head_before: str, slug: str
+    ) -> None:
+        """Push any commits that landed during the turn before yielding.
+
+        On a preempt early-return the worker would otherwise leave a
+        committed-but-unpushed branch behind: bash command N committed,
+        bash command N+1 (``git push``) never ran because the webhook cut
+        in.  The next worker iteration may rescope, abort, or otherwise
+        forget about the in-flight task and the local commit becomes a
+        permanent orphan in the workspace clone (closes #1192).
+
+        Uses ``_commit_provider_leftovers_if_any`` first to absorb any
+        uncommitted worktree changes (so the wip-commit safety net still
+        runs on a preempt path), then ``ensure_pushed`` to send anything
+        new to ``origin``.  Both helpers are idempotent and safe to call
+        when nothing changed during the turn.
+        """
+        head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
+        if head_after == head_before:
+            return
+        self.ensure_pushed("origin", slug)
+
     def _commit_provider_leftovers_if_any(
         self, task_title: str, head_before: str
     ) -> str:
@@ -2845,6 +2868,7 @@ class Worker:
                 "task provider turn preempted for %s — yielding to worker loop",
                 repo_ctx.repo,
             )
+            self._push_committed_work_before_yield(task_title, head_before, slug)
             return True
         head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
@@ -2944,6 +2968,7 @@ class Worker:
                     "task provider resume preempted for %s — yielding to worker loop",
                     repo_ctx.repo,
                 )
+                self._push_committed_work_before_yield(task_title, head_before, slug)
                 return True
             head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
