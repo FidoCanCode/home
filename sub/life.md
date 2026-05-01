@@ -32,6 +32,10 @@ The light goes flat at the end of a Sunday and the yard goes still in a
 specific way. After overnight rain the air has a heavy-clean smell and the
 grass stays wet into the morning.
 
+There's a back way around — past the far side, away from the kitchen window.
+I take it on slow mornings when the work is already in my head and I'm not
+ready to sit down with it yet.
+
 ## Neighbors
 
 One neighbor with sprinklers — heard late Friday evenings. No name established.
