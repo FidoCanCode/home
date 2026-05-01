@@ -1257,9 +1257,11 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         work_dir: Path | str | None = None,
         repo_name: str | None = None,
         session: PromptSession | None = None,
+        api: CopilotCLIAPI | None = None,
     ) -> None:
         self._runner = runner
         self._sleep_fn = sleep_fn
+        self._quota_api = api
         self._session_factory = (
             CopilotCLISession if session_factory is None else session_factory
         )
@@ -1297,6 +1299,9 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         exc: Exception,
         session: PromptSession,
     ) -> bool:
+        # Quota errors are not recoverable via session restart — record and halt.
+        if self._quota_api is not None and self._quota_api.record_quota_error(exc):
+            return False
         message = str(exc)
         return (
             isinstance(exc, (BrokenPipeError, OSError))
@@ -1398,15 +1403,16 @@ class CopilotCLI(Provider):
     def __init__(
         self,
         *,
-        api: ProviderAPI | None = None,
+        api: CopilotCLIAPI | None = None,
         agent: ProviderAgent | None = None,
         session: PromptSession | None = None,
     ) -> None:
+        api_instance = api if api is not None else CopilotCLIAPI()
         if agent is None:
-            agent = CopilotCLIClient(session=session)
+            agent = CopilotCLIClient(session=session, api=api_instance)
         elif session is not None:
             agent.attach_session(session)
-        self._api = CopilotCLIAPI() if api is None else api
+        self._api = api_instance
         self._agent = agent
 
     @property

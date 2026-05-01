@@ -1589,6 +1589,40 @@ class TestCopilotCLIClient:
             client.run_turn("fetch", model=client.voice_model)
         session.recover.assert_called_once_with()
 
+    def test_quota_error_records_on_api_and_is_not_retried(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = RuntimeError("rate limit exceeded")
+        api = CopilotCLIAPI()
+        client = CopilotCLIClient(session=session, api=api)
+        with pytest.raises(RuntimeError, match="rate limit exceeded"):
+            client.run_turn("fetch", model=client.voice_model)
+        # The error was recorded — snapshot now shows 100% pressure.
+        snapshot = api.get_limit_snapshot()
+        assert len(snapshot.windows) == 1
+        assert snapshot.windows[0].pressure == 1.0
+        # Session was NOT asked to recover — quota errors are not retryable.
+        session.recover.assert_not_called()
+
+    def test_quota_error_without_api_still_raises(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = RuntimeError("rate limit exceeded")
+        client = CopilotCLIClient(session=session)  # no api injected
+        with pytest.raises(RuntimeError, match="rate limit exceeded"):
+            client.run_turn("fetch", model=client.voice_model)
+
+    def test_non_quota_error_still_retried_with_api_wired(self) -> None:
+        session = MagicMock()
+        session.prompt.side_effect = [
+            ValueError("Separator is found, but chunk is longer than limit"),
+            "done",
+        ]
+        api = CopilotCLIAPI()
+        client = CopilotCLIClient(session=session, api=api)
+        assert client.run_turn("fetch", model=client.voice_model) == "done"
+        session.recover.assert_called_once_with()
+        # Non-quota error did not poison the snapshot.
+        assert api.get_limit_snapshot().windows == ()
+
     def test_json_and_one_shot_helpers(self, tmp_path: Path) -> None:
         runner = MagicMock(return_value=_completed(_copilot_output("line1\nline2")))
         system_file = tmp_path / "system"
@@ -1688,3 +1722,12 @@ class TestCopilotCLI:
         session = MagicMock()
         CopilotCLI(agent=agent, session=session)
         agent.attach_session.assert_called_once_with(session)
+
+    def test_default_construction_wires_api_to_default_agent(self) -> None:
+        # When neither api nor agent is injected, CopilotCLI must create a
+        # shared CopilotCLIAPI and wire it into the CopilotCLIClient so that
+        # quota errors recorded during prompts are visible via api.
+        copilot = CopilotCLI()
+        assert isinstance(copilot.api, CopilotCLIAPI)
+        assert isinstance(copilot.agent, CopilotCLIClient)
+        assert copilot.agent._quota_api is copilot.api
