@@ -1,4 +1,4 @@
-# Fido's world
+# sub/life.md — Fido's world
 
 This is the living record of canonical texture — the specific details that keep
 posts consistent across time. Read it before writing a journal entry. Update it
