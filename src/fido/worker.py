@@ -66,6 +66,14 @@ _PICKUP_COMMENT_MARKER = "<!-- fido:pickup -->"
 # Allows the retry path to dedup across crash-replay cycles (fix for #802).
 _RETRY_COMMENT_MARKER = "<!-- fido:retry-ack -->"
 
+# Invisible HTML marker on the one-time comment fido posts when its
+# promote-merge guard refuses to mark a PR ready_for_review because
+# the branch has no diff vs base (closes #1194).  The PR is left open
+# so the human can decide whether more work is needed; the marker
+# prevents the worker loop from posting the same comment on every
+# subsequent iteration.
+_EMPTY_PR_COMMENT_MARKER = "<!-- fido:empty-pr-blocked -->"
+
 log = logging.getLogger(__name__)
 
 _thread_repo: threading.local = threading.local()
@@ -1067,15 +1075,6 @@ class AbortHandle:
     def is_set(self) -> bool:
         """Return whether *any* abort request is pending."""
         return self._event.is_set()
-
-    def set(self) -> None:
-        """Untargeted shorthand for ``request(None)``.
-
-        Kept for back-compat with code that fired an abort signal
-        without a specific task in mind.  Real callers should prefer
-        :meth:`request` so the abort cannot leak to a different task.
-        """
-        self.request(None)
 
     def clear(self) -> None:
         """Consume the abort request (cleanup path)."""
@@ -2647,6 +2646,47 @@ class Worker:
                     pr_number,
                 )
 
+    def _post_empty_pr_comment_once(self, repo: str, pr_number: int) -> None:
+        """Post a one-time BLOCKED comment when the empty-diff guard refuses
+        to promote a PR (closes #1194).
+
+        The PR is left open so a human can decide whether more work is
+        needed via review comments — fido cannot meaningfully act on an
+        empty PR from inside the worker loop.  Idempotent on
+        :data:`_EMPTY_PR_COMMENT_MARKER`: if the marker is already
+        present in any existing comment on the PR, this is a no-op,
+        which prevents the worker loop from re-posting the same comment
+        on every iteration.
+        """
+        try:
+            existing = self.gh.get_issue_comments(repo, pr_number)
+        except _requests.RequestException:
+            log.exception(
+                "_post_empty_pr_comment_once: failed to fetch comments on %s#%d",
+                repo,
+                pr_number,
+            )
+            return
+        if any(_EMPTY_PR_COMMENT_MARKER in (c.get("body") or "") for c in existing):
+            return
+        body = (
+            "BLOCKED: I finished my task list and CI is green, but the branch "
+            "has no diff against the base — there's nothing here for a "
+            "reviewer to look at. Leaving the PR open so you can decide what "
+            "to do: comment with more guidance and I'll pick it up, or close "
+            "the PR if there's nothing further.\n\n"
+            f"{_EMPTY_PR_COMMENT_MARKER}"
+        )
+        try:
+            self.gh.comment_issue(repo, pr_number, body)
+            log.info("posted empty-PR BLOCKED comment on %s#%d", repo, pr_number)
+        except _requests.RequestException:
+            log.exception(
+                "_post_empty_pr_comment_once: failed to post comment on %s#%d",
+                repo,
+                pr_number,
+            )
+
     def _pr_has_real_diff(self, remote: str, slug: str, default_branch: str) -> bool:
         """Return True iff the branch has any file diff vs the default branch.
 
@@ -3335,6 +3375,7 @@ class Worker:
                         pr_number,
                         repo_ctx.default_branch,
                     )
+                    self._post_empty_pr_comment_once(repo_ctx.repo, pr_number)
                     return 0
                 log.info(
                     "PR #%s: changes requested — all addressed, CI passing — marking ready",
@@ -3395,6 +3436,7 @@ class Worker:
                     pr_number,
                     repo_ctx.default_branch,
                 )
+                self._post_empty_pr_comment_once(repo_ctx.repo, pr_number)
                 return 0
             log.info("PR #%s: work complete, CI green — marking ready", pr_number)
             self.gh.pr_ready(repo_ctx.repo, pr_number)

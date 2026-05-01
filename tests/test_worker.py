@@ -8848,10 +8848,12 @@ class TestAbortHandle:
         # The signal is still set — only its target is wrong for B.
         assert h.is_set() is True
 
-    def test_untargeted_set_matches_any_task(self) -> None:
-        """Legacy untargeted form (set / request(None)) matches any task."""
+    def test_untargeted_request_matches_any_task(self) -> None:
+        """`request(None)` is the untargeted form, used only by the external
+        WorkerThread.abort_task() entry point that fires before any task
+        is in flight.  Real callers (preempt, rescope) always pass an id."""
         h = AbortHandle()
-        h.set()
+        h.request(None)
         assert h.is_active_for("any-task") is True
         h.clear()
         h.request(None)
@@ -9618,7 +9620,7 @@ class TestExecuteTask:
             run_calls += 1
             prompt_snapshots.append((fd / "prompt").read_text())
             if run_calls == 6:
-                worker._abort_task.set()
+                worker._abort_task.request(task["id"])
             return ("sess", "")
 
         with (
@@ -9886,7 +9888,7 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         State(fido_dir).save({"issue": 1, "current_task_id": "t-abort"})
         task = {"id": "t-abort", "title": "Abort me", "status": "pending"}
-        worker._abort_task.set()
+        worker._abort_task.request(task["id"])
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
@@ -9918,7 +9920,7 @@ class TestExecuteTask:
             nonlocal call_count
             call_count += 1
             if call_count == 2:
-                worker._abort_task.set()
+                worker._abort_task.request(task["id"])
             return ("sid", "")
 
         with (
@@ -9944,7 +9946,7 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         State(fido_dir).save({"issue": 1})
         task = {"id": "t-no-complete", "title": "No complete", "status": "pending"}
-        worker._abort_task.set()
+        worker._abort_task.request(task["id"])
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
@@ -11600,13 +11602,16 @@ class TestHandlePromoteMerge:
     def test_draft_refuses_pr_ready_when_branch_has_no_diff(
         self, tmp_path: Path
     ) -> None:
-        """Regression for #1194: don't promote a PR whose remote diff is empty."""
+        """Regression for #1194: don't promote a PR whose remote diff is empty.
+        Leave the PR open with a one-time BLOCKED comment so the human can
+        decide what to do."""
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
         gh.get_review_threads.return_value = []
+        gh.get_issue_comments.return_value = []  # no prior BLOCKED marker
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
         with (
             patch("fido.tasks.Tasks.list", return_value=completed),
@@ -11617,12 +11622,43 @@ class TestHandlePromoteMerge:
             )
         gh.pr_ready.assert_not_called()
         gh.add_pr_reviewers.assert_not_called()
+        # PR stays open with a one-time BLOCKED comment.
+        gh.comment_issue.assert_called_once()
+        comment_body = gh.comment_issue.call_args.args[2]
+        assert "BLOCKED" in comment_body
+        assert "<!-- fido:empty-pr-blocked -->" in comment_body
         assert result == 0
+
+    def test_draft_empty_diff_does_not_repost_blocked_comment(
+        self, tmp_path: Path
+    ) -> None:
+        """The BLOCKED comment is one-shot: re-running the worker loop
+        with the same empty-diff state must not spam more comments."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        gh.get_review_threads.return_value = []
+        # Marker already present from a prior iteration.
+        gh.get_issue_comments.return_value = [
+            {"body": "BLOCKED: ...\n<!-- fido:empty-pr-blocked -->"}
+        ]
+        completed = [{"id": "t1", "title": "Done", "status": "completed"}]
+        with (
+            patch("fido.tasks.Tasks.list", return_value=completed),
+            patch.object(worker, "_pr_has_real_diff", return_value=False),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_ready.assert_not_called()
+        # No second BLOCKED comment posted.
+        gh.comment_issue.assert_not_called()
 
     def test_changes_requested_refuses_promote_when_branch_has_no_diff(
         self, tmp_path: Path
     ) -> None:
-        """Regression for #1194: same guard fires on the CHANGES_REQUESTED+draft path."""
+        """Regression for #1194: same guard fires on the CHANGES_REQUESTED+draft
+        path, with the same one-time BLOCKED comment behaviour."""
         worker, gh = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
         gh.get_reviews.return_value = {
@@ -11630,14 +11666,17 @@ class TestHandlePromoteMerge:
                 {
                     "author": {"login": "rhencke"},
                     "state": "CHANGES_REQUESTED",
-                    "submittedAt": "2026-05-01T10:00:00Z",
+                    "submittedAt": "2026-05-01T09:00:00Z",
                 }
             ],
-            "commits": [{"committedDate": "2026-05-01T09:00:00Z"}],
+            # Commit is *newer* than the review so should_rerequest_review
+            # returns True and the path reaches the empty-diff guard.
+            "commits": [{"committedDate": "2026-05-01T10:00:00Z"}],
             "isDraft": True,
         }
         gh.pr_checks.return_value = []
         gh.get_required_checks.return_value = []
+        gh.get_issue_comments.return_value = []
         completed = [{"id": "t1", "title": "Done", "status": "completed"}]
         with (
             patch("fido.tasks.Tasks.list", return_value=completed),
@@ -11647,6 +11686,7 @@ class TestHandlePromoteMerge:
                 fido_dir, self._repo_ctx(), 9, "fix", 5
             )
         gh.pr_ready.assert_not_called()
+        gh.comment_issue.assert_called_once()
         assert result == 0
 
     def test_pr_has_real_diff_returns_true_when_git_reports_diff(
