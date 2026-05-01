@@ -39,6 +39,7 @@ from fido.tasks import (
 from fido.types import GitIdentity
 from fido.worker import (
     _RETRY_COMMENT_MARKER,
+    AbortHandle,
     GitIdentityError,
     LockHeld,
     RepoContext,
@@ -3671,7 +3672,7 @@ class TestProviderRun:
             retry_on_preempt=False,
         )
         client.run_turn.assert_called_once_with(
-            "skill text\n\n---\n\nprompt text",
+            "skill\n\n---\n\nprompt",
             model=client.work_model,
             retry_on_preempt=False,
             session_mode=TurnSessionMode.REUSE,
@@ -8830,6 +8831,55 @@ class TestSquashWipCommit:
         assert rebase_call == ["rebase", "--onto", base, wip, "my-branch"]
 
 
+class TestAbortHandle:
+    """Tests for the per-task abort signal (closes #1193)."""
+
+    def test_request_then_is_active_for_matches(self) -> None:
+        h = AbortHandle()
+        h.request("task-A")
+        assert h.is_active_for("task-A") is True
+        assert h.is_set() is True
+
+    def test_request_then_is_active_for_other_task_is_false(self) -> None:
+        """The bug-fix invariant: an abort targeted at A doesn't fire on B."""
+        h = AbortHandle()
+        h.request("task-A")
+        assert h.is_active_for("task-B") is False
+        # The signal is still set — only its target is wrong for B.
+        assert h.is_set() is True
+
+    def test_untargeted_request_matches_any_task(self) -> None:
+        """`request(None)` is the untargeted form, used only by the external
+        WorkerThread.abort_task() entry point that fires before any task
+        is in flight.  Real callers (preempt, rescope) always pass an id."""
+        h = AbortHandle()
+        h.request(None)
+        assert h.is_active_for("any-task") is True
+        h.clear()
+        h.request(None)
+        assert h.is_active_for("other-task") is True
+
+    def test_clear_resets_signal_and_target(self) -> None:
+        h = AbortHandle()
+        h.request("task-A")
+        h.clear()
+        assert h.is_set() is False
+        assert h.is_active_for("task-A") is False
+
+    def test_request_overwrites_prior_target(self) -> None:
+        """A second request changes the target; prior target no longer active."""
+        h = AbortHandle()
+        h.request("task-A")
+        h.request("task-B")
+        assert h.is_active_for("task-A") is False
+        assert h.is_active_for("task-B") is True
+
+    def test_default_state_is_inactive(self) -> None:
+        h = AbortHandle()
+        assert h.is_set() is False
+        assert h.is_active_for("anything") is False
+
+
 class TestExecuteTask:
     """Tests for Worker.execute_task."""
 
@@ -9119,6 +9169,7 @@ class TestExecuteTask:
             session=None,
             agent=ANY,
             session_mode=TurnSessionMode.REUSE,
+            retry_on_preempt=False,
         )
 
     def test_calls_ensure_pushed_with_origin_and_slug(self, tmp_path: Path) -> None:
@@ -9569,7 +9620,7 @@ class TestExecuteTask:
             run_calls += 1
             prompt_snapshots.append((fd / "prompt").read_text())
             if run_calls == 6:
-                worker._abort_task.set()
+                worker._abort_task.request(task["id"])
             return ("sess", "")
 
         with (
@@ -9703,6 +9754,133 @@ class TestExecuteTask:
         orig.side_effect = side_effect
         return orig
 
+    def test_preempt_pushes_committed_work_before_yielding(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #1192: when the provider turn commits and is then
+        preempted (webhook arrives between `git commit` and `git push`),
+        the worker must push the committed work before yielding.  Without
+        this guard the local commit lives forever in the workspace clone
+        while the PR remote is unchanged — the symptom that produced the
+        empty PR #1191.
+        """
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 1, "current_task_id": "t-preempt"})
+        task = {"id": "t-preempt", "title": "Commit then preempt", "status": "pending"}
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            # Mock the preempt detector so the turn looks cancelled.
+            patch.object(worker, "_provider_turn_was_preempted", return_value=True),
+            # Mock the leftover-commit helper to report HEAD moved during
+            # the turn (provider committed before the preempt fired).
+            patch.object(
+                worker,
+                "_commit_provider_leftovers_if_any",
+                return_value="sha-after-commit",
+            ),
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True) as mock_push,
+            patch("fido.tasks.Tasks.complete_with_resolve") as mock_complete,
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch-slug")
+        # Yielded (return True) because the turn was preempted.
+        assert result is True
+        # Push fired with the right remote and slug *before* yielding.
+        mock_push.assert_called_once_with("origin", "branch-slug")
+        # We yielded mid-task, not completed it.
+        mock_complete.assert_not_called()
+
+    def test_preempt_skips_push_when_no_commits_landed(self, tmp_path: Path) -> None:
+        """Companion to the push-before-yield test: when the provider was
+        preempted *before* it committed (HEAD didn't move), there's
+        nothing to push.  The push helper should be a no-op.
+        """
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 1, "current_task_id": "t-preempt-early"})
+        task = {
+            "id": "t-preempt-early",
+            "title": "Preempt before commit",
+            "status": "pending",
+        }
+        head_before = "sha-unchanged"
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")),
+            patch.object(worker, "_provider_turn_was_preempted", return_value=True),
+            # HEAD did not move — _commit_provider_leftovers_if_any
+            # returns the same SHA, so _push_committed_work_before_yield
+            # short-circuits.
+            patch.object(
+                worker,
+                "_commit_provider_leftovers_if_any",
+                return_value=head_before,
+            ),
+            patch.object(
+                worker, "_git", MagicMock(return_value=MagicMock(stdout=head_before))
+            ),
+            patch.object(worker, "ensure_pushed") as mock_push,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch-slug")
+        assert result is True
+        mock_push.assert_not_called()
+
+    def test_stale_abort_targeting_removed_task_does_not_clobber_next_task(
+        self, tmp_path: Path
+    ) -> None:
+        """End-to-end regression for #1193: an abort signal targeted at a
+        prior task that has since been removed (e.g. rescope marked it
+        completed without running cleanup) must NOT cause the next task
+        to be aborted on entry.
+
+        Pre-fix: `_abort_task` was a per-worker `threading.Event` that
+        stayed set across task boundaries; the next task hit
+        `_abort_task.is_set()` at the top of `execute_task` and was
+        cleaned up before any work ran (this is what dropped the
+        follow-up thread task on PR #1191).
+
+        Post-fix: the abort handle is per-task; an abort targeted at
+        "t-prior" does not match "t-next", so `is_active_for("t-next")`
+        is False and `execute_task` proceeds normally.
+        """
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 1})
+        next_task = {"id": "t-next", "title": "Next task", "status": "pending"}
+        # Stale abort from a prior task that's already been removed by rescope.
+        worker._abort_task.request("t-prior-removed")
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[next_task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_run", return_value=("sid", "")) as mock_run,
+            patch.object(worker, "_git", self._git_with_new_commits()),
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch.object(worker, "git_clean") as mock_clean,
+            patch("fido.tasks.Tasks.remove") as mock_remove,
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "br")
+        # The stale abort was for a different task — t-next must NOT have
+        # been auto-cleaned up.  provider_run runs.  git_clean and
+        # Tasks.remove (the abort-cleanup side effects) are NOT called.
+        mock_run.assert_called()
+        mock_clean.assert_not_called()
+        mock_remove.assert_not_called()
+        # The stale abort signal stays set (no cleanup ran for t-prior-removed)
+        # and remains scoped to t-prior-removed — not active for t-next.
+        assert worker._abort_task.is_active_for("t-next") is False
+
     def test_abort_after_initial_run_removes_task_and_returns_true(
         self, tmp_path: Path
     ) -> None:
@@ -9710,7 +9888,7 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         State(fido_dir).save({"issue": 1, "current_task_id": "t-abort"})
         task = {"id": "t-abort", "title": "Abort me", "status": "pending"}
-        worker._abort_task.set()
+        worker._abort_task.request(task["id"])
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
@@ -9742,7 +9920,7 @@ class TestExecuteTask:
             nonlocal call_count
             call_count += 1
             if call_count == 2:
-                worker._abort_task.set()
+                worker._abort_task.request(task["id"])
             return ("sid", "")
 
         with (
@@ -9768,7 +9946,7 @@ class TestExecuteTask:
         fido_dir = self._fido_dir(tmp_path)
         State(fido_dir).save({"issue": 1})
         task = {"id": "t-no-complete", "title": "No complete", "status": "pending"}
-        worker._abort_task.set()
+        worker._abort_task.request(task["id"])
         with (
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
@@ -11420,6 +11598,123 @@ class TestHandlePromoteMerge:
         with patch("fido.tasks.Tasks.list", return_value=completed):
             worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
         gh.pr_ready.assert_called_once_with("rhencke/myrepo", 9)
+
+    def test_draft_refuses_pr_ready_when_branch_has_no_diff(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #1194: don't promote a PR whose remote diff is empty.
+        Leave the PR open with a one-time BLOCKED comment so the human can
+        decide what to do."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        gh.get_review_threads.return_value = []
+        gh.get_issue_comments.return_value = []  # no prior BLOCKED marker
+        completed = [{"id": "t1", "title": "Done", "status": "completed"}]
+        with (
+            patch("fido.tasks.Tasks.list", return_value=completed),
+            patch.object(worker, "_pr_has_real_diff", return_value=False),
+        ):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        gh.pr_ready.assert_not_called()
+        gh.add_pr_reviewers.assert_not_called()
+        # PR stays open with a one-time BLOCKED comment.
+        gh.comment_issue.assert_called_once()
+        comment_body = gh.comment_issue.call_args.args[2]
+        assert "BLOCKED" in comment_body
+        assert "<!-- fido:empty-pr-blocked -->" in comment_body
+        assert result == 0
+
+    def test_draft_empty_diff_does_not_repost_blocked_comment(
+        self, tmp_path: Path
+    ) -> None:
+        """The BLOCKED comment is one-shot: re-running the worker loop
+        with the same empty-diff state must not spam more comments."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {"reviews": [], "commits": [], "isDraft": True}
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        gh.get_review_threads.return_value = []
+        # Marker already present from a prior iteration.
+        gh.get_issue_comments.return_value = [
+            {"body": "BLOCKED: ...\n<!-- fido:empty-pr-blocked -->"}
+        ]
+        completed = [{"id": "t1", "title": "Done", "status": "completed"}]
+        with (
+            patch("fido.tasks.Tasks.list", return_value=completed),
+            patch.object(worker, "_pr_has_real_diff", return_value=False),
+        ):
+            worker.handle_promote_merge(fido_dir, self._repo_ctx(), 9, "fix", 5)
+        gh.pr_ready.assert_not_called()
+        # No second BLOCKED comment posted.
+        gh.comment_issue.assert_not_called()
+
+    def test_changes_requested_refuses_promote_when_branch_has_no_diff(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #1194: same guard fires on the CHANGES_REQUESTED+draft
+        path, with the same one-time BLOCKED comment behaviour."""
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        gh.get_reviews.return_value = {
+            "reviews": [
+                {
+                    "author": {"login": "rhencke"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2026-05-01T09:00:00Z",
+                }
+            ],
+            # Commit is *newer* than the review so should_rerequest_review
+            # returns True and the path reaches the empty-diff guard.
+            "commits": [{"committedDate": "2026-05-01T10:00:00Z"}],
+            "isDraft": True,
+        }
+        gh.pr_checks.return_value = []
+        gh.get_required_checks.return_value = []
+        gh.get_issue_comments.return_value = []
+        completed = [{"id": "t1", "title": "Done", "status": "completed"}]
+        with (
+            patch("fido.tasks.Tasks.list", return_value=completed),
+            patch.object(worker, "_pr_has_real_diff", return_value=False),
+        ):
+            result = worker.handle_promote_merge(
+                fido_dir, self._repo_ctx(), 9, "fix", 5
+            )
+        gh.pr_ready.assert_not_called()
+        gh.comment_issue.assert_called_once()
+        assert result == 0
+
+    def test_pr_has_real_diff_returns_true_when_git_reports_diff(
+        self, tmp_path: Path
+    ) -> None:
+        """`git diff --quiet` exit 1 means diff present → True."""
+        worker, _ = self._make_worker(tmp_path)
+        fake_git = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr=""))
+        with patch.object(worker, "_git", fake_git):
+            assert worker._pr_has_real_diff("origin", "fix", "main") is True
+
+    def test_pr_has_real_diff_returns_false_on_clean_diff(self, tmp_path: Path) -> None:
+        """`git diff --quiet` exit 0 means no diff → False."""
+        worker, _ = self._make_worker(tmp_path)
+        fake_git = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+        with patch.object(worker, "_git", fake_git):
+            assert worker._pr_has_real_diff("origin", "fix", "main") is False
+
+    def test_pr_has_real_diff_fails_closed_on_unexpected_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Unknown git exit code → fail closed (False)."""
+        worker, _ = self._make_worker(tmp_path)
+        fake_git = MagicMock(
+            return_value=MagicMock(returncode=128, stdout="", stderr="bad ref")
+        )
+        with patch.object(worker, "_git", fake_git):
+            assert worker._pr_has_real_diff("origin", "fix", "main") is False
 
     def test_draft_with_completed_tasks_adds_reviewer(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)

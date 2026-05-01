@@ -66,6 +66,14 @@ _PICKUP_COMMENT_MARKER = "<!-- fido:pickup -->"
 # Allows the retry path to dedup across crash-replay cycles (fix for #802).
 _RETRY_COMMENT_MARKER = "<!-- fido:retry-ack -->"
 
+# Invisible HTML marker on the one-time comment fido posts when its
+# promote-merge guard refuses to mark a PR ready_for_review because
+# the branch has no diff vs base (closes #1194).  The PR is left open
+# so the human can decide whether more work is needed; the marker
+# prevents the worker loop from posting the same comment on every
+# subsequent iteration.
+_EMPTY_PR_COMMENT_MARKER = "<!-- fido:empty-pr-blocked -->"
+
 log = logging.getLogger(__name__)
 
 _thread_repo: threading.local = threading.local()
@@ -1019,6 +1027,62 @@ def _write_pr_description(
     log.info("_write_pr_description: PR #%s description written", pr_number)
 
 
+class AbortHandle:
+    """Per-task abort signal.
+
+    Replaces a per-worker :class:`threading.Event` that previously leaked
+    across task boundaries (closes #1193): when a rescope marked an
+    in-progress task ``completed`` instead of letting :meth:`Worker._cleanup_aborted_task`
+    consume the abort signal, the still-set ``Event`` would clobber the
+    very next task to enter :meth:`Worker.execute_task`.
+
+    The handle binds an abort request to a specific ``task_id``.  Only
+    the cleanup path for the *targeted* task consumes it.  An untargeted
+    request (``task_id=None``) is the legacy "abort whatever is running"
+    semantic, kept available for the external
+    :meth:`WorkerThread.abort_task` entry point that fires before any
+    task is in flight.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._target_task_id: str | None = None
+        self._event = threading.Event()
+
+    def request(self, task_id: str | None) -> None:
+        """Request abort of *task_id*.
+
+        ``task_id=None`` is an untargeted request that matches whichever
+        task happens to be running.  Real callers (preempt, rescope)
+        always know the task they're aborting and should pass it.
+        """
+        with self._lock:
+            self._target_task_id = task_id
+            self._event.set()
+
+    def is_active_for(self, task_id: str) -> bool:
+        """Return ``True`` when an abort request matches *task_id*.
+
+        An untargeted (legacy) request matches any task.  A targeted
+        request matches only its named task — a leaked abort from a
+        prior, since-removed task no longer fires here.
+        """
+        with self._lock:
+            if not self._event.is_set():
+                return False
+            return self._target_task_id is None or self._target_task_id == task_id
+
+    def is_set(self) -> bool:
+        """Return whether *any* abort request is pending."""
+        return self._event.is_set()
+
+    def clear(self) -> None:
+        """Consume the abort request (cleanup path)."""
+        with self._lock:
+            self._target_task_id = None
+            self._event.clear()
+
+
 class Worker:
     """Fido worker for a single repository.
 
@@ -1031,7 +1095,7 @@ class Worker:
         self,
         work_dir: Path,
         gh: GitHub,
-        abort_task: threading.Event | None = None,
+        abort_task: AbortHandle | None = None,
         repo_name: str = "",
         registry: ActivityReporter | None = None,
         membership: RepoMembership | None = None,
@@ -1050,7 +1114,7 @@ class Worker:
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
-        self._abort_task = abort_task if abort_task is not None else threading.Event()
+        self._abort_task = abort_task if abort_task is not None else AbortHandle()
         self._repo_name = repo_name
         # Replay missed issue_comment webhooks exactly once per WorkerThread
         # lifetime (at startup).  Fix for #794 — without this, top-level PR
@@ -2447,6 +2511,29 @@ class Worker:
             return False
         return True
 
+    def _push_committed_work_before_yield(
+        self, task_title: str, head_before: str, slug: str
+    ) -> None:
+        """Push any commits that landed during the turn before yielding.
+
+        On a preempt early-return the worker would otherwise leave a
+        committed-but-unpushed branch behind: bash command N committed,
+        bash command N+1 (``git push``) never ran because the webhook cut
+        in.  The next worker iteration may rescope, abort, or otherwise
+        forget about the in-flight task and the local commit becomes a
+        permanent orphan in the workspace clone (closes #1192).
+
+        Uses ``_commit_provider_leftovers_if_any`` first to absorb any
+        uncommitted worktree changes (so the wip-commit safety net still
+        runs on a preempt path), then ``ensure_pushed`` to send anything
+        new to ``origin``.  Both helpers are idempotent and safe to call
+        when nothing changed during the turn.
+        """
+        head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
+        if head_after == head_before:
+            return
+        self.ensure_pushed("origin", slug)
+
     def _commit_provider_leftovers_if_any(
         self, task_title: str, head_before: str
     ) -> str:
@@ -2559,6 +2646,80 @@ class Worker:
                     pr_number,
                 )
 
+    def _post_empty_pr_comment_once(self, repo: str, pr_number: int) -> None:
+        """Post a one-time BLOCKED comment when the empty-diff guard refuses
+        to promote a PR (closes #1194).
+
+        The PR is left open so a human can decide whether more work is
+        needed via review comments — fido cannot meaningfully act on an
+        empty PR from inside the worker loop.  Idempotent on
+        :data:`_EMPTY_PR_COMMENT_MARKER`: if the marker is already
+        present in any existing comment on the PR, this is a no-op,
+        which prevents the worker loop from re-posting the same comment
+        on every iteration.
+        """
+        try:
+            existing = self.gh.get_issue_comments(repo, pr_number)
+        except _requests.RequestException:
+            log.exception(
+                "_post_empty_pr_comment_once: failed to fetch comments on %s#%d",
+                repo,
+                pr_number,
+            )
+            return
+        if any(_EMPTY_PR_COMMENT_MARKER in (c.get("body") or "") for c in existing):
+            return
+        body = (
+            "BLOCKED: I finished my task list and CI is green, but the branch "
+            "has no diff against the base — there's nothing here for a "
+            "reviewer to look at. Leaving the PR open so you can decide what "
+            "to do: comment with more guidance and I'll pick it up, or close "
+            "the PR if there's nothing further.\n\n"
+            f"{_EMPTY_PR_COMMENT_MARKER}"
+        )
+        try:
+            self.gh.comment_issue(repo, pr_number, body)
+            log.info("posted empty-PR BLOCKED comment on %s#%d", repo, pr_number)
+        except _requests.RequestException:
+            log.exception(
+                "_post_empty_pr_comment_once: failed to post comment on %s#%d",
+                repo,
+                pr_number,
+            )
+
+    def _pr_has_real_diff(self, remote: str, slug: str, default_branch: str) -> bool:
+        """Return True iff the branch has any file diff vs the default branch.
+
+        Used as a guard before promoting a draft PR to ready-for-review
+        (closes #1194).  A PR whose only commit is the ``wip: start``
+        placeholder, or whose branch has no commits ahead of base, has
+        nothing to review — promoting it advertises broken state to
+        reviewers.
+
+        Compares ``remote/default_branch`` to ``remote/slug`` because
+        that's what reviewers actually see; a local commit not yet pushed
+        does not count.
+
+        Fails closed: any git error returns ``False`` (treat as no diff,
+        do not promote).
+        """
+        diff = self._git(
+            ["diff", "--quiet", f"{remote}/{default_branch}", f"{remote}/{slug}"],
+            check=False,
+        )
+        # `git diff --quiet`: exit 0 = no diff, 1 = diff present.
+        if diff.returncode == 0:
+            return False
+        if diff.returncode == 1:
+            return True
+        log.warning(
+            "_pr_has_real_diff: git diff %s..%s returned %s — treating as no diff",
+            default_branch,
+            slug,
+            diff.returncode,
+        )
+        return False
+
     def _squash_wip_commit(self, remote: str, slug: str, default_branch: str) -> bool:
         """Drop the empty 'wip: start' sentinel if it is the branch root.
 
@@ -2618,10 +2779,12 @@ class Worker:
     ) -> None:
         """Discard uncommitted changes and remove task after an abort signal.
 
-        Called when ``self._abort_task`` is set mid-execution.  Runs
-        ``git_clean`` to restore the working tree, removes the task from the
-        queue, clears ``current_task_id`` from state, resets the abort event,
-        and syncs the PR work queue.
+        Called when ``self._abort_task`` is *active for* this task —
+        i.e. an abort was requested with this ``task_id`` (or untargeted)
+        and ``execute_task`` observed it mid-execution.  Runs
+        ``git_clean`` to restore the working tree, removes the task from
+        the queue, clears ``current_task_id`` from state, clears the
+        abort handle, and syncs the PR work queue.
         """
         log.info("task aborted: %s", task_title)
         self.git_clean()
@@ -2822,7 +2985,7 @@ class Worker:
             with State(fido_dir).modify() as state:
                 state.pop("current_task_id", None)
             return True
-        if self._abort_task.is_set():
+        if self._abort_task.is_active_for(task["id"]):
             self._cleanup_aborted_task(fido_dir, task["id"], task_title)
             return True
         if not self._task_still_current(fido_dir, task["id"]):
@@ -2845,10 +3008,11 @@ class Worker:
                 "task provider turn preempted for %s — yielding to worker loop",
                 repo_ctx.repo,
             )
+            self._push_committed_work_before_yield(task_title, head_before, slug)
             return True
         head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
-        if self._abort_task.is_set():
+        if self._abort_task.is_active_for(task["id"]):
             self._cleanup_aborted_task(fido_dir, task["id"], task_title)
             return True
 
@@ -2920,7 +3084,7 @@ class Worker:
             )
             if not self._admit_worker_turn(pr_number):
                 return True
-            if self._abort_task.is_set():
+            if self._abort_task.is_active_for(task["id"]):
                 self._cleanup_aborted_task(fido_dir, task["id"], task_title)
                 return True
             if not self._task_still_current(fido_dir, task["id"]):
@@ -2944,10 +3108,11 @@ class Worker:
                     "task provider resume preempted for %s — yielding to worker loop",
                     repo_ctx.repo,
                 )
+                self._push_committed_work_before_yield(task_title, head_before, slug)
                 return True
             head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
-            if self._abort_task.is_set():
+            if self._abort_task.is_active_for(task["id"]):
                 self._cleanup_aborted_task(fido_dir, task["id"], task_title)
                 return True
 
@@ -3203,6 +3368,15 @@ class Worker:
                 return 0
             promoted_from_draft = False
             if is_draft:
+                if not self._pr_has_real_diff("origin", slug, repo_ctx.default_branch):
+                    log.warning(
+                        "PR #%s: refusing ready_for_review — branch has no diff "
+                        "vs %s (#1194)",
+                        pr_number,
+                        repo_ctx.default_branch,
+                    )
+                    self._post_empty_pr_comment_once(repo_ctx.repo, pr_number)
+                    return 0
                 log.info(
                     "PR #%s: changes requested — all addressed, CI passing — marking ready",
                     pr_number,
@@ -3254,6 +3428,15 @@ class Worker:
                     "PR #%s: work complete but unresolved review threads remain — deferring promote",
                     pr_number,
                 )
+                return 0
+            if not self._pr_has_real_diff("origin", slug, repo_ctx.default_branch):
+                log.warning(
+                    "PR #%s: refusing ready_for_review — branch has no diff "
+                    "vs %s (#1194)",
+                    pr_number,
+                    repo_ctx.default_branch,
+                )
+                self._post_empty_pr_comment_once(repo_ctx.repo, pr_number)
                 return 0
             log.info("PR #%s: work complete, CI green — marking ready", pr_number)
             self.gh.pr_ready(repo_ctx.repo, pr_number)
@@ -3639,7 +3822,7 @@ class WorkerThread(threading.Thread):
         self._registry = registry
         self._membership = membership if membership is not None else RepoMembership()
         self._wake = threading.Event()
-        self._abort_task = threading.Event()
+        self._abort_task = AbortHandle()
         self._stop = False
         self.crash_error: str | None = None
         self._provider_lock = threading.Lock()
@@ -3784,9 +3967,16 @@ class WorkerThread(threading.Thread):
         """Signal the thread to wake up and check for work immediately."""
         self._wake.set()
 
-    def abort_task(self) -> None:
-        """Signal the worker to abort the current task after provider_run returns."""
-        self._abort_task.set()
+    def abort_task(self, task_id: str | None = None) -> None:
+        """Signal the worker to abort *task_id* after provider_run returns.
+
+        ``task_id=None`` is the legacy untargeted form, used by external
+        entry points that want to abort whichever task is running.  Real
+        callers (preempt, rescope) always know the task they're aborting
+        and should pass it so a leaked abort cannot clobber a different,
+        unrelated task on the next loop iteration.
+        """
+        self._abort_task.request(task_id)
         self._wake.set()
 
     def stop(self) -> None:
