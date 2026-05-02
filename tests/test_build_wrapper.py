@@ -631,9 +631,11 @@ class TestFidoLauncher:
 
         assert "--network host" in script
         assert "--interactive" in script
-        assert '--env "PYTHONPATH=/workspace/src"' in script
+        # Container path mirrors the host path so prompts referencing
+        # /home/rhencke/home-runner Just Work in-container (PR #1212).
+        assert '--env "PYTHONPATH=$repo_root/src"' in script
         assert '--volume "$HOME:$HOME"' not in script
-        assert '--volume "$repo_root:/workspace"' in script
+        assert '--volume "$repo_root:$repo_root"' in script
         assert '--volume "$HOME/workspace:$HOME/workspace"' in script
         assert '--volume "$HOME/log:$HOME/log"' not in script
         assert '--volume "$secret:/run/secrets/fido-secret:ro"' in script
@@ -658,8 +660,13 @@ class TestFidoLauncher:
         assert "ruff)" in script
         assert 'run_fido_pyproject_image ruff "${@:2}"' in script
         assert 'run_fido_pyproject_image pyright "${@:2}"' in script
-        assert 'run_fido_pyproject_image pytest "${@:2}"' in script
-        assert 'run_fido_pyproject_image python3 -m fido.tests_main "${@:2}"' in script
+        # pytest and tests run through the capped runner so a leaky test
+        # cannot soft-lock the box (#1248 / PR #1251).
+        assert 'run_fido_pyproject_image_capped pytest "${@:2}"' in script
+        assert (
+            'run_fido_pyproject_image_capped python3 -m fido.tests_main "${@:2}"'
+            in script
+        )
         assert 'echo "unsupported fido command: $command" >&2' in script
         assert "Any other command is passed through" not in help_text
         assert "rocq-lsp" in help_text
