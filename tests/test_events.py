@@ -7,6 +7,8 @@ from fido.claude import ClaudeClient
 from fido.config import Config, RepoMembership
 from fido.config import RepoConfig as _RepoConfig
 from fido.events import (
+    _INSIGHT_LABEL,
+    _INSIGHT_REPO,
     Action,
     WebhookIngressOracle,
     _apply_reply_result,
@@ -15,6 +17,8 @@ from fido.events import (
     _configured_agent,
     _existing_reply_artifact,
     _get_commit_summary,
+    _GitHubInsightFiler,
+    _insight_source_link,
     _is_allowed,
     _load_active_context_for_rescope,
     _make_reorder_kwargs,
@@ -42,8 +46,9 @@ from fido.provider import ProviderID
 from fido.rocq import replied_comment_claims as oracle
 from fido.state import State
 from fido.store import FidoStore, ReplyPromiseRecord
-from fido.synthesis import CommentResponse
+from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import SynthesisExhaustedError
+from fido.synthesis_executor import CommentTarget
 from fido.types import ActiveIssue, ActivePR, RescоpeIntent
 
 
@@ -6552,3 +6557,157 @@ class TestMakeReorderKwargsActiveContext:
         assert "issue" not in kwargs
         assert "pr" not in kwargs
         gh.view_issue.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _GitHubInsightFiler
+# ---------------------------------------------------------------------------
+
+
+class TestGitHubInsightFiler:
+    """_GitHubInsightFiler files Insight observations as GitHub issues."""
+
+    def _make_insight(
+        self,
+        title: str = "Interesting observation",
+        hook: str = "Hook sentence.",
+        why: str = "Why it matters.",
+    ) -> Insight:
+        return Insight(title=title, hook=hook, why=why)
+
+    def _make_target(
+        self,
+        repo: str = "owner/repo",
+        pr: int = 42,
+        comment_id: int = 100,
+        comment_type: str = "pulls",
+    ) -> CommentTarget:
+        return CommentTarget(
+            repo=repo, pr=pr, comment_id=comment_id, comment_type=comment_type
+        )
+
+    def test_creates_issue_when_none_exists(self) -> None:
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/99"
+        filer = _GitHubInsightFiler(gh)
+        insight = self._make_insight()
+        target = self._make_target()
+
+        filer.file_insight(insight, target)
+
+        gh.create_issue.assert_called_once()
+
+    def test_skips_creation_when_issue_already_exists(self) -> None:
+        gh = MagicMock()
+        gh.search_issues.return_value = [
+            {"html_url": f"https://github.com/{_INSIGHT_REPO}/issues/5"}
+        ]
+        filer = _GitHubInsightFiler(gh)
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        gh.create_issue.assert_not_called()
+
+    def test_issue_title_uses_insight_title(self) -> None:
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/1"
+        filer = _GitHubInsightFiler(gh)
+
+        filer.file_insight(
+            self._make_insight(title="My Observation"), self._make_target()
+        )
+
+        title = gh.create_issue.call_args.args[1]
+        assert title == "Insight: My Observation"
+
+    def test_issue_filed_against_insight_repo(self) -> None:
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/2"
+        filer = _GitHubInsightFiler(gh)
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        repo = gh.create_issue.call_args.args[0]
+        assert repo == _INSIGHT_REPO
+
+    def test_issue_has_insight_label(self) -> None:
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/3"
+        filer = _GitHubInsightFiler(gh)
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        labels = (
+            gh.create_issue.call_args.kwargs.get("labels")
+            or gh.create_issue.call_args.args[3]
+        )
+        assert _INSIGHT_LABEL in labels
+
+    def test_body_contains_hook_and_why(self) -> None:
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/4"
+        filer = _GitHubInsightFiler(gh)
+        insight = self._make_insight(hook="The hook.", why="The why.")
+
+        filer.file_insight(insight, self._make_target())
+
+        body = gh.create_issue.call_args.args[2]
+        assert "The hook." in body
+        assert "The why." in body
+
+    def test_body_contains_idempotency_marker(self) -> None:
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/5"
+        filer = _GitHubInsightFiler(gh)
+        target = self._make_target(comment_id=777)
+
+        filer.file_insight(self._make_insight(), target)
+
+        body = gh.create_issue.call_args.args[2]
+        assert "<!-- insight-source: 777 -->" in body
+
+    def test_search_uses_idempotency_marker(self) -> None:
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/6"
+        filer = _GitHubInsightFiler(gh)
+        target = self._make_target(comment_id=42)
+
+        filer.file_insight(self._make_insight(), target)
+
+        query = gh.search_issues.call_args.args[1]
+        assert "insight-source: 42" in query
+
+    def test_source_link_pulls_format(self) -> None:
+        target = CommentTarget(
+            repo="org/proj", pr=10, comment_id=555, comment_type="pulls"
+        )
+        link = _insight_source_link(target)
+        assert link == "https://github.com/org/proj/pull/10#discussion_r555"
+
+    def test_source_link_issues_format(self) -> None:
+        target = CommentTarget(
+            repo="org/proj", pr=10, comment_id=555, comment_type="issues"
+        )
+        link = _insight_source_link(target)
+        assert link == "https://github.com/org/proj/issues/10#issuecomment-555"
+
+    def test_body_contains_source_link(self) -> None:
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/7"
+        filer = _GitHubInsightFiler(gh)
+        target = self._make_target(
+            repo="org/proj", pr=10, comment_id=555, comment_type="pulls"
+        )
+
+        filer.file_insight(self._make_insight(), target)
+
+        body = gh.create_issue.call_args.args[2]
+        assert "https://github.com/org/proj/pull/10#discussion_r555" in body

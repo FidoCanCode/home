@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import time
+import urllib.parse
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -795,10 +796,31 @@ class GitHub:
         """Return all events on an issue."""
         return list(self._paginate(f"{self.BASE}/repos/{repo}/issues/{number}/events"))
 
-    def create_issue(self, repo: str, title: str, body: str) -> str:
+    def create_issue(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        labels: list[str] | None = None,
+    ) -> str:
         """Create an issue and return its HTML URL."""
-        data = self._post_json(f"/repos/{repo}/issues", title=title, body=body)
+        extra: dict[str, Any] = {}
+        if labels:
+            extra["labels"] = labels
+        data = self._post_json(f"/repos/{repo}/issues", title=title, body=body, **extra)
         return data["html_url"]
+
+    def search_issues(self, repo: str, query: str) -> list[dict[str, Any]]:
+        """Search issues in *repo* matching *query* and return the result items.
+
+        Prepends ``repo:{repo}`` to *query* so callers do not need to repeat
+        the repo qualifier.  Returns the ``items`` list from the GitHub search
+        response — an empty list when nothing matches.
+        """
+        q = f"repo:{repo} {query}"
+        url = f"{self.BASE}/search/issues?{urllib.parse.urlencode({'q': q})}"
+        data = self._retryable_get(url).json()
+        return list(data.get("items", []))
 
     def create_pr(self, repo: str, title: str, body: str, base: str, head: str) -> str:
         """Create a draft PR and return its URL."""

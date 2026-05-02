@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from fido.rocq.replied_comment_claims import ReviewReplyOutcome
-from fido.synthesis import CommentResponse, outcome_for_response
+from fido.synthesis import CommentResponse, Insight, outcome_for_response
 from fido.types import RescоpeIntent
 
 log = logging.getLogger(__name__)
@@ -96,6 +96,12 @@ class RescopeTrigger(Protocol):
     def trigger_rescope(self, intent: RescоpeIntent) -> None: ...
 
 
+class InsightFiler(Protocol):
+    """Files a synthesis insight as a durable GitHub issue."""
+
+    def file_insight(self, insight: Insight, target: CommentTarget) -> None: ...
+
+
 class SynthesisExecutor:
     """Dispatches a :class:`CommentResponse` to its side effects.
 
@@ -107,7 +113,10 @@ class SynthesisExecutor:
     3. **Trigger rescope** — if ``response.change_request`` is set, hand
        it to the rescope trigger (which preempts the current task and
        passes the intent to the rescope machinery).
-    4. **Return outcome** — maps the response to a
+    4. **File insights** — if ``response.insights`` is non-empty and an
+       :class:`InsightFiler` was injected, file each insight as a GitHub
+       issue.
+    5. **Return outcome** — maps the response to a
        :class:`ReviewReplyOutcome` for the Rocq oracle.
 
     Dependencies are injected through the constructor per the
@@ -118,9 +127,11 @@ class SynthesisExecutor:
         self,
         gh: ReplyPoster,
         rescope: RescopeTrigger | None = None,
+        insight_filer: InsightFiler | None = None,
     ) -> None:
         self._gh = gh
         self._rescope = rescope
+        self._insight_filer = insight_filer
 
     def execute(
         self,
@@ -152,7 +163,10 @@ class SynthesisExecutor:
         # 3. Trigger rescope if change_request present
         self._maybe_trigger_rescope(response, target)
 
-        # 4. Return outcome for Rocq oracle
+        # 4. File insights if any
+        self._file_insights(response, target)
+
+        # 5. Return outcome for Rocq oracle
         return outcome_for_response(response)
 
     def execute_effects_only(
@@ -176,7 +190,10 @@ class SynthesisExecutor:
            the triggering comment after removing eyes.
         3. **Trigger rescope** — if ``response.change_request`` is set, hands
            it to the rescope trigger.
-        4. **Return outcome** — maps the response to a
+        4. **File insights** — if ``response.insights`` is non-empty and an
+           :class:`InsightFiler` was injected, files each insight as a GitHub
+           issue.
+        5. **Return outcome** — maps the response to a
            :class:`ReviewReplyOutcome` for the Rocq oracle.
         """
         # 1. Remove eyes reaction (best-effort)
@@ -199,7 +216,10 @@ class SynthesisExecutor:
         # 3. Trigger rescope if change_request present
         self._maybe_trigger_rescope(response, target)
 
-        # 4. Return outcome for Rocq oracle
+        # 4. File insights if any
+        self._file_insights(response, target)
+
+        # 5. Return outcome for Rocq oracle
         return outcome_for_response(response)
 
     def _post_reply(self, body: str, target: CommentTarget) -> None:
@@ -250,6 +270,26 @@ class SynthesisExecutor:
                 "skipping rescope for: %s",
                 response.change_request[:80],
             )
+
+    def _file_insights(
+        self,
+        response: CommentResponse,
+        target: CommentTarget,
+    ) -> None:
+        """File each insight in *response* through the configured InsightFiler.
+
+        No-op when *response.insights* is empty or no :class:`InsightFiler`
+        was injected.
+        """
+        if not response.insights or self._insight_filer is None:
+            return
+        for insight in response.insights:
+            log.info(
+                "filing insight %r for comment %d",
+                insight.title,
+                target.comment_id,
+            )
+            self._insight_filer.file_insight(insight, target)
 
     def _remove_eyes_reaction(self, target: CommentTarget) -> None:
         """Remove the ``eyes`` reaction from *target* (best-effort).

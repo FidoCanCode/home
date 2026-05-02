@@ -33,6 +33,7 @@ from fido.store import (
     ReplyPromiseRecord,
     append_reply_promise_markers,
 )
+from fido.synthesis import Insight
 from fido.synthesis_call import call_synthesis
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
@@ -94,6 +95,61 @@ class _BackgroundRescopeTrigger:
             prompts=self._prompts,
             intents=[intent],
         )
+
+
+_INSIGHT_REPO = "FidoCanCode/home"
+_INSIGHT_LABEL = "Insight"
+
+
+class _GitHubInsightFiler:
+    """InsightFiler implementation that creates GitHub issues on :data:`_INSIGHT_REPO`.
+
+    Idempotent: before filing, searches for an existing issue carrying the
+    ``<!-- insight-source: {comment_id} -->`` marker in its body.  If one is
+    found the filing is skipped so replaying the same comment never creates
+    duplicate insights.
+    """
+
+    def __init__(self, gh: GitHub) -> None:
+        self._gh = gh
+
+    def file_insight(self, insight: Insight, target: CommentTarget) -> None:
+        """File *insight* as a GitHub issue against :data:`_INSIGHT_REPO`.
+
+        Skips creation if an issue with the idempotency marker for
+        *target.comment_id* already exists.
+        """
+        marker = f"<!-- insight-source: {target.comment_id} -->"
+        existing = self._gh.search_issues(_INSIGHT_REPO, f'"{marker}" in:body is:issue')
+        if existing:
+            log.info(
+                "insight already filed for comment %d — skipping: %s",
+                target.comment_id,
+                existing[0].get("html_url", ""),
+            )
+            return
+        source_link = _insight_source_link(target)
+        title = f"Insight: {insight.title}"
+        body = f"{insight.hook}\n\n{insight.why}\n\nSource: {source_link}\n\n{marker}"
+        url = self._gh.create_issue(_INSIGHT_REPO, title, body, labels=[_INSIGHT_LABEL])
+        log.info("filed insight issue for comment %d: %s", target.comment_id, url)
+
+
+def _insight_source_link(target: CommentTarget) -> str:
+    """Return a GitHub URL pointing to the originating comment.
+
+    Uses the ``discussion_r{comment_id}`` anchor for review comments and
+    ``issuecomment-{comment_id}`` for top-level issue/PR comments.
+    """
+    if target.comment_type == "pulls":
+        return (
+            f"https://github.com/{target.repo}/pull/{target.pr}"
+            f"#discussion_r{target.comment_id}"
+        )
+    return (
+        f"https://github.com/{target.repo}/issues/{target.pr}"
+        f"#issuecomment-{target.comment_id}"
+    )
 
 
 # Per-work_dir coalescing state for _reorder_tasks_background.
@@ -1511,7 +1567,11 @@ def reply_to_comment(
             agent=agent,
             prompts=prompts,
         )
-        executor = SynthesisExecutor(gh, rescope=rescope_trigger)
+        executor = SynthesisExecutor(
+            gh,
+            rescope=rescope_trigger,
+            insight_filer=_GitHubInsightFiler(gh),
+        )
         target = CommentTarget(
             repo=str(info.get("repo", "")),
             pr=int(info.get("pr", 0)),
@@ -1742,7 +1802,11 @@ def reply_to_issue_comment(
             agent=agent,
             prompts=prompts,
         )
-        executor = SynthesisExecutor(gh, rescope=rescope_trigger)
+        executor = SynthesisExecutor(
+            gh,
+            rescope=rescope_trigger,
+            insight_filer=_GitHubInsightFiler(gh),
+        )
         issue_target = CommentTarget(
             repo=repo_full,
             pr=int(number) if number else 0,

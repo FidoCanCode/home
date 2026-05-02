@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from fido.rocq.replied_comment_claims import ReviewAct, ReviewAnswer
-from fido.synthesis import CommentResponse
+from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.types import RescоpeIntent
 
@@ -18,13 +18,27 @@ def _make_response(
     reply_text: str = "My reply.",
     emoji: str | None = None,
     change_request: str | None = None,
+    insights: list[Insight] | None = None,
 ) -> CommentResponse:
     return CommentResponse(
         reasoning="thinking",
         reply_text=reply_text,
         emoji=emoji,
         change_request=change_request,
+        insights=insights or [],
     )
+
+
+def _make_insight(
+    title: str = "Interesting finding",
+    hook: str = "The hook sentence.",
+    why: str = "The why paragraph.",
+) -> Insight:
+    return Insight(title=title, hook=hook, why=why)
+
+
+def _make_insight_filer() -> MagicMock:
+    return MagicMock()
 
 
 def _make_target(
@@ -437,3 +451,76 @@ class TestExecutorEffectsOnly:
         )
 
         assert outcome == ReviewAnswer()
+
+
+# ---------------------------------------------------------------------------
+# SynthesisExecutor — insight filing
+# ---------------------------------------------------------------------------
+
+
+class TestExecutorInsightFiling:
+    """_file_insights routes each insight through the InsightFiler."""
+
+    def test_no_filer_configured_does_not_crash(self) -> None:
+        gh = _make_gh()
+        executor = SynthesisExecutor(gh)  # no insight_filer
+
+        # Should not raise even with insights present
+        executor.execute(_make_response(insights=[_make_insight()]), _make_target())
+
+    def test_no_insights_does_not_call_filer(self) -> None:
+        gh = _make_gh()
+        filer = _make_insight_filer()
+        executor = SynthesisExecutor(gh, insight_filer=filer)
+
+        executor.execute(_make_response(insights=[]), _make_target())
+
+        filer.file_insight.assert_not_called()
+
+    def test_files_each_insight(self) -> None:
+        gh = _make_gh()
+        filer = _make_insight_filer()
+        executor = SynthesisExecutor(gh, insight_filer=filer)
+        insight1 = _make_insight(title="First")
+        insight2 = _make_insight(title="Second")
+        target = _make_target()
+
+        executor.execute(_make_response(insights=[insight1, insight2]), target)
+
+        assert filer.file_insight.call_count == 2
+        calls = filer.file_insight.call_args_list
+        assert calls[0][0] == (insight1, target)
+        assert calls[1][0] == (insight2, target)
+
+    def test_passes_target_to_filer(self) -> None:
+        gh = _make_gh()
+        filer = _make_insight_filer()
+        executor = SynthesisExecutor(gh, insight_filer=filer)
+        insight = _make_insight()
+        target = _make_target(comment_id=777, repo="org/repo", pr=5)
+
+        executor.execute(_make_response(insights=[insight]), target)
+
+        filer.file_insight.assert_called_once_with(insight, target)
+
+    def test_execute_effects_only_files_insights(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = []
+        filer = _make_insight_filer()
+        executor = SynthesisExecutor(gh, insight_filer=filer)
+        insight = _make_insight()
+        target = _make_target()
+
+        executor.execute_effects_only(_make_response(insights=[insight]), target)
+
+        filer.file_insight.assert_called_once_with(insight, target)
+
+    def test_execute_effects_only_no_insights_no_filer_call(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = []
+        filer = _make_insight_filer()
+        executor = SynthesisExecutor(gh, insight_filer=filer)
+
+        executor.execute_effects_only(_make_response(insights=[]), _make_target())
+
+        filer.file_insight.assert_not_called()
