@@ -66,6 +66,21 @@ class ReplyPoster(Protocol):
         content: str,
     ) -> None: ...
 
+    def list_reactions(
+        self,
+        repo: str,
+        comment_type: str,
+        comment_id: int | str,
+    ) -> list[dict[str, Any]]: ...
+
+    def delete_reaction(
+        self,
+        repo: str,
+        comment_type: str,
+        comment_id: int | str,
+        reaction_id: int | str,
+    ) -> None: ...
+
 
 class RescopeTrigger(Protocol):
     """Triggers a background rescope with a plain-English change request."""
@@ -144,6 +159,65 @@ class SynthesisExecutor:
         # 4. Return outcome for Rocq oracle
         return outcome_for_response(response)
 
+    def execute_effects_only(
+        self,
+        response: CommentResponse,
+        target: CommentTarget,
+    ) -> ReviewReplyOutcome:
+        """Execute post-reply effects for *response* against *target*.
+
+        This method handles the emoji reaction lifecycle and rescope trigger,
+        but does **not** post the reply itself.  Use this when the caller owns
+        the reply-posting step (e.g. to thread the outbox protocol through
+        it), and only needs the executor to manage the remaining side effects.
+
+        Effects, in order:
+
+        1. **Remove eyes reaction** — deletes any ``eyes`` reaction on the
+           triggering comment that was posted by the authenticated user
+           (best-effort; errors are logged but do not propagate).
+        2. **Add emoji reaction** — if ``response.emoji`` is set, adds it to
+           the triggering comment after removing eyes.
+        3. **Trigger rescope** — if ``response.change_request`` is set, hands
+           it to the rescope trigger.
+        4. **Return outcome** — maps the response to a
+           :class:`ReviewReplyOutcome` for the Rocq oracle.
+        """
+        # 1. Remove eyes reaction (best-effort)
+        self._remove_eyes_reaction(target)
+
+        # 2. Add emoji reaction if present
+        if response.emoji is not None:
+            log.info(
+                "adding %s reaction to comment %s",
+                response.emoji,
+                target.comment_id,
+            )
+            self._gh.add_reaction(
+                target.repo,
+                target.comment_type,
+                target.comment_id,
+                response.emoji,
+            )
+
+        # 3. Trigger rescope if change_request present
+        if response.change_request is not None:
+            if self._rescope is not None:
+                log.info(
+                    "triggering rescope: %s",
+                    response.change_request[:80],
+                )
+                self._rescope.trigger_rescope(response.change_request)
+            else:
+                log.warning(
+                    "change_request present but no rescope trigger configured — "
+                    "skipping rescope for: %s",
+                    response.change_request[:80],
+                )
+
+        # 4. Return outcome for Rocq oracle
+        return outcome_for_response(response)
+
     def _post_reply(self, body: str, target: CommentTarget) -> None:
         """Post the reply to the correct endpoint based on comment type."""
         if target.comment_type == "pulls":
@@ -163,3 +237,38 @@ class SynthesisExecutor:
                 target.pr,
             )
             self._gh.comment_issue(target.repo, target.pr, body)
+
+    def _remove_eyes_reaction(self, target: CommentTarget) -> None:
+        """Remove the ``eyes`` reaction from *target* (best-effort).
+
+        Lists all reactions on the comment and deletes any with
+        ``content == "eyes"``.  Errors are logged but never propagated —
+        a failed reaction cleanup must not abort an otherwise-successful
+        reply.
+        """
+        try:
+            reactions = self._gh.list_reactions(
+                target.repo,
+                target.comment_type,
+                target.comment_id,
+            )
+            for reaction in reactions:
+                if reaction.get("content") == "eyes":
+                    reaction_id = reaction.get("id")
+                    if reaction_id is not None:
+                        log.info(
+                            "removing eyes reaction %s from comment %s",
+                            reaction_id,
+                            target.comment_id,
+                        )
+                        self._gh.delete_reaction(
+                            target.repo,
+                            target.comment_type,
+                            target.comment_id,
+                            reaction_id,
+                        )
+        except Exception:
+            log.exception(
+                "failed to remove eyes reaction from comment %s — continuing",
+                target.comment_id,
+            )

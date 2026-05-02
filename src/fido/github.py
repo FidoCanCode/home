@@ -243,6 +243,38 @@ class GitHub:
             content=content,
         )
 
+    def list_reactions(
+        self, repo: str, comment_type: str, comment_id: int | str
+    ) -> list[dict[str, Any]]:
+        """Return all reactions on a comment.
+
+        Each item is a dict with at least ``id`` (int) and ``content`` (str).
+        comment_type is ``'pulls'`` for review comments or ``'issues'`` for
+        top-level PR/issue comments.
+        """
+        return list(
+            self._paginate(
+                f"{self.BASE}/repos/{repo}/{comment_type}/comments/{comment_id}/reactions"
+            )
+        )
+
+    def delete_reaction(
+        self,
+        repo: str,
+        comment_type: str,
+        comment_id: int | str,
+        reaction_id: int | str,
+    ) -> None:
+        """Delete a reaction from a comment by its reaction id.
+
+        comment_type is ``'pulls'`` for review comments or ``'issues'`` for
+        top-level PR/issue comments.
+        """
+        resp = self._s.delete(
+            f"{self.BASE}/repos/{repo}/{comment_type}/comments/{comment_id}/reactions/{reaction_id}"
+        )
+        resp.raise_for_status()
+
     def reply_to_review_comment(
         self, repo: str, pr: int | str, body: str, in_reply_to: int | str
     ) -> dict[str, Any]:

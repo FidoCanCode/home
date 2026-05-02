@@ -244,6 +244,45 @@ class TestGitHubClass:
         url = mock_s.post.call_args.args[0]
         assert "repos/o/r/issues/comments/7/reactions" in url
 
+    def test_list_reactions_pulls(self) -> None:
+        gh, mock_s = self._gh()
+        page_resp = MagicMock()
+        page_resp.json.return_value = [{"id": 1, "content": "eyes"}]
+        page_resp.headers = {}  # no Link header → single page
+        mock_s.get.return_value = page_resp
+        result = gh.list_reactions("o/r", "pulls", 42)
+        url = mock_s.get.call_args.args[0]
+        assert "repos/o/r/pulls/comments/42/reactions" in url
+        assert result == [{"id": 1, "content": "eyes"}]
+
+    def test_list_reactions_issues(self) -> None:
+        gh, mock_s = self._gh()
+        page_resp = MagicMock()
+        page_resp.json.return_value = [{"id": 2, "content": "+1"}]
+        page_resp.headers = {}
+        mock_s.get.return_value = page_resp
+        result = gh.list_reactions("o/r", "issues", 7)
+        url = mock_s.get.call_args.args[0]
+        assert "repos/o/r/issues/comments/7/reactions" in url
+        assert result == [{"id": 2, "content": "+1"}]
+
+    def test_delete_reaction_pulls(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_s.delete.return_value = mock_resp
+        gh.delete_reaction("o/r", "pulls", 42, 99)
+        url = mock_s.delete.call_args.args[0]
+        assert "repos/o/r/pulls/comments/42/reactions/99" in url
+        mock_resp.raise_for_status.assert_called_once()
+
+    def test_delete_reaction_issues(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_s.delete.return_value = mock_resp
+        gh.delete_reaction("o/r", "issues", 7, 55)
+        url = mock_s.delete.call_args.args[0]
+        assert "repos/o/r/issues/comments/7/reactions/55" in url
+
     def test_reply_to_review_comment(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()

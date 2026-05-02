@@ -10,27 +10,22 @@ from fido.events import (
     Action,
     WebhookIngressOracle,
     _apply_reply_result,
+    _BackgroundRescopeTrigger,
     _build_issue_comment_action,
     _configured_agent,
-    _deferred_issue_key,
     _existing_reply_artifact,
     _get_commit_summary,
     _is_allowed,
     _load_active_context_for_rescope,
     _make_reorder_kwargs,
     _notify_thread_change,
-    _open_defer_issue_idempotent,
     _posted_comment_id,
     _record_reply_artifact,
     _reorder_tasks_background,
     _reply_promise_ids,
     _rewrite_pr_description,
-    _summarize_as_action_item,
     _task_snapshot,
-    _triage,
-    _try_resolve_thread,
     bot_feedback_creates_tasks,
-    bot_feedback_resolves_thread,
     build_review_comment_action,
     create_task,
     dispatch,
@@ -44,14 +39,29 @@ from fido.events import (
     reply_to_issue_comment,
     reply_to_review,
     review_outcome_creates_tasks,
-    review_outcome_resolves_thread,
     thread_lineage_comment_ids,
 )
 from fido.provider import ProviderID
 from fido.rocq import replied_comment_claims as oracle
 from fido.state import State
 from fido.store import FidoStore, ReplyPromiseRecord
+from fido.synthesis import CommentResponse
+from fido.synthesis_call import SynthesisExhaustedError
 from fido.types import ActiveIssue, ActivePR
+
+
+def _synthesis_response(
+    reply_text: str = "I'll look into that.",
+    emoji: str | None = None,
+    change_request: str | None = None,
+) -> CommentResponse:
+    """Build a CommentResponse for use in test patches."""
+    return CommentResponse(
+        reasoning="thinking",
+        reply_text=reply_text,
+        emoji=emoji,
+        change_request=change_request,
+    )
 
 
 class RepoConfig(_RepoConfig):
@@ -274,6 +284,8 @@ class TestRecoverReplyPromises:
             "url": "https://github.com/owner/repo/pull/7#issuecomment-302",
             "author": "owner",
             "comment_type": "issues",
+            "lineage_key": "issues:owner/repo:7",
+            "lineage_comment_ids": [302],
         }
 
     def test_recovers_stale_issue_marker_without_reposting(
@@ -792,19 +804,20 @@ class TestRecoverReplyPromises:
 
         gh.get_issue_comment.side_effect = get_issue_comment
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ANSWER: yep"
-            return "One combined reply."
-
-        with patch("fido.events.maybe_react"):
+        with (
+            patch("fido.events.maybe_react"),
+            patch(
+                "fido.events.call_synthesis",
+                return_value=_synthesis_response("One combined reply."),
+            ),
+        ):
             assert recover_reply_promises(
                 fido_dir,
                 _config(tmp_path),
                 _repo_cfg(tmp_path),
                 gh,
                 7,
-                agent=_client(side_effect=fake_pp),
+                agent=_client(),
             )
 
         store = FidoStore(tmp_path)
@@ -926,21 +939,20 @@ class TestRecoverReplyPromises:
             },
         ]
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ANSWER: yep"
-            return "One combined review reply."
-
-        with patch("fido.events.maybe_react"):
+        with (
+            patch("fido.events.maybe_react"),
+            patch(
+                "fido.events.call_synthesis",
+                return_value=_synthesis_response("One combined review reply."),
+            ),
+        ):
             assert recover_reply_promises(
                 fido_dir,
                 _config(tmp_path),
                 _repo_cfg(tmp_path),
                 gh,
                 7,
-                agent=_client(side_effect=fake_pp),
+                agent=_client(),
             )
 
         store = FidoStore(tmp_path)
@@ -1320,93 +1332,6 @@ class TestReplyPromiseHelpers:
             _existing_reply_artifact(repo_cfg, (first.promise_id, second.promise_id))
             is None
         )
-
-    def test_deferred_issue_key_deduplicates_and_sorts(self) -> None:
-        assert _deferred_issue_key(["b", "a", "a"]) == "deferred-issue:a,b"
-        assert _deferred_issue_key([]) is None
-
-    def test_open_defer_issue_idempotent_reuses_recorded_issue(
-        self, tmp_path: Path
-    ) -> None:
-        repo_cfg = _repo_cfg(tmp_path)
-        store = FidoStore(tmp_path)
-        promise = store.prepare_reply(
-            owner="worker",
-            comment_type="pulls",
-            anchor_comment_id=321,
-        )
-        store.record_deferred_issue(
-            idempotence_key=f"deferred-issue:{promise.promise_id}",
-            repo="owner/repo",
-            title="later",
-            body="Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
-            issue_url="https://github.com/owner/repo/issues/7",
-        )
-        gh = MagicMock()
-
-        url = _open_defer_issue_idempotent(
-            repo_cfg,
-            gh,
-            "owner/repo",
-            "https://github.com/owner/repo/pull/7",
-            "later",
-            "big refactor",
-            (promise.promise_id,),
-        )
-
-        assert url == "https://github.com/owner/repo/issues/7"
-        gh.create_issue.assert_not_called()
-
-    def test_open_defer_issue_idempotent_records_created_issue(
-        self, tmp_path: Path
-    ) -> None:
-        repo_cfg = _repo_cfg(tmp_path)
-        store = FidoStore(tmp_path)
-        promise = store.prepare_reply(
-            owner="worker",
-            comment_type="issues",
-            anchor_comment_id=654,
-        )
-        gh = MagicMock()
-        gh.create_issue.return_value = "https://github.com/owner/repo/issues/8"
-
-        url = _open_defer_issue_idempotent(
-            repo_cfg,
-            gh,
-            "owner/repo",
-            "https://github.com/owner/repo/pull/7",
-            "later",
-            "big refactor",
-            (promise.promise_id,),
-        )
-
-        key = f"deferred-issue:{promise.promise_id}"
-        assert url == "https://github.com/owner/repo/issues/8"
-        gh.create_issue.assert_called_once_with(
-            "owner/repo",
-            "later",
-            "Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
-        )
-        record = store.deferred_issue(key)
-        assert record is not None
-        assert record.issue_url == "https://github.com/owner/repo/issues/8"
-
-    def test_open_defer_issue_without_key_posts_directly(self, tmp_path: Path) -> None:
-        gh = MagicMock()
-        gh.create_issue.return_value = "https://github.com/owner/repo/issues/8"
-
-        url = _open_defer_issue_idempotent(
-            _repo_cfg(tmp_path),
-            gh,
-            "owner/repo",
-            "",
-            "later",
-            "big refactor",
-            (),
-        )
-
-        assert url == "https://github.com/owner/repo/issues/8"
-        gh.create_issue.assert_called_once_with("owner/repo", "later", "big refactor")
 
 
 class TestDispatchPing:
@@ -1867,190 +1792,6 @@ class TestDispatchUnknown:
         assert result is None
 
 
-# ── New coverage tests ──────────────────────────────────────────────────────
-
-
-class TestSummarizeAsActionItem:
-    def test_returns_model_result(self) -> None:
-        client = _client("add logging to streamed sub-Claude output")
-        result = _summarize_as_action_item(
-            "Ensure we log at that level too.", agent=client
-        )
-        assert result == "add logging to streamed sub-Claude output"
-
-    def test_empty_result_raises(self) -> None:
-        client = _client("")
-        with pytest.raises(ValueError, match="_summarize_as_action_item"):
-            _summarize_as_action_item("short comment", agent=client)
-
-    def test_strips_whitespace_from_result(self) -> None:
-        client = _client("  add tests  ")
-        result = _summarize_as_action_item("add tests please", agent=client)
-        assert result == "add tests"
-
-    def test_requires_agent(self) -> None:
-        with pytest.raises(
-            ValueError, match="_summarize_as_action_item requires agent"
-        ):
-            _summarize_as_action_item("add some tests")
-
-    def test_short_result_returned_without_retry(self) -> None:
-        short_title = "add unit tests"
-        client = _client(short_title)
-        result = _summarize_as_action_item("add some tests", agent=client)
-        assert result == short_title
-        client.run_turn.assert_called_once()  # no retry needed
-
-    def test_retries_when_result_too_long(self) -> None:
-        long_title = "a" * 81
-        short_title = "add tests"
-        client = _client(side_effect=[long_title, short_title])
-        result = _summarize_as_action_item("add some tests", agent=client)
-        assert result == short_title
-        assert client.run_turn.call_count == 2
-
-    def test_retries_up_to_three_times_then_truncates(self) -> None:
-        long_title = "a" * 81
-        client = _client(long_title)
-        result = _summarize_as_action_item("add some tests", agent=client)
-        assert result == long_title[:80]
-        assert client.run_turn.call_count == 4  # 1 initial + 3 retries
-
-    def test_stops_retrying_once_short_enough(self) -> None:
-        titles = ["a" * 81, "b" * 81, "short title"]
-        client = _client(side_effect=titles)
-        result = _summarize_as_action_item("add some tests", agent=client)
-        assert result == "short title"
-        assert client.run_turn.call_count == 3  # 1 initial + 2 retries
-
-    def test_uses_retry_on_preempt_via_safe_voice_turn(self) -> None:
-        """safe_voice_turn always passes retry_on_preempt=True to run_turn."""
-        client = _client("add tests")
-        _summarize_as_action_item("add some tests", agent=client)
-        _, kwargs = client.run_turn.call_args
-        assert kwargs.get("retry_on_preempt") is True
-
-    def test_shorten_empty_raises(self) -> None:
-        """If shorten returns empty, safe_voice_turn raises ValueError."""
-        long_title = "a" * 81
-        # Initial returns long_title; shorten returns ""
-        client = _client(side_effect=[long_title, ""])
-        with pytest.raises(ValueError, match="run_turn returned empty"):
-            _summarize_as_action_item("add some tests", agent=client)
-
-
-class TestTriage:
-    def test_returns_parsed_category(self, tmp_path: Path) -> None:
-        cat, titles = _triage(
-            "please add tests",
-            is_bot=False,
-            agent=_client("ACT: add tests"),
-        )
-        assert cat == "ACT"
-        assert titles == ["add tests"]
-
-    def test_fallback_on_bad_response(self, tmp_path: Path) -> None:
-        client = _client(side_effect=["", "implement the thing"])
-        cat, titles = _triage("do stuff", is_bot=False, agent=client)
-        assert cat == "ACT"
-        assert titles == ["implement the thing"]
-
-    def test_fallback_for_bot(self, tmp_path: Path) -> None:
-        client = _client(side_effect=["", "implement the thing"])
-        cat, titles = _triage("do stuff", is_bot=True, agent=client)
-        assert cat == "DO"
-        assert titles == ["implement the thing"]
-
-    def test_with_context(self, tmp_path: Path) -> None:
-        ctx = {"pr_title": "My PR", "file": "foo.py", "diff_hunk": "@@ -1 +1 @@"}
-        cat, titles = _triage(
-            "nit comment",
-            is_bot=False,
-            context=ctx,
-            agent=_client("DEFER: out of scope"),
-        )
-        assert cat == "DEFER"
-
-    def test_unrecognized_category_falls_back(self, tmp_path: Path) -> None:
-        client = _client(side_effect=["WEIRD: something", "do the thing"])
-        cat, titles = _triage("hi", is_bot=False, agent=client)
-        assert cat == "ACT"
-        assert titles == ["do the thing"]
-
-    def test_timeout_falls_back(self, tmp_path: Path) -> None:
-        client = _client(side_effect=["", "do the thing"])
-        cat, titles = _triage("hi", is_bot=True, agent=client)
-        assert cat == "DO"
-
-    def test_task_category_falls_back(self, tmp_path: Path) -> None:
-        """TASK is no longer a valid bot category — falls back to DO."""
-        client = _client(side_effect=["TASK: add caching", "add result caching"])
-        cat, titles = _triage("cache results", is_bot=True, agent=client)
-        assert cat == "DO"
-        assert titles == ["add result caching"]
-
-    def test_bot_categories_in_prompt(self, tmp_path: Path) -> None:
-        """Ensure bot-specific categories (DO/DUMP) are used when is_bot=True."""
-        captured = {}
-
-        def fake_pp(prompt, model, **kwargs):
-            captured["prompt"] = prompt
-            return "DO: implement feature"
-
-        cat, _ = _triage(
-            "implement feature", is_bot=True, agent=_client(side_effect=fake_pp)
-        )
-        assert cat == "DO"
-        assert "DO" in captured["prompt"]
-        assert "DEFER" not in captured["prompt"]
-        assert "DUMP" in captured["prompt"]
-        assert "TASK" not in captured["prompt"]
-
-    def test_requires_agent(self) -> None:
-        with pytest.raises(ValueError, match="_triage requires agent"):
-            _triage("do it", is_bot=False)
-
-    def test_multiple_act_lines_returns_all_titles(self) -> None:
-        response = "ACT: add unit tests\nACT: update documentation"
-        cat, titles = _triage(
-            "please add tests and docs",
-            is_bot=False,
-            agent=_client(response),
-        )
-        assert cat == "ACT"
-        assert titles == ["add unit tests", "update documentation"]
-
-    def test_mixed_categories_uses_first(self) -> None:
-        """Only lines matching the first valid category are collected."""
-        response = "ACT: add tests\nDEFER: out of scope"
-        cat, titles = _triage(
-            "comment",
-            is_bot=False,
-            agent=_client(response),
-        )
-        assert cat == "ACT"
-        assert titles == ["add tests"]
-
-    def test_zero_act_tasks_falls_back(self) -> None:
-        """ACT with empty title is treated as parse failure → fallback."""
-        client = _client(side_effect=["ACT: ", "do the thing"])
-        cat, titles = _triage("hi", is_bot=False, agent=client)
-        # empty title → stripped to "" → falsy → no titles collected → fallback
-        assert cat == "ACT"
-        assert titles == ["do the thing"]
-
-    def test_lines_without_colon_are_skipped(self) -> None:
-        """Preamble lines without a colon are ignored; valid lines are still parsed."""
-        response = "thinking\nACT: add unit tests"
-        cat, titles = _triage(
-            "add tests",
-            is_bot=False,
-            agent=_client(response),
-        )
-        assert cat == "ACT"
-        assert titles == ["add unit tests"]
-
-
 class TestMaybeReact:
     def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
         return RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -2203,6 +1944,14 @@ class TestReplyToComment:
         )
         assert cat == "ACT"
 
+    def _mock_gh(self) -> MagicMock:
+        """Return a MagicMock GitHub client with reply methods configured."""
+        mock_gh = MagicMock()
+        mock_gh.fetch_comment_thread.return_value = []
+        mock_gh.reply_to_review_comment.return_value = {"id": 999}
+        mock_gh.comment_issue.return_value = {"id": 999}
+        return mock_gh
+
     def test_full_flow_act(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(
@@ -2218,20 +1967,20 @@ class TestReplyToComment:
             },
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: add logging"
-            return "I will add logging."
-
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                reply_text="I will add logging.",
+                change_request="Add logging to the request handler",
+            ),
+        ):
+            cat, titles = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                self._mock_gh(),
+                agent=_client(),
+            )
         assert cat == "ACT"
         assert "logging" in titles[0].lower()
 
@@ -2254,13 +2003,6 @@ class TestReplyToComment:
             },
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ANSWER: yep"
-            return "Yep."
-
         mock_gh = MagicMock()
         mock_gh.fetch_comment_thread.return_value = []
 
@@ -2275,13 +2017,17 @@ class TestReplyToComment:
 
         mock_gh.reply_to_review_comment.side_effect = reply_to_review_comment
 
-        reply_to_comment(
-            action,
-            cfg,
-            repo_cfg,
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("Yep."),
+        ):
+            reply_to_comment(
+                action,
+                cfg,
+                repo_cfg,
+                mock_gh,
+                agent=_client(),
+            )
 
         effect = store.reply_outbox_effect(promise.promise_id)
         assert effect is not None
@@ -2314,28 +2060,28 @@ class TestReplyToComment:
             },
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ANSWER: yep"
-            return "Yep."
-
         mock_gh = MagicMock()
         mock_gh.fetch_comment_thread.return_value = []
 
-        with pytest.raises(RuntimeError, match="already claimed"):
+        with (
+            pytest.raises(RuntimeError, match="already claimed"),
+            patch(
+                "fido.events.call_synthesis",
+                return_value=_synthesis_response("Yep."),
+            ),
+        ):
             reply_to_comment(
                 action,
                 cfg,
                 repo_cfg,
                 mock_gh,
-                agent=_client(side_effect=fake_pp),
+                agent=_client(),
             )
 
         mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_full_flow_ask(self, tmp_path: Path) -> None:
+        """Synthesis path: no change_request → ANSWER (replaces old ASK category)."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2344,69 +2090,60 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ASK: need more info"
-            return "What specifically?"
-
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
-        assert cat == "ASK"
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("What specifically?"),
+        ):
+            cat, titles = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                self._mock_gh(),
+                agent=_client(),
+            )
+        assert cat == "ANSWER"
 
     @pytest.mark.parametrize(
-        ("category", "creates_tasks", "resolves_thread"),
+        ("category", "creates_tasks"),
         [
-            ("ACT", True, False),
-            ("DO", True, False),
-            ("ASK", False, False),
-            ("ANSWER", False, False),
-            ("DEFER", False, True),
-            ("DUMP", False, True),
+            ("ACT", True),
+            ("DO", True),
+            ("ASK", False),
+            ("ANSWER", False),
+            ("DEFER", False),
+            ("DUMP", False),
         ],
     )
-    def test_review_outcome_helpers(
+    def test_review_outcome_creates_tasks_helper(
         self,
         category: str,
         creates_tasks: bool,
-        resolves_thread: bool,
     ) -> None:
         assert review_outcome_creates_tasks(category) is creates_tasks
-        assert review_outcome_resolves_thread(category) is resolves_thread
 
     @pytest.mark.parametrize(
-        ("category", "creates_tasks", "resolves_thread"),
+        ("category", "creates_tasks"),
         [
-            ("DO", True, False),
-            ("DUMP", False, True),
-            ("DEFER", False, False),
+            ("DO", True),
+            ("DUMP", False),
+            ("DEFER", False),
         ],
     )
     def test_bot_feedback_outcome_helpers(
         self,
         category: str,
         creates_tasks: bool,
-        resolves_thread: bool,
     ) -> None:
         assert bot_feedback_creates_tasks(category) is creates_tasks
-        assert bot_feedback_resolves_thread(category) is resolves_thread
         assert review_outcome_creates_tasks(category, is_bot=True) is creates_tasks
-        assert review_outcome_resolves_thread(category, is_bot=True) is resolves_thread
 
     def test_review_outcome_helpers_return_false_for_unknown_category(self) -> None:
         assert review_outcome_creates_tasks("UNKNOWN") is False
-        assert review_outcome_resolves_thread("UNKNOWN") is False
 
-    @pytest.mark.parametrize("category", ["DEFER", "DUMP"])
-    def test_resolve_categories_resolve_review_thread(
-        self, tmp_path: Path, category: str
+    def test_synthesis_path_does_not_resolve_review_thread(
+        self, tmp_path: Path
     ) -> None:
+        """Synthesis path never resolves review threads."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2419,57 +2156,18 @@ class TestReplyToComment:
             {"id": 11, "author": "owner", "body": "please defer"}
         ]
         gh.reply_to_review_comment.return_value = {"id": 88}
-        gh.get_review_threads.return_value = [
-            {
-                "id": "thread-node-1",
-                "isResolved": False,
-                "comments": {"nodes": [{"databaseId": 11}]},
-            }
-        ]
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return f"{category}: handled"
-            return "Handled."
-
-        reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            gh,
-            agent=_client(side_effect=fake_pp),
-        )
-        gh.resolve_thread.assert_called_once_with("thread-node-1")
-
-    def test_try_resolve_thread_returns_early_for_missing_repo(self) -> None:
-        gh = MagicMock()
-        _try_resolve_thread({"pr": 1, "comment_id": 11}, gh)
-        gh.get_review_threads.assert_not_called()
-
-    def test_try_resolve_thread_returns_early_for_missing_pr(self) -> None:
-        gh = MagicMock()
-        _try_resolve_thread({"repo": "owner/repo", "comment_id": 11}, gh)
-        gh.get_review_threads.assert_not_called()
-
-    def test_try_resolve_thread_returns_early_for_unparseable_pr(self) -> None:
-        gh = MagicMock()
-        _try_resolve_thread(
-            {"repo": "owner/repo", "pr": object(), "comment_id": 11}, gh
-        )
-        gh.get_review_threads.assert_not_called()
-
-    def test_try_resolve_thread_skips_resolved_threads(self) -> None:
-        gh = MagicMock()
-        gh.get_review_threads.return_value = [
-            {
-                "id": "thread-node-1",
-                "isResolved": True,
-                "comments": {"nodes": [{"databaseId": 11}]},
-            }
-        ]
-        _try_resolve_thread({"repo": "owner/repo", "pr": 1, "comment_id": 11}, gh)
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("Handled."),
+        ):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                gh,
+                agent=_client(),
+            )
         gh.resolve_thread.assert_not_called()
 
     def test_apply_reply_result_skips_non_task_issue_categories(
@@ -2522,6 +2220,7 @@ class TestReplyToComment:
         )
 
     def test_full_flow_answer(self, tmp_path: Path) -> None:
+        """Synthesis path: no change_request → ANSWER."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2530,23 +2229,22 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ANSWER: explain choice"
-            return "I did this because..."
-
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("I did this because..."),
+        ):
+            cat, titles = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                self._mock_gh(),
+                agent=_client(),
+            )
         assert cat == "ANSWER"
+        assert titles == []
 
     def test_full_flow_do(self, tmp_path: Path) -> None:
+        """Synthesis path: change_request present → ACT (replaces old DO for bots)."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2555,28 +2253,26 @@ class TestReplyToComment:
             is_bot=True,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "DO: add result caching"
-            if "Convert this PR review comment" in prompt:
-                return "Cache results for performance"
-            return "On it!"
-
-        mock_gh = MagicMock()
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
-        assert cat == "DO"
+        mock_gh = self._mock_gh()
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                "On it!",
+                change_request="Cache results for performance",
+            ),
+        ):
+            cat, titles = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
+        assert cat == "ACT"
         assert titles == ["Cache results for performance"]
-        mock_gh.create_issue.assert_not_called()
 
     def test_full_flow_defer(self, tmp_path: Path) -> None:
+        """Synthesis path: change_request with scope description → ACT (replaces old DEFER)."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2585,72 +2281,28 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "DEFER: out of scope"
-            return "That's out of scope for this PR."
-
-        mock_gh = MagicMock()
-        mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/99"
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
-        assert cat == "DEFER"
-        mock_gh.create_issue.assert_called_once_with(
-            "owner/repo",
-            "out of scope",
-            "Deferred from https://github.com/owner/repo/pull/1\n\n> refactor everything",
-        )
-
-    def test_reuses_recorded_defer_issue_for_promise(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        store = FidoStore(tmp_path)
-        promise = store.prepare_reply(
-            owner="worker", comment_type="pulls", anchor_comment_id=16
-        )
-        assert promise is not None
-        store.record_deferred_issue(
-            idempotence_key=f"deferred-issue:{promise.promise_id}",
-            repo="owner/repo",
-            title="out of scope",
-            body="Deferred from https://github.com/owner/repo/pull/1\n\n> refactor everything",
-            issue_url="https://github.com/owner/repo/issues/99",
-        )
-        action = Action(
-            prompt="comment",
-            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 16},
-            comment_body="refactor everything",
-            is_bot=False,
-            context={"reply_promise_id": promise.promise_id},
-        )
-
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "DEFER: out of scope"
-            assert "https://github.com/owner/repo/issues/99" in prompt
-            return "That's out of scope for this PR."
-
-        mock_gh = MagicMock()
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
-        assert cat == "DEFER"
-        assert titles == ["out of scope"]
+        mock_gh = self._mock_gh()
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                "That's noted for a future PR.",
+                change_request="Refactor everything in a separate PR",
+            ),
+        ):
+            cat, titles = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
+        assert cat == "ACT"
+        assert "refactor" in titles[0].lower()
+        # Synthesis path never calls create_issue
         mock_gh.create_issue.assert_not_called()
 
     def test_full_flow_dump(self, tmp_path: Path) -> None:
+        """Synthesis path: no change_request → ANSWER (replaces old DUMP)."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2659,54 +2311,21 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "DUMP: not applicable"
-            return "Not applicable here."
-
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
-        assert cat == "DUMP"
-
-    def test_full_flow_defer_issue_creation_failure_propagates(
-        self, tmp_path: Path
-    ) -> None:
-        """DEFER issue creation failure propagates — no reply posted with missing issue."""
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="comment",
-            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 15},
-            comment_body="refactor everything",
-            is_bot=False,
-        )
-
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "DEFER: out of scope"
-            return "That's out of scope for this PR."
-
-        mock_gh = MagicMock()
-        mock_gh.create_issue.side_effect = RuntimeError("network fail")
-        with pytest.raises(RuntimeError, match="network fail"):
-            reply_to_comment(
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("Not applicable here."),
+        ):
+            cat, titles = reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(side_effect=fake_pp),
+                self._mock_gh(),
+                agent=_client(),
             )
-        mock_gh.reply_to_review_comment.assert_not_called()
+        assert cat == "ANSWER"
 
     def test_empty_reply_body_raises(self, tmp_path: Path) -> None:
+        """Synthesis exhausted error propagates fail-closed."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2715,22 +2334,19 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: do it"
-            if "Convert this PR review comment" in prompt:
-                return "Do something"
-            return ""
-
-        with pytest.raises(ValueError, match="run_turn returned empty"):
+        with (
+            pytest.raises(SynthesisExhaustedError),
+            patch(
+                "fido.events.call_synthesis",
+                side_effect=SynthesisExhaustedError("exhausted"),
+            ),
+        ):
             reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
                 MagicMock(),
-                agent=_client(side_effect=fake_pp),
+                agent=_client(),
             )
 
     def test_claim_race_returns_act_with_no_titles(self, tmp_path: Path) -> None:
@@ -2757,7 +2373,7 @@ class TestReplyToComment:
         assert titles == []
 
     def test_no_comment_id_skips_lock(self, tmp_path: Path) -> None:
-        """When comment_id is None, lock is skipped; maybe_react is still called."""
+        """When comment_id is None, lock is skipped; synthesis still called."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2766,24 +2382,23 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return "ok"
-
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("ok", change_request="Do it"),
+        ):
+            cat, titles = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                MagicMock(),
+                agent=_client(),
+            )
         assert cat == "ACT"
 
-    def test_act_title_from_comment_chain_not_raw_triage(self, tmp_path: Path) -> None:
-        """ACT task title uses the chain-aware title pass, not raw triage output."""
+    def test_act_title_comes_from_synthesis_change_request(
+        self, tmp_path: Path
+    ) -> None:
+        """ACT task title is the change_request from the synthesis response."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2792,147 +2407,58 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        calls: list[str] = []
-
-        def fake_pp(prompt, model, **kwargs):
-            calls.append(prompt)
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: add unit tests\nACT: update documentation"
-            if "Convert this PR review comment chain" in prompt:
-                return "Add tests and update docs"
-            return "On it!"
-
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                "On it!",
+                change_request="Add tests and update docs",
+            ),
+        ):
+            cat, titles = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                self._mock_gh(),
+                agent=_client(),
+            )
         assert cat == "ACT"
         assert titles == ["Add tests and update docs"]
-        chain_prompts = [
-            p for p in calls if "Convert this PR review comment chain" in p
-        ]
-        assert len(chain_prompts) == 1
-        assert "Suggested ACT title(s) from triage:" in chain_prompts[0]
-        assert "- add unit tests" in chain_prompts[0]
-        assert "- update documentation" in chain_prompts[0]
-        assert "FINAL ACT COMMENT" in chain_prompts[0]
 
-    def test_act_title_uses_thread_context_and_final_comment(
-        self, tmp_path: Path
-    ) -> None:
-        """When the triggering comment is a reply, ACT title sees the whole chain."""
+    def test_synthesis_reply_body_is_posted(self, tmp_path: Path) -> None:
+        """The reply text from synthesis is what gets posted to GitHub."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
             reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 42},
-            comment_body="But what about ] + []?",
+            comment_body="please fix the parser",
             is_bot=False,
         )
 
-        calls: list[str] = []
-
-        def fake_pp(prompt, model, **kwargs):
-            calls.append(prompt)
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: remove redundant empty-list concatenation"
-            if "Convert this PR review comment chain" in prompt:
-                return "Remove redundant empty-list concatenation"
-            return "Done!"
-
-        mock_gh = MagicMock()
-        # The root explains the surrounding concern; the final human reply
-        # supplies the concrete ACT request.
+        mock_gh = self._mock_gh()
         mock_gh.fetch_comment_thread.return_value = [
-            {
-                "id": 100,
-                "author": "rhencke",
-                "body": "Why did generated fields get renamed?",
-            },
-            {"id": 101, "author": "fidocancode", "body": "Woof, because..."},
-            {"id": 42, "author": "rhencke", "body": "But what about ] + []?"},
+            {"id": 42, "author": "rhencke", "body": "please fix the parser"},
         ]
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                "I'll fix the parser right away.",
+                change_request="Fix the parser",
+            ),
+        ):
+            cat, titles = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
         assert cat == "ACT"
-        assert titles == ["Remove redundant empty-list concatenation"]
-        chain_prompts = [
-            p for p in calls if "Convert this PR review comment chain" in p
-        ]
-        assert len(chain_prompts) == 1
-        assert "1. rhencke: Why did generated fields get renamed?" in chain_prompts[0]
-        assert "2. fidocancode: Woof, because..." in chain_prompts[0]
-        assert (
-            "3. rhencke (FINAL ACT COMMENT): But what about ] + []?" in chain_prompts[0]
-        )
-        # Posted replies are immutable; even with a prior Fido reply we post a new one.
+        assert titles == ["Fix the parser"]
         reply_args = mock_gh.reply_to_review_comment.call_args.args
         assert reply_args[:2] == ("owner/repo", 1)
-        assert reply_args[2].startswith("Done!")
+        assert "I'll fix the parser right away." in reply_args[2]
         assert "fido:reply-promise:" in reply_args[2]
-        mock_gh.edit_review_comment.assert_not_called()
-
-    def test_act_title_marks_single_comment_thread_as_final(
-        self, tmp_path: Path
-    ) -> None:
-        """A single-comment thread is still explicitly marked as the ACT source."""
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="comment",
-            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 43},
-            comment_body="Add error handling for null inputs",
-            is_bot=False,
-        )
-
-        calls: list[str] = []
-
-        def fake_pp(prompt, model, **kwargs):
-            calls.append(prompt)
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: add error handling"
-            if "Convert this PR review comment chain" in prompt:
-                return "Add error handling for null inputs"
-            return "Will do!"
-
-        mock_gh = MagicMock()
-        # Thread has only one comment — the triggering one IS the root
-        mock_gh.fetch_comment_thread.return_value = [
-            {
-                "id": 43,
-                "author": "reviewer",
-                "body": "Add error handling for null inputs",
-            },
-        ]
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
-        assert cat == "ACT"
-        assert titles == ["Add error handling for null inputs"]
-        chain_prompts = [
-            p for p in calls if "Convert this PR review comment chain" in p
-        ]
-        assert len(chain_prompts) == 1
-        assert (
-            "1. reviewer (FINAL ACT COMMENT): Add error handling for null inputs"
-            in chain_prompts[0]
-        )
         # No prior Fido reply in thread — a new reply is posted
         mock_gh.reply_to_review_comment.assert_called_once()
         mock_gh.edit_review_comment.assert_not_called()
@@ -2949,16 +2475,7 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: reorder sub issues"
-            if "Convert this PR review comment" in prompt:
-                return "Reorder sub issues by priority"
-            return "On it!"
-
-        mock_gh = MagicMock()
+        mock_gh = self._mock_gh()
         # Thread: root → fido reply → NEW human comment (fido must not edit)
         mock_gh.fetch_comment_thread.return_value = [
             {"id": 300, "author": "rhencke", "body": "Add orderBy"},
@@ -2969,20 +2486,26 @@ class TestReplyToComment:
                 "body": "We need sub issues in priority order.",
             },
         ]
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                "On it!", change_request="Reorder sub issues by priority"
+            ),
+        ):
+            cat, titles = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
         assert cat == "ACT"
         # Human spoke last — must post a fresh reply, never edit the old one
         mock_gh.reply_to_review_comment.assert_called_once()
         mock_gh.edit_review_comment.assert_not_called()
 
-    def test_ask_title_not_rederived_from_root(self, tmp_path: Path) -> None:
-        """Non-task categories (ASK) are not affected by root body re-derivation."""
+    def test_answer_reply_posts_synthesis_text(self, tmp_path: Path) -> None:
+        """ANSWER replies post synthesis reply_text directly."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -2991,76 +2514,32 @@ class TestReplyToComment:
             is_bot=False,
         )
 
-        summarize_called = False
-
-        def fake_pp(prompt, model, **kwargs):
-            nonlocal summarize_called
-            if "Convert this PR review comment" in prompt:
-                summarize_called = True
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ASK: need more info"
-            return "Could you clarify?"
-
-        mock_gh = MagicMock()
+        mock_gh = self._mock_gh()
         mock_gh.fetch_comment_thread.return_value = [
             {"id": 200, "author": "reviewer", "body": "What do you think?"},
             {"id": 201, "author": "fidocancode", "body": "Sure, sounds good"},
         ]
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
-        assert cat == "ASK"
-        # _summarize_as_action_item must not be called for non-task categories
-        assert not summarize_called
-        # Posted replies are immutable; ask replies also post a new artifact.
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("Could you clarify?"),
+        ):
+            cat, titles = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
+        assert cat == "ANSWER"
+        # Posted replies are immutable; answer replies also post a new artifact.
         reply_args = mock_gh.reply_to_review_comment.call_args.args
         assert reply_args[:2] == ("owner/repo", 1)
-        assert reply_args[2].startswith("Could you clarify?")
+        assert "Could you clarify?" in reply_args[2]
         assert "fido:reply-promise:" in reply_args[2]
         mock_gh.edit_review_comment.assert_not_called()
 
-    def test_reply_run_turn_uses_retry_on_preempt(self, tmp_path: Path) -> None:
-        """Reply generation run_turn must pass retry_on_preempt=True so a
-        session preemption mid-generation retries rather than silently
-        returning an empty or truncated body."""
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="comment",
-            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 10},
-            comment_body="please add logging",
-            is_bot=False,
-        )
-        all_run_turn_kwargs: list[dict] = []
-
-        def fake_pp(prompt, model, **kwargs):
-            all_run_turn_kwargs.append(kwargs)
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: add logging"
-            if "Convert this PR review comment" in prompt:
-                return "Add logging"
-            return "I will add logging."
-
-        reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
-        # At least one run_turn call must carry retry_on_preempt=True — that is
-        # the reply generation call, which must survive session preemption.
-        assert any(kw.get("retry_on_preempt") is True for kw in all_run_turn_kwargs)
-
-    def test_active_context_injected_into_system_prompt(self, tmp_path: Path) -> None:
-        """reply_to_comment should inject active-issue context into reply_system_prompt."""
+    def test_call_synthesis_receives_issue_and_pr_context(self, tmp_path: Path) -> None:
+        """reply_to_comment passes active issue/PR context to call_synthesis."""
         cfg = self._cfg(tmp_path)
         # Set up state.json so _load_active_context_for_rescope finds active issue.
         fido_dir = tmp_path / ".git" / "fido"
@@ -3072,35 +2551,31 @@ class TestReplyToComment:
             comment_body="please add logging",
             is_bot=False,
         )
-        captured_system_prompts: list[str] = []
 
-        def fake_pp(prompt, model, **kwargs):
-            if sp := kwargs.get("system_prompt"):
-                captured_system_prompts.append(sp)
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: add logging"
-            if "Convert this PR review comment" in prompt:
-                return "Add logging"
-            return "I will add logging."
-
-        mock_gh = MagicMock()
+        mock_gh = self._mock_gh()
         mock_gh.view_issue.return_value = {"title": "Fix crash", "body": "It crashes."}
-        mock_gh.fetch_comment_thread.return_value = []
 
-        reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
-        assert any("## Active issue" in sp for sp in captured_system_prompts)
-        assert any("Fix crash" in sp for sp in captured_system_prompts)
+        captured_calls: list[dict] = []
+
+        def capture_synthesis(*args, **kwargs):
+            captured_calls.append(kwargs)
+            return _synthesis_response("I will add logging.")
+
+        with patch("fido.events.call_synthesis", side_effect=capture_synthesis):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
+        assert captured_calls
+        call_kwargs = captured_calls[0]
+        assert call_kwargs.get("issue") is not None
+        assert call_kwargs["issue"].title == "Fix crash"
 
     def test_no_active_context_when_no_state(self, tmp_path: Path) -> None:
-        """reply_to_comment should not include active-issue header when no state.json."""
+        """reply_to_comment passes None issue/pr to call_synthesis when no state.json."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -3108,30 +2583,26 @@ class TestReplyToComment:
             comment_body="please add logging",
             is_bot=False,
         )
-        captured_system_prompts: list[str] = []
 
-        def fake_pp(prompt, model, **kwargs):
-            if sp := kwargs.get("system_prompt"):
-                captured_system_prompts.append(sp)
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: add logging"
-            if "Convert this PR review comment" in prompt:
-                return "Add logging"
-            return "I will add logging."
+        mock_gh = self._mock_gh()
 
-        mock_gh = MagicMock()
-        mock_gh.fetch_comment_thread.return_value = []
+        captured_calls: list[dict] = []
 
-        reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
-        assert all("## Active issue" not in sp for sp in captured_system_prompts)
+        def capture_synthesis(*args, **kwargs):
+            captured_calls.append(kwargs)
+            return _synthesis_response("I will add logging.")
+
+        with patch("fido.events.call_synthesis", side_effect=capture_synthesis):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
+        assert captured_calls
+        call_kwargs = captured_calls[0]
+        assert call_kwargs.get("issue") is None
 
 
 class TestReplyToReview:
@@ -3193,55 +2664,65 @@ class TestReplyToIssueComment:
             context={"pr_title": "My PR", "comment_id": cid},
         )
 
+    def _mock_gh(self) -> MagicMock:
+        """Return a MagicMock GitHub client with reply methods configured."""
+        mock_gh = MagicMock()
+        mock_gh.get_repo_info.return_value = "owner/repo"
+        mock_gh.comment_issue.return_value = {"id": 9999}
+        return mock_gh
+
     def test_act_reply(self, tmp_path: Path) -> None:
+        """Synthesis path: change_request present → ACT."""
         cfg = self._cfg(tmp_path)
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: fix the bug"
-            return "I'll fix that."
-
-        cat, titles = reply_to_issue_comment(
-            self._action(),
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                "I'll fix that.", change_request="Fix the bug"
+            ),
+        ):
+            cat, titles = reply_to_issue_comment(
+                self._action(),
+                cfg,
+                self._repo_cfg(tmp_path),
+                self._mock_gh(),
+                agent=_client(),
+            )
         assert cat == "ACT"
+        assert titles == ["Fix the bug"]
 
     def test_ask_reply(self, tmp_path: Path) -> None:
+        """Synthesis path: no change_request → ANSWER (replaces old ASK)."""
         cfg = self._cfg(tmp_path)
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ASK: unclear"
-            return "What do you mean?"
-
-        cat, titles = reply_to_issue_comment(
-            self._action("unclear"),
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
-        assert cat == "ASK"
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("What do you mean?"),
+        ):
+            cat, titles = reply_to_issue_comment(
+                self._action("unclear"),
+                cfg,
+                self._repo_cfg(tmp_path),
+                self._mock_gh(),
+                agent=_client(),
+            )
+        assert cat == "ANSWER"
 
     def test_answer_reply(self, tmp_path: Path) -> None:
+        """Synthesis path: no change_request → ANSWER."""
         cfg = self._cfg(tmp_path)
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ANSWER: it works this way"
-            return "Yes, because..."
-
-        cat, titles = reply_to_issue_comment(
-            self._action("why?"),
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("Yes, because..."),
+        ):
+            cat, titles = reply_to_issue_comment(
+                self._action("why?"),
+                cfg,
+                self._repo_cfg(tmp_path),
+                self._mock_gh(),
+                agent=_client(),
+            )
         assert cat == "ANSWER"
 
     def test_claims_issue_reply_outbox_before_posting(self, tmp_path: Path) -> None:
@@ -3259,13 +2740,7 @@ class TestReplyToIssueComment:
             "reply_promise_id": promise.promise_id,
         }
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ANSWER: it works this way"
-            return "Yes, because..."
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo_info.return_value = "owner/repo"
+        mock_gh = self._mock_gh()
 
         def comment_issue(repo, number, body):
             effect = store.reply_outbox_effect(promise.promise_id)
@@ -3278,13 +2753,17 @@ class TestReplyToIssueComment:
 
         mock_gh.comment_issue.side_effect = comment_issue
 
-        reply_to_issue_comment(
-            action,
-            cfg,
-            repo_cfg,
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("Yes, because..."),
+        ):
+            reply_to_issue_comment(
+                action,
+                cfg,
+                repo_cfg,
+                mock_gh,
+                agent=_client(),
+            )
 
         effect = store.reply_outbox_effect(promise.promise_id)
         assert effect is not None
@@ -3292,112 +2771,45 @@ class TestReplyToIssueComment:
         assert effect.external_id == 9042
 
     def test_dump_reply(self, tmp_path: Path) -> None:
+        """Synthesis path: no change_request → ANSWER (replaces old DUMP)."""
         cfg = self._cfg(tmp_path)
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "DUMP: nope"
-            return "That won't work here."
-
-        cat, titles = reply_to_issue_comment(
-            self._action("do it differently"),
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
-        assert cat == "DUMP"
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("That won't work here."),
+        ):
+            cat, titles = reply_to_issue_comment(
+                self._action("do it differently"),
+                cfg,
+                self._repo_cfg(tmp_path),
+                self._mock_gh(),
+                agent=_client(),
+            )
+        assert cat == "ANSWER"
 
     def test_defer_reply(self, tmp_path: Path) -> None:
+        """Synthesis path: change_request with scope description → ACT (replaces old DEFER)."""
         cfg = self._cfg(tmp_path)
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "DEFER: later"
-            return "Out of scope."
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo_info.return_value = "owner/repo"
-        mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/5"
-        cat, titles = reply_to_issue_comment(
-            self._action("big refactor"),
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
-        assert cat == "DEFER"
-        mock_gh.create_issue.assert_called_once_with(
-            "owner/repo",
-            "later",
-            "Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
-        )
-
-    def test_reuses_recorded_defer_issue_for_issue_comment(
-        self, tmp_path: Path
-    ) -> None:
-        cfg = self._cfg(tmp_path)
-        repo_cfg = self._repo_cfg(tmp_path)
-        store = FidoStore(tmp_path)
-        promise = store.prepare_reply(
-            owner="worker", comment_type="issues", anchor_comment_id=43
-        )
-        assert promise is not None
-        store.record_deferred_issue(
-            idempotence_key=f"deferred-issue:{promise.promise_id}",
-            repo="owner/repo",
-            title="later",
-            body="Deferred from https://github.com/owner/repo/pull/7\n\n> big refactor",
-            issue_url="https://github.com/owner/repo/issues/5",
-        )
-
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "DEFER: later"
-            assert "https://github.com/owner/repo/issues/5" in prompt
-            return "Out of scope."
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo_info.return_value = "owner/repo"
-        action = self._action("big refactor", cid=43)
-        action.context = {
-            **(action.context or {}),
-            "reply_promise_id": promise.promise_id,
-        }
-        cat, titles = reply_to_issue_comment(
-            action,
-            cfg,
-            repo_cfg,
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
-        assert cat == "DEFER"
-        assert titles == ["later"]
-        mock_gh.create_issue.assert_not_called()
-
-    def test_defer_reply_issue_creation_failure_propagates(
-        self, tmp_path: Path
-    ) -> None:
-        """DEFER issue creation failure propagates — no reply posted with missing issue."""
-        cfg = self._cfg(tmp_path)
-
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "DEFER: later"
-            return "Out of scope."
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo_info.return_value = "owner/repo"
-        mock_gh.create_issue.side_effect = RuntimeError("network fail")
-        with pytest.raises(RuntimeError, match="network fail"):
-            reply_to_issue_comment(
+        mock_gh = self._mock_gh()
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                "Out of scope for now.",
+                change_request="Big refactor in separate PR",
+            ),
+        ):
+            cat, titles = reply_to_issue_comment(
                 self._action("big refactor"),
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                agent=_client(side_effect=fake_pp),
+                agent=_client(),
             )
-        mock_gh.comment_issue.assert_not_called()
+        assert cat == "ACT"
+        assert "refactor" in titles[0].lower()
+        # Synthesis path never calls create_issue
+        mock_gh.create_issue.assert_not_called()
 
     def test_skips_issue_reply_when_artifact_already_recorded(
         self, tmp_path: Path
@@ -3422,49 +2834,49 @@ class TestReplyToIssueComment:
             promise_ids=(promise.promise_id,),
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ANSWER: yep"
-            return "Yep."
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo_info.return_value = "owner/repo"
-        cat, titles = reply_to_issue_comment(
-            Action(
-                prompt="PR top-level comment on #7 by owner:\n\nplease fix",
-                comment_body="please fix",
-                is_bot=False,
-                context={
-                    "pr_title": "My PR",
-                    "comment_id": 44,
-                    "reply_promise_id": promise.promise_id,
-                },
-            ),
-            cfg,
-            repo_cfg,
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        mock_gh = self._mock_gh()
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("Yep."),
+        ):
+            cat, titles = reply_to_issue_comment(
+                Action(
+                    prompt="PR top-level comment on #7 by owner:\n\nplease fix",
+                    comment_body="please fix",
+                    is_bot=False,
+                    context={
+                        "pr_title": "My PR",
+                        "comment_id": 44,
+                        "reply_promise_id": promise.promise_id,
+                    },
+                ),
+                cfg,
+                repo_cfg,
+                mock_gh,
+                agent=_client(),
+            )
 
         assert cat == "ANSWER"
-        assert titles == ["yep"]
+        assert titles == []
         mock_gh.comment_issue.assert_not_called()
 
     def test_empty_reply_body_raises(self, tmp_path: Path) -> None:
+        """Synthesis exhausted error propagates fail-closed."""
         cfg = self._cfg(tmp_path)
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return ""
-
-        with pytest.raises(ValueError, match="run_turn returned empty"):
+        with (
+            pytest.raises(SynthesisExhaustedError),
+            patch(
+                "fido.events.call_synthesis",
+                side_effect=SynthesisExhaustedError("exhausted"),
+            ),
+        ):
             reply_to_issue_comment(
                 self._action(),
                 cfg,
                 self._repo_cfg(tmp_path),
-                MagicMock(),
-                agent=_client(side_effect=fake_pp),
+                self._mock_gh(),
+                agent=_client(),
             )
 
     def test_post_exception_propagates(self, tmp_path: Path) -> None:
@@ -3477,23 +2889,25 @@ class TestReplyToIssueComment:
             context={"pr_title": "My PR"},
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return "ok"
-
-        mock_gh = MagicMock()
+        mock_gh = self._mock_gh()
         mock_gh.comment_issue.side_effect = Exception("gh fail")
-        with pytest.raises(Exception, match="gh fail"):
+        with (
+            pytest.raises(Exception, match="gh fail"),
+            patch(
+                "fido.events.call_synthesis",
+                return_value=_synthesis_response("ok"),
+            ),
+        ):
             reply_to_issue_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                agent=_client(side_effect=fake_pp),
+                agent=_client(),
             )
 
     def test_no_comment_id_skips_react(self, tmp_path: Path) -> None:
+        """When comment_id is absent, no reaction is attempted."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="PR top-level comment on #7 by owner:\n\nhi",
@@ -3502,35 +2916,35 @@ class TestReplyToIssueComment:
             context={"pr_title": "My PR"},  # no comment_id
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return "ok"
-
-        cat, titles = reply_to_issue_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
+        mock_gh = self._mock_gh()
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("ok", change_request="Do it"),
+        ):
+            cat, titles = reply_to_issue_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
         assert cat == "ACT"
+        mock_gh.add_reaction.assert_not_called()
 
     def test_defaults_to_repo_configured_agent(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = self._action()
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return "ok"
-
-        with patch("fido.events.DefaultProviderFactory") as factory_cls:
-            factory_cls.return_value.create_agent.return_value = _client(
-                side_effect=fake_pp
-            )
+        with (
+            patch("fido.events.DefaultProviderFactory") as factory_cls,
+            patch(
+                "fido.events.call_synthesis",
+                return_value=_synthesis_response("ok", change_request="Do it"),
+            ),
+        ):
+            factory_cls.return_value.create_agent.return_value = _client()
             cat, titles = reply_to_issue_comment(
-                action, cfg, self._repo_cfg(tmp_path), MagicMock()
+                action, cfg, self._repo_cfg(tmp_path), self._mock_gh()
             )
         factory_cls.return_value.create_agent.assert_called_once_with(
             self._repo_cfg(tmp_path),
@@ -3539,124 +2953,78 @@ class TestReplyToIssueComment:
         )
         assert cat == "ACT"
 
-    def test_includes_conversation_context_in_triage(self, tmp_path: Path) -> None:
+    def test_includes_conversation_context_in_synthesis(self, tmp_path: Path) -> None:
+        """Conversation history is fetched and passed to call_synthesis as context."""
         cfg = self._cfg(tmp_path)
         action = self._action()
-        mock_gh = MagicMock()
+        mock_gh = self._mock_gh()
         mock_gh.get_issue_comments.return_value = [
             {"user": {"login": "alice"}, "body": "first comment"},
             {"user": {"login": "bob"}, "body": "second comment"},
             {"user": {"login": "owner"}, "body": "please fix"},
         ]
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return "ok"
+        captured_calls: list[dict] = []
 
-        with patch(
-            "fido.events._triage", wraps=lambda *a, **kw: ("ACT", ["do it"])
-        ) as mock_triage:
+        def capture_synthesis(*args, **kwargs):
+            captured_calls.append(kwargs)
+            return _synthesis_response("ok", change_request="Do it")
+
+        with patch("fido.events.call_synthesis", side_effect=capture_synthesis):
             cat, titles = reply_to_issue_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                agent=_client(side_effect=fake_pp),
+                agent=_client(),
             )
         assert cat == "ACT"
         mock_gh.get_issue_comments.assert_called_once_with("owner/repo", 7)
-        # Verify conversation context was built and passed to _triage
-        triage_ctx = mock_triage.call_args[0][2]  # third positional arg = context
-        assert "conversation" in triage_ctx
-        assert "alice: first comment" in triage_ctx["conversation"]
-        assert "bob: second comment" in triage_ctx["conversation"]
+        # Verify conversation context was built and passed to call_synthesis
+        assert captured_calls
+        ctx = captured_calls[0].get("context") or {}
+        assert "conversation" in ctx
+        assert "alice: first comment" in ctx["conversation"]
+        assert "bob: second comment" in ctx["conversation"]
 
     def test_conversation_context_fetch_failure_logs_and_continues(
         self, tmp_path: Path
     ) -> None:
-        """Conversation fetch failure logs a warning and proceeds without context.
-
-        The reply pipeline must not be blocked by a best-effort history fetch.
-        """
+        """Conversation fetch failure logs a warning and proceeds without context."""
         cfg = self._cfg(tmp_path)
         action = self._action()
-        mock_gh = MagicMock()
+        mock_gh = self._mock_gh()
         mock_gh.get_issue_comments.side_effect = RuntimeError("API down")
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return "ok"
-
-        cat, titles = reply_to_issue_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("ok", change_request="Do it"),
+        ):
+            cat, titles = reply_to_issue_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
         assert cat == "ACT"
-
-    def test_multiple_tasks_from_one_comment(self, tmp_path: Path) -> None:
-        """A top-level comment may produce multiple ACT tasks."""
-        cfg = self._cfg(tmp_path)
-
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: add unit tests\nACT: update documentation"
-            return "On it!"
-
-        cat, titles = reply_to_issue_comment(
-            self._action("add tests and update docs"),
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
-        assert cat == "ACT"
-        assert titles == ["add unit tests", "update documentation"]
-
-    def test_reply_run_turn_uses_retry_on_preempt(self, tmp_path: Path) -> None:
-        """Reply generation run_turn must pass retry_on_preempt=True so a
-        session preemption mid-generation retries rather than silently
-        returning an empty or truncated body."""
-        cfg = self._cfg(tmp_path)
-        all_run_turn_kwargs: list[dict] = []
-
-        def fake_pp(prompt, model, **kwargs):
-            all_run_turn_kwargs.append(kwargs)
-            if "Triage" in prompt:
-                return "ACT: fix the bug"
-            return "I'll fix that."
-
-        reply_to_issue_comment(
-            self._action(),
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
-        # At least one run_turn call must carry retry_on_preempt=True — that is
-        # the reply generation call, which must survive session preemption.
-        assert any(kw.get("retry_on_preempt") is True for kw in all_run_turn_kwargs)
 
     def test_writes_durable_claim_after_reply(self, tmp_path: Path) -> None:
         """After posting a reply, the comment id is completed in SQLite."""
         cfg = self._cfg(tmp_path)
+        mock_gh = self._mock_gh()
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ANSWER: it works this way"
-            return "Yes, here is why..."
-
-        reply_to_issue_comment(
-            self._action(cid=4275080243),
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("Yes, here is why..."),
+        ):
+            reply_to_issue_comment(
+                self._action(cid=4275080243),
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
         assert FidoStore(tmp_path).claim_state(4275080243) == "completed"
 
     def test_claimed_issue_comment_returns_no_titles(self, tmp_path: Path) -> None:
@@ -3687,76 +3055,75 @@ class TestReplyToIssueComment:
             context={"pr_title": "My PR"},  # no comment_id
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return "ok"
-
-        reply_to_issue_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("ok", change_request="Do it"),
+        ):
+            reply_to_issue_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                self._mock_gh(),
+                agent=_client(),
+            )
         claim_dir = tmp_path / ".git" / "fido" / "comments"
         assert not claim_dir.exists() or not list(claim_dir.iterdir()), (
             "no claim files should be written when comment_id is absent"
         )
 
-    def test_active_context_injected_into_system_prompt(self, tmp_path: Path) -> None:
-        """reply_to_issue_comment should inject active-issue context into reply_system_prompt."""
+    def test_active_context_injected_into_synthesis(self, tmp_path: Path) -> None:
+        """reply_to_issue_comment passes active-issue context to call_synthesis."""
         cfg = self._cfg(tmp_path)
         # Set up state.json so _load_active_context_for_rescope finds active issue.
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
         State(fido_dir).save({"issue": 7})
-        captured_system_prompts: list[str] = []
 
-        def fake_pp(prompt, model, **kwargs):
-            if sp := kwargs.get("system_prompt"):
-                captured_system_prompts.append(sp)
-            if "Triage" in prompt:
-                return "ACT: fix the bug"
-            return "I'll fix that."
-
-        mock_gh = MagicMock()
+        mock_gh = self._mock_gh()
         mock_gh.view_issue.return_value = {"title": "Fix crash", "body": "It crashes."}
-        mock_gh.get_repo_info.return_value = "owner/repo"
 
-        reply_to_issue_comment(
-            self._action(),
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
-        assert any("## Active issue" in sp for sp in captured_system_prompts)
-        assert any("Fix crash" in sp for sp in captured_system_prompts)
+        captured_calls: list[dict] = []
+
+        def capture_synthesis(*args, **kwargs):
+            captured_calls.append(kwargs)
+            return _synthesis_response("I'll fix that.", change_request="Fix crash")
+
+        with patch("fido.events.call_synthesis", side_effect=capture_synthesis):
+            reply_to_issue_comment(
+                self._action(),
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
+        assert captured_calls
+        call_kwargs = captured_calls[0]
+        assert call_kwargs.get("issue") is not None
+        assert call_kwargs["issue"].title == "Fix crash"
 
     def test_no_active_context_when_no_state(self, tmp_path: Path) -> None:
-        """reply_to_issue_comment should not include active-issue header when no state.json."""
+        """reply_to_issue_comment passes None issue to call_synthesis when no state.json."""
         cfg = self._cfg(tmp_path)
-        captured_system_prompts: list[str] = []
 
-        def fake_pp(prompt, model, **kwargs):
-            if sp := kwargs.get("system_prompt"):
-                captured_system_prompts.append(sp)
-            if "Triage" in prompt:
-                return "ACT: fix the bug"
-            return "I'll fix that."
+        captured_calls: list[dict] = []
 
-        mock_gh = MagicMock()
-        mock_gh.get_repo_info.return_value = "owner/repo"
+        def capture_synthesis(*args, **kwargs):
+            captured_calls.append(kwargs)
+            return _synthesis_response("I'll fix that.")
 
-        reply_to_issue_comment(
-            self._action(),
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
-        assert all("## Active issue" not in sp for sp in captured_system_prompts)
+        mock_gh = self._mock_gh()
+
+        with patch("fido.events.call_synthesis", side_effect=capture_synthesis):
+            reply_to_issue_comment(
+                self._action(),
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
+        assert captured_calls
+        call_kwargs = captured_calls[0]
+        assert call_kwargs.get("issue") is None
 
 
 class TestCreateTask:
@@ -6088,6 +5455,65 @@ class TestMaybeReactGhException:
         )  # must not raise
 
 
+class TestBackgroundRescopeTrigger:
+    """_BackgroundRescopeTrigger delegates to _reorder_tasks_background."""
+
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
+        return RepoConfig(name="owner/repo", work_dir=tmp_path)
+
+    def test_trigger_rescope_calls_reorder_tasks_background(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        mock_gh = MagicMock()
+
+        trigger = _BackgroundRescopeTrigger(
+            tmp_path,
+            cfg,
+            mock_gh,
+            repo_cfg=repo_cfg,
+        )
+
+        with patch("fido.events._reorder_tasks_background") as mock_reorder:
+            trigger.trigger_rescope("Add logging to the handler")
+
+        mock_reorder.assert_called_once()
+        call_kwargs = mock_reorder.call_args
+        assert call_kwargs.args[1] == "Add logging to the handler"
+
+    def test_trigger_rescope_passes_collaborators(self, tmp_path: Path) -> None:
+        """_BackgroundRescopeTrigger forwards work_dir, config, and gh to reorder."""
+        cfg = self._cfg(tmp_path)
+        repo_cfg = self._repo_cfg(tmp_path)
+        mock_gh = MagicMock()
+
+        trigger = _BackgroundRescopeTrigger(
+            tmp_path,
+            cfg,
+            mock_gh,
+            repo_cfg=repo_cfg,
+        )
+
+        with patch("fido.events._reorder_tasks_background") as mock_reorder:
+            trigger.trigger_rescope("Refactor the parser")
+
+        args = mock_reorder.call_args.args
+        assert args[0] == tmp_path
+        assert args[2] is cfg
+        assert args[3] is mock_gh
+
+
 class TestReplyToCommentElseBranch:
     def _cfg(self, tmp_path: Path) -> Config:
         return Config(
@@ -6102,8 +5528,10 @@ class TestReplyToCommentElseBranch:
     def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
         return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
-    def test_unknown_category_uses_else_reply(self, tmp_path: Path) -> None:
-        """Triage returns a known category not in the explicit branches → else branch (line 313)."""
+    def test_synthesis_reply_returns_answer_without_change_request(
+        self, tmp_path: Path
+    ) -> None:
+        """Synthesis path: no change_request → ANSWER."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -6111,23 +5539,22 @@ class TestReplyToCommentElseBranch:
             comment_body="do something",
             is_bot=False,
         )
-        # Return "DO" which is a bot category but IS_BOT=False — falls through to else
-        # Actually all the categories (ACT/DO/ASK/ANSWER/DEFER/DUMP) are covered.
-        # The else fires when _triage returns an unrecognised prefix, which hits the
-        # fallback "ACT"/"DO". We need to force an unlisted category past _triage.
-        # Monkey-patch _triage directly to return a fake category.
-        with (
-            patch("fido.events._triage", return_value=("UNKNOWN_CAT", ["do it"])),
-            patch("fido.events.needs_more_context", return_value=False),
+        mock_gh = MagicMock()
+        mock_gh.fetch_comment_thread.return_value = []
+        mock_gh.reply_to_review_comment.return_value = {"id": 999}
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("I'll look into this."),
         ):
             cat, titles = reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
-                MagicMock(),
-                agent=_client("I'll look into this."),
+                mock_gh,
+                agent=_client(),
             )
-        assert cat == "UNKNOWN_CAT"
+        assert cat == "ANSWER"
+        assert titles == []
 
     def test_gh_post_exception_propagates(self, tmp_path: Path) -> None:
         """Exception in reply_to_review_comment propagates so callers fail closed."""
@@ -6139,24 +5566,22 @@ class TestReplyToCommentElseBranch:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: fix it"
-            if "Convert this PR review comment" in prompt:
-                return "Fix it"
-            return "I'll fix it."
-
         mock_gh = MagicMock()
+        mock_gh.fetch_comment_thread.return_value = []
         mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
-        with pytest.raises(RuntimeError, match="network down"):
+        with (
+            pytest.raises(RuntimeError, match="network down"),
+            patch(
+                "fido.events.call_synthesis",
+                return_value=_synthesis_response("I'll fix it."),
+            ),
+        ):
             reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                agent=_client(side_effect=fake_pp),
+                agent=_client(),
             )
 
     def test_skips_review_reply_when_artifact_already_recorded(
@@ -6189,33 +5614,30 @@ class TestReplyToCommentElseBranch:
             context={"reply_promise_id": promise.promise_id},
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: fix it"
-            if "Convert this PR review comment" in prompt:
-                return "Fix it"
-            return "I'll fix it."
-
         mock_gh = MagicMock()
         mock_gh.fetch_comment_thread.return_value = [
             {"id": 52, "author": "owner", "body": "please fix this"}
         ]
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            repo_cfg,
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("I'll fix it.", change_request="Fix it"),
+        ):
+            cat, titles = reply_to_comment(
+                action,
+                cfg,
+                repo_cfg,
+                mock_gh,
+                agent=_client(),
+            )
 
         assert cat == "ACT"
         assert titles == ["Fix it"]
         mock_gh.reply_to_review_comment.assert_not_called()
 
 
-class TestReplyToCommentTerseEnrichment:
+class TestReplyToCommentEyesReaction:
+    """Eyes reaction lifecycle in reply_to_comment."""
+
     def _cfg(self, tmp_path: Path) -> Config:
         return Config(
             port=9000,
@@ -6229,138 +5651,136 @@ class TestReplyToCommentTerseEnrichment:
     def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
         return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
-    def test_terse_comment_fetches_siblings_and_adds_to_context(
-        self, tmp_path: Path
-    ) -> None:
-        """When needs_more_context is True, sibling_threads are added to context for _triage."""
+    def test_eyes_reaction_added_before_synthesis(self, tmp_path: Path) -> None:
+        """Eyes reaction is added immediately at comment pickup, before synthesis."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
             reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 200},
-            comment_body="same",
+            comment_body="please add logging",
             is_bot=False,
-            context={"pr_title": "My PR", "file": "foo.py"},
         )
-        captured_context: dict = {}
-
-        def fake_triage(body, is_bot, context=None, *, agent=None, prompts=None):
-            if context is not None:
-                captured_context.update(context)
-            return ("ACT", ["handle same comment"])
+        call_order: list[str] = []
 
         mock_gh = MagicMock()
-        mock_gh.fetch_sibling_threads.return_value = [
-            {
-                "path": "bar.py",
-                "line": 1,
-                "comments": [{"author": "rev", "body": "fix this"}],
-            }
-        ]
+        mock_gh.fetch_comment_thread.return_value = []
+        mock_gh.reply_to_review_comment.return_value = {"id": 999}
+        mock_gh.add_reaction.side_effect = lambda *a, **kw: call_order.append(
+            "reaction"
+        )
 
-        with (
-            patch("fido.events._triage", side_effect=fake_triage),
-            patch("fido.events.needs_more_context", return_value=True),
+        def capture_synthesis(*args, **kwargs):
+            call_order.append("synthesis")
+            return _synthesis_response("On it!")
+
+        with patch("fido.events.call_synthesis", side_effect=capture_synthesis):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
+
+        # Eyes reaction must come before synthesis
+        assert "reaction" in call_order
+        assert "synthesis" in call_order
+        reaction_idx = next(i for i, v in enumerate(call_order) if v == "reaction")
+        synthesis_idx = next(i for i, v in enumerate(call_order) if v == "synthesis")
+        assert reaction_idx < synthesis_idx
+
+    def test_eyes_reaction_uses_correct_args(self, tmp_path: Path) -> None:
+        """Eyes reaction is posted with the correct repo, comment_type, and comment_id."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 200},
+            comment_body="please add logging",
+            is_bot=False,
+        )
+
+        mock_gh = MagicMock()
+        mock_gh.fetch_comment_thread.return_value = []
+        mock_gh.reply_to_review_comment.return_value = {"id": 999}
+
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("On it!"),
         ):
             reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                agent=_client("On it!"),
+                agent=_client(),
             )
 
-        mock_gh.fetch_sibling_threads.assert_called_once_with("owner/repo", 5)
-        assert "sibling_threads" in captured_context
-        assert len(captured_context["sibling_threads"]) == 1
+        # First add_reaction call should be the eyes reaction
+        first_reaction_call = mock_gh.add_reaction.call_args_list[0]
+        args = first_reaction_call.args
+        assert args[0] == "owner/repo"
+        assert args[1] == "pulls"
+        assert args[2] == 200
+        assert args[3] == "eyes"
 
-    def test_non_terse_comment_skips_sibling_fetch(self, tmp_path: Path) -> None:
-        """When needs_more_context is False, sibling thread fetch is skipped."""
+    def test_eyes_reaction_failure_does_not_block_reply(self, tmp_path: Path) -> None:
+        """Eyes reaction failure is swallowed; reply still posts."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
             reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 201},
-            comment_body="This is a detailed comment explaining the issue clearly.",
+            comment_body="please add logging",
             is_bot=False,
         )
+
         mock_gh = MagicMock()
+        mock_gh.fetch_comment_thread.return_value = []
+        mock_gh.reply_to_review_comment.return_value = {"id": 999}
+        mock_gh.add_reaction.side_effect = RuntimeError("API down")
 
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return "Got it."
-
-        with patch("fido.events.needs_more_context", return_value=False):
-            reply_to_comment(
-                action,
-                cfg,
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                agent=_client(side_effect=fake_pp),
-            )
-
-        mock_gh.fetch_sibling_threads.assert_not_called()
-
-    def test_terse_fetch_exception_does_not_propagate(self, tmp_path: Path) -> None:
-        """If sibling fetch fails, reply_to_comment proceeds without sibling_threads."""
-        cfg = self._cfg(tmp_path)
-        action = Action(
-            prompt="comment",
-            reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 202},
-            comment_body="ditto",
-            is_bot=False,
-        )
-        mock_gh = MagicMock()
-        mock_gh.fetch_sibling_threads.return_value = []
-
-        def fake_pp(prompt, model, **kwargs):
-            if "Triage" in prompt:
-                return "ACT: do it"
-            return "On it."
-
-        with patch("fido.events.needs_more_context", return_value=True):
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("On it!"),
+        ):
             cat, titles = reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                agent=_client(side_effect=fake_pp),
+                agent=_client(),
             )
 
-        assert cat == "ACT"
+        # Reply still posted despite reaction failure
+        mock_gh.reply_to_review_comment.assert_called()
+        assert cat == "ANSWER"
 
-    def test_terse_no_siblings_leaves_context_clean(self, tmp_path: Path) -> None:
-        """Empty sibling threads list → sibling_threads not added to context."""
+    def test_no_eyes_reaction_without_comment_id(self, tmp_path: Path) -> None:
+        """No eyes reaction when comment_id is None."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
-            reply_to={"repo": "owner/repo", "pr": 5, "comment_id": 203},
-            comment_body="^",
+            reply_to={"repo": "owner/repo", "pr": 5, "comment_id": None},
+            comment_body="please add logging",
             is_bot=False,
-            context={"pr_title": "My PR"},
         )
-        captured_context: dict = {}
-
-        def fake_triage(body, is_bot, context=None, *, agent=None, prompts=None):
-            if context is not None:
-                captured_context.update(context)
-            return ("ACT", ["check caret comment"])
 
         mock_gh = MagicMock()
-        mock_gh.fetch_sibling_threads.return_value = []
+        mock_gh.fetch_comment_thread.return_value = []
+        mock_gh.reply_to_review_comment.return_value = {"id": 999}
 
-        with (
-            patch("fido.events._triage", side_effect=fake_triage),
-            patch("fido.events.needs_more_context", return_value=True),
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("On it!"),
         ):
             reply_to_comment(
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                agent=_client("On it!"),
+                agent=_client(),
             )
 
-        assert "sibling_threads" not in captured_context
+        mock_gh.add_reaction.assert_not_called()
 
 
 # ── reply_to_comment: thread re-fetch before posting ─────────────────────────
@@ -6385,8 +5805,8 @@ class TestReplyToCommentThreadRefetch:
         return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
     def test_fetch_comment_thread_called_twice(self, tmp_path: Path) -> None:
-        """fetch_comment_thread is called once for context (before triage) and
-        once right before posting (after reply generation)."""
+        """fetch_comment_thread is called once for context (before synthesis) and
+        once right before posting (after synthesis)."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -6395,27 +5815,25 @@ class TestReplyToCommentThreadRefetch:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: refactor"
-            if "Convert this PR review comment" in prompt:
-                return "Refactor this module"
-            return "On it!"
-
         mock_gh = MagicMock()
         mock_gh.fetch_comment_thread.return_value = [
             {"id": 500, "author": "reviewer", "body": "please refactor this"}
         ]
+        mock_gh.reply_to_review_comment.return_value = {"id": 999}
 
-        reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                "On it!", change_request="Refactor this module"
+            ),
+        ):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
 
         # Must be called exactly twice: initial context fetch + pre-post re-fetch
         assert mock_gh.fetch_comment_thread.call_count == 2
@@ -6436,14 +5854,8 @@ class TestReplyToCommentThreadRefetch:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ANSWER: acknowledged"
-            return "Will do!"
-
         mock_gh = MagicMock()
+        mock_gh.reply_to_review_comment.return_value = {"id": 999}
         call_count = 0
 
         def fetch_side_effect(repo, pr, cid):
@@ -6465,20 +5877,24 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("Will do!"),
+        ):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
 
         # Re-fetch shows human is last → post new reply, not edit
         # (Fido ID 502 existed in initial, so concurrent-skip is NOT triggered)
         mock_gh.reply_to_review_comment.assert_called_once()
         mock_gh.edit_review_comment.assert_not_called()
 
-    def test_refetch_human_comment_added_during_triage_triggers_new_post(
+    def test_refetch_human_comment_added_during_synthesis_triggers_new_post(
         self, tmp_path: Path
     ) -> None:
         """If a human comments AFTER the initial fetch but BEFORE the re-fetch,
@@ -6492,16 +5908,8 @@ class TestReplyToCommentThreadRefetch:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: add tests"
-            if "Convert this PR review comment" in prompt:
-                return "Add tests"
-            return "Adding tests now!"
-
         mock_gh = MagicMock()
+        mock_gh.reply_to_review_comment.return_value = {"id": 999}
         call_count = 0
 
         def fetch_side_effect(repo, pr, cid):
@@ -6527,13 +5935,19 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                "Adding tests now!", change_request="Add tests"
+            ),
+        ):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
 
         # Fresh data shows human is last speaker → post new reply, never edit
         mock_gh.reply_to_review_comment.assert_called_once()
@@ -6550,16 +5964,8 @@ class TestReplyToCommentThreadRefetch:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: fix import"
-            if "Convert this PR review comment" in prompt:
-                return "Fix the import"
-            return "Fixed!"
-
         mock_gh = MagicMock()
+        mock_gh.reply_to_review_comment.return_value = {"id": 999}
         call_count = 0
 
         def fetch_side_effect(repo, pr, cid):
@@ -6572,13 +5978,17 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("Fixed!", change_request="Fix the import"),
+        ):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
 
         # Falls back to initial snapshot (no Fido reply) → posts new reply
         mock_gh.reply_to_review_comment.assert_called_once()
@@ -6598,15 +6008,6 @@ class TestReplyToCommentThreadRefetch:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: add docstrings"
-            if "Convert this PR review comment" in prompt:
-                return "Add docstrings"
-            return "Woof, on it!"
-
         mock_gh = MagicMock()
         call_count = 0
 
@@ -6620,7 +6021,7 @@ class TestReplyToCommentThreadRefetch:
                 ]
             else:
                 # Re-fetch: concurrent handler posted a Fido reply to THIS
-                # comment (in_reply_to_id == 507) during triage.
+                # comment (in_reply_to_id == 507) during synthesis.
                 return [
                     {"id": 507, "author": "reviewer", "body": "please add docstrings"},
                     {
@@ -6633,25 +6034,31 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        cat, titles = reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                "Woof, on it!", change_request="Add docstrings"
+            ),
+        ):
+            cat, titles = reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
 
         # Concurrent handler already replied — neither post nor edit is called
         mock_gh.reply_to_review_comment.assert_not_called()
         mock_gh.edit_review_comment.assert_not_called()
-        # Triage result is still returned so the caller can queue tasks
+        # Synthesis result is still returned so the caller can queue tasks
         assert cat == "ACT"
         assert titles == ["Add docstrings"]
 
     def test_no_skip_when_concurrent_reply_is_to_sibling_comment(
         self, tmp_path: Path
     ) -> None:
-        """A Fido reply that appeared during triage but targets a *different*
+        """A Fido reply that appeared during synthesis but targets a *different*
         comment (sibling in the same review) must NOT trip the skip — that
         was the #1004 silent-drop bug.  Closes #1004."""
         cfg = self._cfg(tmp_path)
@@ -6662,16 +6069,8 @@ class TestReplyToCommentThreadRefetch:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: add docstrings"
-            if "Convert this PR review comment" in prompt:
-                return "Add docstrings"
-            return "Woof, on it!"
-
         mock_gh = MagicMock()
+        mock_gh.reply_to_review_comment.return_value = {"id": 999}
         call_count = 0
 
         def fetch_side_effect(repo, pr, cid):
@@ -6682,7 +6081,7 @@ class TestReplyToCommentThreadRefetch:
                     {"id": 507, "author": "reviewer", "body": "please add docstrings"}
                 ]
             # Re-fetch: a sibling comment (id 600) got a fido reply (id 601)
-            # while we were triaging — that's NOT a reply to OUR comment.
+            # while we were in synthesis — that's NOT a reply to OUR comment.
             return [
                 {"id": 507, "author": "reviewer", "body": "please add docstrings"},
                 {
@@ -6695,13 +6094,19 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                "Woof, on it!", change_request="Add docstrings"
+            ),
+        ):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
 
         # Sibling-comment reply must NOT skip our post — we still reply.
         mock_gh.reply_to_review_comment.assert_called_once()
@@ -6710,7 +6115,7 @@ class TestReplyToCommentThreadRefetch:
         self, tmp_path: Path
     ) -> None:
         """A Fido reply that existed in the initial fetch is not treated as
-        a concurrent duplicate — the edit-vs-post flow proceeds normally."""
+        a concurrent duplicate — post proceeds normally."""
         cfg = self._cfg(tmp_path)
         action = Action(
             prompt="comment",
@@ -6719,14 +6124,8 @@ class TestReplyToCommentThreadRefetch:
             is_bot=False,
         )
 
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ANSWER: acknowledged"
-            return "Thanks for the feedback!"
-
         mock_gh = MagicMock()
+        mock_gh.reply_to_review_comment.return_value = {"id": 999}
 
         def fetch_side_effect(repo, pr, cid):
             # Both fetches return the same Fido reply — it was already there
@@ -6737,13 +6136,17 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("Thanks for the feedback!"),
+        ):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
 
         # Posted replies are immutable; Fido posts a new reply instead.
         mock_gh.reply_to_review_comment.assert_called_once()
@@ -6759,15 +6162,6 @@ class TestReplyToCommentThreadRefetch:
             comment_body="fix the typo",
             is_bot=False,
         )
-
-        def fake_pp(prompt, model, **kwargs):
-            if model == "claude-haiku-4-5":
-                return "NO"
-            if "Triage" in prompt:
-                return "ACT: fix typo"
-            if "Convert this PR review comment" in prompt:
-                return "Fix the typo"
-            return "Fixed the typo!"
 
         mock_gh = MagicMock()
         call_count = 0
@@ -6792,13 +6186,19 @@ class TestReplyToCommentThreadRefetch:
 
         mock_gh.fetch_comment_thread.side_effect = fetch_side_effect
 
-        reply_to_comment(
-            action,
-            cfg,
-            self._repo_cfg(tmp_path),
-            mock_gh,
-            agent=_client(side_effect=fake_pp),
-        )
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response(
+                "Fixed the typo!", change_request="Fix the typo"
+            ),
+        ):
+            reply_to_comment(
+                action,
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                agent=_client(),
+            )
 
         # Concurrent Fido reply detected (via fido-can-code) — skip
         mock_gh.reply_to_review_comment.assert_not_called()
@@ -6937,6 +6337,7 @@ class TestRewritePrDescription:
         assert "New description." in new_body
 
     def test_preserves_work_queue_section(self, tmp_path: Path) -> None:
+        """work queue start/end markers are preserved even with an empty task list."""
         mock_gh = self._mock_gh()
         _rewrite_pr_description(
             tmp_path,
@@ -6947,7 +6348,6 @@ class TestRewritePrDescription:
         )
         new_body = mock_gh.edit_pr_body.call_args[0][2]
         assert "<!-- WORK_QUEUE_START -->" in new_body
-        assert "do a thing" in new_body
         assert "<!-- WORK_QUEUE_END -->" in new_body
 
     def test_description_replaces_only_before_divider(self, tmp_path: Path) -> None:

@@ -272,3 +272,146 @@ class TestExecutorEffectOrder:
         )
 
         assert call_order == ["reply", "reaction", "rescope"]
+
+
+# ---------------------------------------------------------------------------
+# SynthesisExecutor — execute_effects_only
+# ---------------------------------------------------------------------------
+
+
+class TestExecutorEffectsOnly:
+    """execute_effects_only handles emoji + rescope but NOT reply posting."""
+
+    def test_does_not_post_reply(self) -> None:
+        gh = _make_gh()
+        executor = SynthesisExecutor(gh)
+
+        executor.execute_effects_only(_make_response("My reply."), _make_target())
+
+        gh.reply_to_review_comment.assert_not_called()
+        gh.comment_issue.assert_not_called()
+
+    def test_removes_eyes_reaction_before_emoji(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = [
+            {"id": 42, "content": "eyes"},
+        ]
+        call_order: list[str] = []
+        gh.delete_reaction.side_effect = lambda *a, **kw: call_order.append(
+            "remove_eyes"
+        )
+        gh.add_reaction.side_effect = lambda *a, **kw: call_order.append("add_emoji")
+        executor = SynthesisExecutor(gh)
+
+        executor.execute_effects_only(_make_response(emoji="rocket"), _make_target())
+
+        assert call_order == ["remove_eyes", "add_emoji"]
+
+    def test_removes_eyes_reaction(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = [
+            {"id": 42, "content": "eyes"},
+        ]
+        executor = SynthesisExecutor(gh)
+
+        executor.execute_effects_only(_make_response(), _make_target())
+
+        gh.delete_reaction.assert_called_once_with("owner/repo", "pulls", 100, 42)
+
+    def test_ignores_non_eyes_reactions(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = [
+            {"id": 10, "content": "heart"},
+            {"id": 11, "content": "+1"},
+        ]
+        executor = SynthesisExecutor(gh)
+
+        executor.execute_effects_only(_make_response(), _make_target())
+
+        gh.delete_reaction.assert_not_called()
+
+    def test_list_reactions_error_does_not_propagate(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.side_effect = RuntimeError("API error")
+        executor = SynthesisExecutor(gh)
+
+        # Should not raise
+        outcome = executor.execute_effects_only(_make_response(), _make_target())
+
+        assert outcome is not None
+
+    def test_adds_emoji_reaction(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = []
+        executor = SynthesisExecutor(gh)
+
+        executor.execute_effects_only(
+            _make_response(emoji="heart"), _make_target(comment_type="issues")
+        )
+
+        gh.add_reaction.assert_called_once_with("owner/repo", "issues", 100, "heart")
+
+    def test_no_emoji_no_add_reaction(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = []
+        executor = SynthesisExecutor(gh)
+
+        executor.execute_effects_only(_make_response(emoji=None), _make_target())
+
+        gh.add_reaction.assert_not_called()
+
+    def test_triggers_rescope(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = []
+        rescope = _make_rescope()
+        executor = SynthesisExecutor(gh, rescope=rescope)
+
+        executor.execute_effects_only(
+            _make_response(change_request="Add logging"), _make_target()
+        )
+
+        rescope.trigger_rescope.assert_called_once_with("Add logging")
+
+    def test_no_rescope_when_change_request_none(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = []
+        rescope = _make_rescope()
+        executor = SynthesisExecutor(gh, rescope=rescope)
+
+        executor.execute_effects_only(
+            _make_response(change_request=None), _make_target()
+        )
+
+        rescope.trigger_rescope.assert_not_called()
+
+    def test_no_rescope_trigger_configured_does_not_crash(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = []
+        executor = SynthesisExecutor(gh)  # no rescope trigger
+
+        # Should not raise
+        executor.execute_effects_only(
+            _make_response(change_request="Add logging"), _make_target()
+        )
+
+    def test_returns_review_act_when_change_request_present(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = []
+        executor = SynthesisExecutor(gh)
+
+        outcome = executor.execute_effects_only(
+            _make_response(change_request="Add logging"), _make_target()
+        )
+
+        assert outcome == ReviewAct()
+
+    def test_returns_review_answer_when_no_change_request(self) -> None:
+        gh = _make_gh()
+        gh.list_reactions.return_value = []
+        executor = SynthesisExecutor(gh)
+
+        outcome = executor.execute_effects_only(
+            _make_response(change_request=None), _make_target()
+        )
+
+        assert outcome == ReviewAnswer()
