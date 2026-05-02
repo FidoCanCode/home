@@ -9183,7 +9183,11 @@ class TestExecuteTask:
         task = self._pending_task("Implement feature")
         session = MagicMock()
         session.last_turn_cancelled = False
-        worker._provider_agent.session = session
+        # ``session`` is now a read-only property on SessionBackedAgent
+        # (session_agent.py:37); write to the underlying attribute so the
+        # property returns our mock when ``provider_turn_was_preempted``
+        # consults ``_provider_agent.session``.
+        worker._provider_agent._session = session
 
         def preempt_provider_turn(*_args: object, **_kwargs: object) -> tuple[str, str]:
             session.last_turn_cancelled = True
