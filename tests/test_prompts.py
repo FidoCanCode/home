@@ -493,6 +493,34 @@ class TestPromptsReplySystemPrompt:
         result = Prompts("persona").reply_system_prompt()
         assert "meta-commentary" in result or "Here's the reply" in result
 
+    def test_active_context_included_when_issue_provided(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="It crashes.")
+        result = Prompts("persona").reply_system_prompt(issue=issue)
+        assert "## Active issue" in result
+        assert "Fix crash" in result
+        assert "It crashes." in result
+
+    def test_no_active_context_when_issue_is_none(self) -> None:
+        result = Prompts("persona").reply_system_prompt()
+        assert "## Active issue" not in result
+
+    def test_active_context_includes_pr_when_provided(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="")
+        pr = ActivePR(
+            number=42,
+            title="Fix crash PR",
+            url="https://github.com/a/b/pull/42",
+            body="",
+        )
+        result = Prompts("persona").reply_system_prompt(issue=issue, pr=pr)
+        assert "## Active PR" in result
+        assert "Fix crash PR" in result
+
+    def test_active_context_no_pr_section_when_pr_is_none(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="")
+        result = Prompts("persona").reply_system_prompt(issue=issue, pr=None)
+        assert "## Active PR" not in result
+
 
 class TestPromptsPersonaWrap:
     def test_includes_persona(self) -> None:

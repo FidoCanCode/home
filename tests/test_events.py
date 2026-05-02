@@ -3059,6 +3059,80 @@ class TestReplyToComment:
         # the reply generation call, which must survive session preemption.
         assert any(kw.get("retry_on_preempt") is True for kw in all_run_turn_kwargs)
 
+    def test_active_context_injected_into_system_prompt(self, tmp_path: Path) -> None:
+        """reply_to_comment should inject active-issue context into reply_system_prompt."""
+        cfg = self._cfg(tmp_path)
+        # Set up state.json so _load_active_context_for_rescope finds active issue.
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        State(fido_dir).save({"issue": 7})
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 10},
+            comment_body="please add logging",
+            is_bot=False,
+        )
+        captured_system_prompts: list[str] = []
+
+        def fake_pp(prompt, model, **kwargs):
+            if sp := kwargs.get("system_prompt"):
+                captured_system_prompts.append(sp)
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: add logging"
+            if "Convert this PR review comment" in prompt:
+                return "Add logging"
+            return "I will add logging."
+
+        mock_gh = MagicMock()
+        mock_gh.view_issue.return_value = {"title": "Fix crash", "body": "It crashes."}
+        mock_gh.fetch_comment_thread.return_value = []
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+        assert any("## Active issue" in sp for sp in captured_system_prompts)
+        assert any("Fix crash" in sp for sp in captured_system_prompts)
+
+    def test_no_active_context_when_no_state(self, tmp_path: Path) -> None:
+        """reply_to_comment should not include active-issue header when no state.json."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 10},
+            comment_body="please add logging",
+            is_bot=False,
+        )
+        captured_system_prompts: list[str] = []
+
+        def fake_pp(prompt, model, **kwargs):
+            if sp := kwargs.get("system_prompt"):
+                captured_system_prompts.append(sp)
+            if model == "claude-haiku-4-5":
+                return "NO"
+            if "Triage" in prompt:
+                return "ACT: add logging"
+            if "Convert this PR review comment" in prompt:
+                return "Add logging"
+            return "I will add logging."
+
+        mock_gh = MagicMock()
+        mock_gh.fetch_comment_thread.return_value = []
+
+        reply_to_comment(
+            action,
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+        assert all("## Active issue" not in sp for sp in captured_system_prompts)
+
 
 class TestReplyToReview:
     def _cfg(self, tmp_path: Path) -> Config:
@@ -3629,6 +3703,60 @@ class TestReplyToIssueComment:
         assert not claim_dir.exists() or not list(claim_dir.iterdir()), (
             "no claim files should be written when comment_id is absent"
         )
+
+    def test_active_context_injected_into_system_prompt(self, tmp_path: Path) -> None:
+        """reply_to_issue_comment should inject active-issue context into reply_system_prompt."""
+        cfg = self._cfg(tmp_path)
+        # Set up state.json so _load_active_context_for_rescope finds active issue.
+        fido_dir = tmp_path / ".git" / "fido"
+        fido_dir.mkdir(parents=True)
+        State(fido_dir).save({"issue": 7})
+        captured_system_prompts: list[str] = []
+
+        def fake_pp(prompt, model, **kwargs):
+            if sp := kwargs.get("system_prompt"):
+                captured_system_prompts.append(sp)
+            if "Triage" in prompt:
+                return "ACT: fix the bug"
+            return "I'll fix that."
+
+        mock_gh = MagicMock()
+        mock_gh.view_issue.return_value = {"title": "Fix crash", "body": "It crashes."}
+        mock_gh.get_repo_info.return_value = "owner/repo"
+
+        reply_to_issue_comment(
+            self._action(),
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+        assert any("## Active issue" in sp for sp in captured_system_prompts)
+        assert any("Fix crash" in sp for sp in captured_system_prompts)
+
+    def test_no_active_context_when_no_state(self, tmp_path: Path) -> None:
+        """reply_to_issue_comment should not include active-issue header when no state.json."""
+        cfg = self._cfg(tmp_path)
+        captured_system_prompts: list[str] = []
+
+        def fake_pp(prompt, model, **kwargs):
+            if sp := kwargs.get("system_prompt"):
+                captured_system_prompts.append(sp)
+            if "Triage" in prompt:
+                return "ACT: fix the bug"
+            return "I'll fix that."
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo_info.return_value = "owner/repo"
+
+        reply_to_issue_comment(
+            self._action(),
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            agent=_client(side_effect=fake_pp),
+        )
+        assert all("## Active issue" not in sp for sp in captured_system_prompts)
 
 
 class TestCreateTask:

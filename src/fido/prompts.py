@@ -250,7 +250,11 @@ class Prompts:
     def __init__(self, persona: str) -> None:
         self.persona = persona
 
-    def reply_system_prompt(self) -> str:
+    def reply_system_prompt(
+        self,
+        issue: ActiveIssue | None = None,
+        pr: ActivePR | None = None,
+    ) -> str:
         """Return the system prompt for reply generation.
 
         Instils the Fido persona, strictly forbids preamble framing, and
@@ -259,9 +263,17 @@ class Prompts:
         launch Bash/Read/Edit calls to actually make the change — turning a
         ~5s reply into a multi-minute session turn that holds the lock and
         starves the worker.
+
+        When *issue* is provided, the rendered active-work context (issue, PR,
+        and tasks) is prepended so the reply model anchors on the same ground
+        truth as the task worker.
         """
+        active = ""
+        if issue is not None:
+            active = render_active_context(issue, pr, [], None, []) + "\n\n"
         return (
             f"{self.persona}\n\n"
+            f"{active}"
             "You are responding to a GitHub PR comment.  Reply composition "
             "is a TEXT-ONLY task: do NOT invoke any tools.  No Bash, no Read, "
             "no Edit, no Write, no Grep, no Glob, no Task sub-agents, no "

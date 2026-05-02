@@ -1625,6 +1625,10 @@ def reply_to_comment(
         category, comment, ", ".join(titles), context, issue_url=issue_url
     )
 
+    issue_ctx, pr_ctx = _load_active_context_for_rescope(
+        repo_cfg.work_dir, repo_cfg.name, gh
+    )
+
     log.info(
         "reply generator: requesting %s reply for PR #%s comment %s",
         category,
@@ -1635,7 +1639,7 @@ def reply_to_comment(
         agent,
         prompts.persona_wrap(instr),
         model=agent.voice_model,
-        system_prompt=prompts.reply_system_prompt(),
+        system_prompt=prompts.reply_system_prompt(issue=issue_ctx, pr=pr_ctx),
         log_prefix="reply_to_comment",
     )
     log.info(
@@ -2102,12 +2106,16 @@ def reply_to_issue_comment(
         category, comment, ", ".join(titles), action.context, issue_url=issue_url
     )
 
+    issue_ctx, pr_ctx = _load_active_context_for_rescope(
+        repo_cfg.work_dir, repo_cfg.name, gh
+    )
+
     log.info("generating %s reply for issue comment on PR #%s", category, number)
     body = safe_voice_turn(
         agent,
         prompts.persona_wrap(instr),
         model=agent.voice_model,
-        system_prompt=prompts.reply_system_prompt(),
+        system_prompt=prompts.reply_system_prompt(issue=issue_ctx, pr=pr_ctx),
         log_prefix="reply_to_issue_comment",
     )
     log.info(
