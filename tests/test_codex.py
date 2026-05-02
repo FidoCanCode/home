@@ -462,6 +462,12 @@ class TestCodexAppServerClient:
 
     def test_stop_kills_process_when_terminate_times_out(self) -> None:
         class _Stubborn(_FakeProcess):
+            def terminate(self) -> None:
+                # Override so terminate doesn't immediately set _returncode
+                # to 0; we need the subsequent wait() to time out and trigger
+                # the kill+wait fallback (codex.py:303-305).
+                self.terminated = True
+
             def wait(self, timeout: float | None = None) -> int:
                 if self._returncode is None:
                     raise subprocess.TimeoutExpired(cmd=["codex"], timeout=timeout or 0)
@@ -469,14 +475,12 @@ class TestCodexAppServerClient:
 
             def kill(self) -> None:
                 self._returncode = -9
-                self.terminated = True
 
-        process = _Stubborn(
-            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
-        )
+        process = _Stubborn('{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n')
         client = CodexAppServerClient(process_factory=lambda **_: process)
         client.stop()
         assert process.terminated
+        assert process._returncode == -9  # kill() ran via the timeout path
 
 
 class TestCodexAPI:

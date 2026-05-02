@@ -100,13 +100,11 @@ def test_set_infix_lowerings_preserve_precedence(
     # forbidden ``union - (diff & set)`` regrouping doesn't appear.
     has_parens = (
         "positive_claim_inter_diff_expr: frozenset[int] = "
-        "(positive_claim_union - positive_claim_diff) & positive_claim_set"
-        in source
+        "(positive_claim_union - positive_claim_diff) & positive_claim_set" in source
     )
     no_parens = (
         "positive_claim_inter_diff_expr: frozenset[int] = "
-        "positive_claim_union - positive_claim_diff & positive_claim_set"
-        in source
+        "positive_claim_union - positive_claim_diff & positive_claim_set" in source
     )
     assert has_parens or no_parens
     assert (

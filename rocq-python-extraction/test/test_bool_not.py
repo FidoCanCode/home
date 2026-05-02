@@ -307,10 +307,7 @@ def test_lambda_call_head_is_parenthesized(build_default) -> None:
     source = (build_default / "primitives.py").read_text()
 
     inlined = "return (lambda f: f(n))(lambda x: x + 1)" in source
-    hoisted = (
-        "f = lambda x: x + 1" in source
-        and "return f(n)" in source
-    )
+    hoisted = "f = lambda x: x + 1" in source and "return f(n)" in source
     assert inlined or hoisted
 
 

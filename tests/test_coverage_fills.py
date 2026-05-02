@@ -267,7 +267,7 @@ class TestOwnedSessionPreemptWorker:
 
 class TestRocqRuntimeKeyValidation:
     def test_positive_key_raises_for_zero_and_negative(self) -> None:
-        from fido.rocq_runtime import _RocqNumericDomainError, _rocq_positive_key
+        from fido.rocq_runtime import _rocq_positive_key, _RocqNumericDomainError
 
         with pytest.raises(_RocqNumericDomainError):
             _rocq_positive_key(0)
@@ -392,7 +392,9 @@ class TestStatusFallbacks:
         # provider_status.paused requires level == "paused"; force it
         # via attribute substitution since the dataclass is frozen.
         with patch.object(
-            type(repo.provider_status), "paused", new_callable=lambda: True  # type: ignore[union-attr]
+            type(repo.provider_status),
+            "paused",
+            new_callable=lambda: True,  # type: ignore[union-attr]
         ):
             assert _should_show_worker_line(repo) is True  # type: ignore[arg-type]
 
@@ -441,9 +443,7 @@ class TestTasksMoreBranches:
                 source_comment=None,
             )
         }
-        result = _materialize_rescope_oracle_result(
-            [oracle_id], rows, tasks_by_id
-        )
+        result = _materialize_rescope_oracle_result([oracle_id], rows, tasks_by_id)
         assert result[0]["status"] == "blocked"
 
 
@@ -453,9 +453,7 @@ class TestTasksMoreBranches:
 
 
 class TestTasksAdd:
-    def test_add_dedups_on_comment_id_and_merges_lineage(
-        self, tmp_path: Path
-    ) -> None:
+    def test_add_dedups_on_comment_id_and_merges_lineage(self, tmp_path: Path) -> None:
         """When a task already exists for ``comment_id``, ``add()`` returns
         the duplicate and merges any new lineage into the existing thread
         (tasks.py:1080-1081 — write-through path)."""
@@ -747,8 +745,7 @@ class TestStoreCompletedReturn:
         )
         with store._transaction() as conn:
             conn.execute(
-                "UPDATE pr_comment_queue SET state = 'completed'"
-                " WHERE queue_id = ?",
+                "UPDATE pr_comment_queue SET state = 'completed' WHERE queue_id = ?",
                 (record.queue_id,),
             )
         # Re-enqueue with new delivery_id → routes through
@@ -786,9 +783,7 @@ class TestEventsLeaves:
         ints raise TypeError/ValueError and skip."""
         from fido.events import _normalize_comment_ids
 
-        result = _normalize_comment_ids(
-            [1, "2", 3.14, None, "not-a-number", 4, "4"]
-        )
+        result = _normalize_comment_ids([1, "2", 3.14, None, "not-a-number", 4, "4"])
         # ints + str-of-ints both retained, dedup'd; non-int-like skipped.
         assert tuple(result) == (1, 2, 4)
 
@@ -868,6 +863,7 @@ class TestCodexAppServerErrorPaths:
         # tests so the reader thread doesn't EOF and flag protocol_error
         # before the test exercises its case.
         import io
+
         from fido.codex import CodexAppServerClient
 
         lines: queue.Queue[str | None] = queue.Queue()
@@ -983,9 +979,7 @@ class TestCodexSessionLeafBranches:
         defaults.update(kwargs)
         return CodexSession(system_file, work_dir=tmp_path, **defaults)
 
-    def test_owner_returns_none_when_repo_name_is_none(
-        self, tmp_path: Path
-    ) -> None:
+    def test_owner_returns_none_when_repo_name_is_none(self, tmp_path: Path) -> None:
         """codex.py:697 — short-circuit when no repo_name is configured."""
         session = self._session(tmp_path, repo_name=None)
         assert session.owner is None  # type: ignore[union-attr]
@@ -1052,9 +1046,7 @@ class TestClaudeDefensivePaths:
         assert isinstance(session._stream_state, Sending)
         session.stop()
 
-    def test_stderr_pump_tolerates_value_error_on_close(
-        self, tmp_path: Path
-    ) -> None:
+    def test_stderr_pump_tolerates_value_error_on_close(self, tmp_path: Path) -> None:
         """If ``for raw in stderr`` raises ValueError (closed file) or
         OSError (broken pipe), the pump silently exits (claude.py:691-697).
         Cover by handing the session a stderr whose iteration raises."""
@@ -1138,9 +1130,7 @@ class TestRocqLspMoreBranches:
             promise_ids=["", None],  # type: ignore[list-item]
         )
 
-    def test_pr_comment_queue_in_progress_update_path(
-        self, tmp_path: Path
-    ) -> None:
+    def test_pr_comment_queue_in_progress_update_path(self, tmp_path: Path) -> None:
         """A second enqueue with the same ``delivery_id`` while the row
         is in_progress takes the UPDATE branch (store.py:575-578)."""
         from fido.store import FidoStore
@@ -1165,8 +1155,7 @@ class TestRocqLspMoreBranches:
         # ``state == "completed"`` short-circuit).
         with store._transaction() as conn:
             conn.execute(
-                "UPDATE pr_comment_queue SET state = 'in_progress'"
-                " WHERE queue_id = ?",
+                "UPDATE pr_comment_queue SET state = 'in_progress' WHERE queue_id = ?",
                 (record_initial.queue_id,),
             )
 
@@ -1191,9 +1180,7 @@ class TestRocqLspMoreBranches:
 
 
 class TestCopilotCLIOwner:
-    def test_owner_returns_none_when_repo_name_is_unset(
-        self, tmp_path: Path
-    ) -> None:
+    def test_owner_returns_none_when_repo_name_is_unset(self, tmp_path: Path) -> None:
         """``owner`` property short-circuits to None when repo_name is
         not set (copilotcli.py:975 path)."""
         from fido.copilotcli import CopilotCLISession
