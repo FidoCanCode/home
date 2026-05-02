@@ -1,5 +1,7 @@
 import io
+import queue
 import subprocess
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -353,6 +355,110 @@ class TestCodexAppServerClient:
             client.request("explode")
         assert "server is sad" in str(excinfo.value)
         client.stop()
+
+    def _streaming_process(
+        self, prelude: str, lines: queue.Queue[str | None]
+    ) -> "_FakeProcess":
+        """Return a _FakeProcess whose stdout's readline pulls from
+        ``lines`` instead of EOF'ing immediately.  Use this when a test
+        needs to keep the reader thread alive past the initial setup
+        message so the client stays in a non-protocol-error state."""
+
+        class _StreamingStdout:
+            def __init__(self) -> None:
+                self._buf = io.StringIO(prelude)
+                self._closed = False
+
+            def readline(self) -> str:
+                line = self._buf.readline()
+                if line:
+                    return line
+                # Block until lines.put() pushes more content (or None
+                # to signal EOF).
+                next_line = lines.get()
+                if next_line is None:
+                    return ""
+                return next_line
+
+            def close(self) -> None:
+                self._closed = True
+
+            def __iter__(self):
+                while True:
+                    line = self.readline()
+                    if not line:
+                        return
+                    yield line
+
+        process = _FakeProcess()
+        process.stdout = _StreamingStdout()  # type: ignore[assignment]
+        return process
+
+    def test_wait_notification_returns_matching_method(self) -> None:
+        lines: queue.Queue[str | None] = queue.Queue()
+        process = self._streaming_process(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+
+        def feed() -> None:
+            lines.put('{"method":"unrelated/event","params":{"x":1}}\n')
+            lines.put('{"method":"target/event","params":{"value":42}}\n')
+
+        threading.Thread(target=feed, daemon=True).start()
+        notif = client.wait_notification("target/event", timeout=2.0)
+        assert notif["params"] == {"value": 42}
+        lines.put(None)  # EOF the reader
+        client.stop()
+
+    def test_wait_notification_predicate_filters(self) -> None:
+        lines: queue.Queue[str | None] = queue.Queue()
+        process = self._streaming_process(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        lines.put('{"method":"event","params":{"keep":false}}\n')
+        lines.put('{"method":"event","params":{"keep":true,"value":7}}\n')
+        notif = client.wait_notification(
+            "event", predicate=lambda p: p.get("keep") is True, timeout=2.0
+        )
+        assert notif["params"]["value"] == 7
+        lines.put(None)
+        client.stop()
+
+    def test_wait_notification_times_out(self) -> None:
+        lines: queue.Queue[str | None] = queue.Queue()
+        process = self._streaming_process(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        with pytest.raises(TimeoutError, match="Timed out waiting for Codex"):
+            client.wait_notification("never-arrives", timeout=0.1)
+        lines.put(None)
+        client.stop()
+
+    def test_wait_notification_rejects_non_object_params(self) -> None:
+        lines: queue.Queue[str | None] = queue.Queue()
+        process = self._streaming_process(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        lines.put('{"method":"event","params":"not-an-object"}\n')
+        with pytest.raises(CodexProtocolError, match="params must be an object"):
+            client.wait_notification("event", timeout=2.0)
+        lines.put(None)
+        client.stop()
+
+    def test_is_alive_reflects_process_state(self) -> None:
+        lines: queue.Queue[str | None] = queue.Queue()
+        process = self._streaming_process(
+            '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n', lines
+        )
+        client = CodexAppServerClient(process_factory=lambda **_: process)
+        assert client.is_alive()
+        client.stop()
+        assert not client.is_alive()
+        lines.put(None)
 
     def test_stop_kills_process_when_terminate_times_out(self) -> None:
         class _Stubborn(_FakeProcess):
