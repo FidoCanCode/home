@@ -1464,7 +1464,7 @@ class TestWorker:
         ):
             worker.run()
         mock_focp.assert_called_once_with(
-            mock_ctx.fido_dir, repo_ctx, 8, "My task", "Issue body text"
+            mock_ctx.fido_dir, repo_ctx, 8, "My task", "Issue body text", issue_labels=[]
         )
 
     def test_run_skips_ci_thread_rescope_for_fresh_pr(self, tmp_path: Path) -> None:
@@ -6325,7 +6325,7 @@ class TestRunHandleMergeConflictIntegration:
         ):
             worker.run()
         mock_handle_mc.assert_called_once_with(
-            mock_ctx.fido_dir, repo_ctx, 42, "fix-bug"
+            mock_ctx.fido_dir, repo_ctx, 42, "fix-bug", issue_labels=[]
         )
 
     def test_returns_1_when_merge_conflict_handled(self, tmp_path: Path) -> None:
@@ -6581,7 +6581,9 @@ class TestHandleCi:
             patch.object(worker, "set_status"),
             patch(
                 "fido.worker.build_prompt",
-                side_effect=lambda fd, sk, ctx: captured_context.update({"ctx": ctx}),
+                side_effect=lambda fd, sk, ctx, **_: captured_context.update(
+                    {"ctx": ctx}
+                ),
             ),
             patch("fido.worker.provider_run", return_value=("", "")),
             patch("fido.tasks.Tasks.complete_with_resolve"),
@@ -6883,7 +6885,7 @@ class TestRunHandleCiIntegration:
         ):
             worker.run()
         mock_handle_ci.assert_called_once_with(
-            mock_ctx.fido_dir, repo_ctx, 42, "fix-bug"
+            mock_ctx.fido_dir, repo_ctx, 42, "fix-bug", issue_labels=[]
         )
 
     def test_returns_1_when_ci_handled(self, tmp_path: Path) -> None:
@@ -11123,7 +11125,9 @@ class TestRunExecuteTaskIntegration:
             patch.object(worker, "execute_task", mock_execute),
         ):
             worker.run()
-        mock_execute.assert_called_once_with(mock_ctx.fido_dir, repo_ctx, 42, "fix-bug")
+        mock_execute.assert_called_once_with(
+            mock_ctx.fido_dir, repo_ctx, 42, "fix-bug", issue_labels=[]
+        )
 
     def test_returns_1_when_execute_task_done(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
