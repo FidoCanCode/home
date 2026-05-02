@@ -1260,14 +1260,20 @@ class TestIsCopilotQuotaError:
     @pytest.mark.parametrize(
         "message",
         [
-            "rate limit exceeded",
-            "Rate Limit hit",
-            "rate_limit reached",
-            "quota exhausted",
-            "Too Many Requests",
-            "429 error from server",
-            "limit exceeded for user",
-            "usage limit reached",
+            # Exact messages from @github/copilot sdk/index.js ---------------
+            "You've reached your weekly rate limit.",  # user_weekly_rate_limited
+            "You've hit the rate limit for this model.",  # user_model_rate_limited
+            "You've hit your global rate limit.",  # user_global_rate_limited
+            "Rate limit reached, waiting 1 minute before retrying...",
+            "Rate limit exceeded",
+            "No remaining quota for premium requests",
+            "Quota is insufficient to finish this session.",
+            # Error codes that may surface in ACP exceptions -----------------
+            "user_weekly_rate_limited",
+            "user_model_rate_limited",
+            "user_global_rate_limited",
+            "integration_rate_limited",
+            "rate_limited",
         ],
     )
     def test_quota_patterns_match(self, message: str) -> None:
@@ -1280,6 +1286,8 @@ class TestIsCopilotQuotaError:
             "BrokenPipeError",
             "authentication failed",
             "context window overflow",
+            "Too Many Requests",  # generic HTTP — not a Copilot CLI pattern
+            "429",  # raw HTTP status — not surfaced by Copilot CLI
             "",
         ],
     )

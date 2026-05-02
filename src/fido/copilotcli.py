@@ -148,26 +148,33 @@ _COPILOT_SUPPORTED_MODELS: frozenset[str] = frozenset(
 # window.  Update when real quota reset semantics are confirmed.
 _COPILOT_QUOTA_PAUSE_SECONDS = 3600.0
 
-# Strings that identify a Copilot error as quota / rate-limit related.
-# Copilot CLI has not (yet) been observed hitting quota in the wild, so
-# this list is speculative.  Expand it as real error messages appear.
+# Substrings that identify a Copilot error as quota / rate-limit related.
+# Grounded in the actual strings emitted by @github/copilot (sdk/index.js):
+#
+#   "You've reached your weekly rate limit."    ← user_weekly_rate_limited
+#   "You've hit the rate limit for this model." ← user_model_rate_limited
+#                                                   / integration_rate_limited
+#   "You've hit your global rate limit."        ← user_global_rate_limited
+#                                                   / rate_limited (fallback)
+#   "Rate limit reached, waiting 1 minute before retrying..."
+#   "Rate limit exceeded"
+#   "No remaining quota for premium requests"
+#   "Quota is insufficient to finish this session."
+#
+# All of the above fold to either "rate limit", "rate_limit", or "quota"
+# when lowercased and substring-matched.
 _COPILOT_QUOTA_PATTERNS: tuple[str, ...] = (
-    "rate limit",
-    "rate_limit",
-    "quota",
-    "too many requests",
-    "429",
-    "limit exceeded",
-    "usage limit",
+    "rate limit",  # covers all "You've … rate limit …" and "Rate limit …" messages
+    "rate_limit",  # covers error codes in ACP exceptions (e.g. user_weekly_rate_limited)
+    "quota",  # covers "No remaining quota" and "Quota is insufficient"
 )
 
 
 def _is_copilot_quota_error(exc: Exception) -> bool:
     """Return True when *exc* looks like a Copilot quota or rate-limit error.
 
-    The check is intentionally broad because Copilot CLI has not yet been
-    observed surfacing quota failures in production.  The patterns will be
-    tightened once real error messages are confirmed.
+    Matches against :data:`_COPILOT_QUOTA_PATTERNS`, which are grounded in the
+    actual error messages emitted by ``@github/copilot`` (sdk/index.js).
     """
     lowered = str(exc).lower()
     return any(pat in lowered for pat in _COPILOT_QUOTA_PATTERNS)
