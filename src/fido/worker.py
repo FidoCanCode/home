@@ -3001,9 +3001,6 @@ class Worker:
                     "Related thread comment_ids: "
                     + ", ".join(str(comment_id) for comment_id in lineage_ids)
                 )
-        context = "\n".join(context_parts)
-        build_prompt(fido_dir, "task", context, labels=issue_labels)
-        prompts = self._get_prompts()
         state_path = fido_dir / "state.json"
         state_data = State(fido_dir).load() if state_path.exists() else {}
         issue_number = state_data.get("issue")
@@ -3018,6 +3015,26 @@ class Worker:
         pr_data = self.gh.get_pr(repo_ctx.repo, pr_number)
         pr_title = pr_data.get("title", "") or ""
         pr_body = pr_data.get("body", "") or ""
+        pr_url = f"https://github.com/{repo_ctx.repo}/pull/{pr_number}"
+        active_ctx = render_active_context(
+            issue=ActiveIssue(
+                number=issue_number if isinstance(issue_number, int) else 0,
+                title=issue_title,
+                body=issue_body,
+            ),
+            pr=ActivePR(
+                number=pr_number,
+                title=pr_title,
+                url=pr_url,
+                body=pr_body,
+            ),
+            tasks=task_list,
+            current_task=task,
+            prior_attempts=[],
+        )
+        context = f"{active_ctx}\n\n" + "\n".join(context_parts)
+        build_prompt(fido_dir, "task", context, labels=issue_labels)
+        prompts = self._get_prompts()
         head_before = self._git(["rev-parse", "HEAD"]).stdout.strip()
         # Snapshot fido-authored PR comments so we can detect and delete any
         # improvised top-level BLOCKED/leak comments this task turn posts
