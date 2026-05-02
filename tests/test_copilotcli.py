@@ -1404,6 +1404,9 @@ class TestCopilotCLIClient:
         client.attach_session(attached)
         assert client.session is attached
 
+    def test_supports_no_commit_reset_is_false(self) -> None:
+        assert CopilotCLIClient().supports_no_commit_reset is False
+
     def test_session_id_none_branches(self) -> None:
         assert CopilotCLIClient().session_id is None
         assert CopilotCLIClient(session=object()).session_id is None

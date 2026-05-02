@@ -1637,6 +1637,10 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
     def provider_id(self) -> ProviderID:
         return ProviderID.CLAUDE_CODE
 
+    @property
+    def supports_no_commit_reset(self) -> bool:
+        return True
+
     def _spawn_owned_session(
         self,
         model: ProviderModel | None = None,
