@@ -3037,6 +3037,9 @@ class Worker:
             self._tasks.update(task["id"], TaskStatus.PENDING)
             with State(fido_dir).modify() as state:
                 state.pop("current_task_id", None)
+            if self._abort_task.is_active_for(task["id"]):
+                log.info("consuming abort signal for preempted task %s", task["id"])
+                self._abort_task.clear()
             return True
         head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
@@ -3140,6 +3143,9 @@ class Worker:
                 self._tasks.update(task["id"], TaskStatus.PENDING)
                 with State(fido_dir).modify() as state:
                     state.pop("current_task_id", None)
+                if self._abort_task.is_active_for(task["id"]):
+                    log.info("consuming abort signal for preempted task %s", task["id"])
+                    self._abort_task.clear()
                 return True
             head_after = self._commit_provider_leftovers_if_any(task_title, head_before)
 
