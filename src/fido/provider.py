@@ -944,6 +944,11 @@ class ProviderAgent(Protocol):
         """Return the number of stream-json events received from the current session subprocess since spawn."""
         ...
 
+    @property
+    def supports_no_commit_reset(self) -> bool:
+        """Return whether this provider supports resetting the session when no commits are produced."""
+        ...
+
     voice_model: ProviderModel
     work_model: ProviderModel
     brief_model: ProviderModel

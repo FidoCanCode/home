@@ -2733,6 +2733,9 @@ class TestClaudeClientSessionAttachment:
         client = ClaudeClient()
         assert str(client.provider_id) == "claude-code"
 
+    def test_supports_no_commit_reset_is_true(self) -> None:
+        assert ClaudeClient().supports_no_commit_reset is True
+
     def test_ensure_session_requires_session_system_file_and_work_dir(self) -> None:
         client = ClaudeClient()
         with pytest.raises(

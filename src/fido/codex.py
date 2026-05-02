@@ -1152,6 +1152,10 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
     def provider_id(self) -> ProviderID:
         return ProviderID.CODEX
 
+    @property
+    def supports_no_commit_reset(self) -> bool:
+        return True
+
     def _spawn_owned_session(
         self, model: ProviderModel, *, session_id: str | None = None
     ) -> PromptSession:

@@ -717,6 +717,9 @@ class TestCodexClient:
         assert client.work_model == ProviderModel("gpt-5.5", "medium")
         assert client.brief_model == ProviderModel("gpt-5.5", "low")
 
+    def test_supports_no_commit_reset_is_true(self) -> None:
+        assert CodexClient(session=MagicMock()).supports_no_commit_reset is True
+
     def test_spawns_owned_session_with_resume_id(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("persona")

@@ -1286,6 +1286,10 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
     def provider_id(self) -> ProviderID:
         return ProviderID.COPILOT_CLI
 
+    @property
+    def supports_no_commit_reset(self) -> bool:
+        return False
+
     def _spawn_owned_session(
         self, model: ProviderModel, *, session_id: str | None = None
     ) -> PromptSession:
