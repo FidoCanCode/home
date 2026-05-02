@@ -451,6 +451,272 @@ class TestTasksMoreBranches:
 # ---------------------------------------------------------------------------
 
 
+class TestTasksAdd:
+    def test_add_dedups_on_comment_id_and_merges_lineage(
+        self, tmp_path: Path
+    ) -> None:
+        """When a task already exists for ``comment_id``, ``add()`` returns
+        the duplicate and merges any new lineage into the existing thread
+        (tasks.py:1080-1081 — write-through path)."""
+        from fido.tasks import Tasks
+        from fido.types import TaskType
+
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / ".git" / "fido").mkdir(parents=True)
+        (work / ".git" / "fido" / "tasks.json").write_text("[]")
+        tasks = Tasks(work)
+
+        first = tasks.add(
+            "first",
+            TaskType.THREAD,
+            thread={"comment_id": 1, "repo": "o/r", "pr": 1},
+        )
+        # Second add with same comment_id but extra lineage entry must
+        # return the existing task and merge the lineage_comment_ids
+        # into the stored thread.
+        dup = tasks.add(
+            "anything",
+            TaskType.THREAD,
+            thread={
+                "comment_id": 1,
+                "repo": "o/r",
+                "pr": 1,
+                "lineage_comment_ids": [1, 2],
+            },
+        )
+        assert dup["id"] == first["id"]
+        on_disk = tasks.list()
+        assert on_disk[0]["thread"]["lineage_comment_ids"] == [1, 2]
+
+
+class TestRocqRuntimeStringKeyAccept:
+    def test_string_key_passes_through_str(self) -> None:
+        from fido.rocq_runtime import _rocq_string_key
+
+        # Accept-path: type matches → ``return key``
+        assert _rocq_string_key("hello") == "hello"
+
+
+# ---------------------------------------------------------------------------
+# codex.py — small validation / parser branches
+# ---------------------------------------------------------------------------
+
+
+class TestCodexParsers:
+    def test_normalize_limit_name_falls_back_for_non_str(self) -> None:
+        from fido.codex import _normalize_limit_name
+
+        assert _normalize_limit_name(None, "fb") == "fb"
+        assert _normalize_limit_name("", "fb") == "fb"
+
+    def test_normalize_limit_name_normalises_text(self) -> None:
+        from fido.codex import _normalize_limit_name
+
+        assert _normalize_limit_name("Token-Bucket  Window", "fb") == (
+            "token_bucket_window"
+        )
+
+    def test_parse_rate_limit_reset_rejects_non_numeric(self) -> None:
+        from fido.codex import _parse_rate_limit_reset
+
+        with pytest.raises(ValueError, match="resetsAt must be numeric"):
+            _parse_rate_limit_reset("nope")
+
+    def test_parse_rate_limit_reset_returns_none_for_none(self) -> None:
+        from fido.codex import _parse_rate_limit_reset
+
+        assert _parse_rate_limit_reset(None) is None
+
+    def test_rate_limit_window_returns_none_for_none(self) -> None:
+        from fido.codex import _rate_limit_window
+
+        assert _rate_limit_window("id", "primary", None) is None
+
+    def test_rate_limit_window_rejects_non_dict(self) -> None:
+        from fido.codex import _rate_limit_window
+
+        with pytest.raises(ValueError, match="must be an object"):
+            _rate_limit_window("id", "primary", "not-a-dict")
+
+    def test_rate_limit_window_returns_none_when_used_percent_missing(self) -> None:
+        from fido.codex import _rate_limit_window
+
+        assert _rate_limit_window("id", "primary", {}) is None
+
+    def test_rate_limit_window_rejects_non_numeric_used_percent(self) -> None:
+        from fido.codex import _rate_limit_window
+
+        with pytest.raises(ValueError, match="usedPercent must be numeric"):
+            _rate_limit_window("id", "primary", {"usedPercent": "fifty"})
+
+    def test_credits_depleted_recognises_marker(self) -> None:
+        from fido.codex import _credits_depleted
+
+        assert _credits_depleted(
+            {"hasCredits": False, "unlimited": False}, "credits_depleted"
+        )
+        assert not _credits_depleted({"hasCredits": True}, "credits_depleted")
+        assert not _credits_depleted({}, "rate_limit_reached")
+        assert not _credits_depleted("not-a-dict", "credits_depleted")
+
+    def test_reached_window_name_classifies(self) -> None:
+        from fido.codex import _reached_window_name
+
+        assert _reached_window_name("credits_depleted") == "credits"
+        assert _reached_window_name("usage_limit_reached") == "workspace_usage"
+        assert _reached_window_name("rate_limit_reached") == "rate_limit_reached"
+        assert _reached_window_name("custom-limit") == "custom_limit"
+        assert _reached_window_name(None) is None
+        assert _reached_window_name("") is None
+
+    def test_codex_limit_windows_uses_by_id_dict(self) -> None:
+        """Cover the rate_limits_by_id branch (codex.py:559-560)."""
+        from fido.codex import _codex_limit_windows
+
+        payload = {
+            "rateLimitsByLimitId": {
+                "tier_a": {
+                    "primary": {"usedPercent": 30},
+                    "secondary": None,
+                }
+            }
+        }
+        windows = _codex_limit_windows(payload)
+        # ``rateLimitsByLimitId`` doesn't include limitId in the
+        # snapshot itself; the synthetic name uses ``codex_<index>``.
+        assert windows[0].name == "codex_0_primary"
+        assert windows[0].used == 30
+
+    def test_codex_limit_windows_rejects_non_object_snapshot(self) -> None:
+        """Cover the non-dict raw_limit guard (codex.py:573)."""
+        from fido.codex import _codex_limit_windows
+
+        with pytest.raises(ValueError, match="must be objects"):
+            _codex_limit_windows({"rateLimits": ["not-an-object"]})
+
+    def test_codex_limit_windows_emits_credits_window(self) -> None:
+        """Cover the credits-depleted ProviderLimitWindow append
+        (codex.py:583-586)."""
+        from fido.codex import _codex_limit_windows
+
+        payload = {
+            "rateLimits": [
+                {
+                    "limitId": "tier",
+                    "credits": {"hasCredits": False, "unlimited": False},
+                    "rateLimitReachedType": "credits_depleted",
+                }
+            ]
+        }
+        windows = _codex_limit_windows(payload)
+        names = {w.name for w in windows}
+        assert "tier_credits" in names
+
+    def test_codex_limit_windows_emits_explicit_reached_window(self) -> None:
+        """Cover the explicit reached-window append branch
+        (codex.py:587-592)."""
+        from fido.codex import _codex_limit_windows
+
+        payload = {
+            "rateLimits": [
+                {
+                    "limitId": "tier",
+                    "rateLimitReachedType": "rate_limit_reached",
+                }
+            ]
+        }
+        windows = _codex_limit_windows(payload)
+        names = {w.name for w in windows}
+        assert "tier_rate_limit_reached" in names
+
+
+# ---------------------------------------------------------------------------
+# worker.py — pure helper coverage
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerPureHelpers:
+    def test_ci_oracle_task_kind_discrimination(self) -> None:
+        from fido.rocq import ci_task_lifecycle as ci_oracle
+        from fido.types import TaskType
+        from fido.worker import _ci_oracle_task_kind
+
+        assert isinstance(_ci_oracle_task_kind({"title": "Ask: x"}), ci_oracle.TaskAsk)
+        assert isinstance(
+            _ci_oracle_task_kind({"title": "Defer: x"}), ci_oracle.TaskDefer
+        )
+        assert isinstance(
+            _ci_oracle_task_kind({"title": "CI FAILURE: y"}), ci_oracle.TaskCI
+        )
+        assert isinstance(
+            _ci_oracle_task_kind({"title": "x", "type": TaskType.CI}),
+            ci_oracle.TaskCI,
+        )
+        assert isinstance(
+            _ci_oracle_task_kind({"title": "x", "type": TaskType.THREAD}),
+            ci_oracle.TaskThread,
+        )
+        assert isinstance(
+            _ci_oracle_task_kind({"title": "x", "type": TaskType.SPEC}),
+            ci_oracle.TaskSpec,
+        )
+        # Non-string title is normalized to "".
+        assert isinstance(_ci_oracle_task_kind({"title": 42}), ci_oracle.TaskSpec)
+
+    def test_ci_oracle_task_status_discrimination(self) -> None:
+        from fido.rocq import ci_task_lifecycle as ci_oracle
+        from fido.types import TaskStatus
+        from fido.worker import _ci_oracle_task_status
+
+        assert isinstance(
+            _ci_oracle_task_status({"status": TaskStatus.COMPLETED}),
+            ci_oracle.StatusCompleted,
+        )
+        assert isinstance(
+            _ci_oracle_task_status({"status": "completed"}),
+            ci_oracle.StatusCompleted,
+        )
+        assert isinstance(
+            _ci_oracle_task_status({"status": TaskStatus.BLOCKED}),
+            ci_oracle.StatusBlocked,
+        )
+        assert isinstance(
+            _ci_oracle_task_status({"status": "blocked"}),
+            ci_oracle.StatusBlocked,
+        )
+        assert isinstance(
+            _ci_oracle_task_status({"status": "pending"}),
+            ci_oracle.StatusPending,
+        )
+
+    def test_ci_oracle_snapshot_run_normalization(self) -> None:
+        """run_id of 0 / negative normalizes to 1 (worker.py:819)."""
+        from fido.rocq import ci_task_lifecycle as ci_oracle
+        from fido.worker import _ci_oracle_snapshot
+
+        snap = _ci_oracle_snapshot(check_name="ci", state="FAILURE", run_id="-3")
+        assert snap.ci_run == 1
+        assert isinstance(snap.ci_conclusion, ci_oracle.CIConclusionFailure)
+
+    def test_ci_oracle_snapshot_timed_out(self) -> None:
+        """TIMED_OUT state lowers to CIConclusionTimedOut (worker.py:822)."""
+        from fido.rocq import ci_task_lifecycle as ci_oracle
+        from fido.worker import _ci_oracle_snapshot
+
+        snap = _ci_oracle_snapshot(check_name="ci", state="TIMED_OUT", run_id="2")
+        assert isinstance(snap.ci_conclusion, ci_oracle.CIConclusionTimedOut)
+
+    def test_ci_oracle_snapshot_run_invalid_string(self) -> None:
+        """Non-numeric run_id normalizes via ValueError → 1."""
+        from fido.worker import _ci_oracle_snapshot
+
+        snap = _ci_oracle_snapshot(
+            check_name="ci", state="FAILURE", run_id="not-an-int"
+        )
+        assert snap.ci_run == 1
+
+
 class TestCopilotCLIOwner:
     def test_owner_returns_none_when_repo_name_is_unset(
         self, tmp_path: Path
