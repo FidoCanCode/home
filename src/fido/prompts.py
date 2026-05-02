@@ -625,11 +625,19 @@ class Prompts:
         self,
         task_list: list[dict[str, Any]],
         commit_summary: str,
+        *,
+        issue: ActiveIssue | None = None,
+        pr: ActivePR | None = None,
+        prior_attempts: list[ClosedPR] | None = None,
     ) -> str:
         """Build an Opus prompt for dependency-aware task reordering.
 
         Presents the full task list and a summary of commits already made, then
         asks Opus to return a JSON array of the reordered pending tasks.
+
+        When *issue* is provided, the rendered active-context block (issue,
+        optional PR, prior attempts, task list) is prepended to the prompt so
+        Opus has full context about what is being worked on.
 
         Rules enforced in the prompt:
         - CI tasks (type "ci") must remain first.
@@ -662,8 +670,22 @@ class Prompts:
             else "(none)"
         )
 
+        active_ctx_prefix = ""
+        if issue is not None:
+            active_ctx_prefix = (
+                render_active_context(
+                    issue=issue,
+                    pr=pr,
+                    tasks=task_list,
+                    current_task=None,
+                    prior_attempts=prior_attempts or [],
+                )
+                + "\n\n"
+            )
+
         return (
             f"{TRIAGE_CLAUSE}\n\n"
+            f"{active_ctx_prefix}"
             "You are reviewing the pending work queue for a pull request in progress.\n\n"
             "Already completed tasks:\n"
             f"{completed_block}\n\n"

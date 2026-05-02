@@ -772,6 +772,39 @@ class TestRescopePrompt:
         assert isinstance(result, str)
         assert "(none)" in result  # both completed and commit summary
 
+    def test_active_context_prefix_included_when_issue_provided(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        issue = ActiveIssue(number=42, title="Fix crash", body="It crashes on startup.")
+        result = Prompts("").rescope_prompt(tasks, "", issue=issue)
+        assert "## Active issue" in result
+        assert "#42: Fix crash" in result
+        assert "It crashes on startup." in result
+
+    def test_no_active_context_prefix_when_issue_is_none(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "", issue=None)
+        assert "## Active issue" not in result
+
+    def test_active_context_includes_pr_when_provided(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        issue = ActiveIssue(number=1, title="T", body="")
+        pr = ActivePR(
+            number=7,
+            title="Fix T (closes #1)",
+            url="https://github.com/o/r/pull/7",
+            body="",
+        )
+        result = Prompts("").rescope_prompt(tasks, "", issue=issue, pr=pr)
+        assert "## Active PR" in result
+        assert "PR #7" in result
+
+    def test_active_context_no_pr_section_when_pr_is_none(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        issue = ActiveIssue(number=1, title="T", body="")
+        result = Prompts("").rescope_prompt(tasks, "", issue=issue, pr=None)
+        assert "## Active issue" in result
+        assert "## Active PR" not in result
+
 
 # ── Prompts.rescope_duplicate_nudge ──────────────────────────────────────────
 
