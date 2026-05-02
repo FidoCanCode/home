@@ -3,6 +3,8 @@
 import json
 from typing import Any
 
+from fido.types import ActiveIssue, ActivePR, ClosedPR
+
 # ── Prompt-level tool guardrails ──────────────────────────────────────────────
 #
 # Every prompt that runs through ``session.prompt()`` must include one of the
@@ -44,6 +46,87 @@ TRIAGE_CLAUSE = (
 
 # Backward-compatible alias for call sites that predate the split.
 READ_ONLY_CLAUSE = TRIAGE_CLAUSE
+
+
+# ── Active-work context renderer ─────────────────────────────────────────────
+
+
+def render_active_context(
+    issue: ActiveIssue,
+    pr: ActivePR | None,
+    tasks: list[dict[str, Any]],
+    current_task: dict[str, Any] | None,
+    prior_attempts: list[ClosedPR],
+) -> str:
+    """Render active-work context blocks for injection into any LLM system prompt.
+
+    Produces up to five markdown sections in this order:
+
+    1. ``## Active issue``  — stable; issue number, title, and body
+    2. ``## Active PR``     — stable; PR number, title, URL, and body
+    3. ``## Prior attempts``— stable; closed PRs that referenced this issue
+    4. ``## Tasks``         — dynamic; full task list with status and type markers
+    5. ``## Right now``     — dynamic; current task title and description
+
+    Sections 1–3 form the **stable prefix**: their content is byte-identical
+    across every prompt rebuild during a session, which keeps them warm in
+    provider prompt caches.  Sections 4–5 are the **dynamic suffix** that
+    changes when tasks are added, completed, or switched.
+
+    Any section whose data is absent is omitted entirely so the output stays
+    compact and does not confuse the agent with empty headers.
+    """
+    _STATUS_MARKER = {
+        "completed": "[x]",
+        "in_progress": "[~]",
+        "pending": "[ ]",
+        "blocked": "[!]",
+    }
+    parts: list[str] = []
+
+    # ── stable prefix ────────────────────────────────────────────────────────
+
+    issue_text = f"## Active issue\n\n#{issue.number}: {issue.title}"
+    if issue.body:
+        issue_text += f"\n\n{issue.body}"
+    parts.append(issue_text)
+
+    if pr is not None:
+        pr_text = f"## Active PR\n\nPR #{pr.number}: {pr.title}\n{pr.url}"
+        if pr.body:
+            pr_text += f"\n\n{pr.body}"
+        parts.append(pr_text)
+
+    if prior_attempts:
+        attempt_blocks: list[str] = []
+        for attempt in prior_attempts:
+            entry = f"### PR #{attempt.number}: {attempt.title}"
+            if attempt.close_reason:
+                entry += f"\n\nClose reason: {attempt.close_reason}"
+            if attempt.body:
+                entry += f"\n\n{attempt.body}"
+            attempt_blocks.append(entry)
+        parts.append("## Prior attempts\n\n" + "\n\n".join(attempt_blocks))
+
+    # ── dynamic suffix ────────────────────────────────────────────────────────
+
+    if tasks:
+        task_lines = [
+            f"- {_STATUS_MARKER.get(t.get('status', 'pending'), '[ ]')} "
+            f"[{t.get('type', 'spec')}] {t.get('title', '')}"
+            for t in tasks
+        ]
+        parts.append("## Tasks\n\n" + "\n".join(task_lines))
+
+    if current_task is not None:
+        task_title = current_task.get("title", "")
+        task_desc = current_task.get("description", "")
+        now_text = f"## Right now\n\n{task_title}"
+        if task_desc:
+            now_text += f"\n\n{task_desc}"
+        parts.append(now_text)
+
+    return "\n\n".join(parts)
 
 
 # ── Triage ────────────────────────────────────────────────────────────────────
