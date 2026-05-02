@@ -774,6 +774,153 @@ class TestStoreCompletedReturn:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# events.py — small leaf branches
+# ---------------------------------------------------------------------------
+
+
+class TestEventsLeaves:
+    def test_normalize_comment_ids_filters_non_int_or_str(self) -> None:
+        """events.py:737-741 — non-int/str entries skip; unparseable
+        ints raise TypeError/ValueError and skip."""
+        from fido.events import _normalize_comment_ids
+
+        result = _normalize_comment_ids(
+            [1, "2", 3.14, None, "not-a-number", 4, "4"]
+        )
+        # ints + str-of-ints both retained, dedup'd; non-int-like skipped.
+        assert tuple(result) == (1, 2, 4)
+
+    def test_thread_lineage_comment_ids_with_no_thread(self) -> None:
+        """events.py:769 — None thread short-circuits to ``()``."""
+        from fido.events import thread_lineage_comment_ids
+
+        assert thread_lineage_comment_ids(None) == ()
+        assert thread_lineage_comment_ids({}) == ()
+
+    def test_thread_lineage_comment_ids_uses_lineage_list(self) -> None:
+        """events.py:773 path — lineage_comment_ids list takes priority."""
+        from fido.events import thread_lineage_comment_ids
+
+        result = thread_lineage_comment_ids(
+            {"lineage_comment_ids": [1, 2], "comment_id": 99}
+        )
+        assert result == (1, 2)
+
+    def test_thread_lineage_comment_ids_no_lineage_no_comment_id(self) -> None:
+        """events.py:775 — neither lineage nor comment_id → ``()``."""
+        from fido.events import thread_lineage_comment_ids
+
+        # An empty dict — short-circuits at the ``if not thread`` guard
+        # rather than reaching the no-comment-id branch.
+        assert thread_lineage_comment_ids({}) == ()
+        # A thread with a non-list lineage and no comment_id reaches
+        # the explicit ``return ()`` for missing comment_id.
+        assert thread_lineage_comment_ids({"repo": "o/r"}) == ()
+        # And the trailing branch — non-list lineage, comment_id set.
+        result = thread_lineage_comment_ids({"comment_id": 7})
+        assert result == (7,)
+
+    def test_comment_chain_action_title_requires_agent(self) -> None:
+        """events.py:1920 — calling without an agent raises."""
+        from fido.events import _comment_chain_action_title
+
+        with pytest.raises(ValueError, match="requires agent"):
+            _comment_chain_action_title(
+                thread_comments=[],
+                final_comment_id=None,
+                final_comment_body="",
+                triage_titles=[],
+                agent=None,
+            )
+
+
+# ---------------------------------------------------------------------------
+# claude.py — defensive concurrency branches
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeDefensivePaths:
+    def _session(self, tmp_path: Path, *, stdout_lines: list[str]) -> object:
+        from fido.claude import ClaudeSession
+
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.stdin = MagicMock()
+        proc.stdin.closed = False
+        proc.stdout = MagicMock()
+        proc.stdout.readline = MagicMock(side_effect=stdout_lines + [""])
+        proc.stderr = MagicMock()
+        proc.stderr.__iter__ = MagicMock(return_value=iter([]))
+        proc.poll = MagicMock(return_value=None)
+        proc.wait = MagicMock(return_value=0)
+        proc.returncode = 0
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+        return ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=MagicMock(return_value=proc),
+            selector=MagicMock(return_value=([proc.stdout], [], [])),
+            repo_name="owner/repo",
+            model="claude-opus-4-6",
+        )
+
+    def test_send_acknowledges_prior_cancelled_turn(self, tmp_path: Path) -> None:
+        """``send`` walks Cancelled → Idle via TurnReturn before
+        starting a new Sending turn (claude.py:884-888)."""
+        from fido.claude import ClaudeSession
+        from fido.rocq.claude_session import Cancelled, Sending
+
+        session = self._session(tmp_path, stdout_lines=[])
+        assert isinstance(session, ClaudeSession)
+        # Force Cancelled state — this is what a prior cancelled turn
+        # would leave behind.
+        with session._stream_lock:
+            session._stream_state = Cancelled()
+        session.send("ping")
+        # send() must have transitioned away from Cancelled.
+        assert isinstance(session._stream_state, Sending)
+        session.stop()
+
+    def test_stderr_pump_tolerates_value_error_on_close(
+        self, tmp_path: Path
+    ) -> None:
+        """If ``for raw in stderr`` raises ValueError (closed file) or
+        OSError (broken pipe), the pump silently exits (claude.py:691-697).
+        Cover by handing the session a stderr whose iteration raises."""
+        from fido.claude import ClaudeSession
+
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.stdin = MagicMock()
+        proc.stdin.closed = False
+        proc.stdout = MagicMock()
+        proc.stdout.readline = MagicMock(return_value="")
+        proc.stderr = MagicMock()
+        proc.stderr.__iter__ = MagicMock(side_effect=ValueError("closed"))
+        proc.poll = MagicMock(return_value=None)
+        proc.wait = MagicMock(return_value=0)
+        proc.returncode = 0
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+
+        session = ClaudeSession(
+            system_file,
+            work_dir=tmp_path,
+            popen=MagicMock(return_value=proc),
+            selector=MagicMock(return_value=([], [], [])),
+            repo_name="owner/repo",
+            model="claude-opus-4-6",
+        )
+        # The stderr pump runs as a daemon thread; let it exit.
+        import time
+
+        time.sleep(0.05)
+        session.stop()
+
+
 class TestRocqLspMoreBranches:
     def test_symbol_at_token_fallback_for_models_dir(self, tmp_path: Path) -> None:
         """When a token at (path, line, col) doesn't match any source
