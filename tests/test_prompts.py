@@ -1472,8 +1472,13 @@ class TestSynthesisPrompt:
         result = Prompts("").synthesis_prompt("comment", is_bot=False)
         assert "add_reaction" in result
         assert "rescope_intent" in result
-        assert "preempt" in result
         assert "no_op" in result
+
+    def test_excludes_preempt_action_type(self) -> None:
+        # Preempt is not in the synthesis action vocabulary — preemption is
+        # automatic when RescopeIntents are present, decided by the executor.
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert '{"type": "preempt"' not in result
 
     def test_includes_valid_emoji_shortcodes(self) -> None:
         result = Prompts("").synthesis_prompt("comment", is_bot=False)

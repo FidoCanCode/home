@@ -64,25 +64,17 @@ class RescopeIntent:
 
 
 @dataclass(frozen=True)
-class Preempt:
-    """Signal whether the current in-progress worker task should be preempted.
-
-    When *preempt* is ``True``, the handler requests that the worker abort
-    its current task and re-evaluate its queue immediately after actions
-    are applied.
-    """
-
-    preempt: bool
-
-
-@dataclass(frozen=True)
 class NoOp:
     """Explicitly take no additional action beyond posting the required reply."""
 
 
 # The closed vocabulary of additional effects Fido may produce from a single
 # synthesis call.  Constraint A: no operations outside this set exist.
-SynthesisAction = AddReaction | RescopeIntent | Preempt | NoOp
+#
+# Preemption is not part of the action vocabulary — it is automatic: the
+# action executor always preempts when any RescopeIntent is present.  The
+# rescope machinery then decides whether work actually changes.
+SynthesisAction = AddReaction | RescopeIntent | NoOp
 
 
 # ---------------------------------------------------------------------------

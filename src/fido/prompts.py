@@ -855,7 +855,7 @@ class Prompts:
         that asks the model to return a :class:`~fido.synthesis.CommentResponse`
         JSON object containing both the reply prose (Constraint B: always present,
         always freshly synthesised) and any additional effects from the constrained
-        action vocabulary (Constraint A: rescope intents, reactions, preempt, no-op).
+        action vocabulary (Constraint A: rescope intents, reactions, no-op).
 
         *is_bot* is passed to adjust voice guidance — bot suggestions are handled
         with a different tone than human reviewer comments.
@@ -897,9 +897,6 @@ class Prompts:
             "task mutations — this action only registers the intent.\n"
             "    One rescope_intent per distinct scope change; omit when no scope "
             "change is needed.\n\n"
-            '  {"type": "preempt", "preempt": true|false}\n'
-            "    Whether the current in-progress worker task should be interrupted "
-            "immediately after this response is applied.  Omit when not relevant.\n\n"
             '  {"type": "no_op"}\n'
             "    Explicitly take no additional action beyond posting the reply.\n\n"
             "Voice guidelines:\n"

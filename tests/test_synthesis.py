@@ -7,7 +7,6 @@ from fido.synthesis import (
     AddReaction,
     CommentResponse,
     NoOp,
-    Preempt,
     RescopeIntent,
     SynthesisAction,
     validate_reaction,
@@ -115,30 +114,6 @@ class TestRescopeIntent:
 
 
 # ---------------------------------------------------------------------------
-# Preempt
-# ---------------------------------------------------------------------------
-
-
-class TestPreempt:
-    def test_preempt_true(self) -> None:
-        p = Preempt(preempt=True)
-        assert p.preempt is True
-
-    def test_preempt_false(self) -> None:
-        p = Preempt(preempt=False)
-        assert p.preempt is False
-
-    def test_frozen(self) -> None:
-        p = Preempt(preempt=True)
-        with pytest.raises((AttributeError, TypeError)):
-            p.preempt = False  # type: ignore[misc]
-
-    def test_equality(self) -> None:
-        assert Preempt(True) == Preempt(True)
-        assert Preempt(True) != Preempt(False)
-
-
-# ---------------------------------------------------------------------------
 # NoOp
 # ---------------------------------------------------------------------------
 
@@ -165,7 +140,12 @@ class TestNoOp:
 
 
 class TestSynthesisActionUnion:
-    """Verify the union includes every action type and no others."""
+    """Verify the union includes every action type and no others.
+
+    Preemption is intentionally absent from the vocabulary: the action
+    executor always preempts when any RescopeIntent is present, so the
+    synthesis call never needs to express a preemption decision.
+    """
 
     def test_add_reaction_is_synthesis_action(self) -> None:
         a: SynthesisAction = AddReaction("rocket")
@@ -174,10 +154,6 @@ class TestSynthesisActionUnion:
     def test_rescope_intent_is_synthesis_action(self) -> None:
         a: SynthesisAction = RescopeIntent("Add logging")
         assert isinstance(a, RescopeIntent)
-
-    def test_preempt_is_synthesis_action(self) -> None:
-        a: SynthesisAction = Preempt(True)
-        assert isinstance(a, Preempt)
 
     def test_noop_is_synthesis_action(self) -> None:
         a: SynthesisAction = NoOp()
@@ -270,11 +246,10 @@ class TestCommentResponse:
             actions=(
                 AddReaction("eyes"),
                 RescopeIntent("Reorder the parser tasks"),
-                Preempt(False),
                 NoOp(),
             ),
         )
-        assert len(r.actions) == 4
+        assert len(r.actions) == 3
 
     def test_default_actions_empty_tuple(self) -> None:
         r = CommentResponse(reasoning="r", reply_text="Reply.")
