@@ -22,7 +22,7 @@ from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.issue_cache import IssueNode, IssueTreeCache
-from fido.prompts import Prompts
+from fido.prompts import Prompts, render_active_context
 from fido.provider import (
     PromptSession,
     Provider,
@@ -44,7 +44,7 @@ from fido.state import (
 )
 from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
 from fido.tasks import Tasks
-from fido.types import GitIdentity, TaskStatus, TaskType
+from fido.types import ActiveIssue, ActivePR, GitIdentity, TaskStatus, TaskType
 
 
 class GitIdentityError(Exception):
@@ -1821,7 +1821,22 @@ class Worker:
                 task_list = self._tasks.list()
             if not task_list:
                 log.info("PR #%s has no tasks — running setup", pr_number)
+                pr_body = self.gh.get_pr_body(repo_ctx.repo, pr_number)
+                pr_url = f"https://github.com/{repo_ctx.repo}/pull/{pr_number}"
+                active_ctx = render_active_context(
+                    issue=ActiveIssue(number=issue, title=issue_title, body=issue_body),
+                    pr=ActivePR(
+                        number=pr_number,
+                        title=pr_title,
+                        url=pr_url,
+                        body=pr_body,
+                    ),
+                    tasks=[],
+                    current_task=None,
+                    prior_attempts=[],
+                )
                 context = (
+                    f"{active_ctx}\n\n"
                     f"Request: {request}\n"
                     f"Repo: {repo_ctx.repo}\n"
                     f"Branch: {slug}\n"
@@ -1890,7 +1905,15 @@ class Worker:
 
         # Run setup sub-agent (plans tasks before PR is created)
         log.info("running setup (pre-PR)")
+        active_ctx = render_active_context(
+            issue=ActiveIssue(number=issue, title=issue_title, body=issue_body),
+            pr=None,
+            tasks=[],
+            current_task=None,
+            prior_attempts=[],
+        )
         context = (
+            f"{active_ctx}\n\n"
             f"Request: {request}\n"
             f"Repo: {repo_ctx.repo}\n"
             f"Branch: {slug}\n"

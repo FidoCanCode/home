@@ -5043,6 +5043,94 @@ class TestFindOrCreatePr:
             "owner/proj", 206, "Migrate", "fido-bot", [215]
         )
 
+    def test_open_pr_setup_context_includes_issue_body(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        gh.get_pr_body.return_value = ""
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value="sess"),
+            pytest.raises(RuntimeError),
+        ):
+            worker.find_or_create_pr(
+                fido_dir,
+                self._make_repo_ctx(),
+                5,
+                "Do the thing",
+                issue_body="Important requirement here.",
+            )
+        _, _, context = mock_build.call_args.args
+        assert "Important requirement here." in context
+        assert "#5: Do the thing" in context
+
+    def test_open_pr_setup_context_includes_pr_info(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
+        gh.get_pr_body.return_value = "PR description body"
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value="sess"),
+            pytest.raises(RuntimeError),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Do the thing")
+        _, _, context = mock_build.call_args.args
+        assert "PR #20" in context
+        assert "https://github.com/owner/proj/pull/20" in context
+        assert "PR description body" in context
+
+    def test_no_pr_setup_context_includes_issue_body(self, tmp_path: Path) -> None:
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value="s"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            pytest.raises(RuntimeError),
+        ):
+            worker.find_or_create_pr(
+                fido_dir,
+                self._make_repo_ctx(),
+                7,
+                "Fix the bug",
+                issue_body="Steps to reproduce here.",
+            )
+        _, _, context = mock_build.call_args.args
+        assert "Steps to reproduce here." in context
+        assert "#7: Fix the bug" in context
+
+    def test_no_pr_setup_context_excludes_pr_section(self, tmp_path: Path) -> None:
+        mock_client = _client()
+        mock_client.generate_branch_name.return_value = "do-work"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        fido_dir = self._fido_dir(tmp_path)
+        mock_build = MagicMock()
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch("fido.worker.provider_start", return_value="s"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            pytest.raises(RuntimeError),
+        ):
+            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        _, _, context = mock_build.call_args.args
+        assert "## Active PR" not in context
+
 
 class TestResetLocalWorkspaceAndRetryAck:
     """Fresh-retry workspace reset + retry-acknowledgement comment (closes
