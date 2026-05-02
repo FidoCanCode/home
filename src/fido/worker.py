@@ -44,7 +44,14 @@ from fido.state import (
 )
 from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
 from fido.tasks import Tasks
-from fido.types import ActiveIssue, ActivePR, GitIdentity, TaskStatus, TaskType
+from fido.types import (
+    ActiveIssue,
+    ActivePR,
+    ClosedPR,
+    GitIdentity,
+    TaskStatus,
+    TaskType,
+)
 
 
 class GitIdentityError(Exception):
@@ -1823,6 +1830,9 @@ class Worker:
                 log.info("PR #%s has no tasks — running setup", pr_number)
                 pr_body = self.gh.get_pr_body(repo_ctx.repo, pr_number)
                 pr_url = f"https://github.com/{repo_ctx.repo}/pull/{pr_number}"
+                prior_attempts = self.gh.find_closed_prs_as_context(
+                    repo_ctx.repo, issue, repo_ctx.gh_user
+                )
                 active_ctx = render_active_context(
                     issue=ActiveIssue(number=issue, title=issue_title, body=issue_body),
                     pr=ActivePR(
@@ -1833,7 +1843,7 @@ class Worker:
                     ),
                     tasks=[],
                     current_task=None,
-                    prior_attempts=[],
+                    prior_attempts=prior_attempts,
                 )
                 context = (
                     f"{active_ctx}\n\n"
@@ -1874,12 +1884,16 @@ class Worker:
         # closed-not-merged PRs exist, post a Fido-voiced retry-ack
         # comment naming them — idempotent on a marker.
         self._reset_local_workspace(fido_dir, repo_ctx, remote)
-        closed_prs = self.gh.find_closed_unmerged_prs_for_issue(
+        prior_attempts = self.gh.find_closed_prs_as_context(
             repo_ctx.repo, issue, repo_ctx.gh_user
         )
-        if closed_prs:
+        if prior_attempts:
             self._post_retry_acknowledgement(
-                repo_ctx.repo, issue, issue_title, repo_ctx.gh_user, closed_prs
+                repo_ctx.repo,
+                issue,
+                issue_title,
+                repo_ctx.gh_user,
+                [pr.number for pr in prior_attempts],
             )
 
         # Generate branch slug via the provider brief model
@@ -1910,7 +1924,7 @@ class Worker:
             pr=None,
             tasks=[],
             current_task=None,
-            prior_attempts=[],
+            prior_attempts=prior_attempts,
         )
         context = (
             f"{active_ctx}\n\n"
@@ -3006,10 +3020,14 @@ class Worker:
         issue_number = state_data.get("issue")
         issue_title = ""
         issue_body = ""
+        prior_attempts: list[ClosedPR] = []
         if isinstance(issue_number, int):
             issue_data = self.gh.view_issue(repo_ctx.repo, issue_number)
             issue_title = issue_data.get("title", "")
             issue_body = issue_data.get("body", "")
+            prior_attempts = self.gh.find_closed_prs_as_context(
+                repo_ctx.repo, issue_number, repo_ctx.gh_user
+            )
         else:
             issue_number = None
         pr_data = self.gh.get_pr(repo_ctx.repo, pr_number)
@@ -3030,7 +3048,7 @@ class Worker:
             ),
             tasks=task_list,
             current_task=task,
-            prior_attempts=[],
+            prior_attempts=prior_attempts,
         )
         context = f"{active_ctx}\n\n" + "\n".join(context_parts)
         build_prompt(fido_dir, "task", context, labels=issue_labels)
