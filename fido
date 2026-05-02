@@ -528,7 +528,38 @@ run_container() {
     fi
   fi
 
+  # Test paths set _container_cap_memory and _container_cap_timeout to bound
+  # pytest runs.  The cgroup-backed --memory cap stops the box from soft-locking
+  # under a leaky test (see #1248); the wall-clock timeout stops a hung worker
+  # from sitting forever paging through swap.
+  if [ -n "${_container_cap_memory:-}" ]; then
+    run_args+=(--memory="$_container_cap_memory" --memory-swap="$_container_cap_memory")
+  fi
+
   log INFO "starting container image=$run_image"
+  if [ -n "${_container_cap_timeout:-}" ]; then
+    set +e
+    timeout --foreground --kill-after=10s "$_container_cap_timeout" \
+      docker run "${run_args[@]}" "$run_image" "$@"
+    rc=$?
+    set -e
+    case "$rc" in
+      124)
+        echo >&2
+        echo "TIMEOUT: container exceeded ${_container_cap_timeout} wall-clock cap (#1248)." >&2
+        for f in /tmp/pyfh-*.log; do
+          [ -f "$f" ] || continue
+          echo "--- $f (last 40 lines) ---" >&2
+          tail -40 "$f" >&2
+        done
+        ;;
+      137)
+        echo >&2
+        echo "OOM: container killed by cgroup memory cap ${_container_cap_memory} (#1248)." >&2
+        ;;
+    esac
+    return "$rc"
+  fi
   docker run "${run_args[@]}" "$run_image" "$@"
 }
 
@@ -550,6 +581,12 @@ run_fido_test_python_image() {
 run_fido_pyproject_image() {
   build_image fido-test "$test_image"
   container_entrypoint="$repo_root/pyproject" run_container "$@"
+}
+
+run_fido_pyproject_image_capped() {
+  _container_cap_memory="${FIDO_TEST_MEMORY_CAP:-8g}" \
+    _container_cap_timeout="${FIDO_TEST_TIMEOUT:-300}" \
+    run_fido_pyproject_image "$@"
 }
 
 run_fido_module_image() {
@@ -1006,7 +1043,7 @@ case "$command" in
     run_fido_module_image fido.sync_tasks_cli "${@:2}"
     ;;
   tests)
-    run_fido_pyproject_image python3 -m fido.tests_main "${@:2}"
+    run_fido_pyproject_image_capped python3 -m fido.tests_main "${@:2}"
     ;;
   traceback)
     run_fido_test_python_image -m fido.rocq_traceback "${@:2}"
@@ -1027,7 +1064,7 @@ case "$command" in
     run_fido_pyproject_image pyright "${@:2}"
     ;;
   pytest)
-    run_fido_pyproject_image pytest "${@:2}"
+    run_fido_pyproject_image_capped pytest "${@:2}"
     ;;
   *)
     echo "unsupported fido command: $command" >&2
