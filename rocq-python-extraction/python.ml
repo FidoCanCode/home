@@ -319,9 +319,16 @@ let lookup_lowering_method_target environment source_name =
 let lookup_lowering_record_field_target environment source_name =
   match List.assoc_opt source_name environment.lowering_record_field_targets with
   | Some _ as result -> result
-  | None ->
+  | None when not (String.contains source_name '.') ->
+      (* Fall back to the trailing identifier only for un-qualified
+         references.  When the caller wrote ``Mod.field x`` the dotted
+         path is an explicit "go through the module" — applying the
+         field-lowering would silently rewrite it to attribute access
+         on the receiver and lose the cross-module call.  Tracked: the
+         module-scoped lowering env work in #1096. *)
       List.assoc_opt (source_name_tail source_name)
         environment.lowering_record_field_targets
+  | None -> None
 
 let extend_lowering_environment ~method_targets ~record_field_targets environment = {
   lowering_method_targets = method_targets;
