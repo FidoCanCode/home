@@ -102,6 +102,28 @@ def _client(return_value: str = "", *, side_effect=None) -> MagicMock:
     return client
 
 
+def _make_mock_gh() -> MagicMock:
+    """Return a MagicMock pre-configured with the gh return shapes the
+    reply pipeline depends on.
+
+    The reply-outbox protocol asserts ``_posted_comment_id(posted) is not
+    None`` when promise_ids are queued, so ``reply_to_review_comment`` and
+    ``comment_issue`` must return ``{"id": int}`` rather than the
+    auto-mocked sub-MagicMock.  ``fetch_comment_thread`` defaults to ``[]``
+    so the truthiness guard at events.py:1547 doesn't IndexError on
+    auto-mocked iterables.  Tests that need a different shape override
+    after construction.
+    """
+    gh = MagicMock()
+    gh.reply_to_review_comment.return_value = {"id": 90_001}
+    gh.comment_issue.return_value = {"id": 90_002}
+    gh.fetch_comment_thread.return_value = []
+    # ``create_issue`` returns a string URL — production passes it
+    # through ``uuid.uuid5`` (events.py:403), which would TypeError on
+    # an auto-mocked sub-MagicMock.
+    gh.create_issue.return_value = "https://github.com/owner/repo/issues/0"
+    return gh
+
 def _oracle_owner(owner: str) -> object:
     match owner:
         case "webhook":
@@ -240,7 +262,7 @@ class TestRecoverReplyPromises:
     def test_recovers_issue_comment_promise(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         promise = self._prepare_promise(tmp_path, "issues", 302)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
             "id": 302,
@@ -267,6 +289,10 @@ class TestRecoverReplyPromises:
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
         mock_create_task.assert_called_once()
         assert mock_create_task.call_args.args[0] == "task one"
+        # The thread dict carries lineage metadata
+        # (``lineage_comment_ids`` + ``lineage_key``) so concurrent
+        # comments in the same conversation can be deduped against this
+        # task without re-fetching the thread.
         assert mock_create_task.call_args.kwargs["thread"] == {
             "repo": "owner/repo",
             "pr": 7,
@@ -274,6 +300,8 @@ class TestRecoverReplyPromises:
             "url": "https://github.com/owner/repo/pull/7#issuecomment-302",
             "author": "owner",
             "comment_type": "issues",
+            "lineage_comment_ids": [302],
+            "lineage_key": "issues:owner/repo:7",
         }
 
     def test_recovers_stale_issue_marker_without_reposting(
@@ -285,7 +313,7 @@ class TestRecoverReplyPromises:
             owner="webhook", comment_type="issues", anchor_comment_id=303
         )
         assert promise is not None
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comments.return_value = [
             {
@@ -316,7 +344,7 @@ class TestRecoverReplyPromises:
             owner="webhook", comment_type="pulls", anchor_comment_id=305
         )
         assert promise is not None
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.fetch_comment_thread.return_value = [
             {
@@ -343,7 +371,7 @@ class TestRecoverReplyPromises:
     def test_deleted_comment_promise_is_removed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         promise = self._prepare_promise(tmp_path, "pulls", 205)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_pull_comment.return_value = None
         assert not recover_reply_promises(
@@ -363,7 +391,7 @@ class TestRecoverReplyPromises:
     def test_deleted_issue_comment_promise_is_removed(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         promise = self._prepare_promise(tmp_path, "issues", 302)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = None
         assert not recover_reply_promises(
@@ -383,7 +411,7 @@ class TestRecoverReplyPromises:
     def test_other_pr_promise_is_left_for_later(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         promise = self._prepare_promise(tmp_path, "pulls", 205)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_pull_comment.return_value = {
             "id": 205,
@@ -412,7 +440,7 @@ class TestRecoverReplyPromises:
     def test_other_pr_issue_promise_is_left_for_later(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         promise = self._prepare_promise(tmp_path, "issues", 302)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
             "id": 302,
@@ -441,7 +469,7 @@ class TestRecoverReplyPromises:
     def test_issue_comment_without_pr_url_raises(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         self._prepare_promise(tmp_path, "issues", 302)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
             "id": 302,
@@ -471,7 +499,7 @@ class TestRecoverReplyPromises:
     ) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         promise = self._prepare_promise(tmp_path, "issues", 302)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
             "id": 302,
@@ -505,7 +533,7 @@ class TestRecoverReplyPromises:
     def test_pull_comment_without_pr_url_raises(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         self._prepare_promise(tmp_path, "pulls", 205)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_pull_comment.return_value = {
             "id": 205,
@@ -533,7 +561,7 @@ class TestRecoverReplyPromises:
     def test_pull_recovery_marks_failed_when_reply_raises(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         promise = self._prepare_promise(tmp_path, "pulls", 205)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_pull_comment.return_value = {
             "id": 205,
@@ -570,7 +598,7 @@ class TestRecoverReplyPromises:
     def test_defer_recovery_skips_task_creation(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         promise = self._prepare_promise(tmp_path, "issues", 302)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
             "id": 302,
@@ -602,7 +630,7 @@ class TestRecoverReplyPromises:
     ) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         promise = self._prepare_promise(tmp_path, "issues", 302)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_issue_comment.return_value = {
             "id": 302,
@@ -639,7 +667,7 @@ class TestRecoverReplyPromises:
         fido_dir = tmp_path / ".git" / "fido"
         first = self._prepare_promise(tmp_path, "pulls", 101)
         second = self._prepare_promise(tmp_path, "pulls", 102)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
 
         def get_pull_comment(_repo: str, comment_id: int) -> dict[str, object]:
@@ -706,7 +734,7 @@ class TestRecoverReplyPromises:
         fido_dir = tmp_path / ".git" / "fido"
         first = self._prepare_promise(tmp_path, "issues", 301)
         second = self._prepare_promise(tmp_path, "issues", 302)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
 
         def get_issue_comment(_repo: str, comment_id: int) -> dict[str, object]:
@@ -766,7 +794,7 @@ class TestRecoverReplyPromises:
         fido_dir = tmp_path / ".git" / "fido"
         first = self._prepare_promise(tmp_path, "issues", 301)
         second = self._prepare_promise(tmp_path, "issues", 302)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.get_repo_info.return_value = "owner/repo"
         gh.comment_issue.return_value = {"id": 9001}
@@ -825,7 +853,7 @@ class TestRecoverReplyPromises:
         fido_dir = tmp_path / ".git" / "fido"
         first = self._prepare_promise(tmp_path, "pulls", 101)
         second = self._prepare_promise(tmp_path, "pulls", 102)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
 
         def get_pull_comment(_repo: str, comment_id: int) -> dict[str, object]:
@@ -884,7 +912,7 @@ class TestRecoverReplyPromises:
         fido_dir = tmp_path / ".git" / "fido"
         first = self._prepare_promise(tmp_path, "pulls", 101)
         second = self._prepare_promise(tmp_path, "pulls", 102)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
         gh.reply_to_review_comment.return_value = {"id": 9101}
 
@@ -963,7 +991,7 @@ class TestRecoverReplyPromises:
         self._prepare_promise(tmp_path, "pulls", 102)
         self._prepare_promise(tmp_path, "pulls", 201)
         self._prepare_promise(tmp_path, "pulls", 999)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
 
         def get_pull_comment(_repo: str, comment_id: int) -> dict[str, object]:
@@ -1040,7 +1068,7 @@ class TestRecoverReplyPromises:
         self._prepare_promise(tmp_path, "pulls", 101)
         self._prepare_promise(tmp_path, "pulls", 102)
         self._prepare_promise(tmp_path, "pulls", 201)
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.view_issue.return_value = {"title": "My PR", "body": "body"}
 
         def get_pull_comment(_repo: str, comment_id: int) -> dict[str, object]:
@@ -2184,11 +2212,26 @@ class TestReplyToComment:
     def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
         return RepoConfig(name="owner/repo", work_dir=tmp_path)
 
+    def _mock_gh(self) -> MagicMock:
+        """Return a MagicMock pre-configured with the gh return shapes
+        ``reply_to_comment`` actually depends on.
+
+        The reply-outbox protocol asserts ``_posted_comment_id(posted) is not None``
+        when promise_ids are queued, so ``reply_to_review_comment`` must return
+        ``{"id": int}`` rather than the auto-mocked sub-MagicMock.  Tests that
+        want a different shape override after construction.
+        """
+        gh = _make_mock_gh()
+        gh.reply_to_review_comment.return_value = {"id": 90_001}
+        gh.comment_issue.return_value = {"id": 90_002}
+        gh.fetch_comment_thread.return_value = []
+        return gh
+
     def test_no_reply_to_returns_act(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = Action(prompt="do stuff")
         cat, titles = reply_to_comment(
-            action, cfg, self._repo_cfg(tmp_path), MagicMock()
+            action, cfg, self._repo_cfg(tmp_path), _make_mock_gh()
         )
         assert cat == "ACT"
 
@@ -2199,7 +2242,7 @@ class TestReplyToComment:
             reply_to={"repo": "a/b", "pr": 1, "comment_id": 5},
         )
         cat, titles = reply_to_comment(
-            action, cfg, self._repo_cfg(tmp_path), MagicMock()
+            action, cfg, self._repo_cfg(tmp_path), _make_mock_gh()
         )
         assert cat == "ACT"
 
@@ -2229,7 +2272,7 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
@@ -2261,7 +2304,7 @@ class TestReplyToComment:
                 return "ANSWER: yep"
             return "Yep."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.fetch_comment_thread.return_value = []
 
         def reply_to_review_comment(repo, pr, body, comment_id):
@@ -2321,7 +2364,7 @@ class TestReplyToComment:
                 return "ANSWER: yep"
             return "Yep."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.fetch_comment_thread.return_value = []
 
         with pytest.raises(RuntimeError, match="already claimed"):
@@ -2355,7 +2398,7 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ASK"
@@ -2414,7 +2457,7 @@ class TestReplyToComment:
             comment_body="please defer",
             is_bot=False,
         )
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.fetch_comment_thread.return_value = [
             {"id": 11, "author": "owner", "body": "please defer"}
         ]
@@ -2444,24 +2487,24 @@ class TestReplyToComment:
         gh.resolve_thread.assert_called_once_with("thread-node-1")
 
     def test_try_resolve_thread_returns_early_for_missing_repo(self) -> None:
-        gh = MagicMock()
+        gh = _make_mock_gh()
         _try_resolve_thread({"pr": 1, "comment_id": 11}, gh)
         gh.get_review_threads.assert_not_called()
 
     def test_try_resolve_thread_returns_early_for_missing_pr(self) -> None:
-        gh = MagicMock()
+        gh = _make_mock_gh()
         _try_resolve_thread({"repo": "owner/repo", "comment_id": 11}, gh)
         gh.get_review_threads.assert_not_called()
 
     def test_try_resolve_thread_returns_early_for_unparseable_pr(self) -> None:
-        gh = MagicMock()
+        gh = _make_mock_gh()
         _try_resolve_thread(
             {"repo": "owner/repo", "pr": object(), "comment_id": 11}, gh
         )
         gh.get_review_threads.assert_not_called()
 
     def test_try_resolve_thread_skips_resolved_threads(self) -> None:
-        gh = MagicMock()
+        gh = _make_mock_gh()
         gh.get_review_threads.return_value = [
             {
                 "id": "thread-node-1",
@@ -2541,7 +2584,7 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ANSWER"
@@ -2564,7 +2607,7 @@ class TestReplyToComment:
                 return "Cache results for performance"
             return "On it!"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         cat, titles = reply_to_comment(
             action,
             cfg,
@@ -2592,7 +2635,7 @@ class TestReplyToComment:
                 return "DEFER: out of scope"
             return "That's out of scope for this PR."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/99"
         cat, titles = reply_to_comment(
             action,
@@ -2635,10 +2678,14 @@ class TestReplyToComment:
                 return "NO"
             if "Triage" in prompt:
                 return "DEFER: out of scope"
+            if "reaction keyword" in prompt.lower():
+                # Independent reaction-emoji selection turn — doesn't
+                # need the defer URL embedded.  Decline a reaction.
+                return "NONE"
             assert "https://github.com/owner/repo/issues/99" in prompt
             return "That's out of scope for this PR."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         cat, titles = reply_to_comment(
             action,
             cfg,
@@ -2670,7 +2717,7 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "DUMP"
@@ -2694,7 +2741,7 @@ class TestReplyToComment:
                 return "DEFER: out of scope"
             return "That's out of scope for this PR."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.create_issue.side_effect = RuntimeError("network fail")
         with pytest.raises(RuntimeError, match="network fail"):
             reply_to_comment(
@@ -2729,7 +2776,7 @@ class TestReplyToComment:
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
-                MagicMock(),
+                _make_mock_gh(),
                 agent=_client(side_effect=fake_pp),
             )
 
@@ -2751,7 +2798,7 @@ class TestReplyToComment:
             is_bot=False,
         )
         cat, titles = reply_to_comment(
-            action, cfg, self._repo_cfg(tmp_path), MagicMock()
+            action, cfg, self._repo_cfg(tmp_path), _make_mock_gh()
         )
         assert cat == "ACT"
         assert titles == []
@@ -2777,7 +2824,7 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
@@ -2808,7 +2855,7 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
@@ -2846,7 +2893,7 @@ class TestReplyToComment:
                 return "Remove redundant empty-list concatenation"
             return "Done!"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         # The root explains the surrounding concern; the final human reply
         # supplies the concrete ACT request.
         mock_gh.fetch_comment_thread.return_value = [
@@ -2907,7 +2954,7 @@ class TestReplyToComment:
                 return "Add error handling for null inputs"
             return "Will do!"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         # Thread has only one comment — the triggering one IS the root
         mock_gh.fetch_comment_thread.return_value = [
             {
@@ -2958,7 +3005,7 @@ class TestReplyToComment:
                 return "Reorder sub issues by priority"
             return "On it!"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         # Thread: root → fido reply → NEW human comment (fido must not edit)
         mock_gh.fetch_comment_thread.return_value = [
             {"id": 300, "author": "rhencke", "body": "Add orderBy"},
@@ -3003,7 +3050,7 @@ class TestReplyToComment:
                 return "ASK: need more info"
             return "Could you clarify?"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.fetch_comment_thread.return_value = [
             {"id": 200, "author": "reviewer", "body": "What do you think?"},
             {"id": 201, "author": "fidocancode", "body": "Sure, sounds good"},
@@ -3052,7 +3099,7 @@ class TestReplyToComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         # At least one run_turn call must carry retry_on_preempt=True — that is
@@ -3085,7 +3132,7 @@ class TestReplyToComment:
                 return "Add logging"
             return "I will add logging."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.view_issue.return_value = {"title": "Fix crash", "body": "It crashes."}
         mock_gh.fetch_comment_thread.return_value = []
 
@@ -3121,7 +3168,7 @@ class TestReplyToComment:
                 return "Add logging"
             return "I will add logging."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.fetch_comment_thread.return_value = []
 
         reply_to_comment(
@@ -3168,7 +3215,7 @@ class TestReplyToReview:
         cfg = self._cfg(tmp_path)
         action = Action(prompt="review", review_comments=None)
         # should return without error
-        reply_to_review(action, cfg, self._repo_cfg(tmp_path), MagicMock())
+        reply_to_review(action, cfg, self._repo_cfg(tmp_path), _make_mock_gh())
 
 
 class TestReplyToIssueComment:
@@ -3205,7 +3252,7 @@ class TestReplyToIssueComment:
             self._action(),
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
@@ -3222,7 +3269,7 @@ class TestReplyToIssueComment:
             self._action("unclear"),
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ASK"
@@ -3239,7 +3286,7 @@ class TestReplyToIssueComment:
             self._action("why?"),
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ANSWER"
@@ -3264,7 +3311,7 @@ class TestReplyToIssueComment:
                 return "ANSWER: it works this way"
             return "Yes, because..."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.get_repo_info.return_value = "owner/repo"
 
         def comment_issue(repo, number, body):
@@ -3303,7 +3350,7 @@ class TestReplyToIssueComment:
             self._action("do it differently"),
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "DUMP"
@@ -3316,7 +3363,7 @@ class TestReplyToIssueComment:
                 return "DEFER: later"
             return "Out of scope."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.create_issue.return_value = "https://github.com/owner/repo/issues/5"
         cat, titles = reply_to_issue_comment(
@@ -3354,10 +3401,12 @@ class TestReplyToIssueComment:
         def fake_pp(prompt, model, **kwargs):
             if "Triage" in prompt:
                 return "DEFER: later"
+            if "reaction keyword" in prompt.lower():
+                return "NONE"
             assert "https://github.com/owner/repo/issues/5" in prompt
             return "Out of scope."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.get_repo_info.return_value = "owner/repo"
         action = self._action("big refactor", cid=43)
         action.context = {
@@ -3386,7 +3435,7 @@ class TestReplyToIssueComment:
                 return "DEFER: later"
             return "Out of scope."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.create_issue.side_effect = RuntimeError("network fail")
         with pytest.raises(RuntimeError, match="network fail"):
@@ -3427,7 +3476,7 @@ class TestReplyToIssueComment:
                 return "ANSWER: yep"
             return "Yep."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.get_repo_info.return_value = "owner/repo"
         cat, titles = reply_to_issue_comment(
             Action(
@@ -3463,7 +3512,7 @@ class TestReplyToIssueComment:
                 self._action(),
                 cfg,
                 self._repo_cfg(tmp_path),
-                MagicMock(),
+                _make_mock_gh(),
                 agent=_client(side_effect=fake_pp),
             )
 
@@ -3482,7 +3531,7 @@ class TestReplyToIssueComment:
                 return "ACT: do it"
             return "ok"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.comment_issue.side_effect = Exception("gh fail")
         with pytest.raises(Exception, match="gh fail"):
             reply_to_issue_comment(
@@ -3511,7 +3560,7 @@ class TestReplyToIssueComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
@@ -3530,7 +3579,7 @@ class TestReplyToIssueComment:
                 side_effect=fake_pp
             )
             cat, titles = reply_to_issue_comment(
-                action, cfg, self._repo_cfg(tmp_path), MagicMock()
+                action, cfg, self._repo_cfg(tmp_path), _make_mock_gh()
             )
         factory_cls.return_value.create_agent.assert_called_once_with(
             self._repo_cfg(tmp_path),
@@ -3542,7 +3591,7 @@ class TestReplyToIssueComment:
     def test_includes_conversation_context_in_triage(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         action = self._action()
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.get_issue_comments.return_value = [
             {"user": {"login": "alice"}, "body": "first comment"},
             {"user": {"login": "bob"}, "body": "second comment"},
@@ -3581,7 +3630,7 @@ class TestReplyToIssueComment:
         """
         cfg = self._cfg(tmp_path)
         action = self._action()
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.get_issue_comments.side_effect = RuntimeError("API down")
 
         def fake_pp(prompt, model, **kwargs):
@@ -3611,7 +3660,7 @@ class TestReplyToIssueComment:
             self._action("add tests and update docs"),
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert cat == "ACT"
@@ -3634,7 +3683,7 @@ class TestReplyToIssueComment:
             self._action(),
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         # At least one run_turn call must carry retry_on_preempt=True — that is
@@ -3654,7 +3703,7 @@ class TestReplyToIssueComment:
             self._action(cid=4275080243),
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         assert FidoStore(tmp_path).claim_state(4275080243) == "completed"
@@ -3670,7 +3719,7 @@ class TestReplyToIssueComment:
             self._action(cid=4275080244),
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client("unused"),
         )
 
@@ -3696,7 +3745,7 @@ class TestReplyToIssueComment:
             action,
             cfg,
             self._repo_cfg(tmp_path),
-            MagicMock(),
+            _make_mock_gh(),
             agent=_client(side_effect=fake_pp),
         )
         claim_dir = tmp_path / ".git" / "fido" / "comments"
@@ -3720,7 +3769,7 @@ class TestReplyToIssueComment:
                 return "ACT: fix the bug"
             return "I'll fix that."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.view_issue.return_value = {"title": "Fix crash", "body": "It crashes."}
         mock_gh.get_repo_info.return_value = "owner/repo"
 
@@ -3746,7 +3795,7 @@ class TestReplyToIssueComment:
                 return "ACT: fix the bug"
             return "I'll fix that."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.get_repo_info.return_value = "owner/repo"
 
         reply_to_issue_comment(
@@ -5839,7 +5888,7 @@ class TestLaunchSync:
     def test_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         with patch("fido.tasks.sync_tasks_background"):
-            launch_sync(cfg, self._repo_cfg(tmp_path), MagicMock())  # should not raise
+            launch_sync(cfg, self._repo_cfg(tmp_path), _make_mock_gh())  # should not raise
 
 
 class TestLaunchWorker:
@@ -6124,7 +6173,7 @@ class TestReplyToCommentElseBranch:
                 action,
                 cfg,
                 self._repo_cfg(tmp_path),
-                MagicMock(),
+                _make_mock_gh(),
                 agent=_client("I'll look into this."),
             )
         assert cat == "UNKNOWN_CAT"
@@ -6148,7 +6197,7 @@ class TestReplyToCommentElseBranch:
                 return "Fix it"
             return "I'll fix it."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.reply_to_review_comment.side_effect = RuntimeError("network down")
         with pytest.raises(RuntimeError, match="network down"):
             reply_to_comment(
@@ -6198,7 +6247,7 @@ class TestReplyToCommentElseBranch:
                 return "Fix it"
             return "I'll fix it."
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.fetch_comment_thread.return_value = [
             {"id": 52, "author": "owner", "body": "please fix this"}
         ]
@@ -6248,7 +6297,7 @@ class TestReplyToCommentTerseEnrichment:
                 captured_context.update(context)
             return ("ACT", ["handle same comment"])
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.fetch_sibling_threads.return_value = [
             {
                 "path": "bar.py",
@@ -6282,7 +6331,7 @@ class TestReplyToCommentTerseEnrichment:
             comment_body="This is a detailed comment explaining the issue clearly.",
             is_bot=False,
         )
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
 
         def fake_pp(prompt, model, **kwargs):
             if "Triage" in prompt:
@@ -6309,7 +6358,7 @@ class TestReplyToCommentTerseEnrichment:
             comment_body="ditto",
             is_bot=False,
         )
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.fetch_sibling_threads.return_value = []
 
         def fake_pp(prompt, model, **kwargs):
@@ -6345,7 +6394,7 @@ class TestReplyToCommentTerseEnrichment:
                 captured_context.update(context)
             return ("ACT", ["check caret comment"])
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.fetch_sibling_threads.return_value = []
 
         with (
@@ -6404,7 +6453,7 @@ class TestReplyToCommentThreadRefetch:
                 return "Refactor this module"
             return "On it!"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         mock_gh.fetch_comment_thread.return_value = [
             {"id": 500, "author": "reviewer", "body": "please refactor this"}
         ]
@@ -6443,7 +6492,7 @@ class TestReplyToCommentThreadRefetch:
                 return "ANSWER: acknowledged"
             return "Will do!"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         call_count = 0
 
         def fetch_side_effect(repo, pr, cid):
@@ -6501,7 +6550,7 @@ class TestReplyToCommentThreadRefetch:
                 return "Add tests"
             return "Adding tests now!"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         call_count = 0
 
         def fetch_side_effect(repo, pr, cid):
@@ -6559,7 +6608,7 @@ class TestReplyToCommentThreadRefetch:
                 return "Fix the import"
             return "Fixed!"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         call_count = 0
 
         def fetch_side_effect(repo, pr, cid):
@@ -6607,7 +6656,7 @@ class TestReplyToCommentThreadRefetch:
                 return "Add docstrings"
             return "Woof, on it!"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         call_count = 0
 
         def fetch_side_effect(repo, pr, cid):
@@ -6671,7 +6720,7 @@ class TestReplyToCommentThreadRefetch:
                 return "Add docstrings"
             return "Woof, on it!"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         call_count = 0
 
         def fetch_side_effect(repo, pr, cid):
@@ -6726,7 +6775,7 @@ class TestReplyToCommentThreadRefetch:
                 return "ANSWER: acknowledged"
             return "Thanks for the feedback!"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
 
         def fetch_side_effect(repo, pr, cid):
             # Both fetches return the same Fido reply — it was already there
@@ -6769,7 +6818,7 @@ class TestReplyToCommentThreadRefetch:
                 return "Fix the typo"
             return "Fixed the typo!"
 
-        mock_gh = MagicMock()
+        mock_gh = _make_mock_gh()
         call_count = 0
 
         def fetch_side_effect(repo, pr, cid):
@@ -6937,13 +6986,26 @@ class TestRewritePrDescription:
         assert "New description." in new_body
 
     def test_preserves_work_queue_section(self, tmp_path: Path) -> None:
+        """The rewrite regenerates the work-queue section from the
+        current task list rather than carrying the prior PR-body text
+        verbatim — pass a non-empty task list and assert the regenerated
+        section preserves both the markers and the task content."""
         mock_gh = self._mock_gh()
         _rewrite_pr_description(
             tmp_path,
             mock_gh,
             agent=_client("<body>Updated description.\n\nFixes #42.</body>"),
             _state=self._mock_state(),
-            _tasks=self._mock_tasks(),
+            _tasks=self._mock_tasks(
+                [
+                    {
+                        "id": "1",
+                        "title": "do a thing",
+                        "type": "spec",
+                        "status": "pending",
+                    }
+                ]
+            ),
         )
         new_body = mock_gh.edit_pr_body.call_args[0][2]
         assert "<!-- WORK_QUEUE_START -->" in new_body
