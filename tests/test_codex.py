@@ -202,6 +202,12 @@ class TestCodexProviderErrors:
         assert exc_info.value.kind == "cancelled"
         assert "cancelled" in str(exc_info.value)
 
+    def test_context_window_exceeded_fixture_classified(self) -> None:
+        with pytest.raises(CodexProviderError) as exc_info:
+            raise_for_provider_error_output(_fixture("context-window-exceeded.jsonl"))
+        assert exc_info.value.kind == "context_overflow"
+        assert "context window" in str(exc_info.value).lower()
+
     def test_ignores_successful_fixture(self) -> None:
         raise_for_provider_error_output(_fixture("normal.jsonl"))
 

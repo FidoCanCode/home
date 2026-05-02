@@ -432,6 +432,8 @@ def extract_result_text(output: str) -> str:
 
 def _classify_provider_error(message: str) -> str:
     lowered = message.lower()
+    if "contextWindowExceeded" in message or "context window" in lowered:
+        return "context_overflow"
     if "rate limit" in lowered or "rate_limit" in lowered or "quota" in lowered:
         return "rate_limit"
     if "auth" in lowered or "login" in lowered or "unauthorized" in lowered:
