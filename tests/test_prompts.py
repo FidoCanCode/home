@@ -1402,3 +1402,118 @@ class TestRenderActiveContext:
         )
         assert "## Active issue" in result
         assert "#1: T" in result
+
+
+# ── Prompts.synthesis_system_prompt ──────────────────────────────────────────
+
+
+class TestSynthesisSystemPrompt:
+    def test_includes_persona(self) -> None:
+        result = Prompts("I am Fido.").synthesis_system_prompt()
+        assert "I am Fido." in result
+
+    def test_includes_no_tools_clause(self) -> None:
+        result = Prompts("persona").synthesis_system_prompt()
+        assert NO_TOOLS_CLAUSE in result
+
+    def test_json_output_instruction(self) -> None:
+        result = Prompts("persona").synthesis_system_prompt()
+        assert "JSON" in result
+        assert "ONLY" in result
+
+    def test_no_active_context_when_issue_is_none(self) -> None:
+        result = Prompts("persona").synthesis_system_prompt()
+        assert "## Active issue" not in result
+
+    def test_active_context_included_when_issue_provided(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="It crashes.")
+        result = Prompts("persona").synthesis_system_prompt(issue=issue)
+        assert "## Active issue" in result
+        assert "Fix crash" in result
+        assert "It crashes." in result
+
+    def test_active_context_includes_pr_when_provided(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="")
+        pr = ActivePR(
+            number=42,
+            title="Fix crash PR",
+            url="https://github.com/a/b/pull/42",
+            body="",
+        )
+        result = Prompts("persona").synthesis_system_prompt(issue=issue, pr=pr)
+        assert "## Active PR" in result
+        assert "Fix crash PR" in result
+
+    def test_active_context_no_pr_section_when_pr_is_none(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="")
+        result = Prompts("persona").synthesis_system_prompt(issue=issue, pr=None)
+        assert "## Active PR" not in result
+
+    def test_empty_persona(self) -> None:
+        result = Prompts("").synthesis_system_prompt()
+        assert "JSON" in result
+
+
+# ── Prompts.synthesis_prompt ─────────────────────────────────────────────────
+
+
+class TestSynthesisPrompt:
+    def test_includes_comment(self) -> None:
+        result = Prompts("").synthesis_prompt("please fix the bug", is_bot=False)
+        assert "please fix the bug" in result
+
+    def test_includes_json_schema(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "reasoning" in result
+        assert "reply_text" in result
+        assert "actions" in result
+
+    def test_includes_action_types(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "add_reaction" in result
+        assert "rescope_intent" in result
+        assert "preempt" in result
+        assert "no_op" in result
+
+    def test_includes_valid_emoji_shortcodes(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "rocket" in result
+        assert "heart" in result
+        assert "eyes" in result
+
+    def test_reply_text_required_constraint(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "REQUIRED" in result
+        assert "non-empty" in result
+
+    def test_bot_note_present_when_is_bot_true(self) -> None:
+        result = Prompts("").synthesis_prompt("suggestion", is_bot=True)
+        assert "automated tool" in result
+
+    def test_bot_note_absent_when_is_bot_false(self) -> None:
+        result = Prompts("").synthesis_prompt("suggestion", is_bot=False)
+        assert "automated tool" not in result
+
+    def test_includes_context_when_provided(self) -> None:
+        result = Prompts("").synthesis_prompt(
+            "comment", is_bot=False, context={"pr_title": "My PR"}
+        )
+        assert "PR: My PR" in result
+
+    def test_no_context_still_works(self) -> None:
+        result = Prompts("").synthesis_prompt("hello", is_bot=False, context=None)
+        assert "hello" in result
+
+    def test_voice_guidelines_present(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "Take a position" in result
+        assert "Disagree" in result
+
+    def test_rescope_intent_description(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "plain-English" in result
+        assert "scope change" in result
+
+    def test_json_only_instruction(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "ONLY the JSON" in result

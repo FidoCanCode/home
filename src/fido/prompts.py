@@ -817,6 +817,104 @@ class Prompts:
             "No other text before or after the JSON."
         )
 
+    def synthesis_system_prompt(
+        self,
+        issue: ActiveIssue | None = None,
+        pr: ActivePR | None = None,
+    ) -> str:
+        """Return the system prompt for the unified comment-handling synthesis call.
+
+        Instils the Fido persona, injects active-work context (issue, PR) so the
+        model anchors on the same ground truth as the task worker, and sets up the
+        structured JSON output expectation.  A TEXT-ONLY constraint prevents the
+        model from firing tool calls during what should be a one-shot JSON
+        generation turn.
+        """
+        active = ""
+        if issue is not None:
+            active = render_active_context(issue, pr, [], None, []) + "\n\n"
+        return (
+            f"{self.persona}\n\n"
+            f"{active}"
+            "You are responding to a GitHub PR comment with a single structured "
+            "JSON response.  "
+            f"{NO_TOOLS_CLAUSE}  "
+            "Output ONLY the JSON object — no preamble, no trailing text, "
+            "no explanation outside the JSON fields."
+        )
+
+    def synthesis_prompt(
+        self,
+        comment_body: str,
+        is_bot: bool,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        """Build the synthesis instruction for the unified comment-handling call.
+
+        Replaces the separate triage + reply_instruction pair with a single prompt
+        that asks the model to return a :class:`~fido.synthesis.CommentResponse`
+        JSON object containing both the reply prose (Constraint B: always present,
+        always freshly synthesised) and any additional effects from the constrained
+        action vocabulary (Constraint A: rescope intents, reactions, preempt, no-op).
+
+        *is_bot* is passed to adjust voice guidance — bot suggestions are handled
+        with a different tone than human reviewer comments.
+        """
+        ctx_block = triage_context_block(context)
+        context_section = f"{ctx_block}\n\n" if ctx_block else ""
+
+        bot_note = (
+            "\nThis comment is from an automated tool.  "
+            "Accept or decline the suggestion, with a brief reason.\n"
+            if is_bot
+            else ""
+        )
+
+        return (
+            f"{context_section}"
+            f"Comment: {comment_body}\n\n"
+            f"{bot_note}"
+            "Respond with a single JSON object matching this schema:\n\n"
+            "{\n"
+            '  "reasoning": "<string>",\n'
+            '  "reply_text": "<string>",\n'
+            '  "actions": [<action>, ...]\n'
+            "}\n\n"
+            "Fields:\n"
+            "  reasoning  — private chain-of-thought; logged for traceability, "
+            "never posted to GitHub.\n"
+            "  reply_text — REQUIRED and non-empty; the reply to post to the "
+            "PR comment thread.  Always freshly written from the actual context "
+            "of this comment — no canned phrases, no templates.\n"
+            "  actions    — ordered list of additional effects; may be empty.\n\n"
+            "Available action types (include only those that apply):\n"
+            '  {"type": "add_reaction", "emoji": "<shortcode>"}\n'
+            "    React to the triggering comment.  Valid shortcodes: "
+            "+1 -1 laugh confused heart hooray rocket eyes\n\n"
+            '  {"type": "rescope_intent", "description": "<plain English>"}\n'
+            "    One plain-English sentence describing a requested change to the "
+            "PR scope or task list.  The rescope machinery decides the actual "
+            "task mutations — this action only registers the intent.\n"
+            "    One rescope_intent per distinct scope change; omit when no scope "
+            "change is needed.\n\n"
+            '  {"type": "preempt", "preempt": true|false}\n'
+            "    Whether the current in-progress worker task should be interrupted "
+            "immediately after this response is applied.  Omit when not relevant.\n\n"
+            '  {"type": "no_op"}\n'
+            "    Explicitly take no additional action beyond posting the reply.\n\n"
+            "Voice guidelines:\n"
+            "- Take a position.  When you have enough context to form a view, "
+            "share it — don't reflexively ask a clarifying question to avoid "
+            "having an opinion.\n"
+            "- Disagree when you have reason to.  If the comment makes a claim "
+            "you think is wrong, say so and explain why briefly.\n"
+            "- Read the full comment thread, not just the last comment.  "
+            "Reply to the conversation, not to one isolated line.\n"
+            "- Keep the reply brief and direct.  No preamble, no corporate "
+            "prose, no filler phrases.\n\n"
+            "Respond with ONLY the JSON object.  No text before or after it."
+        )
+
     def rewrite_description_prompt(
         self,
         pr_body: str,
