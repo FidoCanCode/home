@@ -139,22 +139,6 @@ def render_active_context(
 # ── Triage ────────────────────────────────────────────────────────────────────
 
 
-def triage_categories(is_bot: bool) -> str:
-    """Return the category list string for a triage prompt."""
-    if is_bot:
-        return (
-            "DO (take the bot suggestion with a reply saying so), "
-            "DUMP (decline the suggestion with a reason and consider it closed)"
-        )
-    return (
-        "ACT (code change needed on this PR), "
-        "DEFER (out of scope for this PR — file a separate issue), "
-        "ASK (unclear what code change is needed), "
-        "ANSWER (question, casual/playful comment, or anything that isn't a code change request"
-        " — just respond naturally)"
-    )
-
-
 def triage_context_block(context: dict[str, Any] | None) -> str:
     """Build the PR/file/diff context block from a context dict."""
     ctx = context or {}
@@ -190,41 +174,6 @@ def triage_context_block(context: dict[str, Any] | None) -> str:
     return "\n".join(parts)
 
 
-# ── Reply instructions ────────────────────────────────────────────────────────
-
-
-def reply_context_block(
-    context: dict[str, Any] | None,
-    comment: str,
-    title: str,
-) -> str:
-    """Build the rich context block used inside a reply instruction.
-
-    Includes the full conversation thread so reply generation can consider
-    the entire discussion history, not just the triggering comment.
-    """
-    ctx = context or {}
-    parts: list[str] = []
-    if ctx.get("pr_title"):
-        parts.append(f"PR: {ctx['pr_title']}")
-    if ctx.get("file"):
-        parts.append(f"File: {ctx['file']}")
-        if ctx.get("line"):
-            parts.append(f"Line: {ctx['line']}")
-    if ctx.get("diff_hunk"):
-        parts.append(f"Diff:\n```\n{ctx['diff_hunk']}\n```")
-    # Include comment thread so reply generation considers the full conversation
-    if ctx.get("comment_thread"):
-        thread_lines = [
-            f"  {c.get('author', '')}: {c.get('body', '')}"
-            for c in ctx["comment_thread"]
-        ]
-        parts.append("Comment thread:\n" + "\n".join(thread_lines))
-    parts.append(f"Comment: {comment}")
-    parts.append(f"Your plan: {title}")
-    return "\n\n".join(parts)
-
-
 # ── Prompts DI class ──────────────────────────────────────────────────────────
 
 
@@ -239,18 +188,15 @@ class Prompts:
     Prompt builders that do not depend on the persona are also methods here
     so callers can depend on a single injected collaborator rather than a mix
     of the class and bare module-level functions.  Value-only helpers
-    (e.g. :func:`triage_categories`, :func:`triage_context_block`,
-    :func:`reply_context_block`) remain module-level since they only
+    (e.g. :func:`triage_context_block`) remain module-level since they only
     transform data.
 
     Usage::
 
         p = Prompts(persona)
         prompt = p.persona_wrap(instruction)
-        prompt = p.react_prompt(comment_body)
         prompt = p.pickup_comment_prompt(issue_title)
-        prompt = p.triage_prompt(comment_body, is_bot)
-        prompt = p.reply_instruction(category, comment_body, title)
+        prompt = p.synthesis_prompt(comment_body, is_bot)
         prompt = p.rescope_prompt(task_list, commit_summary)
     """
 
@@ -555,146 +501,6 @@ class Prompts:
             f"blocking comment with `{pr_comment_cmd}`\n\n"
             "Do not answer with a summary or plan. Act on the task."
         )
-
-    def react_prompt(self, comment_body: str) -> str:
-        """Build the reaction-decision prompt for Fido.
-
-        Asks the model whether to react to *comment_body* and which emoji to use.
-        The NO_TOOLS_CLAUSE guard is required: without it a comment that looks
-        like a directive ("fix this") can cause Opus to fire Bash/Edit calls
-        during what should be a one-shot reaction decision.
-        """
-        return (
-            f"{self.persona}\n\n"
-            f"{NO_TOOLS_CLAUSE}\n\n"
-            f"You just saw this comment on a PR:\n\n{comment_body}\n\n"
-            "Would you react to this with a GitHub emoji reaction? Not every comment needs one — "
-            "use your dog instincts. Pick from: 👍 (+1), 👎 (-1), 😄 (laugh), 😕 (confused), "
-            "❤️ (heart), 🎉 (hooray), 🚀 (rocket), 👀 (eyes). "
-            "Reply with JUST the reaction keyword (e.g. heart, rocket, eyes). "
-            "If you wouldn't react, reply NONE."
-        )
-
-    # ── Prompt builders (persona-independent) ────────────────────────────
-
-    def triage_prompt(
-        self,
-        comment_body: str,
-        is_bot: bool,
-        context: dict[str, Any] | None = None,
-    ) -> str:
-        """Build a triage prompt for Haiku/Opus.
-
-        Returns a prompt that asks the model to classify the comment and return
-        one or more ``CATEGORY: title`` lines.  A single comment may produce
-        zero tasks (ANSWER/ASK/DEFER/DUMP) or multiple tasks (multiple
-        ACT/DO lines).
-        """
-        categories = triage_categories(is_bot)
-        ctx_str = triage_context_block(context)
-        return (
-            f"{TRIAGE_CLAUSE}\n\n"
-            f"Triage this PR comment into one or more categories: {categories}\n\n"
-            f"{ctx_str}\n\nComment: {comment_body}\n\n"
-            "Reply with one line per task: category word, colon, short imperative task title. "
-            "For ACT/DO, list each distinct required change on its own line. "
-            "Task titles must start with a verb — never quote or paraphrase the comment text. "
-            "Example (one task): ACT: add unit tests for parser\n"
-            "Example (two tasks): ACT: add unit tests for parser\nACT: update documentation"
-        )
-
-    def reply_instruction(
-        self,
-        category: str,
-        comment_body: str,
-        title: str,
-        context: dict[str, Any] | None = None,
-        issue_url: str | None = None,
-    ) -> str:
-        """Build the instruction text for a review-comment reply.
-
-        Returns a plain instruction string (no persona wrapper) so the caller
-        can compose it with :meth:`persona_wrap`.
-        """
-        ctx = reply_context_block(context, comment_body, title)
-        match category:
-            case "ACT" | "DO":
-                return (
-                    f"Write a short GitHub PR reply to this comment. Acknowledge what they're asking for "
-                    f"and briefly explain your approach. "
-                    f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{ctx}"
-                )
-            case "ASK":
-                return (
-                    f"Write a short GitHub PR reply asking a focused clarifying question. "
-                    f"You need more information before you can act.\n\n{ctx}"
-                )
-            case "ANSWER":
-                return (
-                    f"Write a short GitHub PR reply directly answering this question. "
-                    f"Be helpful and specific. Do NOT say you'll make code changes.\n\nQuestion: {comment_body}"
-                )
-            case "DEFER":
-                issue_line = (
-                    f"An issue has been opened to track this: {issue_url}"
-                    if issue_url
-                    else "An issue will be opened to track this"
-                )
-                return (
-                    f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
-                    f"out of scope for this PR. "
-                    f"{issue_line} — mention it in your reply.\n\n{ctx}"
-                )
-            case "DUMP":
-                return (
-                    f"Write a short GitHub PR reply politely declining this suggestion and briefly "
-                    f"explaining why it's not applicable.\n\n{ctx}"
-                )
-            case _:
-                return f"Write a short GitHub PR reply to this comment.\n\n{ctx}"
-
-    def issue_reply_instruction(
-        self,
-        category: str,
-        comment_body: str,
-        title: str,
-        context: dict[str, Any] | None = None,
-        issue_url: str | None = None,
-    ) -> str:
-        """Build the instruction text for a top-level issue/PR comment reply."""
-        ctx = context or {}
-        parts: list[str] = []
-        if ctx.get("pr_title"):
-            parts.append(f"PR: {ctx['pr_title']}")
-        parts.append(f"Comment: {comment_body}")
-        parts.append(f"Your plan: {title}")
-        context_str = "\n\n".join(parts)
-
-        match category:
-            case "ACT" | "DO":
-                return (
-                    f"Write a short GitHub PR reply acknowledging and explaining your approach. "
-                    f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{context_str}"
-                )
-            case "ASK":
-                return f"Write a short GitHub PR reply asking a clarifying question.\n\n{context_str}"
-            case "ANSWER":
-                return f"Write a short GitHub PR reply directly answering the question.\n\nQuestion: {comment_body}"
-            case "DEFER":
-                issue_line = (
-                    f"An issue has been opened to track this: {issue_url}"
-                    if issue_url
-                    else "An issue will be opened to track this"
-                )
-                return (
-                    f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
-                    f"out of scope for this PR. "
-                    f"{issue_line} — mention it in your reply.\n\n{context_str}"
-                )
-            case "DUMP":
-                return f"Write a short polite decline.\n\n{context_str}"
-            case _:
-                return f"Write a short GitHub PR reply.\n\n{context_str}"
 
     def rescope_prompt(
         self,

@@ -25,20 +25,17 @@ from fido.events import (
     _reply_promise_ids,
     _rewrite_pr_description,
     _task_snapshot,
-    bot_feedback_creates_tasks,
     build_review_comment_action,
     create_task,
     dispatch,
     launch_sync,
     launch_worker,
-    maybe_react,
     needs_more_context,
     queue_reply_tasks,
     recover_reply_promises,
     reply_to_comment,
     reply_to_issue_comment,
     reply_to_review,
-    review_outcome_creates_tasks,
     thread_lineage_comment_ids,
 )
 from fido.provider import ProviderID
@@ -804,12 +801,9 @@ class TestRecoverReplyPromises:
 
         gh.get_issue_comment.side_effect = get_issue_comment
 
-        with (
-            patch("fido.events.maybe_react"),
-            patch(
-                "fido.events.call_synthesis",
-                return_value=_synthesis_response("One combined reply."),
-            ),
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("One combined reply."),
         ):
             assert recover_reply_promises(
                 fido_dir,
@@ -939,12 +933,9 @@ class TestRecoverReplyPromises:
             },
         ]
 
-        with (
-            patch("fido.events.maybe_react"),
-            patch(
-                "fido.events.call_synthesis",
-                return_value=_synthesis_response("One combined review reply."),
-            ),
+        with patch(
+            "fido.events.call_synthesis",
+            return_value=_synthesis_response("One combined review reply."),
         ):
             assert recover_reply_promises(
                 fido_dir,
@@ -1792,125 +1783,6 @@ class TestDispatchUnknown:
         assert result is None
 
 
-class TestMaybeReact:
-    def _repo_cfg(self, tmp_path: Path) -> RepoConfig:
-        return RepoConfig(name="owner/repo", work_dir=tmp_path)
-
-    def _cfg(self, tmp_path: Path) -> Config:
-        return Config(
-            port=9000,
-            secret=b"test",
-            repos={"owner/repo": self._repo_cfg(tmp_path)},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=tmp_path / "sub",
-        )
-
-    def test_reacts_when_valid(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        maybe_react(
-            "great work!",
-            99,
-            "pulls",
-            "owner/repo",
-            cfg,
-            mock_gh,
-            agent=_client("heart"),
-        )
-        mock_gh.add_reaction.assert_called_once_with("owner/repo", "pulls", 99, "heart")
-
-    def test_no_reaction_for_none(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        mock_gh = MagicMock()
-        maybe_react(
-            "ok",
-            99,
-            "pulls",
-            "owner/repo",
-            cfg,
-            mock_gh,
-            agent=_client("NONE"),
-        )
-        mock_gh.add_reaction.assert_not_called()
-
-    def test_timeout_warns_and_returns(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        maybe_react(
-            "hi",
-            1,
-            "pulls",
-            "owner/repo",
-            cfg,
-            MagicMock(),
-            agent=_client(""),
-        )
-
-    def test_file_not_found_warns_and_returns(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        maybe_react(
-            "hi",
-            1,
-            "pulls",
-            "owner/repo",
-            cfg,
-            MagicMock(),
-            agent=_client(""),
-        )
-
-    def test_reads_persona_if_present(self, tmp_path: Path) -> None:
-        sub_dir = tmp_path / "sub"
-        sub_dir.mkdir()
-        (sub_dir / "persona.md").write_text("you are fido")
-        cfg = Config(
-            port=9000,
-            secret=b"test",
-            repos={},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=sub_dir,
-        )
-        captured = {}
-
-        def fake_pp(prompt, model, **kwargs):
-            captured["prompt"] = prompt
-            return "eyes"
-
-        maybe_react(
-            "look at this",
-            1,
-            "pulls",
-            "owner/repo",
-            cfg,
-            MagicMock(),
-            agent=_client(side_effect=fake_pp),
-        )
-        assert "you are fido" in captured.get("prompt", "")
-
-    def test_defaults_to_repo_configured_agent(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        with patch("fido.events.DefaultProviderFactory") as factory_cls:
-            factory_cls.return_value.create_agent.return_value = _client("NONE")
-            maybe_react("hi", 1, "pulls", "owner/repo", cfg, MagicMock())
-        factory_cls.return_value.create_agent.assert_called_once_with(
-            cfg.repos["owner/repo"],
-            work_dir=tmp_path,
-            repo_name="owner/repo",
-        )
-
-    def test_missing_repo_config_raises(self, tmp_path: Path) -> None:
-        cfg = Config(
-            port=9000,
-            secret=b"test",
-            repos={},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=tmp_path / "sub",
-        )
-        with pytest.raises(KeyError, match="owner/repo"):
-            maybe_react("hi", 1, "pulls", "owner/repo", cfg, MagicMock())
-
-
 class TestReplyToComment:
     def _cfg(self, tmp_path: Path) -> Config:
         return Config(
@@ -2102,43 +1974,6 @@ class TestReplyToComment:
                 agent=_client(),
             )
         assert cat == "ANSWER"
-
-    @pytest.mark.parametrize(
-        ("category", "creates_tasks"),
-        [
-            ("ACT", True),
-            ("DO", True),
-            ("ASK", False),
-            ("ANSWER", False),
-            ("DEFER", False),
-            ("DUMP", False),
-        ],
-    )
-    def test_review_outcome_creates_tasks_helper(
-        self,
-        category: str,
-        creates_tasks: bool,
-    ) -> None:
-        assert review_outcome_creates_tasks(category) is creates_tasks
-
-    @pytest.mark.parametrize(
-        ("category", "creates_tasks"),
-        [
-            ("DO", True),
-            ("DUMP", False),
-            ("DEFER", False),
-        ],
-    )
-    def test_bot_feedback_outcome_helpers(
-        self,
-        category: str,
-        creates_tasks: bool,
-    ) -> None:
-        assert bot_feedback_creates_tasks(category) is creates_tasks
-        assert review_outcome_creates_tasks(category, is_bot=True) is creates_tasks
-
-    def test_review_outcome_helpers_return_false_for_unknown_category(self) -> None:
-        assert review_outcome_creates_tasks("UNKNOWN") is False
 
     def test_synthesis_path_does_not_resolve_review_thread(
         self, tmp_path: Path
@@ -3381,45 +3216,6 @@ class TestCreateTask:
             )
             == 1
         )
-
-    def test_queue_reply_tasks_uses_bot_do_dump_oracle(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        thread = {"repo": "owner/repo", "pr": 1, "comment_id": 42}
-        create_task_fn = MagicMock(
-            return_value={"title": "take it", "status": "pending"}
-        )
-
-        assert (
-            queue_reply_tasks(
-                "DO",
-                ["take it"],
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                is_bot=True,
-                create_task_fn=create_task_fn,
-            )
-            == 1
-        )
-        create_task_fn.assert_called_once()
-        create_task_fn.reset_mock()
-
-        assert (
-            queue_reply_tasks(
-                "DUMP",
-                ["skip it"],
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                is_bot=True,
-                create_task_fn=create_task_fn,
-            )
-            == 0
-        )
-        create_task_fn.assert_not_called()
 
     def test_no_abort_without_registry(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -5429,30 +5225,6 @@ class TestDispatchReviewCommentNoNumber:
             "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
         )
         assert result is None
-
-
-class TestMaybeReactGhException:
-    def test_gh_post_exception_is_caught(self, tmp_path: Path) -> None:
-        """Exception posting the reaction is caught and logged (lines 230-231)."""
-        cfg = Config(
-            port=9000,
-            secret=b"test",
-            repos={},
-            allowed_bots=frozenset(),
-            log_level="WARNING",
-            sub_dir=tmp_path / "sub",
-        )
-        mock_gh = MagicMock()
-        mock_gh.add_reaction.side_effect = RuntimeError("network down")
-        maybe_react(
-            "great job",
-            77,
-            "pulls",
-            "owner/repo",
-            cfg,
-            mock_gh,
-            agent=_client("heart"),
-        )  # must not raise
 
 
 class TestBackgroundRescopeTrigger:

@@ -1950,12 +1950,9 @@ class TestProcessAction:
                 return "ANSWER: looks good"
             return "One review reply."
 
-        with (
-            patch(
-                "fido.events._configured_agent",
-                return_value=_client(side_effect=fake_pp),
-            ),
-            patch("fido.events.maybe_react"),
+        with patch(
+            "fido.events._configured_agent",
+            return_value=_client(side_effect=fake_pp),
         ):
             status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
 
@@ -2439,12 +2436,9 @@ class TestProcessAction:
                 return "ANSWER: looks good"
             return "One issue reply."
 
-        with (
-            patch(
-                "fido.events._configured_agent",
-                return_value=_client(side_effect=fake_pp),
-            ),
-            patch("fido.events.maybe_react"),
+        with patch(
+            "fido.events._configured_agent",
+            return_value=_client(side_effect=fake_pp),
         ):
             status = _post_webhook(url, cfg, "issue_comment", payload)
 

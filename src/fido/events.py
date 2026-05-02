@@ -22,7 +22,6 @@ from fido.provider import (
 )
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
-from fido.rocq import replied_comment_claims as oracle
 from fido.rocq import reply_outbox_protocol as reply_outbox_oracle
 from fido.rocq import thread_auto_resolve as thread_resolve_oracle
 from fido.rocq import webhook_command_translation as wct_oracle
@@ -750,56 +749,18 @@ def _queued_pr_comment_action(
     )
 
 
-def _review_outcome(category: str) -> oracle.ReviewReplyOutcome:
-    return {
-        "ACT": oracle.ReviewAct(),
-        "DO": oracle.ReviewDo(),
-        "ASK": oracle.ReviewAsk(),
-        "ANSWER": oracle.ReviewAnswer(),
-        "DEFER": oracle.ReviewDefer(),
-        "DUMP": oracle.ReviewDump(),
-    }[category]
-
-
-def _bot_feedback_outcome(
-    category: str,
-) -> thread_resolve_oracle.BotFeedbackOutcome | None:
-    return {
-        "DO": thread_resolve_oracle.BotFeedbackDo(),
-        "DUMP": thread_resolve_oracle.BotFeedbackDump(),
-    }.get(category)
-
-
-def bot_feedback_creates_tasks(category: str) -> bool:
-    """Return whether a bot feedback outcome should create task objects."""
-    outcome = _bot_feedback_outcome(category)
-    if outcome is None:
-        return False
-    return isinstance(
-        thread_resolve_oracle.bot_feedback_decision(outcome),
-        thread_resolve_oracle.TakeBotSuggestion,
-    )
-
-
-def review_outcome_creates_tasks(category: str, *, is_bot: bool = False) -> bool:
-    """Return whether a review reply outcome should create task objects."""
-    if is_bot:
-        return bot_feedback_creates_tasks(category)
-    if category not in {"ACT", "DO", "ASK", "ANSWER", "DEFER", "DUMP"}:
-        return False
-    return bool(oracle.review_outcome_creates_tasks(_review_outcome(category)))
-
-
 def reply_outcome_creates_tasks(
     category: str,
     *,
-    thread: dict[str, Any] | None,
+    thread: dict[str, Any] | None = None,
     is_bot: bool = False,
 ) -> bool:
-    """Return whether a reply outcome should create task objects."""
-    if thread is not None:
-        return review_outcome_creates_tasks(category, is_bot=is_bot)
-    return category not in ("DUMP", "ANSWER", "ASK", "DEFER")
+    """Return whether a reply outcome should create task objects.
+
+    Synthesis produces ``"ACT"`` (change_request present) or ``"ANSWER"``
+    (no scope change).  Only ``"ACT"`` creates tasks.
+    """
+    return category == "ACT"
 
 
 def queue_reply_tasks(
@@ -1324,44 +1285,6 @@ def _load_persona(config: Config) -> str:
         return (config.sub_dir / "persona.md").read_text()
     except FileNotFoundError:
         return ""
-
-
-def maybe_react(
-    comment_body: str,
-    comment_id: int | str,
-    comment_type: str,
-    repo: str,
-    config: Config,
-    gh: GitHub,
-    *,
-    agent: ProviderAgent | None = None,
-    prompts: Prompts | None = None,
-) -> None:
-    """Let Fido decide whether to react to a comment with an emoji.
-
-    comment_type: 'pulls' for review comments, 'issues' for issue comments.
-    """
-    if agent is None:
-        agent = _configured_agent(config, config.repos[repo])
-    if prompts is None:
-        prompts = Prompts(_load_persona(config))
-    reaction = (
-        agent.run_turn(prompts.react_prompt(comment_body), model=agent.voice_model)
-        .lower()
-        .split("\n")[0]
-        .strip()
-    )
-
-    valid = {"+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"}
-    if reaction not in valid:
-        log.debug("fido chose not to react (got: %s)", reaction)
-        return
-
-    log.info("fido reacts with %s to comment %s", reaction, comment_id)
-    try:
-        gh.add_reaction(repo, comment_type, comment_id, reaction)
-    except Exception:
-        log.exception("failed to post reaction")
 
 
 def reply_to_comment(
