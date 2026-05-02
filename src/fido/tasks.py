@@ -28,7 +28,7 @@ from fido.types import (
     ActiveIssue,
     ActivePR,
     ClosedPR,
-    RescоpeIntent,
+    RescopeIntent,
     TaskStatus,
     TaskType,
 )
@@ -900,7 +900,7 @@ def reorder_tasks(
     work_dir: Path,
     commit_summary: str,
     *,
-    intents: list[RescоpeIntent] | None = None,
+    intents: list[RescopeIntent] | None = None,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
     issue: ActiveIssue | None = None,

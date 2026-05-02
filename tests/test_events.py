@@ -49,7 +49,7 @@ from fido.store import FidoStore, ReplyPromiseRecord
 from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import SynthesisExhaustedError
 from fido.synthesis_executor import CommentTarget
-from fido.types import ActiveIssue, ActivePR, RescоpeIntent
+from fido.types import ActiveIssue, ActivePR, RescopeIntent
 
 
 def _synthesis_response(
@@ -4229,9 +4229,9 @@ class TestReorderTasksBackground:
         started: list = []
         calls, mock_reorder = self._capture_reorder_calls()
 
-        intent1 = RescоpeIntent("Add logging", 10, "2024-01-15T10:00:00+00:00")
-        intent2 = RescоpeIntent("Refactor tests", 20, "2024-01-15T10:01:00+00:00")
-        intent3 = RescоpeIntent("Fix typing", 30, "2024-01-15T10:02:00+00:00")
+        intent1 = RescopeIntent("Add logging", 10, "2024-01-15T10:00:00+00:00")
+        intent2 = RescopeIntent("Refactor tests", 20, "2024-01-15T10:01:00+00:00")
+        intent3 = RescopeIntent("Fix typing", 30, "2024-01-15T10:02:00+00:00")
 
         # First call — starts thread with intent1
         _reorder_tasks_background(
@@ -5309,8 +5309,8 @@ class TestBackgroundRescopeTrigger:
         change_request: str = "Add logging",
         comment_id: int = 42,
         timestamp: str = "2024-01-15T10:00:00+00:00",
-    ) -> RescоpeIntent:
-        return RescоpeIntent(
+    ) -> RescopeIntent:
+        return RescopeIntent(
             change_request=change_request,
             comment_id=comment_id,
             timestamp=timestamp,

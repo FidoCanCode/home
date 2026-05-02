@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from fido.types import ActiveIssue, ActivePR, ClosedPR, RescоpeIntent, TaskSnapshot
+from fido.types import ActiveIssue, ActivePR, ClosedPR, RescopeIntent, TaskSnapshot
 
 # ── Prompt-level tool guardrails ──────────────────────────────────────────────
 #
@@ -510,7 +510,7 @@ class Prompts:
         issue: ActiveIssue | None = None,
         pr: ActivePR | None = None,
         prior_attempts: list[ClosedPR] | None = None,
-        intents: list[RescоpeIntent] | None = None,
+        intents: list[RescopeIntent] | None = None,
     ) -> str:
         """Build an Opus prompt for full task-list synthesis from old tasks + intents.
 

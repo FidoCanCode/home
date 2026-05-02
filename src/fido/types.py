@@ -70,7 +70,7 @@ class TaskSnapshot:
 
 
 @dataclass(frozen=True)
-class RescоpeIntent:
+class RescopeIntent:
     """Origin metadata for a rescope trigger from comment synthesis.
 
     Carries the plain-English change request alongside the originating

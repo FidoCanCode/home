@@ -7,7 +7,7 @@ import pytest
 from fido.rocq.replied_comment_claims import ReviewAct, ReviewAnswer
 from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
-from fido.types import RescоpeIntent
+from fido.types import RescopeIntent
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -169,7 +169,7 @@ class TestExecutorRescope:
 
         rescope.trigger_rescope.assert_called_once()
         intent = rescope.trigger_rescope.call_args[0][0]
-        assert isinstance(intent, RescоpeIntent)
+        assert isinstance(intent, RescopeIntent)
         assert intent.change_request == "Add logging"
         assert intent.comment_id == 100  # from _make_target()
         assert intent.timestamp  # non-empty ISO timestamp
@@ -403,7 +403,7 @@ class TestExecutorEffectsOnly:
 
         rescope.trigger_rescope.assert_called_once()
         intent = rescope.trigger_rescope.call_args[0][0]
-        assert isinstance(intent, RescоpeIntent)
+        assert isinstance(intent, RescopeIntent)
         assert intent.change_request == "Add logging"
         assert intent.comment_id == 100
         assert intent.timestamp

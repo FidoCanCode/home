@@ -6,7 +6,7 @@ from fido.prompts import (
     render_active_context,
     triage_context_block,
 )
-from fido.types import ActiveIssue, ActivePR, ClosedPR, RescоpeIntent, TaskSnapshot
+from fido.types import ActiveIssue, ActivePR, ClosedPR, RescopeIntent, TaskSnapshot
 
 # ── triage_context_block ──────────────────────────────────────────────────────
 
@@ -586,7 +586,7 @@ class TestRescopePrompt:
     def test_intents_block_included_when_intents_provided(self) -> None:
         tasks = [self._task("Do thing", task_id="1")]
         intents = [
-            RescоpeIntent(
+            RescopeIntent(
                 change_request="Add logging to the parser",
                 comment_id=123,
                 timestamp="2024-01-15T10:00:00+00:00",
@@ -606,8 +606,8 @@ class TestRescopePrompt:
     def test_multiple_intents_all_included(self) -> None:
         tasks = [self._task("Do thing", task_id="1")]
         intents = [
-            RescоpeIntent("Add logging", 111, "2024-01-15T10:00:00+00:00"),
-            RescоpeIntent("Refactor tests", 222, "2024-01-15T10:01:00+00:00"),
+            RescopeIntent("Add logging", 111, "2024-01-15T10:00:00+00:00"),
+            RescopeIntent("Refactor tests", 222, "2024-01-15T10:01:00+00:00"),
         ]
         result = Prompts("").rescope_prompt(tasks, "", intents=intents)
         assert "comment #111" in result

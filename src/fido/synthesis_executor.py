@@ -14,7 +14,7 @@ from typing import Any, Protocol
 
 from fido.rocq.replied_comment_claims import ReviewReplyOutcome
 from fido.synthesis import CommentResponse, Insight, outcome_for_response
-from fido.types import RescоpeIntent
+from fido.types import RescopeIntent
 
 log = logging.getLogger(__name__)
 
@@ -87,13 +87,13 @@ class ReplyPoster(Protocol):
 class RescopeTrigger(Protocol):
     """Triggers a background rescope from a comment synthesis response.
 
-    Receives a :class:`~fido.types.RescоpeIntent` carrying the plain-English
+    Receives a :class:`~fido.types.RescopeIntent` carrying the plain-English
     change request alongside the originating comment identity and timestamp
     so the rescope machinery can track which comment triggered each intent
     and reply back on material outcomes.
     """
 
-    def trigger_rescope(self, intent: RescоpeIntent) -> None: ...
+    def trigger_rescope(self, intent: RescopeIntent) -> None: ...
 
 
 class InsightFiler(Protocol):
@@ -245,7 +245,7 @@ class SynthesisExecutor:
     def _maybe_trigger_rescope(
         self, response: CommentResponse, target: CommentTarget
     ) -> None:
-        """Build a :class:`RescоpeIntent` and fire the rescope trigger if configured.
+        """Build a :class:`RescopeIntent` and fire the rescope trigger if configured.
 
         No-op when *response.change_request* is ``None``.  Logs a warning if a
         change_request is present but no rescope trigger was injected.
@@ -253,7 +253,7 @@ class SynthesisExecutor:
         if response.change_request is None:
             return
         if self._rescope is not None:
-            intent = RescоpeIntent(
+            intent = RescopeIntent(
                 change_request=response.change_request,
                 comment_id=target.comment_id,
                 timestamp=datetime.now(timezone.utc).isoformat(),

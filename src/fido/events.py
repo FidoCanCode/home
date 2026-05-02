@@ -37,7 +37,7 @@ from fido.synthesis import Insight
 from fido.synthesis_call import call_synthesis
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
-from fido.types import ActiveIssue, ActivePR, RescоpeIntent, TaskType
+from fido.types import ActiveIssue, ActivePR, RescopeIntent, TaskType
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ class _BackgroundRescopeTrigger:
         self._agent = agent
         self._prompts = prompts
 
-    def trigger_rescope(self, intent: RescоpeIntent) -> None:
+    def trigger_rescope(self, intent: RescopeIntent) -> None:
         """Trigger :func:`_reorder_tasks_background` with the given rescope intent.
 
         The intent's *change_request* text is logged for traceability and used
@@ -2181,7 +2181,7 @@ def _reorder_tasks_background(
     repo_cfg: RepoConfig | None = None,
     registry: WorkerRegistry | None = None,
     *,
-    intents: list[RescоpeIntent] | None = None,
+    intents: list[RescopeIntent] | None = None,
     _start: Callable[[threading.Thread], None] = threading.Thread.start,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
@@ -2260,7 +2260,7 @@ def _reorder_tasks_background(
     def run_loop() -> None:
         cs = commit_summary
         kw = kwargs
-        current_intents: list[RescоpeIntent] = list(intents or [])
+        current_intents: list[RescopeIntent] = list(intents or [])
         release_untriaged = 0
         # Register as "webhook" so the session talker reflects the true nature of
         # this thread: it is triggered by webhooks and should not be treated as the
