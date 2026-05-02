@@ -15,12 +15,8 @@ from typing import Any
 from fido.prompts import Prompts
 from fido.provider import ProviderAgent
 from fido.synthesis import (
-    AddReaction,
+    VALID_REACTIONS,
     CommentResponse,
-    NoOp,
-    RescopeIntent,
-    SynthesisAction,
-    validate_reaction,
 )
 from fido.types import ActiveIssue, ActivePR
 
@@ -64,33 +60,6 @@ def _extract_json_candidates(raw: str) -> tuple[str, ...]:
     return tuple(candidates)
 
 
-def _parse_action(obj: dict[str, Any]) -> SynthesisAction | None:
-    """Parse one action dict into a :class:`~fido.synthesis.SynthesisAction`.
-
-    Returns ``None`` for unknown or invalid entries — individual bad
-    actions are skipped with a warning rather than triggering a retry.
-    """
-    action_type = obj.get("type")
-    if action_type == "add_reaction":
-        emoji = obj.get("emoji", "")
-        try:
-            return AddReaction(emoji=validate_reaction(emoji))
-        except ValueError:
-            log.warning("synthesis: invalid reaction shortcode %r — skipping", emoji)
-            return None
-    if action_type == "rescope_intent":
-        description = obj.get("description", "")
-        try:
-            return RescopeIntent(description=description)
-        except ValueError:
-            log.warning("synthesis: empty rescope_intent description — skipping")
-            return None
-    if action_type == "no_op":
-        return NoOp()
-    log.warning("synthesis: unknown action type %r — skipping", action_type)
-    return None
-
-
 def _parse_comment_response(raw: str) -> CommentResponse:
     """Parse *raw* model output into a :class:`~fido.synthesis.CommentResponse`.
 
@@ -112,7 +81,6 @@ def _parse_comment_response(raw: str) -> CommentResponse:
 
         reasoning = obj.get("reasoning", "")
         reply_text = obj.get("reply_text", "")
-        actions_raw = obj.get("actions", [])
 
         if not isinstance(reply_text, str) or not reply_text.strip():
             last_error = ValueError(
@@ -120,19 +88,29 @@ def _parse_comment_response(raw: str) -> CommentResponse:
             )
             continue
 
-        actions: list[SynthesisAction] = []
-        if isinstance(actions_raw, list):
-            for item in actions_raw:
-                if isinstance(item, dict):
-                    action = _parse_action(item)
-                    if action is not None:
-                        actions.append(action)
+        # Parse optional emoji — invalid shortcodes are warned and dropped.
+        emoji_raw = obj.get("emoji")
+        emoji: str | None = None
+        if isinstance(emoji_raw, str) and emoji_raw:
+            if emoji_raw in VALID_REACTIONS:
+                emoji = emoji_raw
+            else:
+                log.warning(
+                    "synthesis: invalid reaction shortcode %r — dropping", emoji_raw
+                )
+
+        # Parse optional change_request — must be a non-empty string or null.
+        change_request_raw = obj.get("change_request")
+        change_request: str | None = None
+        if isinstance(change_request_raw, str) and change_request_raw.strip():
+            change_request = change_request_raw
 
         try:
             return CommentResponse(
                 reasoning=str(reasoning),
                 reply_text=reply_text,
-                actions=tuple(actions),
+                emoji=emoji,
+                change_request=change_request,
             )
         except ValueError as exc:
             last_error = exc

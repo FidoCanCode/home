@@ -853,9 +853,9 @@ class Prompts:
 
         Replaces the separate triage + reply_instruction pair with a single prompt
         that asks the model to return a :class:`~fido.synthesis.CommentResponse`
-        JSON object containing both the reply prose (Constraint B: always present,
-        always freshly synthesised) and any additional effects from the constrained
-        action vocabulary (Constraint A: rescope intents, reactions, no-op).
+        JSON object containing the reply prose (Constraint B: always present,
+        always freshly synthesised), an optional emoji reaction, and an optional
+        scope-change request — all as flat top-level fields.
 
         *is_bot* is passed to adjust voice guidance — bot suggestions are handled
         with a different tone than human reviewer comments.
@@ -878,27 +878,23 @@ class Prompts:
             "{\n"
             '  "reasoning": "<string>",\n'
             '  "reply_text": "<string>",\n'
-            '  "actions": [<action>, ...]\n'
+            '  "emoji": "<shortcode>" | null,\n'
+            '  "change_request": "<plain English>" | null\n'
             "}\n\n"
             "Fields:\n"
-            "  reasoning  — private chain-of-thought; logged for traceability, "
-            "never posted to GitHub.\n"
-            "  reply_text — REQUIRED and non-empty; the reply to post to the "
-            "PR comment thread.  Always freshly written from the actual context "
-            "of this comment — no canned phrases, no templates.\n"
-            "  actions    — ordered list of additional effects; may be empty.\n\n"
-            "Available action types (include only those that apply):\n"
-            '  {"type": "add_reaction", "emoji": "<shortcode>"}\n'
-            "    React to the triggering comment.  Valid shortcodes: "
-            "+1 -1 laugh confused heart hooray rocket eyes\n\n"
-            '  {"type": "rescope_intent", "description": "<plain English>"}\n'
-            "    One plain-English sentence describing a requested change to the "
-            "PR scope or task list.  The rescope machinery decides the actual "
-            "task mutations — this action only registers the intent.\n"
-            "    One rescope_intent per distinct scope change; omit when no scope "
-            "change is needed.\n\n"
-            '  {"type": "no_op"}\n'
-            "    Explicitly take no additional action beyond posting the reply.\n\n"
+            "  reasoning       — private chain-of-thought; logged for "
+            "traceability, never posted to GitHub.\n"
+            "  reply_text      — REQUIRED and non-empty; the reply to post to "
+            "the PR comment thread.  Always freshly written from the actual "
+            "context of this comment — no canned phrases, no templates.\n"
+            "  emoji           — optional GitHub reaction to add to the "
+            "triggering comment.  Valid shortcodes: "
+            "+1 -1 laugh confused heart hooray rocket eyes.  "
+            "Use null when no reaction is appropriate.\n"
+            "  change_request  — optional plain-English sentence describing a "
+            "requested change to the PR scope or task list.  The rescope "
+            "machinery decides the actual task mutations — this field only "
+            "registers the intent.  Use null when no scope change is needed.\n\n"
             "Voice guidelines:\n"
             "- Take a position.  When you have enough context to form a view, "
             "share it — don't reflexively ask a clarifying question to avoid "

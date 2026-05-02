@@ -1466,19 +1466,16 @@ class TestSynthesisPrompt:
         result = Prompts("").synthesis_prompt("comment", is_bot=False)
         assert "reasoning" in result
         assert "reply_text" in result
-        assert "actions" in result
+        assert "emoji" in result
+        assert "change_request" in result
 
-    def test_includes_action_types(self) -> None:
+    def test_no_actions_list_in_schema(self) -> None:
+        # Flat schema — no actions array, no action type objects.
         result = Prompts("").synthesis_prompt("comment", is_bot=False)
-        assert "add_reaction" in result
-        assert "rescope_intent" in result
-        assert "no_op" in result
-
-    def test_excludes_preempt_action_type(self) -> None:
-        # Preempt is not in the synthesis action vocabulary — preemption is
-        # automatic when RescopeIntents are present, decided by the executor.
-        result = Prompts("").synthesis_prompt("comment", is_bot=False)
-        assert '{"type": "preempt"' not in result
+        assert '"actions"' not in result
+        assert "add_reaction" not in result
+        assert "rescope_intent" not in result
+        assert "no_op" not in result
 
     def test_includes_valid_emoji_shortcodes(self) -> None:
         result = Prompts("").synthesis_prompt("comment", is_bot=False)
@@ -1514,7 +1511,7 @@ class TestSynthesisPrompt:
         assert "Take a position" in result
         assert "Disagree" in result
 
-    def test_rescope_intent_description(self) -> None:
+    def test_change_request_description(self) -> None:
         result = Prompts("").synthesis_prompt("comment", is_bot=False)
         assert "plain-English" in result
         assert "scope change" in result

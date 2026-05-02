@@ -1,14 +1,12 @@
-"""Tests for fido.synthesis — CommentResponse and Action types (closes #1230)."""
+"""Tests for fido.synthesis — CommentResponse, outcome bridge, and validation."""
 
 import pytest
 
+from fido.rocq.replied_comment_claims import ReviewAct, ReviewAnswer
 from fido.synthesis import (
     VALID_REACTIONS,
-    AddReaction,
     CommentResponse,
-    NoOp,
-    RescopeIntent,
-    SynthesisAction,
+    outcome_for_response,
     validate_reaction,
 )
 
@@ -62,105 +60,6 @@ class TestValidateReaction:
 
 
 # ---------------------------------------------------------------------------
-# AddReaction
-# ---------------------------------------------------------------------------
-
-
-class TestAddReaction:
-    def test_construction(self) -> None:
-        r = AddReaction(emoji="rocket")
-        assert r.emoji == "rocket"
-
-    def test_frozen(self) -> None:
-        r = AddReaction(emoji="eyes")
-        with pytest.raises((AttributeError, TypeError)):
-            r.emoji = "heart"  # type: ignore[misc]
-
-    def test_equality(self) -> None:
-        assert AddReaction("rocket") == AddReaction("rocket")
-        assert AddReaction("rocket") != AddReaction("eyes")
-
-
-# ---------------------------------------------------------------------------
-# RescopeIntent
-# ---------------------------------------------------------------------------
-
-
-class TestRescopeIntent:
-    def test_construction(self) -> None:
-        r = RescopeIntent(description="Add a logging task")
-        assert r.description == "Add a logging task"
-
-    def test_frozen(self) -> None:
-        r = RescopeIntent(description="something")
-        with pytest.raises((AttributeError, TypeError)):
-            r.description = "other"  # type: ignore[misc]
-
-    def test_equality(self) -> None:
-        assert RescopeIntent("a") == RescopeIntent("a")
-        assert RescopeIntent("a") != RescopeIntent("b")
-
-    def test_empty_description_raises(self) -> None:
-        with pytest.raises(ValueError, match="description must be non-empty"):
-            RescopeIntent(description="")
-
-    def test_whitespace_only_description_raises(self) -> None:
-        with pytest.raises(ValueError, match="description must be non-empty"):
-            RescopeIntent(description="   ")
-
-    def test_description_with_leading_trailing_whitespace_accepted(self) -> None:
-        r = RescopeIntent(description="  actual intent  ")
-        assert r.description == "  actual intent  "
-
-
-# ---------------------------------------------------------------------------
-# NoOp
-# ---------------------------------------------------------------------------
-
-
-class TestNoOp:
-    def test_construction(self) -> None:
-        n = NoOp()
-        assert isinstance(n, NoOp)
-
-    def test_frozen(self) -> None:
-        # frozen=True means no __dict__ mutation; trivially confirmed by
-        # checking it is a dataclass with no settable fields
-        n = NoOp()
-        with pytest.raises((AttributeError, TypeError)):
-            n.anything = "x"  # type: ignore[attr-defined]
-
-    def test_equality(self) -> None:
-        assert NoOp() == NoOp()
-
-
-# ---------------------------------------------------------------------------
-# SynthesisAction union — membership
-# ---------------------------------------------------------------------------
-
-
-class TestSynthesisActionUnion:
-    """Verify the union includes every action type and no others.
-
-    Preemption is intentionally absent from the vocabulary: the action
-    executor always preempts when any RescopeIntent is present, so the
-    synthesis call never needs to express a preemption decision.
-    """
-
-    def test_add_reaction_is_synthesis_action(self) -> None:
-        a: SynthesisAction = AddReaction("rocket")
-        assert isinstance(a, AddReaction)
-
-    def test_rescope_intent_is_synthesis_action(self) -> None:
-        a: SynthesisAction = RescopeIntent("Add logging")
-        assert isinstance(a, RescopeIntent)
-
-    def test_noop_is_synthesis_action(self) -> None:
-        a: SynthesisAction = NoOp()
-        assert isinstance(a, NoOp)
-
-
-# ---------------------------------------------------------------------------
 # CommentResponse
 # ---------------------------------------------------------------------------
 
@@ -170,26 +69,35 @@ class TestCommentResponse:
         self,
         reasoning: str = "thought about it",
         reply_text: str = "Here is my reply.",
-        actions: tuple[SynthesisAction, ...] = (),
+        emoji: str | None = None,
+        change_request: str | None = None,
     ) -> CommentResponse:
         return CommentResponse(
             reasoning=reasoning,
             reply_text=reply_text,
-            actions=actions,
+            emoji=emoji,
+            change_request=change_request,
         )
 
     def test_construction_minimal(self) -> None:
         r = self._make()
         assert r.reasoning == "thought about it"
         assert r.reply_text == "Here is my reply."
-        assert r.actions == ()
+        assert r.emoji is None
+        assert r.change_request is None
 
-    def test_construction_with_actions(self) -> None:
-        actions = (AddReaction("rocket"), RescopeIntent("Fix the parser"))
-        r = self._make(actions=actions)
-        assert len(r.actions) == 2
-        assert isinstance(r.actions[0], AddReaction)
-        assert isinstance(r.actions[1], RescopeIntent)
+    def test_construction_with_emoji(self) -> None:
+        r = self._make(emoji="rocket")
+        assert r.emoji == "rocket"
+
+    def test_construction_with_change_request(self) -> None:
+        r = self._make(change_request="Drop the parser refactor")
+        assert r.change_request == "Drop the parser refactor"
+
+    def test_construction_with_both(self) -> None:
+        r = self._make(emoji="heart", change_request="Add logging")
+        assert r.emoji == "heart"
+        assert r.change_request == "Add logging"
 
     def test_frozen(self) -> None:
         r = self._make()
@@ -198,32 +106,39 @@ class TestCommentResponse:
 
     def test_empty_reply_text_raises(self) -> None:
         with pytest.raises(ValueError, match="reply_text must be non-empty"):
-            CommentResponse(
-                reasoning="thinking",
-                reply_text="",
-                actions=(),
-            )
+            CommentResponse(reasoning="thinking", reply_text="")
 
     def test_whitespace_only_reply_text_raises(self) -> None:
         with pytest.raises(ValueError, match="reply_text must be non-empty"):
-            CommentResponse(
-                reasoning="thinking",
-                reply_text="   ",
-                actions=(),
-            )
+            CommentResponse(reasoning="thinking", reply_text="   ")
 
     def test_newline_only_reply_text_raises(self) -> None:
         with pytest.raises(ValueError, match="reply_text must be non-empty"):
-            CommentResponse(
-                reasoning="thinking",
-                reply_text="\n\t\n",
-                actions=(),
-            )
+            CommentResponse(reasoning="thinking", reply_text="\n\t\n")
 
     def test_reply_text_with_leading_trailing_whitespace_accepted(self) -> None:
-        # Only purely-whitespace values are rejected; padded real text is fine
         r = self._make(reply_text="  actual text  ")
         assert r.reply_text == "  actual text  "
+
+    def test_invalid_emoji_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid reaction"):
+            CommentResponse(reasoning="r", reply_text="Reply.", emoji="thinking")
+
+    def test_empty_emoji_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid reaction"):
+            CommentResponse(reasoning="r", reply_text="Reply.", emoji="")
+
+    def test_empty_change_request_raises(self) -> None:
+        with pytest.raises(ValueError, match="change_request must be non-empty"):
+            CommentResponse(reasoning="r", reply_text="Reply.", change_request="")
+
+    def test_whitespace_change_request_raises(self) -> None:
+        with pytest.raises(ValueError, match="change_request must be non-empty"):
+            CommentResponse(reasoning="r", reply_text="Reply.", change_request="   ")
+
+    def test_change_request_with_padding_accepted(self) -> None:
+        r = self._make(change_request="  actual intent  ")
+        assert r.change_request == "  actual intent  "
 
     def test_equality(self) -> None:
         r1 = self._make()
@@ -237,20 +152,47 @@ class TestCommentResponse:
 
     def test_constraint_b_error_message_mentions_constraint(self) -> None:
         with pytest.raises(ValueError, match="Constraint B"):
-            CommentResponse(reasoning="x", reply_text="", actions=())
+            CommentResponse(reasoning="x", reply_text="")
 
-    def test_mixed_action_types_in_tuple(self) -> None:
+    def test_default_emoji_is_none(self) -> None:
+        r = CommentResponse(reasoning="r", reply_text="Reply.")
+        assert r.emoji is None
+
+    def test_default_change_request_is_none(self) -> None:
+        r = CommentResponse(reasoning="r", reply_text="Reply.")
+        assert r.change_request is None
+
+    def test_all_valid_emojis_accepted(self) -> None:
+        for emoji in VALID_REACTIONS:
+            r = self._make(emoji=emoji)
+            assert r.emoji == emoji
+
+
+# ---------------------------------------------------------------------------
+# outcome_for_response
+# ---------------------------------------------------------------------------
+
+
+class TestOutcomeForResponse:
+    def test_change_request_present_returns_review_act(self) -> None:
+        r = CommentResponse(
+            reasoning="r", reply_text="Reply.", change_request="Add logging"
+        )
+        assert outcome_for_response(r) == ReviewAct()
+
+    def test_change_request_absent_returns_review_answer(self) -> None:
+        r = CommentResponse(reasoning="r", reply_text="Reply.")
+        assert outcome_for_response(r) == ReviewAnswer()
+
+    def test_emoji_only_returns_review_answer(self) -> None:
+        r = CommentResponse(reasoning="r", reply_text="Reply.", emoji="rocket")
+        assert outcome_for_response(r) == ReviewAnswer()
+
+    def test_both_emoji_and_change_request_returns_review_act(self) -> None:
         r = CommentResponse(
             reasoning="r",
             reply_text="Reply.",
-            actions=(
-                AddReaction("eyes"),
-                RescopeIntent("Reorder the parser tasks"),
-                NoOp(),
-            ),
+            emoji="heart",
+            change_request="Reorder tasks",
         )
-        assert len(r.actions) == 3
-
-    def test_default_actions_empty_tuple(self) -> None:
-        r = CommentResponse(reasoning="r", reply_text="Reply.")
-        assert r.actions == ()
+        assert outcome_for_response(r) == ReviewAct()

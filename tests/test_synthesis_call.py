@@ -6,12 +6,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fido.synthesis import AddReaction, NoOp, RescopeIntent
 from fido.synthesis_call import (
     MAX_RETRIES,
     SynthesisExhaustedError,
     _extract_json_candidates,
-    _parse_action,
     _parse_comment_response,
     call_synthesis,
 )
@@ -25,15 +23,18 @@ from fido.types import ActiveIssue, ActivePR
 def _make_raw(
     reasoning: str = "thinking",
     reply_text: str = "My reply.",
-    actions: list[dict[str, Any]] | None = None,
+    emoji: str | None = None,
+    change_request: str | None = None,
 ) -> str:
-    return json.dumps(
-        {
-            "reasoning": reasoning,
-            "reply_text": reply_text,
-            "actions": actions if actions is not None else [],
-        }
-    )
+    obj: dict[str, Any] = {
+        "reasoning": reasoning,
+        "reply_text": reply_text,
+    }
+    if emoji is not None:
+        obj["emoji"] = emoji
+    if change_request is not None:
+        obj["change_request"] = change_request
+    return json.dumps(obj)
 
 
 def _make_agent(return_value: str | list[str]) -> MagicMock:
@@ -92,54 +93,6 @@ class TestExtractJsonCandidates:
 
 
 # ---------------------------------------------------------------------------
-# _parse_action
-# ---------------------------------------------------------------------------
-
-
-class TestParseAction:
-    def test_add_reaction_valid(self) -> None:
-        action = _parse_action({"type": "add_reaction", "emoji": "rocket"})
-        assert action == AddReaction("rocket")
-
-    def test_add_reaction_invalid_emoji_returns_none(self) -> None:
-        action = _parse_action({"type": "add_reaction", "emoji": "thinking"})
-        assert action is None
-
-    def test_add_reaction_empty_emoji_returns_none(self) -> None:
-        action = _parse_action({"type": "add_reaction", "emoji": ""})
-        assert action is None
-
-    def test_rescope_intent_valid(self) -> None:
-        action = _parse_action({"type": "rescope_intent", "description": "Add logging"})
-        assert action == RescopeIntent("Add logging")
-
-    def test_rescope_intent_empty_description_returns_none(self) -> None:
-        action = _parse_action({"type": "rescope_intent", "description": ""})
-        assert action is None
-
-    def test_rescope_intent_whitespace_description_returns_none(self) -> None:
-        action = _parse_action({"type": "rescope_intent", "description": "   "})
-        assert action is None
-
-    def test_no_op(self) -> None:
-        action = _parse_action({"type": "no_op"})
-        assert action == NoOp()
-
-    def test_unknown_type_returns_none(self) -> None:
-        action = _parse_action({"type": "create_task", "title": "x"})
-        assert action is None
-
-    def test_missing_type_returns_none(self) -> None:
-        action = _parse_action({"emoji": "rocket"})
-        assert action is None
-
-    def test_preempt_type_returns_none(self) -> None:
-        # Preempt is no longer in the vocabulary — unknown types are skipped.
-        action = _parse_action({"type": "preempt", "preempt": True})
-        assert action is None
-
-
-# ---------------------------------------------------------------------------
 # _parse_comment_response
 # ---------------------------------------------------------------------------
 
@@ -150,38 +103,41 @@ class TestParseCommentResponse:
         r = _parse_comment_response(raw)
         assert r.reply_text == "My reply."
         assert r.reasoning == "thinking"
-        assert r.actions == ()
+        assert r.emoji is None
+        assert r.change_request is None
 
-    def test_valid_with_actions(self) -> None:
-        raw = _make_raw(
-            actions=[
-                {"type": "add_reaction", "emoji": "rocket"},
-                {"type": "rescope_intent", "description": "Do more tests"},
-                {"type": "no_op"},
-            ]
-        )
+    def test_valid_with_emoji(self) -> None:
+        raw = _make_raw(emoji="rocket")
         r = _parse_comment_response(raw)
-        assert len(r.actions) == 3
-        assert isinstance(r.actions[0], AddReaction)
-        assert isinstance(r.actions[1], RescopeIntent)
-        assert isinstance(r.actions[2], NoOp)
+        assert r.emoji == "rocket"
+
+    def test_valid_with_change_request(self) -> None:
+        raw = _make_raw(change_request="Add more tests")
+        r = _parse_comment_response(raw)
+        assert r.change_request == "Add more tests"
+
+    def test_valid_with_both(self) -> None:
+        raw = _make_raw(emoji="heart", change_request="Reorder the tasks")
+        r = _parse_comment_response(raw)
+        assert r.emoji == "heart"
+        assert r.change_request == "Reorder the tasks"
 
     def test_malformed_json_raises(self) -> None:
         with pytest.raises(ValueError):
             _parse_comment_response("not json")
 
     def test_missing_reply_text_raises(self) -> None:
-        raw = json.dumps({"reasoning": "r", "actions": []})
+        raw = json.dumps({"reasoning": "r"})
         with pytest.raises(ValueError, match="reply_text"):
             _parse_comment_response(raw)
 
     def test_empty_reply_text_raises(self) -> None:
-        raw = json.dumps({"reasoning": "r", "reply_text": "", "actions": []})
+        raw = json.dumps({"reasoning": "r", "reply_text": ""})
         with pytest.raises(ValueError, match="reply_text"):
             _parse_comment_response(raw)
 
     def test_whitespace_reply_text_raises(self) -> None:
-        raw = json.dumps({"reasoning": "r", "reply_text": "   ", "actions": []})
+        raw = json.dumps({"reasoning": "r", "reply_text": "   "})
         with pytest.raises(ValueError, match="reply_text"):
             _parse_comment_response(raw)
 
@@ -195,39 +151,49 @@ class TestParseCommentResponse:
         r = _parse_comment_response(raw)
         assert r.reply_text == "My reply."
 
-    def test_unknown_action_skipped(self) -> None:
-        raw = _make_raw(
-            actions=[
-                {"type": "create_task", "title": "x"},
-                {"type": "add_reaction", "emoji": "eyes"},
-            ]
-        )
+    def test_invalid_emoji_dropped(self) -> None:
+        raw = json.dumps({"reasoning": "r", "reply_text": "OK.", "emoji": "thinking"})
         r = _parse_comment_response(raw)
-        # create_task is skipped; only add_reaction survives
-        assert len(r.actions) == 1
-        assert isinstance(r.actions[0], AddReaction)
+        assert r.emoji is None
 
-    def test_non_dict_action_items_skipped(self) -> None:
+    def test_empty_emoji_dropped(self) -> None:
+        raw = json.dumps({"reasoning": "r", "reply_text": "OK.", "emoji": ""})
+        r = _parse_comment_response(raw)
+        assert r.emoji is None
+
+    def test_null_emoji_stays_none(self) -> None:
+        raw = json.dumps({"reasoning": "r", "reply_text": "OK.", "emoji": None})
+        r = _parse_comment_response(raw)
+        assert r.emoji is None
+
+    def test_whitespace_change_request_dropped(self) -> None:
         raw = json.dumps(
-            {
-                "reasoning": "r",
-                "reply_text": "OK.",
-                "actions": ["string_item", 42, {"type": "no_op"}],
-            }
+            {"reasoning": "r", "reply_text": "OK.", "change_request": "   "}
         )
         r = _parse_comment_response(raw)
-        assert len(r.actions) == 1
-        assert isinstance(r.actions[0], NoOp)
+        assert r.change_request is None
+
+    def test_null_change_request_stays_none(self) -> None:
+        raw = json.dumps(
+            {"reasoning": "r", "reply_text": "OK.", "change_request": None}
+        )
+        r = _parse_comment_response(raw)
+        assert r.change_request is None
 
     def test_missing_reasoning_defaults_to_empty(self) -> None:
-        raw = json.dumps({"reply_text": "Reply.", "actions": []})
+        raw = json.dumps({"reply_text": "Reply."})
         r = _parse_comment_response(raw)
         assert r.reasoning == ""
 
-    def test_missing_actions_defaults_to_empty_tuple(self) -> None:
-        raw = json.dumps({"reasoning": "r", "reply_text": "Reply."})
+    def test_non_string_emoji_dropped(self) -> None:
+        raw = json.dumps({"reasoning": "r", "reply_text": "OK.", "emoji": 42})
         r = _parse_comment_response(raw)
-        assert r.actions == ()
+        assert r.emoji is None
+
+    def test_non_string_change_request_dropped(self) -> None:
+        raw = json.dumps({"reasoning": "r", "reply_text": "OK.", "change_request": 42})
+        r = _parse_comment_response(raw)
+        assert r.change_request is None
 
 
 # ---------------------------------------------------------------------------
@@ -364,26 +330,19 @@ class TestCallSynthesis:
         # No retries — provider errors propagate immediately
         assert agent.run_turn.call_count == 1
 
-    def test_success_with_all_action_types(self) -> None:
+    def test_success_with_emoji_and_change_request(self) -> None:
         raw = _make_raw(
             reply_text="Here's what I think.",
-            actions=[
-                {"type": "add_reaction", "emoji": "heart"},
-                {"type": "rescope_intent", "description": "Drop the parser refactor"},
-                {"type": "no_op"},
-            ],
+            emoji="heart",
+            change_request="Drop the parser refactor",
         )
         agent = _make_agent(raw)
         prompts = _make_prompts()
 
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
 
-        assert len(result.actions) == 3
-        assert isinstance(result.actions[0], AddReaction)
-        assert result.actions[0].emoji == "heart"
-        assert isinstance(result.actions[1], RescopeIntent)
-        assert result.actions[1].description == "Drop the parser refactor"
-        assert isinstance(result.actions[2], NoOp)
+        assert result.emoji == "heart"
+        assert result.change_request == "Drop the parser refactor"
 
     def test_default_context_is_none(self) -> None:
         agent = _make_agent(_make_raw())

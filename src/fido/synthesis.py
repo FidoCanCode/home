@@ -1,17 +1,25 @@
 """Synthesis output types for the unified comment-handling turn.
 
-The action vocabulary is constrained and enumerated (Constraint A from
-#1230): Fido may only perform operations from this closed set when
-responding to a PR comment.  No verb outside this list exists; no
-free-form action escape hatch.
+Flat response schema (Constraint A from #1230): the synthesis call
+returns a single flat JSON object with top-level ``emoji`` and
+``change_request`` fields instead of an actions list.  The closed
+vocabulary is enforced structurally — the only effects the model can
+express are a single emoji reaction and/or a single scope-change
+request.
 
 Reply text is a required top-level field (Constraint B): every synthesis
 response must include a non-empty reply.  The invariant is enforced by
-the type rather than buried as an optional list element — a
+the type rather than buried as an optional field — a
 ``CommentResponse`` without prose simply cannot be constructed.
 """
 
 from dataclasses import dataclass
+
+from fido.rocq.replied_comment_claims import (
+    ReviewAct,
+    ReviewAnswer,
+    ReviewReplyOutcome,
+)
 
 # Valid GitHub reaction shortcodes.
 VALID_REACTIONS: frozenset[str] = frozenset(
@@ -26,55 +34,6 @@ def validate_reaction(emoji: str) -> str:
             f"Invalid reaction {emoji!r}. Valid reactions: {sorted(VALID_REACTIONS)}"
         )
     return emoji
-
-
-# ---------------------------------------------------------------------------
-# Individual action types (Constraint A — closed vocabulary)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class AddReaction:
-    """Add an emoji reaction to the triggering comment.
-
-    *emoji* must be one of the GitHub reaction shortcodes in
-    :data:`VALID_REACTIONS`.
-    """
-
-    emoji: str
-
-
-@dataclass(frozen=True)
-class RescopeIntent:
-    """A plain-English statement of scope-change intent.
-
-    The synthesis call does not decide task mutations directly — it
-    describes what should change and the existing rescope machinery
-    (``reorder_tasks``) decides how to mutate the task list.
-
-    *description* is a single plain-English sentence describing the
-    requested scope change.
-    """
-
-    description: str
-
-    def __post_init__(self) -> None:
-        if not self.description.strip():
-            raise ValueError("RescopeIntent.description must be non-empty")
-
-
-@dataclass(frozen=True)
-class NoOp:
-    """Explicitly take no additional action beyond posting the required reply."""
-
-
-# The closed vocabulary of additional effects Fido may produce from a single
-# synthesis call.  Constraint A: no operations outside this set exist.
-#
-# Preemption is not part of the action vocabulary — it is automatic: the
-# action executor always preempts when any RescopeIntent is present.  The
-# rescope machinery then decides whether work actually changes.
-SynthesisAction = AddReaction | RescopeIntent | NoOp
 
 
 # ---------------------------------------------------------------------------
@@ -96,14 +55,19 @@ class CommentResponse:
         always non-empty (Constraint B).  Always freshly synthesised from
         the actual comment context — never a template, never a canned
         phrase, never absent.
-    actions:
-        Ordered sequence of additional effects from the closed action
-        vocabulary.  Executed in order after the reply is posted.
+    emoji:
+        Optional GitHub reaction shortcode to add to the triggering
+        comment.  Must be one of :data:`VALID_REACTIONS` or ``None``.
+    change_request:
+        Optional plain-English description of a requested scope change.
+        When present, the action executor preempts and the rescope
+        machinery decides the actual task mutations.
     """
 
     reasoning: str
     reply_text: str
-    actions: tuple[SynthesisAction, ...] = ()
+    emoji: str | None = None
+    change_request: str | None = None
 
     def __post_init__(self) -> None:
         if not self.reply_text.strip():
@@ -111,3 +75,33 @@ class CommentResponse:
                 "CommentResponse.reply_text must be non-empty (Constraint B: "
                 "reply prose is always required and always freshly synthesised)"
             )
+        if self.emoji is not None:
+            validate_reaction(self.emoji)
+        if self.change_request is not None and not self.change_request.strip():
+            raise ValueError(
+                "CommentResponse.change_request must be non-empty when present"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Outcome bridge — maps flat response to Rocq oracle ReviewReplyOutcome
+# ---------------------------------------------------------------------------
+
+
+def outcome_for_response(response: CommentResponse) -> ReviewReplyOutcome:
+    """Map a :class:`CommentResponse` to a :class:`ReviewReplyOutcome`.
+
+    The mapping is intentionally simple:
+
+    - ``change_request`` present → :class:`ReviewAct` (the executor will
+      preempt and hand the description to the rescope machinery).
+    - ``change_request`` absent → :class:`ReviewAnswer` (a plain reply
+      with no scope effect).
+
+    This keeps the Rocq oracle's ``review_outcome_creates_tasks`` and
+    ``review_outcome_resolves_thread`` predicates working correctly
+    through the schema transition.
+    """
+    if response.change_request is not None:
+        return ReviewAct()
+    return ReviewAnswer()
