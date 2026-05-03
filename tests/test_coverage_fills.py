@@ -1222,6 +1222,22 @@ class TestCopilotCLIOwnerMore:
         with patch.object(provider_module, "get_talker", return_value=fake_talker):
             assert session.owner is None
 
+    def test_owner_returns_thread_name_when_thread_id_matches(
+        self, tmp_path: Path
+    ) -> None:
+        # copilotcli.py:980 — return t.name when ident matches.
+        import threading
+
+        from fido import provider as provider_module
+
+        session = self._build_session(tmp_path)
+        current = threading.current_thread()
+        fake_talker = MagicMock()
+        fake_talker.kind = "worker"
+        fake_talker.thread_id = current.ident
+        with patch.object(provider_module, "get_talker", return_value=fake_talker):
+            assert session.owner == current.name
+
 
 class TestCopilotCLIOwner:
     def test_owner_returns_none_when_repo_name_is_unset(self, tmp_path: Path) -> None:
@@ -1801,6 +1817,128 @@ class TestCodexAppServerStderrAndError:
         with pytest.raises(CodexProtocolError):
             client.request("anything", timeout=2.0)
         client.stop()
+
+
+class TestCodexLeafBranches:
+    """Final small leaf branches in codex.py."""
+
+    def test_read_stderr_returns_when_stderr_is_none(self) -> None:
+        # codex.py:346-347 — early return when process.stderr is None.
+        from fido.codex import CodexAppServerClient
+
+        class _NoStderrProcess:
+            def __init__(self, *_, **__) -> None:
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO(
+                    '{"id":1,"result":{"serverInfo":{"name":"codex"}}}\n'
+                )
+                self.stderr = None  # Triggers line 347.
+                self.pid = 1234
+                self._returncode: int | None = None
+                self.terminated = False
+
+            def poll(self) -> int | None:
+                return self._returncode
+
+            def terminate(self) -> None:
+                self.terminated = True
+                self._returncode = 0
+
+            def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+                self._returncode = 0
+                return 0
+
+            def kill(self) -> None:
+                self._returncode = -9
+
+        client = CodexAppServerClient(process_factory=_NoStderrProcess)
+        client.stop()
+        assert client is not None
+
+    def test_owner_returns_thread_name_when_thread_id_matches(
+        self, tmp_path: Path
+    ) -> None:
+        # codex.py:702-704 — owner walks threading.enumerate() and returns
+        # thread.name when ident matches.
+        import threading
+
+        from fido import provider as provider_module
+        from fido.codex import CodexSession
+        from fido.provider import ProviderModel
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            repo_name="test/repo",
+            client_factory=lambda **_: _FakeAppServerForCoverage(),
+        )
+        # Use the running test thread's ident so threading.enumerate()
+        # finds a match.
+        current = threading.current_thread()
+        fake_talker = MagicMock()
+        fake_talker.kind = "worker"
+        fake_talker.thread_id = current.ident
+        with patch.object(provider_module, "get_talker", return_value=fake_talker):
+            assert session.owner == current.name
+
+    def test_poll_completed_turn_returns_none_on_timeout(
+        self, tmp_path: Path
+    ) -> None:
+        # codex.py:988-989 — _poll_completed_turn returns None when the
+        # underlying client wait_notification raises TimeoutError.
+        from fido.codex import CodexSession
+        from fido.provider import ProviderModel
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        fake = _FakeAppServerForCoverage()
+        # Don't put any notifications → wait_notification raises TimeoutError.
+        session = CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            client_factory=lambda **_: fake,
+        )
+        result = session._poll_completed_turn("thread-id", "turn-id")  # type: ignore[attr-defined]
+        assert result is None
+
+
+class TestCodexAPIBranches:
+    """Cover defensive branches in CodexAPI.get_limit_snapshot."""
+
+    def test_get_limit_snapshot_handles_non_dict_response(self) -> None:
+        # codex.py:631 — non-dict payload raises ValueError, caught by
+        # the surrounding except → returns unavailable_reason snapshot.
+        from fido.codex import CodexAPI
+
+        bad_client = MagicMock()
+        bad_client.request.return_value = "not-a-dict"
+        api = CodexAPI(client_factory=lambda: bad_client)
+        snapshot = api.get_limit_snapshot()
+        assert snapshot.unavailable_reason is not None
+
+    def test_codex_limit_windows_marks_pressure_one_as_reached(self) -> None:
+        # codex.py:580-581 — window with pressure >= 1.0 added to
+        # reached_names; subsequent _reached_window_name path then guards
+        # against double-add.
+        from fido.codex import _codex_limit_windows
+
+        payload = {
+            "rateLimits": [
+                {
+                    "limitId": "weekly",
+                    "primary": {
+                        "usedPercent": 100,
+                    },
+                }
+            ]
+        }
+        windows = _codex_limit_windows(payload)
+        # The primary window should have pressure 1.0 → reached.
+        assert any(w.pressure is not None and w.pressure >= 1.0 for w in windows)
 
 
 class TestCodexSessionMisc:
