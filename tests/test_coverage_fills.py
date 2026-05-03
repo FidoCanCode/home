@@ -1878,7 +1878,9 @@ class TestWorkerHandleQueuedCommentsDrain:
 
         gh = MagicMock()
         gh.get_pr.return_value = {"title": "T", "body": "B"}
-        gh.get_issue_comment.return_value = None  # forces _queued_issue_comment_action → None
+        gh.get_issue_comment.return_value = (
+            None  # forces _queued_issue_comment_action → None
+        )
         worker = Worker(tmp_path, gh)
         worker._config = MagicMock()  # type: ignore[attr-defined]
         worker._repo_cfg = MagicMock()  # type: ignore[attr-defined]
@@ -2024,9 +2026,7 @@ class TestWorkerExecuteTaskBranches:
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
 
-    def test_abort_active_after_provider_run_cleans_up(
-        self, tmp_path: Path
-    ) -> None:
+    def test_abort_active_after_provider_run_cleans_up(self, tmp_path: Path) -> None:
         # worker.py:3166-3168 — abort active for task → cleanup + return True.
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
@@ -2053,7 +2053,9 @@ class TestWorkerExecuteTaskBranches:
             patch.object(worker, "_admit_worker_turn", return_value=True),
             patch.object(worker, "_task_still_current", return_value=True),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(worker, "_commit_provider_leftovers_if_any", return_value="bbb"),
+            patch.object(
+                worker, "_commit_provider_leftovers_if_any", return_value="bbb"
+            ),
             patch.object(worker, "_cleanup_aborted_task"),
             patch("fido.worker.build_prompt"),
             patch("fido.worker.provider_run", return_value=("sid", "")),
@@ -2092,9 +2094,7 @@ class TestWorkerExecuteTaskBranches:
         }
         return worker, fido_dir, task
 
-    def test_retry_admit_worker_turn_false_returns_true(
-        self, tmp_path: Path
-    ) -> None:
+    def test_retry_admit_worker_turn_false_returns_true(self, tmp_path: Path) -> None:
         # worker.py:3261-3262 — inside retry loop, _admit_worker_turn False → return True.
         worker, fido_dir, task = self._setup_retry_loop(tmp_path)
         # admit returns True for the initial check, then False on retry.
@@ -2104,11 +2104,15 @@ class TestWorkerExecuteTaskBranches:
             patch("fido.tasks.Tasks.list", return_value=[task]),
             patch.object(worker, "set_status"),
             patch.object(
-                worker, "_admit_worker_turn", side_effect=lambda _pr: next(admit_responses)
+                worker,
+                "_admit_worker_turn",
+                side_effect=lambda _pr: next(admit_responses),
             ),
             patch.object(worker, "_task_still_current", return_value=True),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(worker, "_commit_provider_leftovers_if_any", return_value="aaa"),
+            patch.object(
+                worker, "_commit_provider_leftovers_if_any", return_value="aaa"
+            ),
             patch.object(worker, "_yield_for_untriaged"),
             patch("fido.worker.build_prompt"),
             patch("fido.worker.provider_run", return_value=("sid", "")),
@@ -2117,9 +2121,7 @@ class TestWorkerExecuteTaskBranches:
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
 
-    def test_retry_abort_active_cleans_and_returns_true(
-        self, tmp_path: Path
-    ) -> None:
+    def test_retry_abort_active_cleans_and_returns_true(self, tmp_path: Path) -> None:
         # worker.py:3263-3265 — inside retry loop, abort active → cleanup + return True.
         worker, fido_dir, task = self._setup_retry_loop(tmp_path)
         # initial abort check (line 3133 + 3166): False, then retry abort (line 3263): True.
@@ -2138,7 +2140,9 @@ class TestWorkerExecuteTaskBranches:
             patch.object(worker, "_admit_worker_turn", return_value=True),
             patch.object(worker, "_task_still_current", return_value=True),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(worker, "_commit_provider_leftovers_if_any", return_value="aaa"),
+            patch.object(
+                worker, "_commit_provider_leftovers_if_any", return_value="aaa"
+            ),
             patch.object(worker, "_yield_for_untriaged"),
             patch.object(worker, "_cleanup_aborted_task"),
             patch("fido.worker.build_prompt"),
@@ -2149,9 +2153,7 @@ class TestWorkerExecuteTaskBranches:
             result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
         assert result is True
 
-    def test_retry_task_no_longer_current_returns_true(
-        self, tmp_path: Path
-    ) -> None:
+    def test_retry_task_no_longer_current_returns_true(self, tmp_path: Path) -> None:
         # worker.py:3266-3271 — inside retry loop, _task_still_current False → return True.
         worker, fido_dir, task = self._setup_retry_loop(tmp_path)
         # First _task_still_current call (line 3136): True.  Retry call (3266): False.
@@ -2167,7 +2169,9 @@ class TestWorkerExecuteTaskBranches:
                 side_effect=lambda _fd, _tid: next(current_responses),
             ),
             patch.object(worker, "_provider_turn_was_preempted", return_value=False),
-            patch.object(worker, "_commit_provider_leftovers_if_any", return_value="aaa"),
+            patch.object(
+                worker, "_commit_provider_leftovers_if_any", return_value="aaa"
+            ),
             patch.object(worker, "_yield_for_untriaged"),
             patch("fido.worker.build_prompt"),
             patch("fido.worker.provider_run", return_value=("sid", "")),
@@ -2225,7 +2229,9 @@ class TestWorkerOracleAssertion:
             worker_module.ci_oracle, "pick_next_task", return_value="mismatched-task"
         ):
             with pytest.raises(AssertionError, match="not first pickup"):
-                _assert_ci_failure_matches_oracle(task_list, "tests", "FAILURE", "run-1")
+                _assert_ci_failure_matches_oracle(
+                    task_list, "tests", "FAILURE", "run-1"
+                )
 
 
 class TestClaudeIterEventsCancelPaths:
@@ -2314,10 +2320,12 @@ class TestClaudeIterEventsCancelPaths:
         # the interrupt and recording cancelled_at + cancel_request_id).
         # Second call: stdout ready → read the result line and trigger
         # the no-ack boundary check.
-        select_calls = iter([
-            ([], [], []),
-            ([proc.stdout], [], []),
-        ])
+        select_calls = iter(
+            [
+                ([], [], []),
+                ([proc.stdout], [], []),
+            ]
+        )
 
         def selector_that_cancels(*_a, **_kw):
             session_ref[0]._cancel.set()
@@ -2487,9 +2495,7 @@ class TestEventsDispatchTrailingNone:
             },
             "pull_request": {"number": 1, "title": "T", "body": "B"},
         }
-        result = dispatch(
-            "pull_request_review_comment", payload, config, repo_cfg
-        )
+        result = dispatch("pull_request_review_comment", payload, config, repo_cfg)
         assert result is None
 
     def test_issue_comment_with_no_number_falls_through(self) -> None:
