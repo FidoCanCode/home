@@ -300,7 +300,7 @@ class TestWorkerRegistry:
     def test_get_session_delegates_to_thread(self, tmp_path: Path) -> None:
         reg, factory = self._make_registry()
         fake_session = MagicMock()
-        factory.return_value._session = fake_session
+        factory.return_value.current_provider.return_value.agent.session = fake_session
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_session("foo/bar") is fake_session
 

@@ -8,7 +8,7 @@ import time
 from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, PropertyMock, call, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
@@ -920,14 +920,7 @@ class TestWorker:
         claude.ClaudeSession.return_value = mock_session
         worker = Worker(tmp_path, MagicMock())
         worker.create_session()
-        assert worker._session is mock_session
-
-    def test_session_getter_reads_bootstrap_session_before_provider_exists(
-        self,
-    ) -> None:
-        worker = Worker.__new__(Worker)
-        worker.__dict__["_bootstrap_session"] = "boot"
-        assert worker._session == "boot"
+        assert worker._provider.agent.session is mock_session  # pyright: ignore[reportPrivateUsage]
 
     def test_ensure_provider_creates_provider_from_repo_cfg(
         self, tmp_path: Path
@@ -959,24 +952,24 @@ class TestWorker:
         )
         worker = Worker(tmp_path, MagicMock(), provider=provider, session=session)
         provider.agent.attach_session.assert_called_once_with(session)
-        assert worker._session is session
+        assert worker._provider.agent.session is session  # pyright: ignore[reportPrivateUsage]
 
     def test_stop_session_calls_stop(self, tmp_path: Path) -> None:
         mock_session = MagicMock()
         worker = Worker(tmp_path, MagicMock())
-        worker._session = mock_session
+        worker._provider.agent.attach_session(mock_session)  # pyright: ignore[reportPrivateUsage]
         worker.stop_session()
         mock_session.stop.assert_called_once()
 
     def test_stop_session_clears_session(self, tmp_path: Path) -> None:
         worker = Worker(tmp_path, MagicMock())
-        worker._session = MagicMock()
+        worker._provider.agent.attach_session(MagicMock())  # pyright: ignore[reportPrivateUsage]
         worker.stop_session()
-        assert worker._session is None
+        assert worker._provider.agent.session is None  # pyright: ignore[reportPrivateUsage]
 
     def test_stop_session_is_noop_when_none(self, tmp_path: Path) -> None:
         worker = Worker(tmp_path, MagicMock())
-        assert worker._session is None
+        assert worker._provider.agent.session is None  # pyright: ignore[reportPrivateUsage]
         worker.stop_session()  # must not raise
 
     def test_run_creates_session_with_fido_dir(self, tmp_path: Path) -> None:
@@ -14433,7 +14426,7 @@ class TestWorkerThread:
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
-            self_w._session = session
+            self_w._bootstrap_session = session  # pyright: ignore[reportPrivateUsage]
             self_w._session_issue = session_issue
 
         def fake_worker_run(self_w: object) -> int:
@@ -14539,7 +14532,7 @@ class TestWorkerThread:
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
-            self_w._session = session
+            self_w._bootstrap_session = session  # pyright: ignore[reportPrivateUsage]
             self_w._session_issue = session_issue
             sessions_received.append(session)
 
@@ -14593,7 +14586,7 @@ class TestWorkerThread:
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
-            self_w._session = session
+            self_w._bootstrap_session = session  # pyright: ignore[reportPrivateUsage]
             self_w._session_issue = session_issue
             issues_received.append(session_issue)
 
@@ -14634,14 +14627,14 @@ class TestWorkerThread:
         """WorkerThread stops the session when its loop finishes."""
         wt = self._make_thread(tmp_path)
         mock_session = MagicMock()
-        wt._session = mock_session
+        wt.current_provider().agent.attach_session(mock_session)
         wt._stop.set()  # exit immediately without running any Worker
 
         with patch.object(Worker, "run"):
             wt.run()
 
         mock_session.stop.assert_called_once()
-        assert wt._session is None
+        assert wt.current_provider().agent.session is None
 
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
     def test_session_preserved_when_worker_raises(self, tmp_path: Path) -> None:
@@ -14654,7 +14647,7 @@ class TestWorkerThread:
         mock_session = MagicMock()
 
         def fake_worker_run(self_w: object) -> int:
-            self_w._session = mock_session
+            self_w._provider.agent.attach_session(mock_session)  # pyright: ignore[reportPrivateUsage]
             raise RuntimeError("boom")
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14663,7 +14656,9 @@ class TestWorkerThread:
 
         assert not wt.is_alive()
         mock_session.stop.assert_not_called()  # session must NOT be stopped
-        assert wt._session is mock_session  # still reachable for registry to rescue
+        assert (
+            wt.current_provider().agent.session is mock_session
+        )  # still reachable for registry to rescue
 
     def test_session_accepted_via_constructor(self, tmp_path: Path) -> None:
         """Session passed to WorkerThread constructor is used as the initial session."""
@@ -14671,7 +14666,7 @@ class TestWorkerThread:
         wt = WorkerThread(
             tmp_path, "owner/repo", MagicMock(), session=mock_session, session_issue=7
         )
-        assert wt._session is mock_session
+        assert wt.current_provider().agent.session is mock_session
         assert wt._session_issue == 7
 
     def test_provider_accepted_via_constructor(self, tmp_path: Path) -> None:
@@ -14689,7 +14684,7 @@ class TestWorkerThread:
         )
         provider.agent.attach_session.assert_called_once_with(session)
         assert wt.current_provider() is provider
-        assert wt._session is provider.agent.session
+        assert wt.current_provider().agent.session is provider.agent.session
         assert wt._session_issue == 7
 
     def test_detach_provider_returns_and_clears(self, tmp_path: Path) -> None:
@@ -14713,95 +14708,59 @@ class TestWorkerThread:
         assert wt.recover_provider() is True
         provider.agent.recover_session.assert_called_once_with()
 
-    def test_session_setter_recreates_provider_when_detached(
-        self, tmp_path: Path
-    ) -> None:
-        wt = self._make_thread(tmp_path)
-        wt.detach_provider()
-        session = MagicMock()
-        wt._session = session
-        assert wt.current_provider() is not None
-        assert wt._session is session
-
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
     def test_run_recreates_provider_when_missing(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
         wt.detach_provider()
         wt._wake = MagicMock()
         carried_session = MagicMock()
-
-        def fake_worker_init(
-            self_w: object,
-            work_dir: Path,
-            gh: MagicMock,
-            abort_task: object = None,
-            repo_name: str = "",
-            registry: object = None,
-            membership: object = None,
-            session: object = None,
-            session_issue: int | None = None,
-            config: object = None,
-            repo_cfg: object = None,
-            provider_factory: object = None,
-            first_iteration: bool = False,
-        ) -> None:
-            del provider_factory, first_iteration
-            self_w.work_dir = work_dir
-            self_w.gh = gh
-            self_w._abort_task = abort_task
-            self_w._session = session
-            self_w._session_issue = session_issue
+        wt._bootstrap_session = carried_session  # pyright: ignore[reportPrivateUsage]
 
         def fake_worker_run(self_w: object) -> int:
             wt._stop.set()
             return 0
 
         with (
-            patch.object(
-                WorkerThread, "_session", new_callable=PropertyMock
-            ) as session_prop,
-            patch.object(Worker, "__init__", fake_worker_init),
             patch.object(Worker, "run", fake_worker_run),
         ):
-            session_prop.return_value = carried_session
             self._run_thread(wt)
 
         assert wt.current_provider() is not None
 
     def test_session_owner_returns_none_when_no_session(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
-        assert wt._session is None
+        assert wt.current_provider().agent.session is None
         assert wt.session_owner is None
 
     def test_session_owner_delegates_to_session(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
         mock_session = MagicMock()
         mock_session.owner = "worker-home"
-        wt._session = mock_session
+        wt.current_provider().agent.attach_session(mock_session)
         assert wt.session_owner == "worker-home"
 
     def test_session_alive_false_when_no_session(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
-        assert wt._session is None
+        assert wt.current_provider().agent.session is None
         assert wt.session_alive is False
 
     def test_session_pid_none_when_no_session(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
-        assert wt._session is None
+        assert wt.current_provider().agent.session is None
         assert wt.session_pid is None
 
     def test_session_pid_delegates_to_session_pid(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
         mock_session = MagicMock()
         mock_session.pid = 54321
-        wt._session = mock_session
+        wt.current_provider().agent.attach_session(mock_session)
         assert wt.session_pid == 54321
 
     def test_session_alive_delegates_to_session_is_alive(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
         mock_session = MagicMock()
         mock_session.is_alive.return_value = True
-        wt._session = mock_session
+        wt.current_provider().agent.attach_session(mock_session)
         assert wt.session_alive is True
         mock_session.is_alive.return_value = False
         assert wt.session_alive is False
@@ -14964,26 +14923,7 @@ class TestWorkerThread:
     ) -> None:
         wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=None)
         assert wt.current_provider() is None
-        assert wt._session is None
-
-    def test_session_getter_reads_bootstrap_session_when_provider_missing(
-        self, tmp_path: Path
-    ) -> None:
-        session = MagicMock()
-        wt = WorkerThread(
-            tmp_path, "owner/repo", MagicMock(), repo_cfg=None, session=session
-        )
-        assert wt.current_provider() is None
-        assert wt._session is session
-
-    def test_session_setter_stores_bootstrap_session_when_repo_cfg_none(
-        self, tmp_path: Path
-    ) -> None:
-        wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=None)
-        session = MagicMock()
-        wt._session = session
-        assert wt.current_provider() is None
-        assert wt._session is session
+        assert wt._bootstrap_session is None  # pyright: ignore[reportPrivateUsage]
 
     def test_ensure_provider_requires_repo_cfg(self, tmp_path: Path) -> None:
         wt = WorkerThread(tmp_path, "owner/repo", MagicMock(), repo_cfg=None)
@@ -15034,7 +14974,7 @@ class TestWorkerThread:
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
-            self_w._session = session
+            self_w._bootstrap_session = session  # pyright: ignore[reportPrivateUsage]
             self_w._session_issue = session_issue
             received_config.append(config)
             received_repo_cfg.append(repo_cfg)

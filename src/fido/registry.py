@@ -699,7 +699,10 @@ class WorkerRegistry:
         """
         with self._threads_lock:
             thread = self._threads.get(repo_name)
-        return thread._session if thread is not None else None  # pyright: ignore[reportPrivateUsage]
+        if thread is None:
+            return None
+        provider = thread.current_provider()
+        return provider.agent.session if provider is not None else None
 
     def get_issue_cache(self, repo_name: str) -> IssueTreeCache:
         """Return (lazily creating) the per-repo issue tree cache (#812).

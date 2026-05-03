@@ -1190,7 +1190,7 @@ class Worker:
             if provider_factory is None
             else provider_factory
         )
-        self.__dict__["_bootstrap_session"] = session
+        self._bootstrap_session: PromptSession | None = session
         if provider is not None:
             self._provider = provider
             if session is not None:
@@ -1207,20 +1207,7 @@ class Worker:
         else:
             self._provider = None
         if self._provider is not None:
-            self.__dict__["_bootstrap_session"] = self._provider.agent.session
-
-    @property
-    def _session(self) -> PromptSession | None:
-        if hasattr(self, "_provider") and self._provider is not None:
-            return self._provider.agent.session
-        return self.__dict__.get("_bootstrap_session")
-
-    @_session.setter
-    def _session(self, session: PromptSession | None) -> None:
-        if hasattr(self, "_provider") and self._provider is not None:
-            self._provider.agent.attach_session(session)
-            return
-        self.__dict__["_bootstrap_session"] = session
+            self._bootstrap_session = self._provider.agent.session
 
     def _ensure_provider(self) -> Provider:
         """Return the owned provider, creating the configured provider if needed."""
@@ -1232,7 +1219,7 @@ class Worker:
                 self._repo_cfg,
                 work_dir=self.work_dir,
                 repo_name=self._repo_name,
-                session=self._session,
+                session=self._bootstrap_session,
             )
             self._provider = provider
         return provider
@@ -1311,7 +1298,6 @@ class Worker:
     def stop_session(self) -> None:
         """Stop the persistent provider session, if one exists."""
         self._provider_agent.stop_session()
-        self._session = None
 
     def _consume_turn_session_mode(self) -> TurnSessionMode:
         session_mode = self._next_turn_session_mode
@@ -1392,9 +1378,9 @@ class Worker:
         (closes #505) — no provider spawn overhead, no hang class, and the
         preempt/cancel plumbing handles webhook interleaving cleanly.
 
-        When ``self._session`` is ``None`` (worker has not yet created a
-        session), logs and returns — status is best-effort and callers should
-        not block on it.
+        When no provider session exists (worker has not yet created a session),
+        logs and returns — status is best-effort and callers should not block
+        on it.
         """
         prompts = self._get_prompts(_sub_dir_fn=_sub_dir_fn)
 
@@ -1413,7 +1399,7 @@ class Worker:
             else:
                 activities = [(self.work_dir.name, what, busy)]
 
-            if self._session is None:
+            if self._provider is None or self._provider.agent.session is None:
                 log.info("set_status: no session available — skipping")
                 return
 
@@ -3940,7 +3926,7 @@ class Worker:
         )
 
         compact_cmd, sync_cmd = self.setup_hooks(ctx.fido_dir)
-        session_fresh = self._session is None
+        session_fresh = self._provider is None or self._provider.agent.session is None
         if session_fresh:
             self.create_session()
         try:
@@ -4114,8 +4100,8 @@ class WorkerThread(threading.Thread):
     ``_provider`` and ``_session_issue`` survive individual :class:`Worker`
     crashes: each new ``Worker`` receives the existing provider via the
     constructor and hands it back after ``run()`` returns (even on exception).
-    The provider owns the persistent session object, while ``_session`` remains
-    a compatibility shim over that attached session for existing worker code.
+    The provider owns the persistent session object and is the authoritative
+    session store for all worker code.
     When this thread itself crashes, :class:`~fido.registry.WorkerRegistry`
     rescues the live provider from the dead thread and passes it to the
     replacement thread via the *provider* constructor parameter, so both the
@@ -4187,35 +4173,10 @@ class WorkerThread(threading.Thread):
         self._session_issue: int | None = session_issue
         self._config = config
         self._repo_cfg = repo_cfg
-        self.__dict__["_bootstrap_session"] = session
+        self._bootstrap_session: PromptSession | None = session
         # True until the first ``Worker.run()`` returns — flipped after that so
         # the one-shot startup backfill (fix #794) only fires once per thread.
         self._is_first_iteration = True
-
-    @property
-    def _session(self) -> PromptSession | None:
-        with self._provider_lock:
-            provider = self._provider
-        if provider is not None:
-            return provider.agent.session
-        return self.__dict__.get("_bootstrap_session")
-
-    @_session.setter
-    def _session(self, session: PromptSession | None) -> None:
-        with self._provider_lock:
-            provider = self._provider
-            if provider is None:
-                if self._repo_cfg is None:
-                    self.__dict__["_bootstrap_session"] = session
-                    return
-                provider = self._provider_factory.create_provider(
-                    self._repo_cfg,
-                    work_dir=self.work_dir,
-                    repo_name=self._repo_name,
-                    session=session,
-                )
-                self._provider = provider
-        provider.agent.attach_session(session)
 
     def detach_provider(self) -> Provider | None:
         """Detach and return the owned provider for crash rescue."""
@@ -4357,7 +4318,7 @@ class WorkerThread(threading.Thread):
                     self._repo_cfg,
                     work_dir=self.work_dir,
                     repo_name=self._repo_name,
-                    session=self._session,
+                    session=self._bootstrap_session,
                 )
                 self._provider = provider
             return provider
