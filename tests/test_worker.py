@@ -32,6 +32,7 @@ from fido.state import (
 )
 from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
 from fido.tasks import (
+    Tasks,
     _apply_queue_to_body,
     _auto_complete_ask_tasks,
     _format_work_queue,
@@ -7561,7 +7562,6 @@ class TestResolveAddressedThreads:
     def test_skips_resolve_when_pending_sibling_tasks_remain(
         self, tmp_path: Path
     ) -> None:
-        from fido import tasks as tasks_mod
 
         worker, gh = self._make_worker(tmp_path)
         # node whose originating comment has databaseId=55
@@ -7578,8 +7578,7 @@ class TestResolveAddressedThreads:
         gh.get_review_threads.return_value = [node]
         from fido.types import TaskType
 
-        tasks_mod.add_task(
-            tmp_path,
+        Tasks(tmp_path).add(
             title="pending sibling",
             task_type=TaskType.THREAD,
             thread={"repo": "owner/repo", "pr": 1, "comment_id": 55},
@@ -7592,7 +7591,6 @@ class TestResolveAddressedThreads:
         self, tmp_path: Path
     ) -> None:
         """Task comment_id matches a non-root comment — must still block resolution."""
-        from fido import tasks as tasks_mod
         from fido.types import TaskType
 
         worker, gh = self._make_worker(tmp_path)
@@ -7610,8 +7608,7 @@ class TestResolveAddressedThreads:
         }
         gh.get_review_threads.return_value = [node]
         # Task references reply comment (id=11), not the root (id=10)
-        tasks_mod.add_task(
-            tmp_path,
+        Tasks(tmp_path).add(
             title="pending reply task",
             task_type=TaskType.THREAD,
             thread={"repo": "owner/repo", "pr": 1, "comment_id": 11},
@@ -7621,7 +7618,6 @@ class TestResolveAddressedThreads:
         gh.resolve_thread.assert_not_called()
 
     def test_resolves_when_all_sibling_tasks_complete(self, tmp_path: Path) -> None:
-        from fido import tasks as tasks_mod
 
         worker, gh = self._make_worker(tmp_path)
         node = {
@@ -7637,13 +7633,12 @@ class TestResolveAddressedThreads:
         gh.get_review_threads.return_value = [node]
         from fido.types import TaskType
 
-        task = tasks_mod.add_task(
-            tmp_path,
+        task = Tasks(tmp_path).add(
             title="completed sibling",
             task_type=TaskType.THREAD,
             thread={"repo": "owner/repo", "pr": 1, "comment_id": 77},
         )
-        tasks_mod.complete_by_id(tmp_path, task["id"])
+        Tasks(tmp_path).complete_by_id(task["id"])
         result = worker.resolve_addressed_threads(self._repo_ctx(), 1)
         assert result is True
         gh.resolve_thread.assert_called_once_with("tid-resolve")
