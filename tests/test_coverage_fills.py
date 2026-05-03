@@ -1748,6 +1748,55 @@ class TestWorkerLeafBranches:
                 )
 
 
+class TestEventsCreateTaskExitUntriaged:
+    """Cover the registry.exit_untriaged + raise path in ``create_task``
+    when the default ``_reorder_tasks_background`` raises (events.py:2826-2828)."""
+
+    def test_exception_in_reorder_calls_exit_untriaged_and_reraises(
+        self, tmp_path: Path
+    ) -> None:
+        from fido import events
+
+        # Build a config + repo_cfg minimal enough to exercise the path.
+        repo_cfg = MagicMock()
+        repo_cfg.name = "test/repo"
+        repo_cfg.work_dir = tmp_path
+        repo_cfg.membership = MagicMock()
+        repo_cfg.membership.collaborators = frozenset()
+        config = MagicMock()
+        config.allowed_bots = frozenset()
+        gh = MagicMock()
+        gh.is_thread_resolved_for_comment.return_value = False
+        registry = MagicMock()
+        tasks = MagicMock()
+        tasks.add.return_value = {"id": "task-1", "title": "p"}
+        thread = {
+            "repo": "test/repo",
+            "pr": 1,
+            "comment_id": 42,
+        }
+
+        def boom(*args, **kwargs):  # noqa: ARG001
+            raise RuntimeError("explode")
+
+        with patch.object(events, "_reorder_tasks_background", new=boom):
+            with patch.object(events, "launch_sync"):
+                with patch.object(events, "_get_commit_summary", return_value="summary"):
+                    with pytest.raises(RuntimeError, match="explode"):
+                        events.create_task(
+                            "prompt",
+                            config,
+                            repo_cfg,
+                            gh,
+                            thread=thread,
+                            registry=registry,
+                            _reorder_background_fn=boom,
+                            _tasks=tasks,
+                        )
+        registry.enter_untriaged.assert_called_once_with("test/repo")
+        registry.exit_untriaged.assert_called_once_with("test/repo")
+
+
 class TestEventsThreadResolved:
     """Cover ``_thread_task_is_stale_resolved`` early-return branches."""
 
