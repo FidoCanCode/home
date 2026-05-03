@@ -1117,8 +1117,8 @@ def dispatch(
     ``changes_requested``, ``dismissed``) are dispatched normally so the
     worker wakes up without waiting for the next poll cycle.
     """
-    action = payload.get("action", "")
-    repo = payload.get("repository", {}).get("full_name", "")
+    action = payload.get("action")
+    repo = repo_cfg.name  # validated at routing time
 
     # Oracle check — deduplicate at the ingress boundary.
     if delivery_id is not None and oracle is not None:
