@@ -3,6 +3,12 @@ target-version = "py314"
 extend-exclude = [".venv", "venv", "_build"]
 
 [tool.ruff.lint]
+# Considered and skipped (with reason):
+# - BLE001 (blind-except): 23 legitimate fallback / best-effort sites
+#   (codex reader, gh-status provider chain, LSP dispatch, auto-merge,
+#   thread-test exception-capture fixtures). Adopting it would force
+#   either narrowing each catch (per-site refactor work, separate PR)
+#   or noqa pollution. Defer to a focused audit pass.
 select = [
   "ANN001",
   "ANN002",
@@ -48,6 +54,10 @@ select = [
   "B025",
   "B026",
   "B029",
+  "B030",
+  "B032",
+  "B033",
+  "B034",
   "E",
   "F",
   "I",
