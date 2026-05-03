@@ -136,15 +136,15 @@ class TestWorkerRegistry:
         reg.start(_repo("foo/bar", tmp_path))
         reg.start(_repo("foo/baz", tmp_path))
         reg.stop_all()
-        for call_result in factory.side_effect:
+        for _call_result in factory.side_effect:
             # side_effect is exhausted; check via factory call args
             pass
         # Each mock returned by the factory should have stop() called once
         assert factory.call_count == 2
-        for mock_thread in [factory.return_value] + list(factory.side_effect or []):
+        for _mock_thread in [factory.return_value] + list(factory.side_effect or []):
             pass  # can't reuse side_effect after exhaustion; use call_args_list
         # Re-verify via the two distinct mock objects captured from calls
-        thread_a = factory.call_args_list[0]  # noqa: F841 - structural check
+        _thread_a = factory.call_args_list[0]  # structural check
         assert factory.return_value is not None  # sanity
 
     def test_stop_all_calls_stop_count(self, tmp_path: Path) -> None:
