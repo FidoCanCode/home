@@ -1592,7 +1592,7 @@ class ClaudeAPI(ProviderAPI):
                                 "Claude usage is only available for subscription plans."
                             ),
                         )
-                except Exception as exc:
+                except _requests.RequestException as exc:
                     log.exception("ClaudeAPI: failed to fetch usage snapshot")
                     snapshot = ProviderLimitSnapshot(
                         provider=self.provider_id,

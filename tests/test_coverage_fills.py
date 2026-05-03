@@ -1840,20 +1840,18 @@ class TestEventsCreateTaskExitUntriaged:
 
         with patch.object(events, "_reorder_tasks_background", new=boom):
             with patch.object(events, "launch_sync"):
-                with patch.object(
-                    events, "_get_commit_summary", return_value="summary"
-                ):
-                    with pytest.raises(RuntimeError, match="explode"):
-                        events.create_task(
-                            "prompt",
-                            config,
-                            repo_cfg,
-                            gh,
-                            thread=thread,
-                            registry=registry,
-                            _reorder_background_fn=boom,
-                            _tasks=tasks,
-                        )
+                with pytest.raises(RuntimeError, match="explode"):
+                    events.create_task(
+                        "prompt",
+                        config,
+                        repo_cfg,
+                        gh,
+                        thread=thread,
+                        registry=registry,
+                        _reorder_background_fn=boom,
+                        _get_commit_summary_fn=lambda wd: "summary",
+                        _tasks=tasks,
+                    )
         registry.enter_untriaged.assert_called_once_with("test/repo")
         registry.exit_untriaged.assert_called_once_with("test/repo")
 
@@ -2753,16 +2751,21 @@ class TestCodexLeafBranches:
 class TestCodexAPIBranches:
     """Cover defensive branches in CodexAPI.get_limit_snapshot."""
 
-    def test_get_limit_snapshot_handles_non_dict_response(self) -> None:
-        # codex.py:631 — non-dict payload raises ValueError, caught by
-        # the surrounding except → returns unavailable_reason snapshot.
+    def test_get_limit_snapshot_propagates_value_error_on_non_dict_response(
+        self,
+    ) -> None:
+        # codex.py:631 — non-dict payload raises ValueError; after the
+        # synthetic-success fix this propagates rather than being caught,
+        # so an unexpected API response shape crashes loudly.
         from fido.codex import CodexAPI
 
         bad_client = MagicMock()
         bad_client.request.return_value = "not-a-dict"
         api = CodexAPI(client_factory=lambda: bad_client)
-        snapshot = api.get_limit_snapshot()
-        assert snapshot.unavailable_reason is not None
+        with pytest.raises(
+            ValueError, match="Codex rate limit response must be a JSON object"
+        ):
+            api.get_limit_snapshot()
 
     def test_codex_limit_windows_marks_pressure_one_as_reached(self) -> None:
         # codex.py:580-581 — window with pressure >= 1.0 added to

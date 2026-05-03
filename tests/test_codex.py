@@ -535,16 +535,22 @@ class TestCodexAPI:
             "codex_secondary",
         ]
 
-    def test_malformed_response_is_unavailable_snapshot(self) -> None:
+    def test_malformed_response_propagates_value_error(self) -> None:
+        # {"rateLimits": "bad"} causes _codex_limit_windows to raise
+        # ValueError — a shape regression, not a network/auth failure, so
+        # it propagates loudly after the synthetic-success fix.
         fake = _FakeAppServer()
         fake.responses["account/rateLimits/read"] = {"rateLimits": "bad"}
-        snapshot = CodexAPI(client_factory=lambda: fake).get_limit_snapshot()
-        assert snapshot.provider == ProviderID.CODEX
-        assert snapshot.unavailable_reason is not None
+        with pytest.raises(
+            ValueError, match="Codex rateLimits must be an object or list"
+        ):
+            CodexAPI(client_factory=lambda: fake).get_limit_snapshot()
 
     def test_client_factory_failure_is_unavailable_snapshot(self) -> None:
+        # OSError is the realistic exception when the subprocess can't be spawned
+        # (e.g. binary not found). It is in the narrowed catch set.
         def fail() -> _FakeAppServer:
-            raise RuntimeError("codex unavailable")
+            raise OSError("codex unavailable")
 
         snapshot = CodexAPI(client_factory=fail).get_limit_snapshot()
         assert snapshot.provider == ProviderID.CODEX

@@ -3258,6 +3258,7 @@ class TestCreateTask:
                 thread=thread,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
@@ -3310,6 +3311,7 @@ class TestCreateTask:
                 thread=thread,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
@@ -3368,6 +3370,7 @@ class TestCreateTask:
                 thread=thread,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
@@ -3420,6 +3423,7 @@ class TestCreateTask:
                 thread=thread,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )
         mock_tasks.add.assert_called_once()
 
@@ -3500,6 +3504,7 @@ class TestCreateTask:
                 thread=thread,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )  # no registry
         registry.abort_task.assert_not_called()
 
@@ -3570,6 +3575,7 @@ class TestCreateTask:
                 registry=registry,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )
         registry.abort_task.assert_not_called()
 
@@ -3616,6 +3622,7 @@ class TestCreateTask:
                 registry=registry,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )
         registry.abort_task.assert_not_called()
 
@@ -3643,6 +3650,7 @@ class TestCreateTask:
                 registry=registry,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )
         registry.abort_task.assert_not_called()
 
@@ -3674,6 +3682,7 @@ class TestCreateTask:
                 registry=registry,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )
         registry.abort_task.assert_not_called()
 
@@ -3705,6 +3714,7 @@ class TestCreateTask:
                 registry=registry,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )
         registry.abort_task.assert_not_called()
 
@@ -3760,6 +3770,7 @@ class TestCreateTask:
                 registry=registry,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         # ABORT_KEEP: current task stays in tasks.json
@@ -3791,6 +3802,7 @@ class TestCreateTask:
                 registry=registry,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         # task should still be in tasks.json (ABORT_KEEP)
@@ -3821,6 +3833,7 @@ class TestCreateTask:
                 registry=registry,
                 _tasks=mock_tasks,
                 _reorder_background_fn=MagicMock(),
+                _get_commit_summary_fn=lambda wd: "",
             )
         registry.abort_task.assert_not_called()
 
@@ -4023,39 +4036,37 @@ class TestGetCommitSummary:
             check=True,
         )
 
-    def test_returns_empty_on_file_not_found(self, tmp_path: Path) -> None:
+    def test_raises_on_file_not_found(self, tmp_path: Path) -> None:
         with patch("fido.events.subprocess.run", side_effect=FileNotFoundError):
-            result = _get_commit_summary(tmp_path)
-        assert result == ""
+            with pytest.raises(FileNotFoundError):
+                _get_commit_summary(tmp_path)
 
-    def test_returns_empty_on_timeout(self, tmp_path: Path) -> None:
+    def test_raises_on_timeout(self, tmp_path: Path) -> None:
         import subprocess as sp
 
         with patch(
             "fido.events.subprocess.run",
             side_effect=sp.TimeoutExpired(cmd="git", timeout=10),
         ):
-            result = _get_commit_summary(tmp_path)
-        assert result == ""
+            with pytest.raises(sp.TimeoutExpired):
+                _get_commit_summary(tmp_path)
 
-    def test_returns_empty_on_nonzero_exit(self, tmp_path: Path) -> None:
-        # check=True turns a non-zero exit into CalledProcessError, which the
-        # ``except (SubprocessError, OSError)`` arm catches → "".
+    def test_raises_on_nonzero_exit(self, tmp_path: Path) -> None:
         import subprocess as sp
 
         with patch(
             "fido.events.subprocess.run",
             side_effect=sp.CalledProcessError(128, ["git"]),
         ):
-            result = _get_commit_summary(tmp_path)
-        assert result == ""
+            with pytest.raises(sp.CalledProcessError):
+                _get_commit_summary(tmp_path)
 
-    def test_returns_empty_on_oserror(self, tmp_path: Path) -> None:
+    def test_raises_on_oserror(self, tmp_path: Path) -> None:
         with patch(
             "fido.events.subprocess.run", side_effect=OSError("permission denied")
         ):
-            result = _get_commit_summary(tmp_path)
-        assert result == ""
+            with pytest.raises(OSError):
+                _get_commit_summary(tmp_path)
 
 
 class _FakeRescopeRegistry:

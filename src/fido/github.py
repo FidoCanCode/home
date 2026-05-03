@@ -313,13 +313,9 @@ class GitHub:
 
         Each entry is {path, line, comments: [{author, body}, ...]}.
         Root comments (no in_reply_to_id) start a new thread; replies are appended.
-        Returns [] on any error.
+        Raises on network or HTTP errors — callers must not treat failure as empty.
         """
-        try:
-            raw = self.get_pull_comments(repo, pr)
-        except Exception:
-            log.exception("failed to fetch sibling threads for %s#%s", repo, pr)
-            return []
+        raw = self.get_pull_comments(repo, pr)
 
         threads: dict[int, dict[str, Any]] = {}
         for c in raw:
@@ -347,13 +343,10 @@ class GitHub:
     ) -> list[dict[str, Any]]:
         """Return all comments in the review thread containing comment_id.
 
-        Returns [{author, body}, ...] in posting order, empty on error.
+        Returns [{author, body}, ...] in posting order.
+        Raises on network or HTTP errors — callers must not treat failure as empty.
         """
-        try:
-            raw = self.get_pull_comments(repo, pr)
-        except Exception:
-            log.exception("failed to fetch comment thread for %s#%s", repo, pr)
-            return []
+        raw = self.get_pull_comments(repo, pr)
 
         by_id = {c["id"]: c for c in raw}
         comment = by_id.get(comment_id)

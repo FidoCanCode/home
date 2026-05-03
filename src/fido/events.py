@@ -1939,23 +1939,20 @@ def _maybe_abort_for_new_task(
 def _get_commit_summary(work_dir: Path) -> str:
     """Return a short ``git log --oneline`` summary of recent commits.
 
-    Best-effort enrichment: used to give Opus context about what has already
-    been implemented when it reorders the pending task list.  Returns an empty
-    string on nonzero exit, subprocess error, or missing git binary — callers
-    must not treat the result as authoritative.
+    Used to give Opus context about what has already been implemented when it
+    reorders the pending task list.  Raises on subprocess error or nonzero git
+    exit so callers see real failures rather than silently receiving an empty
+    string.
     """
-    try:
-        result = subprocess.run(
-            ["git", "log", "--oneline", "-20"],
-            cwd=work_dir,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=True,
-        )
-        return result.stdout.strip()
-    except subprocess.SubprocessError, OSError:
-        return ""
+    result = subprocess.run(
+        ["git", "log", "--oneline", "-20"],
+        cwd=work_dir,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+    return result.stdout.strip()
 
 
 def _notify_thread_change(

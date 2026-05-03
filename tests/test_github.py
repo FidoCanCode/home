@@ -449,13 +449,13 @@ class TestGitHubClass:
         result = gh.fetch_sibling_threads("o/r", 7)
         assert result == []
 
-    def test_fetch_sibling_threads_returns_empty_on_error(self) -> None:
+    def test_fetch_sibling_threads_propagates_error(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
         mock_resp.raise_for_status.side_effect = Exception("403")
         mock_s.get.return_value = mock_resp
-        result = gh.fetch_sibling_threads("o/r", 7)
-        assert result == []
+        with pytest.raises(Exception, match="403"):
+            gh.fetch_sibling_threads("o/r", 7)
 
     def test_fetch_comment_thread_returns_thread(self) -> None:
         gh, mock_s = self._gh()
@@ -537,13 +537,13 @@ class TestGitHubClass:
         result = gh.fetch_comment_thread("o/r", 7, 999)
         assert result == []
 
-    def test_fetch_comment_thread_returns_empty_on_error(self) -> None:
+    def test_fetch_comment_thread_propagates_error(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
         mock_resp.raise_for_status.side_effect = Exception("403")
         mock_s.get.return_value = mock_resp
-        result = gh.fetch_comment_thread("o/r", 7, 10)
-        assert result == []
+        with pytest.raises(Exception, match="403"):
+            gh.fetch_comment_thread("o/r", 7, 10)
 
     def test_get_run_log_skips_non_failing_jobs(self) -> None:
         gh, mock_s = self._gh()
