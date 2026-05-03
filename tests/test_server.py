@@ -1658,6 +1658,17 @@ class TestMalformedPayload:
         )
 
 
+def _payload(repo_owner: str = "owner") -> dict:
+    """Base webhook payload fragment with the repository block every event needs."""
+    return {
+        "repository": {
+            "full_name": f"{repo_owner}/repo",
+            "owner": {"login": repo_owner},
+            "default_branch": "main",
+        },
+    }
+
+
 def _post_webhook(url: str, cfg: Config, event: str, payload: dict) -> int:
     body = json.dumps(payload).encode()
     sig = _sign(body, cfg.secret)
@@ -1716,21 +1727,12 @@ class TestReplyPromiseKey:
 class TestPatchIssueCache:
     """Tests for ``_patch_issue_cache`` — webhook → cache event patcher (#812)."""
 
-    def _payload(self, repo_owner: str = "owner") -> dict:
-        return {
-            "repository": {
-                "full_name": f"{repo_owner}/repo",
-                "owner": {"login": repo_owner},
-                "default_branch": "main",
-            },
-        }
-
     def test_assigned_event_patches_cache(self, server: tuple) -> None:
         url, cfg = server
         cache = MagicMock()
         WebhookHandler.registry.get_issue_cache.return_value = cache
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "assigned",
             "issue": {
                 "number": 42,
@@ -1755,7 +1757,7 @@ class TestPatchIssueCache:
         cache = MagicMock()
         WebhookHandler.registry.get_issue_cache.return_value = cache
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "synchronize",
             "pull_request": {"number": 7},
         }
@@ -1768,7 +1770,7 @@ class TestPatchIssueCache:
         cache = MagicMock()
         WebhookHandler.registry.get_issue_cache.return_value = cache
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "labeled",  # not a picker-relevant action
             "issue": {
                 "number": 42,
@@ -1789,7 +1791,7 @@ class TestPatchIssueCache:
         cache.apply_event.side_effect = RuntimeError("boom")
         WebhookHandler.registry.get_issue_cache.return_value = cache
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "assigned",
             "issue": {
                 "number": 42,
@@ -1806,19 +1808,10 @@ class TestPatchIssueCache:
 class TestProcessAction:
     """Tests for _process_action — the background thread that dispatches actions."""
 
-    def _payload(self, repo_owner: str = "owner") -> dict:
-        return {
-            "repository": {
-                "full_name": f"{repo_owner}/repo",
-                "owner": {"login": repo_owner},
-                "default_branch": "main",
-            },
-        }
-
     def test_dispatch_triggers_worker_on_merged_pr(self, server: tuple) -> None:
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 7, "merged": True},
         }
@@ -1833,7 +1826,7 @@ class TestProcessAction:
         """DEFER files a GitHub issue instead — no tasks.json entry."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 202,
@@ -1863,7 +1856,7 @@ class TestProcessAction:
         )
         assert promise is not None
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 203,
@@ -1893,7 +1886,7 @@ class TestProcessAction:
         creation."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 510,
@@ -1926,7 +1919,7 @@ class TestProcessAction:
 
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 511,
@@ -1959,7 +1952,7 @@ class TestProcessAction:
         # NOT collapsed and do wake the worker.
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "submitted",
             "review": {
                 "id": 888,
@@ -1983,7 +1976,7 @@ class TestProcessAction:
         """
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 14, "merged": True},
         }
@@ -2045,7 +2038,7 @@ class TestProcessAction:
 
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 99, "merged": True},
         }
@@ -2061,7 +2054,7 @@ class TestProcessAction:
     def test_exception_in_process_action_does_not_crash(self, server: tuple) -> None:
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 13, "merged": True},
         }
@@ -2077,7 +2070,7 @@ class TestProcessAction:
         """On exception with no comment context (e.g., merged PR), no reaction."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 22, "merged": True},
         }
@@ -2094,7 +2087,7 @@ class TestProcessAction:
         url, cfg = server
         # review submission: reply_to=None, thread=None, review_comments set
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "submitted",
             "review": {
                 "id": 888,
@@ -2175,7 +2168,7 @@ class TestProcessAction:
     def test_dispatch_error_returns_500(self, server: tuple) -> None:
         """When dispatch raises, return 500 so GitHub retries the delivery."""
         url, cfg = server
-        payload = {**self._payload(), "action": "created"}
+        payload = {**_payload(), "action": "created"}
         WebhookHandler._fn_dispatch = MagicMock(side_effect=RuntimeError("boom"))
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _post_webhook(url, cfg, "pull_request_review_comment", payload)
@@ -2185,7 +2178,7 @@ class TestProcessAction:
         """dispatch() must be called before the HTTP response is written."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 999,
@@ -2221,7 +2214,7 @@ class TestProcessAction:
         """A pull_request_review_comment triggers unblock_tasks so BLOCKED tasks resume."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 700,
@@ -2246,7 +2239,7 @@ class TestProcessAction:
         """A top-level PR comment triggers unblock_tasks so BLOCKED tasks resume."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 701,
@@ -2276,7 +2269,7 @@ class TestProcessAction:
         """A PR merge event (no comment body) must NOT trigger unblock_tasks."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 72, "merged": True},
         }
@@ -2297,7 +2290,7 @@ class TestProcessAction:
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 950,
@@ -2326,7 +2319,7 @@ class TestProcessAction:
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 1007,
@@ -2698,19 +2691,10 @@ class TestSynchronousPreemption:
     can be de-scheduled and the worker turn can complete.
     """
 
-    def _payload(self, repo_owner: str = "owner") -> dict:
-        return {
-            "repository": {
-                "full_name": f"{repo_owner}/repo",
-                "owner": {"login": repo_owner},
-                "default_branch": "main",
-            },
-        }
-
     def _issue_comment_payload(self, comment_id: int = 900) -> dict:
         """An issue_comment on a PR produces a durable-demand wakeup action."""
         return {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": comment_id,
@@ -2960,7 +2944,7 @@ class TestSynchronousPreemption:
         WebhookHandler._fn_create_task = MagicMock()
 
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 81, "merged": True},
         }
@@ -2998,19 +2982,10 @@ class TestUntriagedInboxWiring:
     """Verify that _do_post_inner / _process_action correctly enter/exit the
     per-repo untriaged inbox for preempting webhook actions (#1067)."""
 
-    def _payload(self, repo_owner: str = "owner") -> dict:
-        return {
-            "repository": {
-                "full_name": f"{repo_owner}/repo",
-                "owner": {"login": repo_owner},
-                "default_branch": "main",
-            },
-        }
-
     def _issue_comment_payload(self, comment_id: int = 950) -> dict:
         """An issue_comment on a PR produces a durable-demand wakeup action."""
         return {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": comment_id,
@@ -3030,7 +3005,7 @@ class TestUntriagedInboxWiring:
 
     def _check_run_failure_payload(self) -> dict:
         return {
-            **self._payload(),
+            **_payload(),
             "action": "completed",
             "check_run": {
                 "name": "ci",
@@ -3072,7 +3047,7 @@ class TestUntriagedInboxWiring:
         WebhookHandler._fn_launch_worker = MagicMock()
 
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 81, "merged": True},
         }
@@ -3121,7 +3096,7 @@ class TestUntriagedInboxWiring:
         WebhookHandler._fn_launch_worker = MagicMock()
 
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 82, "merged": True},
         }
