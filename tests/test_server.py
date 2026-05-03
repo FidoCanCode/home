@@ -2456,9 +2456,13 @@ class TestProcessActionInner:
     def test_action_with_reply_to_failure_marks_promise_retryable(
         self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
     ) -> None:
-        """When reply_to_comment raises, _fail_reply marks the promise
-        retryable and the outer try/except swallows the exception
-        (signaling a 'confused' reaction via _signal_action_error)."""
+        """When reply_to_comment raises a recoverable error, _fail_reply marks
+        the promise retryable and the narrowed except swallows the exception
+        (signaling a 'confused' reaction via _signal_action_error).
+        Logic bugs (KeyError, TypeError, etc.) are NOT swallowed — only
+        requests.RequestException and friends are caught."""
+        import requests
+
         action = Action(
             prompt="comment",
             reply_to={
@@ -2471,17 +2475,42 @@ class TestProcessActionInner:
             },
             comment_body="boom",
         )
-        mock_reply = MagicMock(side_effect=RuntimeError("boom"))
+        mock_reply = MagicMock(side_effect=requests.RequestException("API down"))
         WebhookHandler._fn_reply_to_comment = mock_reply
         WebhookHandler._fn_unblock_tasks = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
-        # _process_action_inner swallows the exception (logs + signal).
+        # _process_action_inner swallows the recoverable exception (logs + signal).
         handler._process_action_inner(action, repo_cfg, self._activity())
         # _signal_action_error fired → confused reaction posted.
         handler.gh.add_reaction.assert_called_with(
             "owner/repo", "pulls", 200, "confused"
         )
+
+    def test_action_with_reply_to_logic_bug_propagates(
+        self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
+    ) -> None:
+        """Logic bugs (e.g. KeyError) from reply_to_comment are NOT swallowed —
+        they propagate so the watchdog sees the crash."""
+        action = Action(
+            prompt="comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 201,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="boom",
+        )
+        mock_reply = MagicMock(side_effect=KeyError("missing_key"))
+        WebhookHandler._fn_reply_to_comment = mock_reply
+        WebhookHandler._fn_unblock_tasks = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        with pytest.raises(KeyError):
+            handler._process_action_inner(action, repo_cfg, self._activity())
 
     def test_action_with_review_comments_calls_reply_to_review(
         self, cfg: Config, repo_cfg: RepoConfig
@@ -2555,8 +2584,10 @@ class TestProcessActionInner:
     def test_action_with_comment_body_failure_marks_promise_retryable(
         self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
     ) -> None:
-        """Issue-comment path: handler raises → _fail_reply marks
-        retryable, outer try/except swallows + signals."""
+        """Issue-comment path: recoverable error raises → _fail_reply marks
+        retryable, narrowed except swallows + signals.  Logic bugs propagate."""
+        import requests
+
         action = Action(
             prompt="issue comment",
             thread={
@@ -2569,7 +2600,7 @@ class TestProcessActionInner:
             },
             comment_body="boom",
         )
-        mock_reply = MagicMock(side_effect=RuntimeError("boom"))
+        mock_reply = MagicMock(side_effect=requests.RequestException("API down"))
         WebhookHandler._fn_reply_to_issue_comment = mock_reply
         WebhookHandler._fn_unblock_tasks = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
@@ -2648,6 +2679,13 @@ class TestProcessActionInner:
             },
         )
         handler._signal_action_error(action)  # should not raise
+
+    def test_signal_action_error_no_op_when_no_thread(self, cfg: Config) -> None:
+        """_signal_action_error is a no-op when the action has no thread or
+        reply_to — non-comment events have no comment to react on."""
+        handler = self._handler(cfg)
+        handler._signal_action_error(Action(prompt="push event"))
+        handler.gh.add_reaction.assert_not_called()
 
 
 class TestSynchronousPreemption:
@@ -3252,7 +3290,9 @@ class TestBootstrapIssueCaches:
         mock_gh.find_all_open_issues.assert_any_call("b", "r2")
 
     def test_per_repo_failure_is_swallowed(self, tmp_path: Path) -> None:
-        """A single GitHub API error must not prevent fido from starting."""
+        """A single transient GitHub API error must not prevent fido from starting."""
+        import requests
+
         from fido.server import bootstrap_issue_caches
 
         repos = {
@@ -3260,7 +3300,10 @@ class TestBootstrapIssueCaches:
             "b/r2": RepoConfig(name="b/r2", work_dir=tmp_path),
         }
         mock_gh = MagicMock()
-        mock_gh.find_all_open_issues.side_effect = [RuntimeError("API down"), []]
+        mock_gh.find_all_open_issues.side_effect = [
+            requests.RequestException("API down"),
+            [],
+        ]
         mock_cache_r2 = MagicMock()
         mock_registry = MagicMock()
         mock_registry.get_issue_cache.side_effect = lambda name: (
@@ -3272,6 +3315,19 @@ class TestBootstrapIssueCaches:
 
         # Second repo should still be bootstrapped.
         mock_cache_r2.load_inventory.assert_called_once()
+
+    def test_logic_bug_in_bootstrap_propagates(self, tmp_path: Path) -> None:
+        """Non-transient errors (logic bugs, auth failures) must propagate
+        loudly so misconfiguration is caught at startup, not silently deferred."""
+        from fido.server import bootstrap_issue_caches
+
+        repos = {"a/r1": RepoConfig(name="a/r1", work_dir=tmp_path)}
+        mock_gh = MagicMock()
+        mock_gh.find_all_open_issues.side_effect = RuntimeError("not logged in")
+        mock_registry = MagicMock()
+
+        with pytest.raises(RuntimeError, match="not logged in"):
+            bootstrap_issue_caches(repos, mock_gh, mock_registry)
 
     def test_wakes_worker_after_successful_load(self, tmp_path: Path) -> None:
         """Worker is woken after a successful cache load so it rescans immediately (#995)."""
@@ -3307,6 +3363,8 @@ class TestBootstrapIssueCaches:
 
     def test_does_not_wake_worker_on_failed_load(self, tmp_path: Path) -> None:
         """A failed bootstrap must not wake the worker — the cache is cold (#995)."""
+        import requests
+
         from fido.server import bootstrap_issue_caches
 
         repos = {
@@ -3314,7 +3372,10 @@ class TestBootstrapIssueCaches:
             "b/r2": RepoConfig(name="b/r2", work_dir=tmp_path),
         }
         mock_gh = MagicMock()
-        mock_gh.find_all_open_issues.side_effect = [RuntimeError("API down"), []]
+        mock_gh.find_all_open_issues.side_effect = [
+            requests.RequestException("API down"),
+            [],
+        ]
         mock_registry = MagicMock()
         mock_registry.get_issue_cache.return_value = MagicMock()
 
