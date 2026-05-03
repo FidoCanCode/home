@@ -4043,8 +4043,12 @@ class WorkerThread(threading.Thread):
         self._membership = membership if membership is not None else RepoMembership()
         self._wake = threading.Event()
         self._abort_task = AbortHandle()
-        self._stop = False
-        self.crash_error: str | None = None
+        self._stop = threading.Event()
+        # _crash_error_lock guards crash_error: the worker thread writes it on
+        # exception and the registry/watchdog reads it from a different thread.
+        # Python 3.14t has no GIL, so bare attribute publication is not safe.
+        self._crash_error_lock = threading.Lock()
+        self._crash_error: str | None = None
         self._provider_lock = threading.Lock()
         # Per-repo issue tree cache (closes #812).  Required — hands the
         # same cache to every Worker iteration so it survives Worker
@@ -4199,9 +4203,36 @@ class WorkerThread(threading.Thread):
         self._abort_task.request(task_id)
         self._wake.set()
 
+    @property
+    def was_stopped(self) -> bool:
+        """True if :meth:`stop` was called (orderly shutdown), False if the
+        thread died without a stop request (crash).
+
+        Thread-safe: backed by :class:`threading.Event` so reads from the
+        registry watchdog and writes from the registry's ``stop()`` call are
+        synchronised without explicit locking.
+        """
+        return self._stop.is_set()
+
+    @property
+    def crash_error(self) -> str | None:
+        """Error string set when this thread exits due to an unhandled exception.
+
+        ``None`` until the thread crashes.  Thread-safe: guarded by
+        ``_crash_error_lock`` because the worker thread writes it and the
+        registry/watchdog reads it from a different thread.
+        """
+        with self._crash_error_lock:
+            return self._crash_error
+
+    @crash_error.setter
+    def crash_error(self, value: str | None) -> None:
+        with self._crash_error_lock:
+            self._crash_error = value
+
     def stop(self) -> None:
         """Request the thread to exit after the current iteration."""
-        self._stop = True
+        self._stop.set()
         self._wake.set()
 
     def _ensure_provider(self) -> Provider:
@@ -4329,7 +4360,7 @@ class WorkerThread(threading.Thread):
         set_thread_repo(self._repo_name)
         set_thread_kind("worker")
         try:
-            while not self._stop:
+            while not self._stop.is_set():
                 if self._registry is not None:
                     self._registry.report_activity(
                         self._repo_name, "scanning for work", busy=False
@@ -4407,7 +4438,7 @@ class WorkerThread(threading.Thread):
             set_thread_repo(None)
             # Only stop the session on orderly shutdown — a crashed thread
             # leaves it alive so the registry can hand it to the replacement.
-            if self._stop:
+            if self._stop.is_set():
                 with self._provider_lock:
                     provider = self._provider
                 if provider is not None:

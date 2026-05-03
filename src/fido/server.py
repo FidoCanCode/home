@@ -646,6 +646,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
     # "running normally" before any restart trigger fires.  Reset to Running()
     # after an Aborted episode so a subsequent trigger can begin a fresh one.
     _restart_fsm_state: restart_fsm.State = restart_fsm.Running()
+    # _restart_fsm_lock serialises all reads and writes of _restart_fsm_state
+    # across ThreadingHTTPServer handler threads.  Python 3.14t has no GIL —
+    # the read-modify-write in _restart_fsm_transition is not atomic without
+    # an explicit lock.  Class-level so every handler instance shares it.
+    _restart_fsm_lock: threading.Lock = threading.Lock()
 
     def _restart_fsm_transition(self, event: restart_fsm.Event) -> restart_fsm.State:
         """Fire *event* against the process-level self-restart FSM.
@@ -657,14 +662,15 @@ class WebhookHandler(BaseHTTPRequestHandler):
         Uses ``type(self)`` so the class-level state is updated and visible
         to every subsequent handler instance in the same process.
         """
-        prev = type(self)._restart_fsm_state
-        new_state = restart_fsm.transition(prev, event)
-        if new_state is None:
-            raise AssertionError(
-                f"self_restart FSM: {type(event).__name__} rejected in "
-                f"state {type(prev).__name__}"
-            )
-        type(self)._restart_fsm_state = new_state
+        with type(self)._restart_fsm_lock:
+            prev = type(self)._restart_fsm_state
+            new_state = restart_fsm.transition(prev, event)
+            if new_state is None:
+                raise AssertionError(
+                    f"self_restart FSM: {type(event).__name__} rejected in "
+                    f"state {type(prev).__name__}"
+                )
+            type(self)._restart_fsm_state = new_state
         log.debug(
             "self-restart FSM: %s →%s via %s",
             type(prev).__name__,
@@ -1182,7 +1188,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
             # confirming workers were never touched.  Reset to Running() so a
             # subsequent trigger can begin a fresh episode.
             self._restart_fsm_transition(restart_fsm.SyncFail())
-            type(self)._restart_fsm_state = restart_fsm.Running()
+            with type(self)._restart_fsm_lock:
+                type(self)._restart_fsm_state = restart_fsm.Running()
             return
         # FSM oracle: Syncing → StoppingWorkers.
         self._restart_fsm_transition(restart_fsm.SyncOk())

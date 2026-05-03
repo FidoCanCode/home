@@ -52,9 +52,9 @@ class TestWorkerRegistry:
         cfg = _repo("foo/bar", tmp_path)
         # First start — no prior thread
         reg.start(cfg)
-        # Simulate crash: thread died, _stop is False, provider is still attached
+        # Simulate crash: thread died, was_stopped is False, provider is still attached
         threads[0].is_alive.return_value = False
-        threads[0]._stop = False
+        threads[0].was_stopped = False
         threads[0].detach_provider.return_value = mock_provider
         threads[0]._session_issue = 42
         # Second start — should rescue provider from crashed thread
@@ -81,7 +81,7 @@ class TestWorkerRegistry:
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         threads[0].is_alive.return_value = False
-        threads[0]._stop = False
+        threads[0].was_stopped = False
         threads[0].detach_provider.return_value = mock_provider
         reg.start(cfg)
         mock_provider.agent.recover_session.assert_called_once_with()
@@ -95,9 +95,9 @@ class TestWorkerRegistry:
         reg = WorkerRegistry(factory)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
-        # Simulate orderly shutdown: _stop is True (session was already stopped)
+        # Simulate orderly shutdown: was_stopped is True (session was already stopped)
         threads[0].is_alive.return_value = False
-        threads[0]._stop = True
+        threads[0].was_stopped = True
         threads[0].detach_provider.return_value = MagicMock()
         reg.start(cfg)
         _, kwargs = factory.call_args_list[1]
@@ -615,7 +615,7 @@ class TestWorkerRegistry:
         # Simulate a crash so the FSM accepts the second start
         # (no_start_while_active: start() on a live thread is rejected).
         threads[0].is_alive.return_value = False
-        threads[0]._stop = False
+        threads[0].was_stopped = False
         reg.start(cfg)
         assert factory.call_count == 2
         # Second start — latest thread is in registry
@@ -1341,7 +1341,7 @@ class TestRegistryFsmOracle:
         )
         # Simulate crash
         threads[0].is_alive.return_value = False
-        threads[0]._stop = False
+        threads[0].was_stopped = False
         reg.start(cfg)
         assert isinstance(
             reg._registry_fsm_states.get("foo/bar"),
@@ -1359,7 +1359,7 @@ class TestRegistryFsmOracle:
         reg.start(cfg)
         # Simulate orderly stop
         threads[0].is_alive.return_value = False
-        threads[0]._stop = True
+        threads[0].was_stopped = True
         reg.start(cfg)
         assert isinstance(
             reg._registry_fsm_states.get("foo/bar"),
