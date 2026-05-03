@@ -1663,6 +1663,110 @@ class TestWorkerLeafBranches:
                 )
 
 
+class TestEventsNotifyThreadChange:
+    """Cover the ``modified`` branch of ``_notify_thread_change``
+    (events.py:2322-2333)."""
+
+    def test_modified_branch_uses_new_title_and_posts_reply(
+        self, tmp_path: Path
+    ) -> None:
+        from fido.events import _notify_thread_change
+
+        change = {
+            "task": {
+                "title": "Old title",
+                "thread": {
+                    "comment_id": 42,
+                    "repo": "test/repo",
+                    "pr": 1,
+                    "url": "https://example.com/c",
+                    "author": "alice",
+                    "comment_type": "pulls",  # required to skip early-return
+                },
+            },
+            "kind": "modified",
+            "new_title": "New title",
+        }
+        config = MagicMock()
+        gh = MagicMock()
+        agent = MagicMock()
+        agent.voice_model = "voice"
+        agent.generate_reply.return_value = "reply body"
+        prompts = MagicMock()
+        prompts.persona_wrap.return_value = "wrapped"
+        prompts.reply_system_prompt.return_value = "system"
+        _ = tmp_path  # quiet unused-arg warning
+        _notify_thread_change(change, config, gh, agent=agent, prompts=prompts)
+        gh.reply_to_review_comment.assert_called_once()
+        # The instruction should mention the new title.
+        wrap_arg = prompts.persona_wrap.call_args[0][0]
+        assert "New title" in wrap_arg
+
+
+class TestCodexSessionEnter:
+    """Cover __enter__ paths involving register_talker (codex.py:915-937)."""
+
+    @staticmethod
+    def _build_session(tmp_path: Path, *, repo_name: str = "test/repo"):
+        from fido.codex import CodexSession
+        from fido.provider import ProviderModel
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        return CodexSession(
+            system_file,
+            work_dir=tmp_path,
+            model=ProviderModel("gpt-5.5", "medium"),
+            repo_name=repo_name,
+            client_factory=lambda **_: _FakeAppServerForCoverage(),
+        )
+
+    def test_enter_registers_talker_then_exit_unregisters(
+        self, tmp_path: Path
+    ) -> None:
+        # Cover happy-path through __enter__ (line 917-926) and __exit__
+        # (line 936-937 unregister_talker).
+        from fido import provider as provider_module
+
+        session = self._build_session(tmp_path)
+        register_calls: list[str] = []
+        unregister_calls: list[str] = []
+
+        def fake_register(talker):  # noqa: ARG001
+            register_calls.append(talker.repo_name)
+
+        def fake_unregister(repo_name, thread_id):  # noqa: ARG001
+            unregister_calls.append(repo_name)
+
+        with patch.object(provider_module, "register_talker", side_effect=fake_register):
+            with patch.object(
+                provider_module, "unregister_talker", side_effect=fake_unregister
+            ):
+                # Force __enter__ kind branch.  current_thread_kind is "handler"
+                # by default which routes through _fsm_acquire_handler.
+                with session:
+                    pass
+        assert register_calls == ["test/repo"]
+        assert unregister_calls == ["test/repo"]
+
+    def test_enter_propagates_session_leak_error_and_releases_fsm(
+        self, tmp_path: Path
+    ) -> None:
+        # Cover lines 927-930 — SessionLeakError raised by register_talker
+        # is re-raised after _drop_entry_depth and _fsm_release are called.
+        from fido import provider as provider_module
+
+        session = self._build_session(tmp_path)
+
+        def explode(_talker):
+            raise provider_module.SessionLeakError("test leak")
+
+        with patch.object(provider_module, "register_talker", side_effect=explode):
+            with pytest.raises(provider_module.SessionLeakError, match="test leak"):
+                with session:
+                    pass
+
+
 class _FakeAppServerForCoverage:
     """Minimal fake matching ``fido.codex.CodexAppServer`` protocol.
 
