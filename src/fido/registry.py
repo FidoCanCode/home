@@ -95,6 +95,10 @@ class WorkerRegistry:
 
     def __init__(self, thread_factory: Callable[..., WorkerThread]) -> None:
         self._threads: dict[str, WorkerThread] = {}
+        # _threads_lock guards _threads: written by start() on the watchdog
+        # thread, read from HTTP handler threads (wake, abort_task, get_session,
+        # etc.).  Python 3.14t has no GIL — dict reads and writes are not atomic.
+        self._threads_lock = threading.Lock()
         self._factory = thread_factory
         self._activities: dict[str, WorkerActivity] = {}
         self._activity_lock = threading.Lock()
@@ -182,7 +186,8 @@ class WorkerRegistry:
         """
         provider = None
         session_issue = None
-        old_thread = self._threads.get(repo_cfg.name)
+        with self._threads_lock:
+            old_thread = self._threads.get(repo_cfg.name)
         if old_thread is None:
             # No predecessor — initial start: Absent → Active.
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
@@ -212,7 +217,8 @@ class WorkerRegistry:
             # the no_start_while_active violation as an immediate AssertionError.
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
         thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
-        self._threads[repo_cfg.name] = thread
+        with self._threads_lock:
+            self._threads[repo_cfg.name] = thread
         with self._started_at_lock:
             self._started_at[repo_cfg.name] = _utcnow()
         thread.start()
@@ -228,7 +234,8 @@ class WorkerRegistry:
 
         No-op if no thread is registered for that repo.
         """
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         if thread:
             thread.wake()
 
@@ -242,13 +249,15 @@ class WorkerRegistry:
 
         No-op if no thread is registered for that repo.
         """
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         if thread:
             thread.abort_task(task_id=task_id)
 
     def recover_provider(self, repo_name: str) -> bool:
         """Recover the attached provider session for *repo_name*, if present."""
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         if thread is None:
             return False
         return thread.recover_provider()
@@ -385,7 +394,9 @@ class WorkerRegistry:
 
     def stop_all(self) -> None:
         """Request every managed thread to stop after its current iteration."""
-        for thread in self._threads.values():
+        with self._threads_lock:
+            threads = list(self._threads.values())
+        for thread in threads:
             thread.stop()
 
     def stop_and_join(self, repo_name: str, timeout: float = 30.0) -> None:
@@ -393,19 +404,22 @@ class WorkerRegistry:
 
         No-op if no thread is registered for that repo.
         """
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         if thread:
             thread.stop()
             thread.join(timeout=timeout)
 
     def is_alive(self, repo_name: str) -> bool:
         """Return True if the thread for *repo_name* is currently alive."""
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         return thread is not None and thread.is_alive()
 
     def get_thread_crash_error(self, repo_name: str) -> str | None:
         """Return the crash_error stored on the thread for *repo_name*, or None."""
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         return thread.crash_error if thread is not None else None
 
     def get_session_owner(self, repo_name: str) -> str | None:
@@ -415,7 +429,8 @@ class WorkerRegistry:
         registered thread.  Returns ``None`` when no thread is registered for
         the repo, no session exists, or the lock is currently free.
         """
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         return thread.session_owner if thread is not None else None
 
     def get_session_alive(self, repo_name: str) -> bool:
@@ -425,7 +440,8 @@ class WorkerRegistry:
         currently holds still reports ``session_alive=True`` so status display
         can distinguish "session exists, idle" from "no session".
         """
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         return thread.session_alive if thread is not None else False
 
     def get_session_pid(self, repo_name: str) -> int | None:
@@ -435,22 +451,26 @@ class WorkerRegistry:
         pgrep — the system prompt file path changed in #456 so the pgrep
         heuristic in :mod:`fido.status` can no longer locate it.
         """
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         return thread.session_pid if thread is not None else None
 
     def get_session_dropped_count(self, repo_name: str) -> int:
         """Return how many stale persistent session ids were dropped for *repo_name*."""
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         return thread.session_dropped_count if thread is not None else 0
 
     def get_session_sent_count(self, repo_name: str) -> int:
         """Return the number of messages sent to the current session subprocess for *repo_name*."""
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         return thread.session_sent_count if thread is not None else 0
 
     def get_session_received_count(self, repo_name: str) -> int:
         """Return the number of events received from the current session subprocess for *repo_name*."""
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         return thread.session_received_count if thread is not None else 0
 
     def set_rescoping(self, repo_name: str, active: bool) -> None:
@@ -653,7 +673,8 @@ class WorkerRegistry:
         when no worker thread is registered for the repo or the thread has
         not yet created its session.
         """
-        thread = self._threads.get(repo_name)
+        with self._threads_lock:
+            thread = self._threads.get(repo_name)
         return thread._session if thread is not None else None  # pyright: ignore[reportPrivateUsage]
 
     def get_issue_cache(self, repo_name: str) -> IssueTreeCache:
