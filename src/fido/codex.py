@@ -638,7 +638,7 @@ class CodexAPI(ProviderAPI):
                         unavailable_reason="Codex rate limits did not include usable windows.",
                     )
                 )
-            except Exception as exc:
+            except (CodexProviderError, CodexProtocolError, OSError) as exc:
                 log.exception("CodexAPI: failed to fetch rate limit snapshot")
                 snapshot = ProviderLimitSnapshot(
                     provider=self.provider_id,

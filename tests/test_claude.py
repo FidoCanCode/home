@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from fido import provider
 from fido.claude import (
@@ -3083,7 +3084,9 @@ class TestClaudeAPI:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         response = MagicMock()
-        response.raise_for_status.side_effect = RuntimeError("boom")
+        response.raise_for_status.side_effect = requests.ConnectionError(
+            "connection failed"
+        )
         session = MagicMock()
         session.get.return_value = response
         api = ClaudeAPI(
@@ -3096,13 +3099,15 @@ class TestClaudeAPI:
             snapshot = api.get_limit_snapshot()
         assert snapshot == ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE,
-            unavailable_reason="Claude usage unavailable: boom",
+            unavailable_reason="Claude usage unavailable: connection failed",
         )
         assert "ClaudeAPI: failed to fetch usage snapshot" in caplog.text
 
-    def test_limit_snapshot_logs_and_marks_unavailable_when_payload_is_not_an_object(
-        self, caplog: pytest.LogCaptureFixture
+    def test_limit_snapshot_propagates_value_error_when_payload_is_not_an_object(
+        self,
     ) -> None:
+        # ValueError from the shape guard is not a network/auth error — it
+        # propagates so a regression in the API response shape is loud.
         response = MagicMock()
         response.json.return_value = []
         session = MagicMock()
@@ -3113,15 +3118,10 @@ class TestClaudeAPI:
                 "OAuthState", (), {"access_token": "tok-123"}
             )(),
         )
-        with caplog.at_level(logging.ERROR, logger="fido.claude"):
-            snapshot = api.get_limit_snapshot()
-        assert snapshot == ProviderLimitSnapshot(
-            provider=ProviderID.CLAUDE_CODE,
-            unavailable_reason=(
-                "Claude usage unavailable: Claude usage response must be a JSON object"
-            ),
-        )
-        assert "ClaudeAPI: failed to fetch usage snapshot" in caplog.text
+        with pytest.raises(
+            ValueError, match="Claude usage response must be a JSON object"
+        ):
+            api.get_limit_snapshot()
 
 
 class TestClaudeCode:
