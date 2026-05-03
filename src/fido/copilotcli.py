@@ -189,7 +189,7 @@ def _normalize_model(model: ProviderModel | str | None) -> ProviderModel | None:
     lowered = normalized.model.lower()
     if lowered.startswith("claude-haiku"):
         return ProviderModel("claude-haiku-4.5", normalized.effort)
-    if lowered.startswith("claude-opus") or lowered.startswith("claude-sonnet"):
+    if lowered.startswith(("claude-opus", "claude-sonnet")):
         return ProviderModel("gpt-4.1", normalized.effort)
     return normalized
 

@@ -1929,7 +1929,7 @@ class TestFormatStatus:
         worker_lines = [
             line
             for line in output.splitlines()
-            if line.startswith("  Worker:") or line.startswith("* Worker:")
+            if line.startswith(("  Worker:", "* Worker:"))
         ]
         assert any("→ pid" not in line for line in worker_lines)
         # Header does not carry pid info — that belongs to the agent line.
