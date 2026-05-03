@@ -19,7 +19,12 @@ from fido.rocq import worker_registry_crash as registry_fsm
 
 
 class RepoConfig(_RepoConfig):
-    def __init__(self, *args, provider: ProviderID = ProviderID.CLAUDE_CODE, **kwargs):
+    def __init__(
+        self,
+        *args: object,
+        provider: ProviderID = ProviderID.CLAUDE_CODE,
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, provider=provider, **kwargs)
 
 

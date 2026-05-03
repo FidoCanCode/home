@@ -14,7 +14,7 @@ import shutil
 import signal
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, Protocol
 
@@ -33,7 +33,7 @@ class ProcessRunner(Protocol):
     def run(
         self,
         cmd: Sequence[str],
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401  # forwarded to subprocess.run
     ) -> subprocess.CompletedProcess[str]:
         """Execute *cmd*, forwarding all keyword arguments to :func:`subprocess.run`."""
         ...
@@ -45,7 +45,7 @@ class RealProcessRunner:
     def run(
         self,
         cmd: Sequence[str],
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401  # forwarded to subprocess.run
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(cmd, **kwargs)
 
@@ -138,7 +138,7 @@ class OsProcess(Protocol):
         """Change the process working directory — equivalent to :func:`os.chdir`."""
         ...
 
-    def install_signal(self, signum: int, handler: Any) -> Any:
+    def install_signal(self, signum: int, handler: Callable[..., object]) -> object:
         """Install a signal handler — equivalent to :func:`signal.signal`.
 
         Returns the previous handler.
@@ -158,7 +158,7 @@ class RealOsProcess:
     def chdir(self, path: Path | str) -> None:
         os.chdir(path)
 
-    def install_signal(self, signum: int, handler: Any) -> Any:
+    def install_signal(self, signum: int, handler: Callable[..., object]) -> object:
         return signal.signal(signum, handler)
 
 

@@ -5,7 +5,6 @@ import argparse
 import sys
 import tomllib
 from pathlib import Path
-from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 FRAGMENTS = [
@@ -16,7 +15,7 @@ FRAGMENTS = [
 
 
 def _collect_leaf_paths(
-    value: Any, prefix: tuple[str, ...] = ()
+    value: object, prefix: tuple[str, ...] = ()
 ) -> set[tuple[str, ...]]:
     if isinstance(value, dict):
         paths: set[tuple[str, ...]] = set()

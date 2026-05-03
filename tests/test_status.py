@@ -61,7 +61,12 @@ from fido.status import (
 
 
 class RepoConfig(_RepoConfig):
-    def __init__(self, *args, provider: ProviderID = ProviderID.CLAUDE_CODE, **kwargs):
+    def __init__(
+        self,
+        *args: object,
+        provider: ProviderID = ProviderID.CLAUDE_CODE,
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, provider=provider, **kwargs)
 
 
@@ -1512,7 +1517,7 @@ class TestCollect:
 class TestFormatAgentLine:
     """Unit tests for _format_agent_line — the dedicated per-repo agent body line."""
 
-    def _repo(self, **kwargs) -> RepoStatus:
+    def _repo(self, **kwargs: object) -> RepoStatus:
         defaults = dict(
             name="owner/repo",
             fido_running=False,
@@ -1629,7 +1634,7 @@ class TestFormatAgentLine:
 
 
 class TestFormatStatus:
-    def _repo(self, **kwargs) -> RepoStatus:
+    def _repo(self, **kwargs: object) -> RepoStatus:
         defaults = dict(
             name="owner/repo",
             fido_running=False,
@@ -2254,7 +2259,7 @@ class TestFormatStatus:
 class TestFormatStatusColor:
     """Color tests: verify ANSI codes appear under FORCE_COLOR=1."""
 
-    def _repo(self, **kwargs) -> RepoStatus:
+    def _repo(self, **kwargs: object) -> RepoStatus:
         defaults = dict(
             name="owner/repo",
             fido_running=False,
@@ -2573,7 +2578,7 @@ class TestProviderColoredStatus:
     asterisk is needed in color mode).
     """
 
-    def _repo(self, **kwargs) -> RepoStatus:
+    def _repo(self, **kwargs: object) -> RepoStatus:
         defaults = dict(
             name="owner/repo",
             fido_running=False,
@@ -2894,7 +2899,7 @@ class TestParseIssueCache:
 
 
 class TestFormatCacheLine:
-    def _repo(self, **kwargs) -> RepoStatus:
+    def _repo(self, **kwargs: object) -> RepoStatus:
         defaults = dict(
             name="owner/repo",
             fido_running=False,
@@ -2974,7 +2979,7 @@ class TestFormatCacheLine:
 
 
 class TestFormatStatusCacheLineIntegration:
-    def _repo(self, **kwargs) -> RepoStatus:
+    def _repo(self, **kwargs: object) -> RepoStatus:
         defaults = dict(
             name="owner/repo",
             fido_running=False,
@@ -3159,7 +3164,7 @@ class TestFormatRateLimitLine:
 
 
 class TestFormatStatusRateLimitIntegration:
-    def _repo(self, **kwargs) -> RepoStatus:
+    def _repo(self, **kwargs: object) -> RepoStatus:
         defaults = dict(
             name="owner/repo",
             fido_running=False,

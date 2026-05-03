@@ -112,7 +112,7 @@ class _FakeAppServer:
         self,
         method: str,
         *,
-        predicate=None,
+        predicate: object = None,
         timeout: float = 30.0,
     ) -> dict:
         self.notification_timeouts.append(timeout)
@@ -383,7 +383,7 @@ class TestCodexAppServerClient:
             def close(self) -> None:
                 self._closed = True
 
-            def __iter__(self):
+            def __iter__(self) -> object:
                 while True:
                     line = self.readline()
                     if not line:
