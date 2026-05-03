@@ -711,8 +711,32 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(400, "invalid json")
             return
 
-        # Route by repo
-        repo_name = payload.get("repository", {}).get("full_name", "")
+        # Route by repo — all keys below are schema-required on real GitHub
+        # webhook payloads.  KeyError means malformed payload → 500 so GitHub
+        # retries and the failure surfaces rather than silently routing to
+        # "unregistered repo" or disabling self-restart.
+        try:
+            repo_name = payload["repository"]["full_name"]
+            # Pre-compute self-restart triggers — needed for both registered and
+            # unregistered repos (_self_restart verifies the runner's git remote).
+            default_branch = payload["repository"]["default_branch"]
+            is_pr_merged = (
+                event == "pull_request"
+                and payload["action"] == "closed"
+                and bool(payload["pull_request"]["merged"])
+            )
+            is_default_push = (
+                event == "push" and payload["ref"] == f"refs/heads/{default_branch}"
+            )
+        except KeyError as exc:
+            log.warning(
+                "webhook: malformed payload, missing key %s (event=%s delivery=%s)",
+                exc,
+                event,
+                delivery,
+            )
+            self._respond(500, "malformed payload")
+            return
         repo_cfg = self.config.repos.get(repo_name)
 
         log.info(
@@ -721,20 +745,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
             payload.get("action", "-"),
             repo_name,
             delivery,
-        )
-
-        # Pre-compute self-restart triggers — needed for both registered and
-        # unregistered repos (_self_restart verifies the runner's git remote).
-        default_branch = payload.get("repository", {}).get("default_branch", "")
-        is_pr_merged = (
-            event == "pull_request"
-            and payload.get("action") == "closed"
-            and bool(payload.get("pull_request", {}).get("merged"))
-        )
-        is_default_push = (
-            event == "push"
-            and bool(default_branch)
-            and payload.get("ref") == f"refs/heads/{default_branch}"
         )
 
         if not repo_cfg:

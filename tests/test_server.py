@@ -168,7 +168,12 @@ def server(tmp_path: Path) -> object:
 class TestSignatureVerification:
     def test_valid_signature(self, server: tuple) -> None:
         url, cfg = server
-        body = json.dumps({"hook_id": 1}).encode()
+        body = json.dumps(
+            {
+                "hook_id": 1,
+                "repository": {"full_name": "other/repo", "default_branch": "main"},
+            }
+        ).encode()
         sig = _sign(body, cfg.secret)
         req = urllib.request.Request(
             url,
@@ -1601,6 +1606,58 @@ class TestInvalidJson:
         assert exc_info.value.code == 400
 
 
+class TestMalformedPayload:
+    """Payloads missing schema-required keys return 500 so GitHub retries."""
+
+    def _post_signed(self, url: str, cfg: Config, event: str, payload: dict) -> int:
+        body = json.dumps(payload).encode()
+        sig = _sign(body, cfg.secret)
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": event,
+                "X-GitHub-Delivery": "test",
+                "X-Hub-Signature-256": sig,
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req)
+        return exc_info.value.code
+
+    def test_missing_repository_returns_500(self, server: tuple) -> None:
+        url, cfg = server
+        assert self._post_signed(url, cfg, "issues", {"action": "opened"}) == 500
+
+    def test_missing_default_branch_returns_500(self, server: tuple) -> None:
+        url, cfg = server
+        assert (
+            self._post_signed(
+                url, cfg, "issues", {"repository": {"full_name": "owner/repo"}}
+            )
+            == 500
+        )
+
+    def test_missing_action_on_pull_request_returns_500(self, server: tuple) -> None:
+        url, cfg = server
+        assert (
+            self._post_signed(
+                url,
+                cfg,
+                "pull_request",
+                {
+                    "repository": {
+                        "full_name": "owner/repo",
+                        "default_branch": "main",
+                    }
+                },
+            )
+            == 500
+        )
+
+
 def _post_webhook(url: str, cfg: Config, event: str, payload: dict) -> int:
     body = json.dumps(payload).encode()
     sig = _sign(body, cfg.secret)
@@ -1664,6 +1721,7 @@ class TestPatchIssueCache:
             "repository": {
                 "full_name": f"{repo_owner}/repo",
                 "owner": {"login": repo_owner},
+                "default_branch": "main",
             },
         }
 
@@ -1753,6 +1811,7 @@ class TestProcessAction:
             "repository": {
                 "full_name": f"{repo_owner}/repo",
                 "owner": {"login": repo_owner},
+                "default_branch": "main",
             },
         }
 
@@ -2606,6 +2665,7 @@ class TestSynchronousPreemption:
             "repository": {
                 "full_name": f"{repo_owner}/repo",
                 "owner": {"login": repo_owner},
+                "default_branch": "main",
             },
         }
 
@@ -2905,6 +2965,7 @@ class TestUntriagedInboxWiring:
             "repository": {
                 "full_name": f"{repo_owner}/repo",
                 "owner": {"login": repo_owner},
+                "default_branch": "main",
             },
         }
 
