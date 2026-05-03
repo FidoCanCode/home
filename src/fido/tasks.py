@@ -817,12 +817,8 @@ def _apply_reorder(
     - Opus-returned items with a null or absent id are treated as new tasks
       and inserted after existing pending tasks (before completed tasks).
     """
-    snapshot_ids = (
-        original_ids
-        if original_ids
-        else frozenset(
-            t["id"] for t in current if t.get("status") != TaskStatus.COMPLETED
-        )
+    snapshot_ids = original_ids or frozenset(
+        t["id"] for t in current if t.get("status") != TaskStatus.COMPLETED
     )
     oracle_result = _apply_reorder_with_oracle(current, ordered_items, snapshot_ids)
     _assert_rescope_matches_oracle(current, ordered_items, snapshot_ids, oracle_result)
