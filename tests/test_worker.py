@@ -14022,8 +14022,17 @@ class TestWorkerThread:
     def test_stop_sets_flag_and_wakes(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
         wt.stop()
-        assert wt._stop is True
+        assert wt._stop.is_set()
         assert wt._wake.is_set()
+
+    def test_was_stopped_false_initially(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        assert wt.was_stopped is False
+
+    def test_was_stopped_true_after_stop(self, tmp_path: Path) -> None:
+        wt = self._make_thread(tmp_path)
+        wt.stop()
+        assert wt.was_stopped is True
 
     # ── loop behaviour ────────────────────────────────────────────────────
 
@@ -14044,7 +14053,7 @@ class TestWorkerThread:
             calls.append(len(calls))
             if len(calls) < 3:
                 return 1
-            wt._stop = True
+            wt._stop.set()
             return 1
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14062,7 +14071,7 @@ class TestWorkerThread:
         wt._wake = mock_wake
 
         def fake_worker_run(self_ignored: object = None) -> int:
-            wt._stop = True
+            wt._stop.set()
             return 0
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14079,7 +14088,7 @@ class TestWorkerThread:
         wt._wake = mock_wake
 
         def fake_worker_run(self_ignored: object = None) -> int:
-            wt._stop = True
+            wt._stop.set()
             return 2
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14165,7 +14174,7 @@ class TestWorkerThread:
             nonlocal call_count
             call_count += 1
             if call_count == 2:
-                wt._stop = True
+                wt._stop.set()
             return 0
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14198,7 +14207,7 @@ class TestWorkerThread:
             import fido.worker as wmod
 
             captured.append(getattr(wmod._thread_repo, "repo_name", None))
-            wt._stop = True
+            wt._stop.set()
             return 0
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14236,7 +14245,7 @@ class TestWorkerThread:
             self_w._session_issue = session_issue
 
         def fake_worker_run(self_w: object) -> int:
-            wt._stop = True
+            wt._stop.set()
             return 0
 
         with (
@@ -14260,7 +14269,7 @@ class TestWorkerThread:
             nonlocal call_count
             call_count += 1
             if call_count >= 2:
-                wt._stop = True
+                wt._stop.set()
             return 0
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14285,7 +14294,7 @@ class TestWorkerThread:
         wt._wake = MagicMock()
 
         def fake_worker_run(self_ignored: object = None) -> int:
-            wt._stop = True
+            wt._stop.set()
             return 2
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14302,7 +14311,7 @@ class TestWorkerThread:
         wt._wake = MagicMock()
 
         def fake_worker_run(self_ignored: object = None) -> int:
-            wt._stop = True
+            wt._stop.set()
             return 0
 
         with patch.object(Worker, "run", fake_worker_run):
@@ -14349,7 +14358,7 @@ class TestWorkerThread:
             call_count += 1
             if call_count == 1:
                 return 1
-            wt._stop = True
+            wt._stop.set()
             return 0
 
         with (
@@ -14404,7 +14413,7 @@ class TestWorkerThread:
             if call_count == 1:
                 self_w._session_issue = 42  # first worker picks issue 42
                 return 1
-            wt._stop = True
+            wt._stop.set()
             return 0
 
         with (
@@ -14434,7 +14443,7 @@ class TestWorkerThread:
         wt = self._make_thread(tmp_path)
         mock_session = MagicMock()
         wt._session = mock_session
-        wt._stop = True  # exit immediately without running any Worker
+        wt._stop.set()  # exit immediately without running any Worker
 
         with patch.object(Worker, "run"):
             wt.run()
@@ -14552,7 +14561,7 @@ class TestWorkerThread:
             self_w._session_issue = session_issue
 
         def fake_worker_run(self_w: object) -> int:
-            wt._stop = True
+            wt._stop.set()
             return 0
 
         with (
@@ -14657,7 +14666,7 @@ class TestWorkerThread:
             call_count += 1
             if call_count == 1:
                 raise ContextOverflowError("context window exceeded")
-            wt._stop = True
+            wt._stop.set()
             return 0
 
         with (
@@ -14839,7 +14848,7 @@ class TestWorkerThread:
             received_repo_cfg.append(repo_cfg)
 
         def fake_worker_run(self_w: object) -> int:
-            wt._stop = True
+            wt._stop.set()
             return 0
 
         with (

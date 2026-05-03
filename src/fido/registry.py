@@ -178,7 +178,7 @@ class WorkerRegistry:
         (``Launch`` vs ``Rescue``) into the extracted ``registry_fsm.transition``
         and dispatches on the returned state, replacing the hand-written
         ``old_thread is not None and not old_thread.is_alive() and not
-        old_thread._stop`` guard entirely.
+        old_thread.was_stopped`` guard entirely.
         """
         provider = None
         session_issue = None
@@ -186,9 +186,7 @@ class WorkerRegistry:
         if old_thread is None:
             # No predecessor — initial start: Absent → Active.
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
-        elif (
-            not old_thread.is_alive() and not old_thread._stop  # pyright: ignore[reportPrivateUsage]
-        ):
+        elif not old_thread.is_alive() and not old_thread.was_stopped:
             # Crashed predecessor — rescue the live provider:
             # Active → Crashed (ThreadDies) → Active (Rescue).
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.ThreadDies())
@@ -205,7 +203,7 @@ class WorkerRegistry:
             if provider is not None:
                 provider.agent.recover_session()
         elif not old_thread.is_alive():
-            # Orderly-stopped predecessor (_stop is True):
+            # Orderly-stopped predecessor (was_stopped is True):
             # Active → Stopped (ThreadStops) → Active (Launch).
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.ThreadStops())
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
