@@ -22,7 +22,6 @@ from fido.provider import (
 )
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
-from fido.rocq import replied_comment_claims as oracle
 from fido.rocq import reply_outbox_protocol as reply_outbox_oracle
 from fido.rocq import thread_auto_resolve as thread_resolve_oracle
 from fido.rocq import webhook_command_translation as wct_oracle
@@ -34,12 +33,135 @@ from fido.store import (
     ReplyPromiseRecord,
     append_reply_promise_markers,
 )
+from fido.synthesis import Insight
+from fido.synthesis_call import (
+    SynthesisExhaustedError,
+    call_failure_explanation,
+    call_synthesis,
+)
+from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
-from fido.types import ActiveIssue, ActivePR, TaskType
+from fido.types import ActiveIssue, ActivePR, RescopeIntent, TaskType
 
 log = logging.getLogger(__name__)
 
 _FIDO_LOGINS = frozenset({"fidocancode", "fido-can-code"})
+
+
+class _BackgroundRescopeTrigger:
+    """RescopeTrigger implementation backed by :func:`_reorder_tasks_background`.
+
+    Constructed in :func:`reply_to_comment` and :func:`reply_to_issue_comment`
+    so :class:`~fido.synthesis_executor.SynthesisExecutor` can trigger a
+    background rescope without needing direct access to the reorder machinery.
+
+    Preempt-always semantics (#1230): a comment never directly preempts the
+    current task — it always registers its intent via the rescope trigger,
+    and the rescope decides whether the in-progress task needs to be
+    preempted, removed, modified, or left alone.  Triage is fast and
+    informed but not work-heavy; the worker thread owns the actual task
+    state mutations after the rescope reducer commits.
+    """
+
+    def __init__(
+        self,
+        work_dir: Path,
+        config: Config,
+        gh: GitHub,
+        repo_cfg: RepoConfig | None = None,
+        registry: WorkerRegistry | None = None,
+        agent: ProviderAgent | None = None,
+        prompts: Prompts | None = None,
+    ) -> None:
+        self._work_dir = work_dir
+        self._config = config
+        self._gh = gh
+        self._repo_cfg = repo_cfg
+        self._registry = registry
+        self._agent = agent
+        self._prompts = prompts
+
+    def trigger_rescope(self, intent: RescopeIntent) -> None:
+        """Trigger :func:`_reorder_tasks_background` with the given rescope intent.
+
+        The intent's *change_request* text is logged for traceability and used
+        as the commit summary passed to the reorder call so Opus can see what
+        changed.  The full intent (including *comment_id* and *timestamp*) is
+        forwarded so the rescoper can reference the originating comment and
+        accumulate multiple concurrent intents correctly.
+        """
+        log.info(
+            "RescopeTrigger: triggering background rescope for comment %d: %s",
+            intent.comment_id,
+            intent.change_request[:80],
+        )
+        _reorder_tasks_background(
+            self._work_dir,
+            intent.change_request,
+            self._config,
+            self._gh,
+            self._repo_cfg,
+            self._registry,
+            agent=self._agent,
+            prompts=self._prompts,
+            intents=[intent],
+        )
+
+
+_INSIGHT_REPO = "FidoCanCode/home"
+_INSIGHT_LABEL = "Insight"
+
+
+class _GitHubInsightFiler:
+    """InsightFiler implementation that creates GitHub issues on :data:`_INSIGHT_REPO`.
+
+    Idempotent: before filing, searches for an existing issue carrying the
+    ``<!-- insight-source: {comment_id} -->`` marker in its body.  If one is
+    found the filing is skipped so replaying the same comment never creates
+    duplicate insights.
+    """
+
+    def __init__(self, gh: GitHub) -> None:
+        self._gh = gh
+
+    def file_insight(self, insight: Insight, target: CommentTarget) -> None:
+        """File *insight* as a GitHub issue against :data:`_INSIGHT_REPO`.
+
+        Skips creation if an issue with the idempotency marker for
+        *target.comment_id* already exists.
+        """
+        marker = f"<!-- insight-source: {target.comment_id} -->"
+        existing = self._gh.search_issues(_INSIGHT_REPO, f'"{marker}" in:body is:issue')
+        if existing:
+            log.info(
+                "insight already filed for comment %d — skipping: %s",
+                target.comment_id,
+                existing[0].get("html_url", ""),
+            )
+            return
+        source_link = _insight_source_link(target)
+        title = f"Insight: {insight.title}"
+        body = f"{insight.hook}\n\n{insight.why}\n\nSource: {source_link}\n\n{marker}"
+        url = self._gh.create_issue(_INSIGHT_REPO, title, body, labels=[_INSIGHT_LABEL])
+        log.info("filed insight issue for comment %d: %s", target.comment_id, url)
+
+
+def _insight_source_link(target: CommentTarget) -> str:
+    """Return a GitHub URL pointing to the originating comment.
+
+    Uses the ``discussion_r{comment_id}`` anchor for review comments and
+    ``issuecomment-{comment_id}`` for top-level issue/PR comments.
+    """
+    if target.comment_type == "pulls":
+        return (
+            f"https://github.com/{target.repo}/pull/{target.pr}"
+            f"#discussion_r{target.comment_id}"
+        )
+    return (
+        f"https://github.com/{target.repo}/issues/{target.pr}"
+        f"#issuecomment-{target.comment_id}"
+    )
+
 
 # Per-work_dir coalescing state for _reorder_tasks_background.
 # Ensures at most one Opus call in-flight + one pending per repo.
@@ -554,163 +676,6 @@ def _assert_reply_outbox_claimed_visible_effect(
     ), "reply_outbox_protocol: claim_before_post violated"
 
 
-def _deferred_issue_key(promise_ids: Iterable[str]) -> str | None:
-    """Return the stable idempotence key for a deferred issue side effect."""
-    normalized = tuple(
-        sorted(dict.fromkeys(promise_id for promise_id in promise_ids if promise_id))
-    )
-    if not normalized:
-        return None
-    return "deferred-issue:" + ",".join(normalized)
-
-
-def _assert_reply_outbox_opens_deferred_issue(
-    store: FidoStore,
-    *,
-    idempotence_key: str,
-    issue_url: str,
-    promise_ids: Iterable[str],
-) -> None:
-    """Crash if Python opens a deferred issue outside the D14 protocol."""
-    _assert_reply_outbox_records_deferred_issue(
-        store,
-        idempotence_key=idempotence_key,
-        issue_url=issue_url,
-        promise_ids=promise_ids,
-        label="deferred issue",
-    )
-
-
-def _assert_reply_outbox_reuses_deferred_issue(
-    store: FidoStore,
-    *,
-    idempotence_key: str,
-    issue_url: str,
-    promise_ids: Iterable[str],
-) -> None:
-    """Crash if Python reuses a deferred issue outside the D14 protocol."""
-    record = store.deferred_issue(idempotence_key)
-    assert record is not None and record.issue_url == issue_url, (
-        "reply_outbox_protocol: missing durable deferred issue record"
-    )
-    opened, effect_id, issue_id = _assert_reply_outbox_records_deferred_issue(
-        store,
-        idempotence_key=idempotence_key,
-        issue_url=issue_url,
-        promise_ids=promise_ids,
-        label="deferred issue reuse",
-    )
-    replayed = reply_outbox_oracle.record_deferred_issue_opened(
-        effect_id,
-        issue_id + 1,
-        opened,
-    )
-    assert replayed == opened and isinstance(
-        reply_outbox_oracle.outbox_decision(opened, effect_id),
-        reply_outbox_oracle.ReuseDeliveredEffect,
-    ), "reply_outbox_protocol: deferred_issue_is_idempotent violated"
-
-
-def _assert_reply_outbox_records_deferred_issue(
-    store: FidoStore,
-    *,
-    idempotence_key: str,
-    issue_url: str,
-    promise_ids: Iterable[str],
-    label: str,
-) -> tuple[reply_outbox_oracle.ProtocolState, int, int]:
-    effect_id = _reply_outbox_text_positive_id(idempotence_key)
-    issue_id = _reply_outbox_text_positive_id(issue_url)
-    opened: reply_outbox_oracle.ProtocolState | None = None
-    for promise_id in promise_ids:
-        promise = store.promise(promise_id)
-        assert promise is not None, (
-            f"reply_outbox_protocol: missing promise {promise_id!r} for deferred issue"
-        )
-        state, origin, promise_key, _reply_effect_id = _reply_outbox_prepared_state(
-            promise
-        )
-        prepared = reply_outbox_oracle.prepare_deferred_issue(
-            effect_id,
-            origin,
-            promise_key,
-            state,
-        )
-        assert prepared is not None, (
-            f"reply_outbox_protocol: prepare_deferred_issue rejected {label}"
-        )
-        assert isinstance(
-            reply_outbox_oracle.outbox_decision(prepared, effect_id),
-            reply_outbox_oracle.EmitEffect,
-        ), "reply_outbox_protocol: deferred issue must be emitted before opening"
-        claimed = reply_outbox_oracle.claim_outbox_effect(effect_id, prepared)
-        assert claimed is not None, (
-            f"reply_outbox_protocol: claim_outbox_effect rejected {label}"
-        )
-        opened = reply_outbox_oracle.record_deferred_issue_opened(
-            effect_id,
-            issue_id,
-            claimed,
-        )
-        assert opened is not None, (
-            f"reply_outbox_protocol: record_deferred_issue_opened rejected {label}"
-        )
-        assert (
-            reply_outbox_oracle.live_issue_for_effect(opened, effect_id) == issue_id
-        ), "reply_outbox_protocol: deferred_issue_is_idempotent violated"
-    assert opened is not None, (
-        "reply_outbox_protocol: deferred issue requires at least one promise"
-    )
-    return opened, effect_id, issue_id
-
-
-def _open_defer_issue_idempotent(
-    repo_cfg: RepoConfig,
-    gh: Any,
-    repo: str,
-    pr_url: str,
-    title: str,
-    comment: str,
-    promise_ids: Iterable[str],
-) -> str:
-    """Create or reuse the deferred tracking issue for this reply promise."""
-    issue_body = f"Deferred from {pr_url}\n\n> {comment}" if pr_url else comment
-    normalized_promise_ids = tuple(
-        sorted(dict.fromkeys(promise_id for promise_id in promise_ids if promise_id))
-    )
-    key = _deferred_issue_key(normalized_promise_ids)
-    store = FidoStore(repo_cfg.work_dir)
-    if key is not None:
-        existing = store.deferred_issue(key)
-        if existing is not None:
-            _assert_reply_outbox_reuses_deferred_issue(
-                store,
-                idempotence_key=key,
-                issue_url=existing.issue_url,
-                promise_ids=normalized_promise_ids,
-            )
-            log.info(
-                "reusing deferred tracking issue for %s: %s", key, existing.issue_url
-            )
-            return existing.issue_url
-    url = _open_defer_issue(gh, repo, pr_url, title, comment)
-    if key is not None:
-        _assert_reply_outbox_opens_deferred_issue(
-            store,
-            idempotence_key=key,
-            issue_url=url,
-            promise_ids=normalized_promise_ids,
-        )
-        store.record_deferred_issue(
-            idempotence_key=key,
-            repo=repo,
-            title=title,
-            body=issue_body,
-            issue_url=url,
-        )
-    return url
-
-
 def _posted_comment_id(posted: object) -> int | None:
     """Return the GitHub comment id from a post response, when available."""
     if not isinstance(posted, dict):
@@ -856,76 +821,18 @@ def _queued_pr_comment_action(
     )
 
 
-def _review_outcome(category: str) -> oracle.ReviewReplyOutcome:
-    return {
-        "ACT": oracle.ReviewAct(),
-        "DO": oracle.ReviewDo(),
-        "ASK": oracle.ReviewAsk(),
-        "ANSWER": oracle.ReviewAnswer(),
-        "DEFER": oracle.ReviewDefer(),
-        "DUMP": oracle.ReviewDump(),
-    }[category]
-
-
-def _bot_feedback_outcome(
-    category: str,
-) -> thread_resolve_oracle.BotFeedbackOutcome | None:
-    return {
-        "DO": thread_resolve_oracle.BotFeedbackDo(),
-        "DUMP": thread_resolve_oracle.BotFeedbackDump(),
-    }.get(category)
-
-
-def bot_feedback_creates_tasks(category: str) -> bool:
-    """Return whether a bot feedback outcome should create task objects."""
-    outcome = _bot_feedback_outcome(category)
-    if outcome is None:
-        return False
-    return isinstance(
-        thread_resolve_oracle.bot_feedback_decision(outcome),
-        thread_resolve_oracle.TakeBotSuggestion,
-    )
-
-
-def bot_feedback_resolves_thread(category: str) -> bool:
-    """Return whether a bot feedback outcome should resolve the thread."""
-    outcome = _bot_feedback_outcome(category)
-    if outcome is None:
-        return False
-    return isinstance(
-        thread_resolve_oracle.bot_feedback_decision(outcome),
-        thread_resolve_oracle.DumpBotSuggestionAndClose,
-    )
-
-
-def review_outcome_creates_tasks(category: str, *, is_bot: bool = False) -> bool:
-    """Return whether a review reply outcome should create task objects."""
-    if is_bot:
-        return bot_feedback_creates_tasks(category)
-    if category not in {"ACT", "DO", "ASK", "ANSWER", "DEFER", "DUMP"}:
-        return False
-    return bool(oracle.review_outcome_creates_tasks(_review_outcome(category)))
-
-
-def review_outcome_resolves_thread(category: str, *, is_bot: bool = False) -> bool:
-    """Return whether a review reply outcome should resolve the thread."""
-    if is_bot:
-        return bot_feedback_resolves_thread(category)
-    if category not in {"ACT", "DO", "ASK", "ANSWER", "DEFER", "DUMP"}:
-        return False
-    return bool(oracle.review_outcome_resolves_thread(_review_outcome(category)))
-
-
 def reply_outcome_creates_tasks(
     category: str,
     *,
-    thread: dict[str, Any] | None,
+    thread: dict[str, Any] | None = None,
     is_bot: bool = False,
 ) -> bool:
-    """Return whether a reply outcome should create task objects."""
-    if thread is not None:
-        return review_outcome_creates_tasks(category, is_bot=is_bot)
-    return category not in ("DUMP", "ANSWER", "ASK", "DEFER")
+    """Return whether a reply outcome should create task objects.
+
+    Synthesis produces ``"ACT"`` (change_request present) or ``"ANSWER"``
+    (no scope change).  Only ``"ACT"`` creates tasks.
+    """
+    return category == "ACT"
 
 
 def queue_reply_tasks(
@@ -1452,56 +1359,6 @@ def _load_persona(config: Config) -> str:
         return ""
 
 
-def _open_defer_issue(gh: Any, repo: str, pr_url: str, title: str, comment: str) -> str:
-    """Create a tracking issue for a DEFER triage result.
-
-    Returns the new issue URL.  Raises on any creation failure so the caller
-    fails closed rather than crafting a reply that references a missing issue.
-    """
-    issue_body = f"Deferred from {pr_url}\n\n> {comment}" if pr_url else comment
-    url = gh.create_issue(repo, title, issue_body)
-    log.info("opened tracking issue for DEFER: %s", url)
-    return url
-
-
-def maybe_react(
-    comment_body: str,
-    comment_id: int | str,
-    comment_type: str,
-    repo: str,
-    config: Config,
-    gh: GitHub,
-    *,
-    agent: ProviderAgent | None = None,
-    prompts: Prompts | None = None,
-) -> None:
-    """Let Fido decide whether to react to a comment with an emoji.
-
-    comment_type: 'pulls' for review comments, 'issues' for issue comments.
-    """
-    if agent is None:
-        agent = _configured_agent(config, config.repos[repo])
-    if prompts is None:
-        prompts = Prompts(_load_persona(config))
-    reaction = (
-        agent.run_turn(prompts.react_prompt(comment_body), model=agent.voice_model)
-        .lower()
-        .split("\n")[0]
-        .strip()
-    )
-
-    valid = {"+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"}
-    if reaction not in valid:
-        log.debug("fido chose not to react (got: %s)", reaction)
-        return
-
-    log.info("fido reacts with %s to comment %s", reaction, comment_id)
-    try:
-        gh.add_reaction(repo, comment_type, comment_id, reaction)
-    except Exception:
-        log.exception("failed to post reaction")
-
-
 def reply_to_comment(
     action: Action,
     config: Config,
@@ -1510,12 +1367,16 @@ def reply_to_comment(
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
+    registry: WorkerRegistry | None = None,
 ) -> tuple[str, list[str]]:
-    """Triage a comment via Opus, generate a reply via Opus, post it.
+    """Handle a review comment via the synthesis LLM call, post reply.
 
-    Returns (triage_category, task_titles).
-    task_titles is a list: one entry for non-task categories (used as reply
-    context), or one or more entries for ACT/DO (each becomes a task).
+    Returns (category, task_titles) where category is derived from the
+    synthesis response: ``"ACT"`` when a change_request is present,
+    ``"ANSWER"`` otherwise.  task_titles is ``[change_request]`` for ACT
+    (the caller passes this to :func:`queue_reply_tasks` to create a task)
+    or ``[]`` for ANSWER.
+
     Uses the caller's SQLite reply claim to prevent concurrent replies.
     Raises on reply-post failure so callers fail closed.
     """
@@ -1575,110 +1436,130 @@ def reply_to_comment(
             )
 
     # Capture Fido reply IDs from the initial snapshot so we can detect new
-    # replies posted by concurrent handlers during the triage + generation
-    # window (compared against the re-fetched thread below).
+    # replies posted by concurrent handlers during the synthesis window
+    # (compared against the re-fetched thread below).
     initial_fido_ids: set[int] = {
         c["id"] for c in thread_comments if c.get("author", "").lower() in _FIDO_LOGINS
     }
 
-    final_comment_id = info.get("comment_id")
-
-    # Enrich context with sibling threads when the comment needs more context
-    if needs_more_context(comment, agent=agent) and info.get("repo") and info.get("pr"):
-        siblings = gh.fetch_sibling_threads(info["repo"], info["pr"])
-        if siblings:
-            context["sibling_threads"] = siblings
-            log.info(
-                "needs-more-context comment — fetched %d sibling thread(s) for context",
-                len(siblings),
+    # Add eyes reaction immediately at pickup to signal work-in-progress.
+    # Best-effort: never fail the reply if the reaction post fails.
+    _eyes_posted = False
+    if info.get("repo") and info.get("comment_id"):
+        try:
+            gh.add_reaction(
+                info["repo"],
+                "pulls",
+                info["comment_id"],
+                "eyes",
             )
-
-    # Step 1: Haiku triage (on the triggering comment to determine category)
-    category, titles = _triage(
-        comment, action.is_bot, context, agent=agent, prompts=prompts
-    )
-    log.info("triage: %s — %s", category, titles)
-
-    # Step 1b: Derive task titles from the full comment chain for action
-    # categories.  The final triggering comment is the ACT source, while prior
-    # comments provide the context needed for terse follow-ups.
-    if category in ("ACT", "DO"):
-        log.info("deriving task title from comment chain")
-        titles = [
-            _comment_chain_action_title(
-                thread_comments,
-                final_comment_id if isinstance(final_comment_id, int) else None,
-                comment,
-                titles,
-                agent=agent,
+            log.info("added eyes reaction to comment %s", info["comment_id"])
+            _eyes_posted = True
+        except Exception:
+            log.exception(
+                "failed to add eyes reaction to comment %s — continuing",
+                info["comment_id"],
             )
-        ]
-
-    # Step 2: For DEFER, open a tracking issue before crafting the reply.
-    # Raises on failure so we don't craft a reply referencing a missing issue.
-    issue_url: str | None = None
-    promise_ids = _reply_promise_ids(context)
-    if category == "DEFER" and info.get("repo"):
-        pr_url = f"https://github.com/{info['repo']}/pull/{info['pr']}"
-        issue_url = _open_defer_issue_idempotent(
-            repo_cfg, gh, info["repo"], pr_url, titles[0], comment, promise_ids
-        )
-
-    # Step 3: Opus reply based on triage
-    instr = prompts.reply_instruction(
-        category, comment, ", ".join(titles), context, issue_url=issue_url
-    )
 
     issue_ctx, pr_ctx = _load_active_context_for_rescope(
         repo_cfg.work_dir, repo_cfg.name, gh
     )
 
+    # Build the executor + target up-front so the failure path can clean
+    # up the eyes reaction without duplicating the cleanup logic.  The
+    # success path uses the same instance below in execute_effects_only.
+    rescope_trigger = _BackgroundRescopeTrigger(
+        repo_cfg.work_dir,
+        config,
+        gh,
+        repo_cfg=repo_cfg,
+        registry=registry,
+        agent=agent,
+        prompts=prompts,
+    )
+    executor = SynthesisExecutor(
+        gh,
+        rescope=rescope_trigger,
+        insight_filer=_GitHubInsightFiler(gh),
+        fido_logins=_FIDO_LOGINS,
+    )
+    target: CommentTarget | None = None
+    if isinstance(info.get("comment_id"), int):
+        target = CommentTarget(
+            repo=str(info.get("repo", "")),
+            pr=int(info.get("pr", 0)),
+            comment_id=int(info["comment_id"]),
+            comment_type="pulls",
+        )
+
     log.info(
-        "reply generator: requesting %s reply for PR #%s comment %s",
-        category,
+        "synthesis: calling for PR #%s comment %s",
         info["pr"],
         info["comment_id"],
     )
-    body = safe_voice_turn(
-        agent,
-        prompts.persona_wrap(instr),
-        model=agent.voice_model,
-        system_prompt=prompts.reply_system_prompt(issue=issue_ctx, pr=pr_ctx),
-        log_prefix="reply_to_comment",
-    )
+    try:
+        synthesis_response = call_synthesis(
+            comment,
+            is_bot=action.is_bot,
+            context=context or None,
+            issue=issue_ctx,
+            pr=pr_ctx,
+            agent=agent,
+            prompts=prompts,
+        )
+    except SynthesisExhaustedError:
+        log.warning(
+            "synthesis exhausted retries for comment %s — falling back to "
+            "LLM-generated failure explanation",
+            info.get("comment_id"),
+        )
+        try:
+            synthesis_response = call_failure_explanation(
+                comment, agent=agent, prompts=prompts
+            )
+        except SynthesisExhaustedError:
+            # Even the fallback explanation exhausted retries.  Best-effort
+            # clear the eyes reaction so it does not sit forever as a false
+            # "Fido is looking" signal, then re-raise.
+            if _eyes_posted and target is not None:
+                executor.remove_eyes_reaction(target)
+            raise
     log.info(
-        "reply generator: returned %d chars (preview=%r)",
-        len(body),
-        body[:80],
+        "synthesis: returned (emoji=%r change_request=%r preview=%r)",
+        synthesis_response.emoji,
+        synthesis_response.change_request,
+        synthesis_response.reply_text[:80],
     )
+    body = synthesis_response.reply_text
 
-    # Re-fetch the thread right before posting so the edit-vs-post decision
-    # uses current GitHub state rather than the snapshot taken before triage.
-    # Concurrent handlers may have posted replies during the triage + generation
-    # window; without a re-fetch the stale snapshot leads to duplicate posts.
+    # Derive (category, titles) from synthesis response for caller's
+    # queue_reply_tasks call.
+    if synthesis_response.change_request is not None:
+        category: str = "ACT"
+        titles: list[str] = [synthesis_response.change_request]
+    else:
+        category = "ANSWER"
+        titles = []
+
+    # Re-fetch the thread right before posting so the concurrent-reply check
+    # uses current GitHub state rather than the snapshot taken before synthesis.
     if info.get("repo") and info.get("pr") and info.get("comment_id"):
         refreshed = gh.fetch_comment_thread(
             info["repo"], info["pr"], info["comment_id"]
         )
         if refreshed:
-            thread_comments = list(refreshed)
+            thread_comments = refreshed
             log.info(
                 "re-fetched %d comment(s) in thread before posting",
                 len(thread_comments),
             )
 
     # Skip posting if a concurrent handler already replied to *this specific*
-    # comment during triage.  A Fido reply with ``in_reply_to_id`` matching
+    # comment during synthesis.  A Fido reply with ``in_reply_to_id`` matching
     # this comment id, that wasn't in the initial snapshot, means another
     # handler handled it — adding a second reply would be a duplicate.
     #
-    # The check used to count *any* new Fido reply in the thread, but that
-    # false-positived on multi-inline-comment reviews: sibling handlers
-    # running in parallel posted to *their own* comments, and the slowest
-    # handler saw those siblings in the re-fetched snapshot, mistakenly
-    # concluded "someone replied to MY comment", and silently dropped its
-    # own reply while still ack'ing the promise.  Closes #1004; mirrors
-    # the original double-post fix in #518.
+    # Closes #1004; mirrors the original double-post fix in #518.
     target_id = info.get("comment_id")
     current_fido_target_ids: set[int] = {
         c["id"]
@@ -1695,6 +1576,7 @@ def reply_to_comment(
             FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
         return (category, titles)
 
+    promise_ids = _reply_promise_ids(context)
     body = append_reply_promise_markers(body, promise_ids)
     root_comment_id = (
         thread_comments[0]["id"] if thread_comments else info["comment_id"]
@@ -1734,48 +1616,15 @@ def reply_to_comment(
     if direct_promise is not None:
         FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
-    # Maybe react
-    maybe_react(
-        comment,
-        info["comment_id"],
-        "pulls",
-        info.get("repo", ""),
-        config,
-        gh,
-        agent=agent,
-        prompts=prompts,
-    )
-
-    if review_outcome_resolves_thread(category, is_bot=action.is_bot) and info.get(
-        "comment_id"
-    ):
-        _try_resolve_thread(info, gh)
+    # Execute post-reply effects: remove eyes, add final emoji, trigger
+    # rescope.  Only runs if we have a real comment_id to react on (the
+    # ``target`` was constructed up-front for the same reason).  Reuses the
+    # ``executor`` instance built before the synthesis call so the failure
+    # path could share its eyes-removal helper.
+    if target is not None:
+        executor.execute_effects_only(synthesis_response, target)
 
     return (category, titles)
-
-
-def _try_resolve_thread(info: dict[str, Any], gh: GitHub) -> None:
-    """Best-effort resolve the review thread containing a comment."""
-    repo = info.get("repo")
-    pr = info.get("pr")
-    comment_id = info.get("comment_id")
-    if not isinstance(repo, str) or not isinstance(comment_id, int):
-        return
-    if pr is None:
-        return
-    if not isinstance(pr, int):
-        try:
-            pr = int(pr)
-        except TypeError, ValueError:
-            return
-    owner, repo_name = repo.split("/", 1)
-    for node in gh.get_review_threads(owner, repo_name, pr):
-        if node.get("isResolved"):
-            continue
-        comments = node.get("comments", {}).get("nodes", [])
-        if any(c.get("databaseId") == comment_id for c in comments):
-            gh.resolve_thread(node["id"])
-            return
 
 
 def reply_to_review(
@@ -1842,187 +1691,6 @@ def needs_more_context(
     return answer.startswith("YES")
 
 
-_MAX_TITLE_LEN = 80
-
-
-def _shorten_title_if_needed(
-    title: str, *, agent: ProviderAgent, log_prefix: str
-) -> str:
-    """Shorten an overlong task title while preserving imperative wording."""
-    result = title
-    for _ in range(3):
-        if len(result) <= _MAX_TITLE_LEN:
-            break
-        log.info(
-            "%s: title too long (%d chars), requesting shorten",
-            log_prefix,
-            len(result),
-        )
-        shortened = safe_voice_turn(
-            agent,
-            f"{NO_TOOLS_CLAUSE}\n\n"
-            f"Shorten this task title to under {_MAX_TITLE_LEN} characters while keeping it imperative. "
-            f"Reply with ONLY the shortened title.\n\nTitle: {result}",
-            model=agent.voice_model,
-            log_prefix=f"{log_prefix}/shorten",
-        )
-        result = shortened.strip()
-        log.info(
-            "%s: shorten returned %d chars (preview=%r)",
-            log_prefix,
-            len(result),
-            result[:60],
-        )
-    return result[:_MAX_TITLE_LEN]
-
-
-def _summarize_as_action_item(
-    comment_body: str, *, agent: ProviderAgent | None = None
-) -> str:
-    """Ask Opus to convert a comment into a short imperative action-item title.
-
-    If the result is too long, asks the provider agent to shorten it up to 3 times before
-    falling back to hard truncation.
-    """
-    if agent is None:
-        raise ValueError("_summarize_as_action_item requires agent")
-    prompt = (
-        f"{NO_TOOLS_CLAUSE}\n\n"
-        "Convert this PR review comment into a short, imperative task title starting with a verb. "
-        "Reply with ONLY the title — no category prefix, no punctuation at the end.\n\n"
-        f"Comment: {comment_body}"
-    )
-    log.info("summarize-action-item: requesting initial title from opus")
-    raw = safe_voice_turn(
-        agent, prompt, model=agent.voice_model, log_prefix="_summarize_as_action_item"
-    )
-    result = raw.strip()
-    log.info(
-        "summarize-action-item: returned %d chars (preview=%r)",
-        len(result),
-        result[:60],
-    )
-    return _shorten_title_if_needed(
-        result, agent=agent, log_prefix="_summarize_as_action_item"
-    )
-
-
-def _comment_chain_action_title(
-    thread_comments: list[dict[str, Any]],
-    final_comment_id: int | None,
-    final_comment_body: str,
-    triage_titles: list[str],
-    *,
-    agent: ProviderAgent | None = None,
-) -> str:
-    """Ask Opus for a task title using the whole comment chain."""
-    if agent is None:
-        raise ValueError("_comment_chain_action_title requires agent")
-    chain = list(thread_comments)
-    if final_comment_id is not None and not any(
-        c.get("id") == final_comment_id for c in chain
-    ):
-        chain.append(
-            {
-                "id": final_comment_id,
-                "author": "commenter",
-                "body": final_comment_body,
-            }
-        )
-    if not chain:
-        chain.append(
-            {
-                "id": final_comment_id,
-                "author": "commenter",
-                "body": final_comment_body,
-            }
-        )
-    lines: list[str] = []
-    for index, item in enumerate(chain, start=1):
-        marker = " (FINAL ACT COMMENT)" if item.get("id") == final_comment_id else ""
-        user = item.get("user")
-        user_login = user.get("login") if isinstance(user, dict) else None
-        author = item.get("author") or user_login or "unknown"
-        body = str(item.get("body", "") or "")
-        lines.append(f"{index}. {author}{marker}: {body}")
-    suggested = "\n".join(f"- {title}" for title in triage_titles if title.strip())
-    prompt = (
-        f"{NO_TOOLS_CLAUSE}\n\n"
-        "Convert this PR review comment chain into a short, imperative task title "
-        "starting with a verb. The comment marked FINAL ACT COMMENT is the comment "
-        "that produced the ACT decision; use the earlier comments only as context. "
-        "Preserve the concrete action from the final comment. Reply with ONLY the "
-        "title — no category prefix, no punctuation at the end.\n\n"
-        f"Suggested ACT title(s) from triage:\n{suggested or '- none'}\n\n"
-        "Comment chain:\n" + "\n".join(lines)
-    )
-    log.info("comment-chain-action-title: requesting title from opus")
-    raw = safe_voice_turn(
-        agent, prompt, model=agent.voice_model, log_prefix="_comment_chain_action_title"
-    )
-    result = raw.strip()
-    log.info(
-        "comment-chain-action-title: returned %d chars (preview=%r)",
-        len(result),
-        result[:60],
-    )
-    return _shorten_title_if_needed(
-        result, agent=agent, log_prefix="_comment_chain_action_title"
-    )
-
-
-def _triage(
-    comment_body: str,
-    is_bot: bool,
-    context: dict[str, Any] | None = None,
-    *,
-    agent: ProviderAgent | None = None,
-    prompts: Prompts | None = None,
-) -> tuple[str, list[str]]:
-    """Ask Opus to triage a comment. Returns (category, titles).
-
-    A comment may produce zero or many tasks: titles is a list with one entry
-    for ANSWER/ASK/DEFER/DUMP (used as reply context), or one or more entries
-    for ACT/DO (each becomes a separate work-queue task).
-    """
-    if agent is None:
-        raise ValueError("_triage requires agent")
-    if prompts is None:
-        prompts = Prompts("")
-    prompt = prompts.triage_prompt(comment_body, is_bot, context)
-    log.info("triage classifier: requesting category from opus")
-    text = agent.run_turn(prompt, model=agent.voice_model)
-    log.info(
-        "triage classifier: returned %d chars (preview=%r)",
-        len(text or ""),
-        (text or "")[:80],
-    )
-    category: str | None = None
-    titles: list[str] = []
-    for line in text.splitlines() if text else []:
-        if ":" not in line:
-            continue
-        prefix, title = line.split(":", 1)
-        prefix = prefix.strip().upper()
-        title = title.strip()
-        if prefix not in ("ACT", "ASK", "ANSWER", "DO", "DEFER", "DUMP"):
-            continue
-        if category is None:
-            category = prefix
-        if prefix == category and title:
-            titles.append(title)
-    if category is not None and titles:
-        return category, titles
-    log.warning(
-        "triage classifier: unparseable response, falling back to %s + summarize",
-        "DO" if is_bot else "ACT",
-    )
-    # Fallback: ACT for humans, DO for bots; summarize comment into action item
-    category = "DO" if is_bot else "ACT"
-    title = _summarize_as_action_item(comment_body, agent=agent)
-    return category, [title]
-
-
 def reply_to_issue_comment(
     action: Action,
     config: Config,
@@ -2031,8 +1699,13 @@ def reply_to_issue_comment(
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
+    registry: WorkerRegistry | None = None,
 ) -> tuple[str, list[str]]:
-    """Triage and reply to a top-level PR comment (issue_comment event).
+    """Handle a top-level PR comment via the synthesis LLM call, post reply.
+
+    Returns (category, task_titles) where category is derived from the
+    synthesis response: ``"ACT"`` when a change_request is present,
+    ``"ANSWER"`` otherwise.
 
     Raises on reply-post failure so callers fail closed.
     """
@@ -2083,52 +1756,102 @@ def reply_to_issue_comment(
                 exc_info=True,
             )
 
-    # Merge conversation context into triage context
+    # Merge conversation context into synthesis context
     if conversation_context:
         context["conversation"] = conversation_context
 
-    category, titles = _triage(
-        comment,
-        action.is_bot,
-        context or None,
-        agent=agent,
-        prompts=prompts,
-    )
-    log.info("issue comment triage: %s — %s", category, titles)
-
-    # For DEFER, open a tracking issue before crafting the reply.
-    # Raises on failure so we don't craft a reply referencing a missing issue.
-    issue_url: str | None = None
-    promise_ids = _reply_promise_ids(context)
-    if category == "DEFER":
-        pr_url = f"https://github.com/{repo_full}/pull/{number}" if number else ""
-        issue_url = _open_defer_issue_idempotent(
-            repo_cfg, gh, repo_full, pr_url, titles[0], comment, promise_ids
-        )
-
-    instr = prompts.issue_reply_instruction(
-        category, comment, ", ".join(titles), action.context, issue_url=issue_url
-    )
+    # Add eyes reaction immediately at pickup to signal work-in-progress.
+    # Best-effort: never fail the reply if the reaction post fails.
+    _eyes_posted_issue = False
+    _cid = context.get("comment_id")
+    if _cid and repo_full:
+        try:
+            gh.add_reaction(repo_full, "issues", _cid, "eyes")
+            log.info("added eyes reaction to issue comment %s on PR #%s", _cid, number)
+            _eyes_posted_issue = True
+        except Exception:
+            log.exception(
+                "failed to add eyes reaction to issue comment %s — continuing", _cid
+            )
 
     issue_ctx, pr_ctx = _load_active_context_for_rescope(
         repo_cfg.work_dir, repo_cfg.name, gh
     )
 
-    log.info("generating %s reply for issue comment on PR #%s", category, number)
-    body = safe_voice_turn(
-        agent,
-        prompts.persona_wrap(instr),
-        model=agent.voice_model,
-        system_prompt=prompts.reply_system_prompt(issue=issue_ctx, pr=pr_ctx),
-        log_prefix="reply_to_issue_comment",
+    # Build the executor + target up-front so the failure path can clean
+    # up the eyes reaction without duplicating the cleanup logic.  The
+    # success path uses the same instance below in execute_effects_only.
+    rescope_trigger = _BackgroundRescopeTrigger(
+        repo_cfg.work_dir,
+        config,
+        gh,
+        repo_cfg=repo_cfg,
+        registry=registry,
+        agent=agent,
+        prompts=prompts,
     )
-    log.info(
-        "reply generation returned for PR #%s — body_len=%d preview=%r",
-        number,
-        len(body),
-        body[:80],
+    executor = SynthesisExecutor(
+        gh,
+        rescope=rescope_trigger,
+        insight_filer=_GitHubInsightFiler(gh),
+        fido_logins=_FIDO_LOGINS,
     )
+    issue_target: CommentTarget | None = None
+    if _cid and repo_full:
+        issue_target = CommentTarget(
+            repo=repo_full,
+            pr=int(number) if number else 0,
+            comment_id=int(_cid),
+            comment_type="issues",
+        )
 
+    log.info("synthesis: calling for issue comment on PR #%s", number)
+    try:
+        synthesis_response = call_synthesis(
+            comment,
+            is_bot=action.is_bot,
+            context=context or None,
+            issue=issue_ctx,
+            pr=pr_ctx,
+            agent=agent,
+            prompts=prompts,
+        )
+    except SynthesisExhaustedError:
+        log.warning(
+            "synthesis exhausted retries for issue comment %s on PR #%s — "
+            "falling back to LLM-generated failure explanation",
+            _cid,
+            number,
+        )
+        try:
+            synthesis_response = call_failure_explanation(
+                comment, agent=agent, prompts=prompts
+            )
+        except SynthesisExhaustedError:
+            # Even the fallback explanation exhausted retries.  Best-effort
+            # clear the eyes reaction so it does not sit forever as a false
+            # "Fido is looking" signal, then re-raise.
+            if _eyes_posted_issue and issue_target is not None:
+                executor.remove_eyes_reaction(issue_target)
+            raise
+    log.info(
+        "synthesis: returned for PR #%s (emoji=%r change_request=%r preview=%r)",
+        number,
+        synthesis_response.emoji,
+        synthesis_response.change_request,
+        synthesis_response.reply_text[:80],
+    )
+    body = synthesis_response.reply_text
+
+    # Derive (category, titles) from synthesis response.
+    if synthesis_response.change_request is not None:
+        category: str = "ACT"
+        titles: list[str] = [synthesis_response.change_request]
+    else:
+        category = "ANSWER"
+        titles = []
+
+    promise_ids = _reply_promise_ids(context)
     body = append_reply_promise_markers(body, promise_ids)
     existing_artifact_id = _existing_reply_artifact(repo_cfg, promise_ids)
     if existing_artifact_id is None:
@@ -2150,7 +1873,7 @@ def reply_to_issue_comment(
             repo_cfg,
             artifact_comment_id=artifact_comment_id,
             comment_type="issues",
-            lane_key=_issue_lane_key(repo_full, int(number)),
+            lane_key=_issue_lane_key(repo_full, int(number) if number else 0),
             promise_ids=promise_ids,
         )
     else:
@@ -2160,26 +1883,12 @@ def reply_to_issue_comment(
     if direct_promise is not None:
         FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
-    _cid = (action.context or {}).get("comment_id")
-    if _cid:
-        log.info(
-            "reply_to_issue_comment: adding reaction on PR #%s comment %s", number, _cid
-        )
-        maybe_react(
-            comment,
-            _cid,
-            "issues",
-            repo_full,
-            config,
-            gh,
-            agent=agent,
-            prompts=prompts,
-        )
-        log.info(
-            "reply_to_issue_comment: reaction path done on PR #%s comment %s",
-            number,
-            _cid,
-        )
+    # Execute post-reply effects: remove eyes, add final emoji, trigger
+    # rescope.  Reuses the ``executor`` and ``issue_target`` constructed
+    # before the synthesis call so the failure path could share its
+    # eyes-removal helper.
+    if issue_target is not None:
+        executor.execute_effects_only(synthesis_response, issue_target)
 
     log.info(
         "reply_to_issue_comment: complete for PR #%s (category=%s)", number, category
@@ -2547,6 +2256,7 @@ def _reorder_tasks_background(
     repo_cfg: RepoConfig | None = None,
     registry: WorkerRegistry | None = None,
     *,
+    intents: list[RescopeIntent] | None = None,
     _start: Callable[[threading.Thread], None] = threading.Thread.start,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
@@ -2563,6 +2273,12 @@ def _reorder_tasks_background(
     another thread.  When the running thread finishes it checks for a pending
     run and, if one exists, executes it before exiting — so at most one Opus
     call is in-flight plus one queued per repo.
+
+    When *intents* is provided (comment-triggered rescope), they accumulate in
+    the pending entry rather than being overwritten — so every originating
+    comment is tracked and the rescoper can reference all of them.  The commit
+    summary and kwargs from the latest call win (context should be fresh);
+    intents from all coalesced calls are preserved.
 
     Passes an ``_on_changes`` callback so that any thread tasks dropped or
     modified during rescoping trigger a notification reply to the original
@@ -2603,8 +2319,15 @@ def _reorder_tasks_background(
         if _release_untriaged_on_finish:
             entry["untriaged_holds"] = int(entry.get("untriaged_holds", 0)) + 1
         if entry["running"]:
-            # Coalesce: latest call wins; the running thread will do one more pass.
-            entry["pending"] = (commit_summary, kwargs)
+            # Coalesce: latest commit_summary and kwargs win; intents accumulate
+            # so every originating comment is tracked even when multiple
+            # comment-triggered rescopes arrive during the same Opus call.
+            existing = entry["pending"]
+            if existing is None:
+                entry["pending"] = (commit_summary, kwargs, list(intents or []))
+            else:
+                accumulated = list(existing[2]) + list(intents or [])
+                entry["pending"] = (commit_summary, kwargs, accumulated)
             return
         entry["running"] = True
         entry["pending"] = None
@@ -2612,6 +2335,7 @@ def _reorder_tasks_background(
     def run_loop() -> None:
         cs = commit_summary
         kw = kwargs
+        current_intents: list[RescopeIntent] = list(intents or [])
         release_untriaged = 0
         # Register as "webhook" so the session talker reflects the true nature of
         # this thread: it is triggered by webhooks and should not be treated as the
@@ -2625,13 +2349,13 @@ def _reorder_tasks_background(
             registry.set_rescoping(repo_cfg.name, True)
         try:
             while True:
-                reorder(work_dir, cs, **kw)
+                reorder(work_dir, cs, intents=current_intents or None, **kw)
                 with _reorder_coalesce_lock:
                     pending = state[key].get("pending")
                     if pending is None:
                         break
                     state[key]["pending"] = None
-                    cs, kw = pending
+                    cs, kw, current_intents = pending
         finally:
             with _reorder_coalesce_lock:
                 entry = state.get(key)

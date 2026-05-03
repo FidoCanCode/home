@@ -244,6 +244,45 @@ class TestGitHubClass:
         url = mock_s.post.call_args.args[0]
         assert "repos/o/r/issues/comments/7/reactions" in url
 
+    def test_list_reactions_pulls(self) -> None:
+        gh, mock_s = self._gh()
+        page_resp = MagicMock()
+        page_resp.json.return_value = [{"id": 1, "content": "eyes"}]
+        page_resp.headers = {}  # no Link header → single page
+        mock_s.get.return_value = page_resp
+        result = gh.list_reactions("o/r", "pulls", 42)
+        url = mock_s.get.call_args.args[0]
+        assert "repos/o/r/pulls/comments/42/reactions" in url
+        assert result == [{"id": 1, "content": "eyes"}]
+
+    def test_list_reactions_issues(self) -> None:
+        gh, mock_s = self._gh()
+        page_resp = MagicMock()
+        page_resp.json.return_value = [{"id": 2, "content": "+1"}]
+        page_resp.headers = {}
+        mock_s.get.return_value = page_resp
+        result = gh.list_reactions("o/r", "issues", 7)
+        url = mock_s.get.call_args.args[0]
+        assert "repos/o/r/issues/comments/7/reactions" in url
+        assert result == [{"id": 2, "content": "+1"}]
+
+    def test_delete_reaction_pulls(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_s.delete.return_value = mock_resp
+        gh.delete_reaction("o/r", "pulls", 42, 99)
+        url = mock_s.delete.call_args.args[0]
+        assert "repos/o/r/pulls/comments/42/reactions/99" in url
+        mock_resp.raise_for_status.assert_called_once()
+
+    def test_delete_reaction_issues(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_s.delete.return_value = mock_resp
+        gh.delete_reaction("o/r", "issues", 7, 55)
+        url = mock_s.delete.call_args.args[0]
+        assert "repos/o/r/issues/comments/7/reactions/55" in url
+
     def test_reply_to_review_comment(self) -> None:
         gh, mock_s = self._gh()
         mock_resp = MagicMock()
@@ -1520,6 +1559,57 @@ class TestGitHubClass:
         payload = mock_s.post.call_args.kwargs["json"]
         assert payload["title"] == "My feature request"
         assert payload["body"] == "body text"
+
+    def test_create_issue_with_labels(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"html_url": "https://github.com/o/r/issues/7"}
+        mock_s.post.return_value = mock_resp
+        url = gh.create_issue("o/r", "Bug report", "details", labels=["bug", "help"])
+        assert url == "https://github.com/o/r/issues/7"
+        payload = mock_s.post.call_args.kwargs["json"]
+        assert payload["labels"] == ["bug", "help"]
+
+    def test_create_issue_no_labels_omits_field(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"html_url": "https://github.com/o/r/issues/8"}
+        mock_s.post.return_value = mock_resp
+        gh.create_issue("o/r", "title", "body")
+        payload = mock_s.post.call_args.kwargs["json"]
+        assert "labels" not in payload
+
+    def test_search_issues_returns_items(self) -> None:
+        gh, mock_s = self._gh()
+        items = [{"number": 1, "html_url": "https://github.com/o/r/issues/1"}]
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"total_count": 1, "items": items}
+        mock_s.get.return_value = mock_resp
+        result = gh.search_issues("o/r", '"needle" in:body is:issue')
+        assert result == items
+
+    def test_search_issues_prepends_repo_qualifier(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"total_count": 0, "items": []}
+        mock_s.get.return_value = mock_resp
+        gh.search_issues("owner/repo", "my query")
+        url = mock_s.get.call_args.args[0]
+        assert "repo%3Aowner%2Frepo" in url or "repo:owner/repo" in url.replace(
+            "%3A", ":"
+        ).replace("%2F", "/")
+        assert "my+query" in url or "my%20query" in url or "my query" in url
+
+    def test_search_issues_empty_result(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"total_count": 0, "items": []}
+        mock_s.get.return_value = mock_resp
+        result = gh.search_issues("o/r", "nothing matches")
+        assert result == []
 
     def test_create_pr_returns_url(self) -> None:
         gh, mock_s = self._gh()

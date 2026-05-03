@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from fido.types import ActiveIssue, ActivePR, ClosedPR, TaskSnapshot
+from fido.types import ActiveIssue, ActivePR, ClosedPR, RescopeIntent, TaskSnapshot
 
 # ── Prompt-level tool guardrails ──────────────────────────────────────────────
 #
@@ -139,22 +139,6 @@ def render_active_context(
 # ── Triage ────────────────────────────────────────────────────────────────────
 
 
-def triage_categories(is_bot: bool) -> str:
-    """Return the category list string for a triage prompt."""
-    if is_bot:
-        return (
-            "DO (take the bot suggestion with a reply saying so), "
-            "DUMP (decline the suggestion with a reason and consider it closed)"
-        )
-    return (
-        "ACT (code change needed on this PR), "
-        "DEFER (out of scope for this PR — file a separate issue), "
-        "ASK (unclear what code change is needed), "
-        "ANSWER (question, casual/playful comment, or anything that isn't a code change request"
-        " — just respond naturally)"
-    )
-
-
 def triage_context_block(context: dict[str, Any] | None) -> str:
     """Build the PR/file/diff context block from a context dict."""
     ctx = context or {}
@@ -190,41 +174,6 @@ def triage_context_block(context: dict[str, Any] | None) -> str:
     return "\n".join(parts)
 
 
-# ── Reply instructions ────────────────────────────────────────────────────────
-
-
-def reply_context_block(
-    context: dict[str, Any] | None,
-    comment: str,
-    title: str,
-) -> str:
-    """Build the rich context block used inside a reply instruction.
-
-    Includes the full conversation thread so reply generation can consider
-    the entire discussion history, not just the triggering comment.
-    """
-    ctx = context or {}
-    parts: list[str] = []
-    if ctx.get("pr_title"):
-        parts.append(f"PR: {ctx['pr_title']}")
-    if ctx.get("file"):
-        parts.append(f"File: {ctx['file']}")
-        if ctx.get("line"):
-            parts.append(f"Line: {ctx['line']}")
-    if ctx.get("diff_hunk"):
-        parts.append(f"Diff:\n```\n{ctx['diff_hunk']}\n```")
-    # Include comment thread so reply generation considers the full conversation
-    if ctx.get("comment_thread"):
-        thread_lines = [
-            f"  {c.get('author', '')}: {c.get('body', '')}"
-            for c in ctx["comment_thread"]
-        ]
-        parts.append("Comment thread:\n" + "\n".join(thread_lines))
-    parts.append(f"Comment: {comment}")
-    parts.append(f"Your plan: {title}")
-    return "\n\n".join(parts)
-
-
 # ── Prompts DI class ──────────────────────────────────────────────────────────
 
 
@@ -239,18 +188,15 @@ class Prompts:
     Prompt builders that do not depend on the persona are also methods here
     so callers can depend on a single injected collaborator rather than a mix
     of the class and bare module-level functions.  Value-only helpers
-    (e.g. :func:`triage_categories`, :func:`triage_context_block`,
-    :func:`reply_context_block`) remain module-level since they only
+    (e.g. :func:`triage_context_block`) remain module-level since they only
     transform data.
 
     Usage::
 
         p = Prompts(persona)
         prompt = p.persona_wrap(instruction)
-        prompt = p.react_prompt(comment_body)
         prompt = p.pickup_comment_prompt(issue_title)
-        prompt = p.triage_prompt(comment_body, is_bot)
-        prompt = p.reply_instruction(category, comment_body, title)
+        prompt = p.synthesis_prompt(comment_body, is_bot)
         prompt = p.rescope_prompt(task_list, commit_summary)
     """
 
@@ -556,146 +502,6 @@ class Prompts:
             "Do not answer with a summary or plan. Act on the task."
         )
 
-    def react_prompt(self, comment_body: str) -> str:
-        """Build the reaction-decision prompt for Fido.
-
-        Asks the model whether to react to *comment_body* and which emoji to use.
-        The NO_TOOLS_CLAUSE guard is required: without it a comment that looks
-        like a directive ("fix this") can cause Opus to fire Bash/Edit calls
-        during what should be a one-shot reaction decision.
-        """
-        return (
-            f"{self.persona}\n\n"
-            f"{NO_TOOLS_CLAUSE}\n\n"
-            f"You just saw this comment on a PR:\n\n{comment_body}\n\n"
-            "Would you react to this with a GitHub emoji reaction? Not every comment needs one — "
-            "use your dog instincts. Pick from: 👍 (+1), 👎 (-1), 😄 (laugh), 😕 (confused), "
-            "❤️ (heart), 🎉 (hooray), 🚀 (rocket), 👀 (eyes). "
-            "Reply with JUST the reaction keyword (e.g. heart, rocket, eyes). "
-            "If you wouldn't react, reply NONE."
-        )
-
-    # ── Prompt builders (persona-independent) ────────────────────────────
-
-    def triage_prompt(
-        self,
-        comment_body: str,
-        is_bot: bool,
-        context: dict[str, Any] | None = None,
-    ) -> str:
-        """Build a triage prompt for Haiku/Opus.
-
-        Returns a prompt that asks the model to classify the comment and return
-        one or more ``CATEGORY: title`` lines.  A single comment may produce
-        zero tasks (ANSWER/ASK/DEFER/DUMP) or multiple tasks (multiple
-        ACT/DO lines).
-        """
-        categories = triage_categories(is_bot)
-        ctx_str = triage_context_block(context)
-        return (
-            f"{TRIAGE_CLAUSE}\n\n"
-            f"Triage this PR comment into one or more categories: {categories}\n\n"
-            f"{ctx_str}\n\nComment: {comment_body}\n\n"
-            "Reply with one line per task: category word, colon, short imperative task title. "
-            "For ACT/DO, list each distinct required change on its own line. "
-            "Task titles must start with a verb — never quote or paraphrase the comment text. "
-            "Example (one task): ACT: add unit tests for parser\n"
-            "Example (two tasks): ACT: add unit tests for parser\nACT: update documentation"
-        )
-
-    def reply_instruction(
-        self,
-        category: str,
-        comment_body: str,
-        title: str,
-        context: dict[str, Any] | None = None,
-        issue_url: str | None = None,
-    ) -> str:
-        """Build the instruction text for a review-comment reply.
-
-        Returns a plain instruction string (no persona wrapper) so the caller
-        can compose it with :meth:`persona_wrap`.
-        """
-        ctx = reply_context_block(context, comment_body, title)
-        match category:
-            case "ACT" | "DO":
-                return (
-                    f"Write a short GitHub PR reply to this comment. Acknowledge what they're asking for "
-                    f"and briefly explain your approach. "
-                    f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{ctx}"
-                )
-            case "ASK":
-                return (
-                    f"Write a short GitHub PR reply asking a focused clarifying question. "
-                    f"You need more information before you can act.\n\n{ctx}"
-                )
-            case "ANSWER":
-                return (
-                    f"Write a short GitHub PR reply directly answering this question. "
-                    f"Be helpful and specific. Do NOT say you'll make code changes.\n\nQuestion: {comment_body}"
-                )
-            case "DEFER":
-                issue_line = (
-                    f"An issue has been opened to track this: {issue_url}"
-                    if issue_url
-                    else "An issue will be opened to track this"
-                )
-                return (
-                    f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
-                    f"out of scope for this PR. "
-                    f"{issue_line} — mention it in your reply.\n\n{ctx}"
-                )
-            case "DUMP":
-                return (
-                    f"Write a short GitHub PR reply politely declining this suggestion and briefly "
-                    f"explaining why it's not applicable.\n\n{ctx}"
-                )
-            case _:
-                return f"Write a short GitHub PR reply to this comment.\n\n{ctx}"
-
-    def issue_reply_instruction(
-        self,
-        category: str,
-        comment_body: str,
-        title: str,
-        context: dict[str, Any] | None = None,
-        issue_url: str | None = None,
-    ) -> str:
-        """Build the instruction text for a top-level issue/PR comment reply."""
-        ctx = context or {}
-        parts: list[str] = []
-        if ctx.get("pr_title"):
-            parts.append(f"PR: {ctx['pr_title']}")
-        parts.append(f"Comment: {comment_body}")
-        parts.append(f"Your plan: {title}")
-        context_str = "\n\n".join(parts)
-
-        match category:
-            case "ACT" | "DO":
-                return (
-                    f"Write a short GitHub PR reply acknowledging and explaining your approach. "
-                    f"Do NOT promise to open issues or do anything outside of code changes in this PR.\n\n{context_str}"
-                )
-            case "ASK":
-                return f"Write a short GitHub PR reply asking a clarifying question.\n\n{context_str}"
-            case "ANSWER":
-                return f"Write a short GitHub PR reply directly answering the question.\n\nQuestion: {comment_body}"
-            case "DEFER":
-                issue_line = (
-                    f"An issue has been opened to track this: {issue_url}"
-                    if issue_url
-                    else "An issue will be opened to track this"
-                )
-                return (
-                    f"Write a short GitHub PR reply acknowledging this suggestion but explaining it's "
-                    f"out of scope for this PR. "
-                    f"{issue_line} — mention it in your reply.\n\n{context_str}"
-                )
-            case "DUMP":
-                return f"Write a short polite decline.\n\n{context_str}"
-            case _:
-                return f"Write a short GitHub PR reply.\n\n{context_str}"
-
     def rescope_prompt(
         self,
         task_list: list[dict[str, Any]],
@@ -704,24 +510,34 @@ class Prompts:
         issue: ActiveIssue | None = None,
         pr: ActivePR | None = None,
         prior_attempts: list[ClosedPR] | None = None,
+        intents: list[RescopeIntent] | None = None,
     ) -> str:
-        """Build an Opus prompt for dependency-aware task reordering.
+        """Build an Opus prompt for full task-list synthesis from old tasks + intents.
 
         Presents the full task list and a summary of commits already made, then
-        asks Opus to return a JSON array of the reordered pending tasks.
+        asks Opus to synthesize a complete new task list that reflects the current
+        codebase state and all accumulated change requests.
+
+        Unlike a simple reorder, Opus may add entirely new tasks, merge, split,
+        rescope, delete, or wipe existing tasks — any transformation needed to
+        produce a coherent task list that describes how to reach the desired new
+        state.  Accumulated intents are listed in chronological order; newer ones
+        override older ones where they conflict.
 
         When *issue* is provided, the rendered active-context block (issue,
-        optional PR, prior attempts, task list) is prepended to the prompt so
-        Opus has full context about what is being worked on.
+        optional PR, prior attempts, task list) is prepended so Opus has full
+        context about what is being worked on.
+
+        When *intents* is provided (comment-triggered rescope), the originating
+        comment IDs, timestamps, and change request texts are shown so Opus can
+        synthesize a coherent picture from all accumulated requests.
 
         Rules enforced in the prompt:
-        - CI tasks (type "ci") must remain first.
+        - CI tasks (type "ci") must come first.
+        - Existing task IDs must be preserved when kept or modified.
+        - New tasks (not in the current list) must have a null or absent id.
         - Completed tasks are excluded from the output.
-        - Task IDs must be preserved exactly.
-        - Tasks already covered by a commit should be omitted -- they will be
-          marked completed automatically by the caller.
-        - Thread-task requirements that conflict with a spec task should cause
-          the spec task title/description to be updated.
+        - Tasks already covered by a commit should be omitted.
 
         The caller is responsible for parsing the returned JSON and applying it.
         """
@@ -758,6 +574,19 @@ class Prompts:
                 + "\n\n"
             )
 
+        intents_block = ""
+        if intents:
+            lines = [
+                f"- comment #{intent.comment_id} ({intent.timestamp}): "
+                f"{intent.change_request}"
+                for intent in intents
+            ]
+            intents_block = (
+                "Pending change requests from PR comments:\n"
+                + "\n".join(lines)
+                + "\n\n"
+            )
+
         return (
             f"{TRIAGE_CLAUSE}\n\n"
             f"{active_ctx_prefix}"
@@ -766,20 +595,30 @@ class Prompts:
             f"{completed_block}\n\n"
             "Recent commits (already implemented):\n"
             f"{commit_summary or '(none)'}\n\n"
+            f"{intents_block}"
             "Pending tasks (current order):\n"
             f"{pending_json}\n\n"
-            "Reorder these tasks for the optimal implementation sequence based on "
-            "dependency analysis. Apply these rules:\n"
-            '1. Tasks with type "ci" must come first — do not move them.\n'
-            "2. Reorder remaining tasks so each task builds on what comes before it.\n"
-            "3. If a task is already covered by a recent commit, omit it from the output — it will be marked done.\n"
-            "4. If a thread task changes the requirements of an existing spec task, "
-            "rewrite that spec task's title and/or description to reflect the updated "
-            "requirements.\n"
-            "5. Preserve every task ID exactly — never change or drop IDs.\n"
-            "6. Include only pending and in_progress tasks in the output — omit completed.\n\n"
+            "Synthesize a complete new task list from the pending tasks above and "
+            "the accumulated change requests.  The result replaces the entire "
+            "pending task list.\n\n"
+            "Any transformation is valid — keep tasks unchanged, modify their scope, "
+            "merge multiple tasks into one, split one into several, delete tasks no "
+            "longer needed, add entirely new tasks, or wipe and start fresh.  "
+            "Integrate all change requests into a coherent picture: newer requests "
+            "override older ones where they conflict.\n\n"
+            "The task list must break down how to get from the current codebase "
+            "state to the desired new state.\n\n"
+            "Rules:\n"
+            '1. Tasks with type "ci" must come first.\n'
+            "2. For existing tasks you keep or modify, preserve the exact task ID.\n"
+            "3. For entirely new tasks (not in the current pending list), set "
+            '"id" to null or omit it — a fresh ID will be assigned.\n'
+            "4. If a task is already covered by a recent commit, omit it from the "
+            "output — it will be marked done.\n"
+            "5. Include only pending and in_progress tasks in the output — omit "
+            "completed.\n\n"
             'Reply with ONLY a JSON object in the form {"tasks": [...]}.\n'
-            'Each element: {"id": "...", "title": "...", "description": "..."}.\n'
+            'Each element: {"id": "..." or null, "title": "...", "description": "..."}.\n'
             "No other text before or after the JSON."
         )
 
@@ -815,6 +654,137 @@ class Prompts:
             'Reply with ONLY a JSON object in the form {"tasks": [...]}.\n'
             'Each element: {"id": "...", "title": "...", "description": "..."}.\n'
             "No other text before or after the JSON."
+        )
+
+    def synthesis_system_prompt(
+        self,
+        issue: ActiveIssue | None = None,
+        pr: ActivePR | None = None,
+    ) -> str:
+        """Return the system prompt for the unified comment-handling synthesis call.
+
+        Instils the Fido persona, injects active-work context (issue, PR) so the
+        model anchors on the same ground truth as the task worker, and sets up the
+        structured JSON output expectation.  A READ-ONLY constraint allows the
+        model to inspect the codebase (Read, Grep, Glob, triage git commands)
+        before responding, so it can write an informed reply *and* a meaningful
+        change_request intent, without being able to modify files or run mutations.
+        """
+        active = ""
+        if issue is not None:
+            active = render_active_context(issue, pr, [], None, []) + "\n\n"
+        return (
+            f"{self.persona}\n\n"
+            f"{active}"
+            "You are responding to a GitHub PR comment with a single structured "
+            "JSON response.  "
+            f"{TRIAGE_CLAUSE}  "
+            "Output ONLY the JSON object — no preamble, no trailing text, "
+            "no explanation outside the JSON fields."
+        )
+
+    def synthesis_prompt(
+        self,
+        comment_body: str,
+        is_bot: bool,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        """Build the synthesis instruction for the unified comment-handling call.
+
+        Replaces the separate triage + reply_instruction pair with a single prompt
+        that asks the model to return a :class:`~fido.synthesis.CommentResponse`
+        JSON object containing the reply prose (Constraint B: always present,
+        always freshly synthesised), an optional emoji reaction, and an optional
+        scope-change request — all as flat top-level fields.
+
+        *is_bot* is passed to adjust voice guidance — bot suggestions are handled
+        with a different tone than human reviewer comments.
+        """
+        ctx_block = triage_context_block(context)
+        context_section = f"{ctx_block}\n\n" if ctx_block else ""
+
+        bot_note = (
+            "\nThis comment is from an automated tool.  "
+            "Accept or decline the suggestion, with a brief reason.\n"
+            if is_bot
+            else ""
+        )
+
+        return (
+            f"{context_section}"
+            f"Comment: {comment_body}\n\n"
+            f"{bot_note}"
+            "Respond with a single JSON object matching this schema:\n\n"
+            "{\n"
+            '  "reasoning": "<string>",\n'
+            '  "reply_text": "<string>",\n'
+            '  "emoji": "<shortcode>" | null,\n'
+            '  "change_request": "<plain English>" | null,\n'
+            '  "insights": [\n'
+            '    {"title": "<string>", "hook": "<string>", "why": "<string>"}\n'
+            "  ]\n"
+            "}\n\n"
+            "Fields:\n"
+            "  reasoning       — private chain-of-thought; logged for "
+            "traceability, never posted to GitHub.\n"
+            "  reply_text      — REQUIRED and non-empty; the reply to post to "
+            "the PR comment thread.  Always freshly written from the actual "
+            "context of this comment — no canned phrases, no templates.\n"
+            "  emoji           — optional GitHub reaction to add to the "
+            "triggering comment.  Valid shortcodes: "
+            "+1 -1 laugh confused heart hooray rocket eyes.  "
+            "Use null when no reaction is appropriate.\n"
+            "  change_request  — registers the owner's or collaborator's "
+            "requested change(s) from the comment (if any).  Use null when "
+            "the comment requests no change to scope or tasks.\n"
+            "  insights        — list of noteworthy observations from this "
+            "interaction.  Populate when the comment teaches something worth "
+            "remembering about Rob, the work, or the collaboration pattern.  "
+            "The bar: if it felt worth pausing over, it belongs here.  Empty "
+            "array when nothing stood out.  Each entry:\n"
+            "    title — short label (used as a GitHub issue title).\n"
+            "    hook  — one sentence stating the observation.\n"
+            "    why   — two to three sentences on why it matters.\n\n"
+            "Voice guidelines:\n"
+            "- Take a position.  When you have enough context to form a view, "
+            "share it — don't reflexively ask a clarifying question to avoid "
+            "having an opinion.\n"
+            "- Disagree when you have reason to, but stay cooperative.  If the "
+            "comment makes a claim you think is wrong, say so and explain why "
+            "briefly.  If you've already pushed back once in this thread and "
+            "the reviewer still disagrees, defer — one round of pushback is "
+            "enough.\n"
+            "- Read the full comment thread, not just the last comment.  "
+            "Reply to the conversation, not to one isolated line.\n"
+            "- Keep the reply brief and direct.  No preamble, no corporate "
+            "prose, no filler phrases.\n\n"
+            "Respond with ONLY the JSON object.  No text before or after it."
+        )
+
+    def synthesis_failure_explanation_prompt(self, comment_body: str) -> str:
+        """Build the fallback prompt for when synthesis exhausts retries.
+
+        Asks the model to acknowledge the failure to the commenter and ask
+        them to rephrase, in plain prose (no JSON).  Used by
+        :func:`fido.synthesis_call.call_failure_explanation` after the
+        structured synthesis turn has exhausted ``MAX_RETRIES``.
+
+        The reply will be posted verbatim to the PR comment thread, so the
+        prompt is tight on length and tone.
+        """
+        return (
+            "Your previous attempt to write a structured response to this PR "
+            "comment failed — the model output could not be parsed as the "
+            "required JSON schema after several retries.\n\n"
+            "Comment that triggered the failure:\n"
+            f"{comment_body}\n\n"
+            "Write ONE short reply for the commenter.  Acknowledge that you "
+            "saw the comment and tried to respond, explain briefly that the "
+            "structured response generation failed, and ask the commenter "
+            "to rephrase or try again.  Keep it under three sentences.\n\n"
+            "Output ONLY the reply text — no JSON, no markdown code fences, "
+            "no preamble.  Just the words you want posted to the PR comment "
+            "thread."
         )
 
     def rewrite_description_prompt(

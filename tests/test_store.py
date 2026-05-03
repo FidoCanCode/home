@@ -459,6 +459,13 @@ def test_record_deferred_issue_is_idempotent(tmp_path: Path) -> None:
     assert stored.issue_url == first.issue_url
 
 
+def test_deferred_issue_returns_none_for_unknown_key(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    # Lookup against a key that was never enqueued — exercises the
+    # ``row is None → return None`` branch.
+    assert store.deferred_issue("deferred-issue:never-created") is None
+
+
 def test_enqueue_pr_comment_persists_normalized_comment(tmp_path: Path) -> None:
     store = FidoStore(tmp_path)
 

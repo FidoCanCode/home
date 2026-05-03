@@ -818,19 +818,6 @@ class TestEventsLeaves:
         result = thread_lineage_comment_ids({"comment_id": 7})
         assert result == (7,)
 
-    def test_comment_chain_action_title_requires_agent(self) -> None:
-        """events.py:1920 — calling without an agent raises."""
-        from fido.events import _comment_chain_action_title
-
-        with pytest.raises(ValueError, match="requires agent"):
-            _comment_chain_action_title(
-                thread_comments=[],
-                final_comment_id=None,
-                final_comment_body="",
-                triage_titles=[],
-                agent=None,
-            )
-
 
 # ---------------------------------------------------------------------------
 # claude.py — defensive concurrency branches

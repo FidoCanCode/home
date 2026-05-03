@@ -1,38 +1,12 @@
 """Unit tests for fido/prompts.py — prompt-building functions and Prompts class."""
 
-import pytest
-
 from fido.prompts import (
-    NO_TOOLS_CLAUSE,
     TRIAGE_CLAUSE,
     Prompts,
     render_active_context,
-    reply_context_block,
-    triage_categories,
     triage_context_block,
 )
-from fido.types import ActiveIssue, ActivePR, ClosedPR, TaskSnapshot
-
-# ── triage_categories ─────────────────────────────────────────────────────────
-
-
-class TestTriageCategories:
-    def test_human_categories(self) -> None:
-        result = triage_categories(is_bot=False)
-        assert "ACT" in result
-        assert "DEFER" in result
-        assert "ASK" in result
-        assert "ANSWER" in result
-        assert "DO" not in result
-
-    def test_bot_categories(self) -> None:
-        result = triage_categories(is_bot=True)
-        assert "DO" in result
-        assert "DEFER" not in result
-        assert "DUMP" in result
-        assert "TASK" not in result
-        assert "ACT" not in result
-
+from fido.types import ActiveIssue, ActivePR, ClosedPR, RescopeIntent, TaskSnapshot
 
 # ── triage_context_block ──────────────────────────────────────────────────────
 
@@ -171,52 +145,6 @@ class TestTriageContextBlock:
         assert "alice: hi" in result
 
 
-# ── Prompts.triage_prompt ────────────────────────────────────────────────────
-
-
-class TestTriagePrompt:
-    def test_includes_comment(self) -> None:
-        result = Prompts("").triage_prompt("please fix the bug", is_bot=False)
-        assert "please fix the bug" in result
-
-    def test_includes_categories(self) -> None:
-        result = Prompts("").triage_prompt("fix this", is_bot=False)
-        assert "ACT" in result
-        assert "DEFER" in result
-
-    def test_includes_bot_categories(self) -> None:
-        result = Prompts("").triage_prompt("suggestion", is_bot=True)
-        assert "DO" in result
-        assert "DUMP" in result
-
-    def test_includes_context(self) -> None:
-        result = Prompts("").triage_prompt(
-            "comment", is_bot=False, context={"pr_title": "My PR"}
-        )
-        assert "PR: My PR" in result
-
-    def test_includes_example(self) -> None:
-        result = Prompts("").triage_prompt("x", is_bot=False)
-        assert "Example" in result
-
-    def test_requires_imperative_action_item_title(self) -> None:
-        result = Prompts("").triage_prompt("x", is_bot=False)
-        assert "imperative" in result
-        assert "verb" in result
-        assert "never quote" in result.lower()
-
-    def test_no_context(self) -> None:
-        # Prompt with empty context still works — just has an empty ctx_str
-        result = Prompts("").triage_prompt("hello", is_bot=False, context=None)
-        assert "hello" in result
-
-    def test_with_context(self) -> None:
-        p = Prompts("")
-        ctx = {"pr_title": "Refactor"}
-        result = p.triage_prompt("x", is_bot=True, context=ctx)
-        assert "Refactor" in result
-
-
 class TestFreshSessionRetryPrompt:
     def test_includes_issue_context_details(self) -> None:
         result = Prompts("").fresh_session_retry_prompt(
@@ -292,210 +220,6 @@ class TestTaskStuckNoCommitCommentPrompt:
             "Fix the parser", 7
         )
         assert "7" in result
-
-
-# ── reply_context_block ───────────────────────────────────────────────────────
-
-
-class TestReplyContextBlock:
-    def test_always_includes_comment_and_plan(self) -> None:
-        result = reply_context_block(None, "the comment", "my plan")
-        assert "Comment: the comment" in result
-        assert "Your plan: my plan" in result
-
-    def test_pr_title(self) -> None:
-        result = reply_context_block({"pr_title": "Big change"}, "c", "p")
-        assert "PR: Big change" in result
-
-    def test_file_without_line(self) -> None:
-        result = reply_context_block({"file": "foo.py"}, "c", "p")
-        assert "File: foo.py" in result
-        assert "Line:" not in result
-
-    def test_file_with_line(self) -> None:
-        result = reply_context_block({"file": "foo.py", "line": 42}, "c", "p")
-        assert "File: foo.py" in result
-        assert "Line: 42" in result
-
-    def test_diff_hunk(self) -> None:
-        result = reply_context_block({"diff_hunk": "+ new line"}, "c", "p")
-        assert "Diff:" in result
-        assert "```" in result
-        assert "+ new line" in result
-
-    def test_empty_context(self) -> None:
-        result = reply_context_block({}, "c", "p")
-        assert "Comment: c" in result
-        assert "Your plan: p" in result
-
-
-# ── Prompts.reply_instruction ────────────────────────────────────────────────
-
-
-class TestReplyInstruction:
-    @pytest.mark.parametrize("category", ["ACT", "DO"])
-    def test_act_do_acknowledges(self, category: str) -> None:
-        result = Prompts("").reply_instruction(category, "fix this", "will fix", {})
-        assert "Acknowledge" in result or "acknowledge" in result
-        assert "approach" in result
-        assert "Do NOT promise" in result
-
-    @pytest.mark.parametrize("category", ["ACT", "DO"])
-    def test_act_do_no_promises_does_not_restrict_task_creation(
-        self, category: str
-    ) -> None:
-        """No-promises constraint governs reply *text* only.
-
-        ACT/DO triage always results in a task being created by server.py —
-        the constraint must not say 'create tasks' or it would misrepresent
-        what the system actually does.
-        """
-        result = Prompts("").reply_instruction(
-            category, "please fix this", "fix: edge case", {}
-        )
-        assert "Do NOT promise" in result
-        assert "create tasks" not in result
-
-    def test_ask_asks_question(self) -> None:
-        result = Prompts("").reply_instruction("ASK", "unclear", "need info", {})
-        assert "clarifying question" in result
-
-    def test_answer_no_code_changes(self) -> None:
-        result = Prompts("").reply_instruction("ANSWER", "what is X?", "explain X", {})
-        assert "Do NOT say you'll make code changes" in result
-        assert "Question: what is X?" in result
-
-    def test_defer_out_of_scope(self) -> None:
-        result = Prompts("").reply_instruction("DEFER", "big refactor", "defer", {})
-        assert "out of scope" in result
-
-    def test_defer_issue_opened_with_url(self) -> None:
-        result = Prompts("").reply_instruction(
-            "DEFER",
-            "big refactor",
-            "defer",
-            {},
-            issue_url="https://github.com/x/y/issues/1",
-        )
-        assert "An issue has been opened" in result
-        assert "https://github.com/x/y/issues/1" in result
-
-    def test_defer_issue_will_be_opened_without_url(self) -> None:
-        result = Prompts("").reply_instruction("DEFER", "big refactor", "defer", {})
-        assert "An issue will be opened" in result
-
-    def test_dump_politely_declines(self) -> None:
-        result = Prompts("").reply_instruction("DUMP", "bad idea", "decline", {})
-        assert "politely declining" in result or "politely" in result
-
-    def test_unknown_category_fallback(self) -> None:
-        result = Prompts("").reply_instruction("UNKNOWN", "comment", "title", {})
-        assert "Write a short GitHub PR reply" in result
-        assert "Comment: comment" in result
-
-    def test_passes_context_to_act(self) -> None:
-        result = Prompts("").reply_instruction(
-            "ACT", "fix it", "patch", {"pr_title": "Bugfix PR"}
-        )
-        assert "PR: Bugfix PR" in result
-
-    def test_with_issue_url(self) -> None:
-        url = "https://github.com/x/y/issues/1"
-        result = Prompts("").reply_instruction(
-            "DEFER", "big refactor", "defer", {}, issue_url=url
-        )
-        assert url in result
-
-
-# ── Prompts.issue_reply_instruction ──────────────────────────────────────────
-
-
-class TestIssueReplyInstruction:
-    @pytest.mark.parametrize("category", ["ACT", "DO"])
-    def test_act_do_acknowledging(self, category: str) -> None:
-        result = Prompts("").issue_reply_instruction(category, "fix it", "will fix", {})
-        assert "acknowledging" in result
-
-    @pytest.mark.parametrize("category", ["ACT", "DO"])
-    def test_act_do_no_promises(self, category: str) -> None:
-        result = Prompts("").issue_reply_instruction(category, "fix it", "will fix", {})
-        assert "Do NOT promise to open issues" in result
-
-    @pytest.mark.parametrize("category", ["ACT", "DO"])
-    def test_act_do_no_promises_does_not_restrict_task_creation(
-        self, category: str
-    ) -> None:
-        """No-promises constraint governs reply *text* only.
-
-        ACT/DO triage always results in a task being created by server.py —
-        the constraint must not say 'create tasks' or it would misrepresent
-        what the system actually does.
-        """
-        result = Prompts("").issue_reply_instruction(
-            category, "please fix this", "fix: edge case", {}
-        )
-        assert "Do NOT promise" in result
-        assert "create tasks" not in result
-
-    def test_ask_clarifying(self) -> None:
-        result = Prompts("").issue_reply_instruction(
-            "ASK", "unclear", "need more info", {}
-        )
-        assert "clarifying question" in result
-
-    def test_answer_direct(self) -> None:
-        result = Prompts("").issue_reply_instruction(
-            "ANSWER", "what is X?", "explain", {}
-        )
-        assert "Question: what is X?" in result
-
-    def test_defer_out_of_scope(self) -> None:
-        result = Prompts("").issue_reply_instruction(
-            "DEFER", "add feature", "defer", {}
-        )
-        assert "out of scope" in result
-
-    def test_defer_issue_opened_with_url(self) -> None:
-        result = Prompts("").issue_reply_instruction(
-            "DEFER",
-            "add feature",
-            "defer",
-            {},
-            issue_url="https://github.com/x/y/issues/2",
-        )
-        assert "An issue has been opened" in result
-        assert "https://github.com/x/y/issues/2" in result
-
-    def test_defer_issue_will_be_opened_without_url(self) -> None:
-        result = Prompts("").issue_reply_instruction(
-            "DEFER", "add feature", "defer", {}
-        )
-        assert "An issue will be opened" in result
-
-    def test_dump_decline(self) -> None:
-        result = Prompts("").issue_reply_instruction("DUMP", "bad idea", "decline", {})
-        assert "decline" in result
-
-    def test_unknown_fallback(self) -> None:
-        result = Prompts("").issue_reply_instruction("MYSTERY", "hello", "hmm", {})
-        assert "short GitHub PR reply" in result
-
-    def test_includes_pr_title_in_context(self) -> None:
-        result = Prompts("").issue_reply_instruction(
-            "ACT", "fix it", "fix", {"pr_title": "My PR"}
-        )
-        assert "PR: My PR" in result
-
-    def test_no_context(self) -> None:
-        result = Prompts("").issue_reply_instruction("ACT", "do something", "will do")
-        assert "Comment: do something" in result
-
-    def test_with_issue_url(self) -> None:
-        url = "https://github.com/x/y/issues/2"
-        result = Prompts("").issue_reply_instruction(
-            "DEFER", "feature", "defer", {}, issue_url=url
-        )
-        assert url in result
 
 
 # ── Prompts.status_system_prompt ─────────────────────────────────────────────
@@ -599,39 +323,6 @@ class TestPromptsPersonaWrap:
         result = Prompts("").persona_wrap("instruct")
         assert "instruct" in result
         assert "Output only" in result
-
-
-class TestPromptsReactPrompt:
-    def test_includes_persona(self) -> None:
-        result = Prompts("I am Fido.").react_prompt("great work!")
-        assert "I am Fido." in result
-
-    def test_includes_comment(self) -> None:
-        result = Prompts("persona").react_prompt("looks good!")
-        assert "looks good!" in result
-
-    def test_includes_emoji_options(self) -> None:
-        result = Prompts("persona").react_prompt("comment")
-        assert "rocket" in result
-        assert "heart" in result
-
-    def test_includes_none_option(self) -> None:
-        result = Prompts("persona").react_prompt("comment")
-        assert "NONE" in result
-
-    def test_empty_persona(self) -> None:
-        result = Prompts("").react_prompt("hi")
-        assert "hi" in result
-        assert "emoji" in result
-
-    def test_includes_no_tools_clause(self) -> None:
-        # react_prompt is pure text — must include NO_TOOLS_CLAUSE (not the broader
-        # TRIAGE_CLAUSE) so a comment that looks like a directive doesn't cause
-        # Opus to fire Edit/Write calls during what should be a one-shot reaction
-        # decision.
-        result = Prompts("persona").react_prompt("fix this please")
-        assert NO_TOOLS_CLAUSE in result
-        assert TRIAGE_CLAUSE not in result
 
 
 class TestPromptsStatusPrompt:
@@ -891,6 +582,61 @@ class TestRescopePrompt:
         result = Prompts("").rescope_prompt(tasks, "", issue=issue, pr=None)
         assert "## Active issue" in result
         assert "## Active PR" not in result
+
+    def test_intents_block_included_when_intents_provided(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        intents = [
+            RescopeIntent(
+                change_request="Add logging to the parser",
+                comment_id=123,
+                timestamp="2024-01-15T10:00:00+00:00",
+            )
+        ]
+        result = Prompts("").rescope_prompt(tasks, "", intents=intents)
+        assert "Pending change requests from PR comments:" in result
+        assert "comment #123" in result
+        assert "Add logging to the parser" in result
+        assert "2024-01-15T10:00:00+00:00" in result
+
+    def test_intents_block_absent_when_no_intents(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        assert "Pending change requests" not in result
+
+    def test_multiple_intents_all_included(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        intents = [
+            RescopeIntent("Add logging", 111, "2024-01-15T10:00:00+00:00"),
+            RescopeIntent("Refactor tests", 222, "2024-01-15T10:01:00+00:00"),
+        ]
+        result = Prompts("").rescope_prompt(tasks, "", intents=intents)
+        assert "comment #111" in result
+        assert "comment #222" in result
+        assert "Add logging" in result
+        assert "Refactor tests" in result
+
+    def test_synthesize_framing_present(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        assert "synthesize" in result.lower() or "synthesis" in result.lower()
+
+    def test_new_task_null_id_instruction_present(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        assert "null" in result.lower()
+
+    def test_all_transformations_mentioned(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        # prompt should mention the full set of valid transformations
+        assert "merge" in result.lower() or "split" in result.lower()
+        assert "delete" in result.lower() or "omit" in result.lower()
+        assert "add" in result.lower() or "new tasks" in result.lower()
+
+    def test_newer_overrides_older_instruction_present(self) -> None:
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        assert "newer" in result.lower() or "override" in result.lower()
 
 
 # ── Prompts.rescope_duplicate_nudge ──────────────────────────────────────────
@@ -1402,3 +1148,140 @@ class TestRenderActiveContext:
         )
         assert "## Active issue" in result
         assert "#1: T" in result
+
+
+# ── Prompts.synthesis_system_prompt ──────────────────────────────────────────
+
+
+class TestSynthesisSystemPrompt:
+    def test_includes_persona(self) -> None:
+        result = Prompts("I am Fido.").synthesis_system_prompt()
+        assert "I am Fido." in result
+
+    def test_includes_triage_clause(self) -> None:
+        result = Prompts("persona").synthesis_system_prompt()
+        assert TRIAGE_CLAUSE in result
+
+    def test_json_output_instruction(self) -> None:
+        result = Prompts("persona").synthesis_system_prompt()
+        assert "JSON" in result
+        assert "ONLY" in result
+
+    def test_no_active_context_when_issue_is_none(self) -> None:
+        result = Prompts("persona").synthesis_system_prompt()
+        assert "## Active issue" not in result
+
+    def test_active_context_included_when_issue_provided(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="It crashes.")
+        result = Prompts("persona").synthesis_system_prompt(issue=issue)
+        assert "## Active issue" in result
+        assert "Fix crash" in result
+        assert "It crashes." in result
+
+    def test_active_context_includes_pr_when_provided(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="")
+        pr = ActivePR(
+            number=42,
+            title="Fix crash PR",
+            url="https://github.com/a/b/pull/42",
+            body="",
+        )
+        result = Prompts("persona").synthesis_system_prompt(issue=issue, pr=pr)
+        assert "## Active PR" in result
+        assert "Fix crash PR" in result
+
+    def test_active_context_no_pr_section_when_pr_is_none(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="")
+        result = Prompts("persona").synthesis_system_prompt(issue=issue, pr=None)
+        assert "## Active PR" not in result
+
+    def test_empty_persona(self) -> None:
+        result = Prompts("").synthesis_system_prompt()
+        assert "JSON" in result
+
+
+# ── Prompts.synthesis_prompt ─────────────────────────────────────────────────
+
+
+class TestSynthesisPrompt:
+    def test_includes_comment(self) -> None:
+        result = Prompts("").synthesis_prompt("please fix the bug", is_bot=False)
+        assert "please fix the bug" in result
+
+    def test_includes_json_schema(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "reasoning" in result
+        assert "reply_text" in result
+        assert "emoji" in result
+        assert "change_request" in result
+        assert "insights" in result
+
+    def test_no_actions_list_in_schema(self) -> None:
+        # Flat schema — no actions array, no action type objects.
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert '"actions"' not in result
+        assert "add_reaction" not in result
+        assert "rescope_intent" not in result
+        assert "no_op" not in result
+
+    def test_includes_valid_emoji_shortcodes(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "rocket" in result
+        assert "heart" in result
+        assert "eyes" in result
+
+    def test_reply_text_required_constraint(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "REQUIRED" in result
+        assert "non-empty" in result
+
+    def test_bot_note_present_when_is_bot_true(self) -> None:
+        result = Prompts("").synthesis_prompt("suggestion", is_bot=True)
+        assert "automated tool" in result
+
+    def test_bot_note_absent_when_is_bot_false(self) -> None:
+        result = Prompts("").synthesis_prompt("suggestion", is_bot=False)
+        assert "automated tool" not in result
+
+    def test_includes_context_when_provided(self) -> None:
+        result = Prompts("").synthesis_prompt(
+            "comment", is_bot=False, context={"pr_title": "My PR"}
+        )
+        assert "PR: My PR" in result
+
+    def test_no_context_still_works(self) -> None:
+        result = Prompts("").synthesis_prompt("hello", is_bot=False, context=None)
+        assert "hello" in result
+
+    def test_voice_guidelines_present(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "Take a position" in result
+        assert "Disagree" in result
+
+    def test_disagree_defers_after_one_pushback(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "already pushed back" in result
+        assert "defer" in result
+
+    def test_change_request_description(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "collaborator" in result
+        assert "scope or tasks" in result
+
+    def test_json_only_instruction(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "ONLY the JSON" in result
+
+    def test_insights_schema_includes_subfields(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "title" in result
+        assert "hook" in result
+        assert "why" in result
+
+    def test_insights_instructs_when_to_populate(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "worth pausing over" in result
+
+    def test_insights_empty_array_when_nothing_stood_out(self) -> None:
+        result = Prompts("").synthesis_prompt("comment", is_bot=False)
+        assert "Empty array" in result or "empty array" in result or "Empty" in result

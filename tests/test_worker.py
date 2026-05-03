@@ -7946,7 +7946,7 @@ class TestHandleThreads:
         }
         fido_dir = self._fido_dir(tmp_path)
         with (
-            patch("fido.events.reply_to_comment", return_value=("DO", ["do thing"])),
+            patch("fido.events.reply_to_comment", return_value=("ACT", ["do thing"])),
             patch("fido.events.create_task") as mock_create_task,
             patch("fido.tasks.sync_tasks_background"),
         ):
@@ -8094,7 +8094,7 @@ class TestHandleQueuedComments:
 
         with (
             patch(
-                "fido.events.reply_to_issue_comment", return_value=("DO", ["do thing"])
+                "fido.events.reply_to_issue_comment", return_value=("ACT", ["do thing"])
             ) as mock_reply,
             patch("fido.events.create_task") as mock_create_task,
             patch("fido.tasks.sync_tasks_background") as mock_sync,
@@ -8131,7 +8131,7 @@ class TestHandleQueuedComments:
 
         with (
             patch(
-                "fido.events.reply_to_issue_comment", return_value=("DO", ["do thing"])
+                "fido.events.reply_to_issue_comment", return_value=("ACT", ["do thing"])
             ),
             patch("fido.events.create_task", side_effect=assert_promise_unacked),
             patch("fido.tasks.sync_tasks_background"),
@@ -8157,7 +8157,7 @@ class TestHandleQueuedComments:
         }
 
         with (
-            patch("fido.events.reply_to_comment", return_value=("DO", ["do thing"])),
+            patch("fido.events.reply_to_comment", return_value=("ACT", ["do thing"])),
             patch("fido.events.create_task") as mock_create_task,
             patch("fido.tasks.sync_tasks_background"),
         ):
@@ -8185,7 +8185,7 @@ class TestHandleQueuedComments:
         }
 
         with (
-            patch("fido.events.reply_to_comment", return_value=("DO", ["do thing"])),
+            patch("fido.events.reply_to_comment", return_value=("ACT", ["do thing"])),
             patch("fido.events.create_task") as mock_create_task,
             patch("fido.tasks.sync_tasks_background"),
         ):
