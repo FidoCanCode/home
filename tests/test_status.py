@@ -1518,20 +1518,20 @@ class TestFormatAgentLine:
     """Unit tests for _format_agent_line — the dedicated per-repo agent body line."""
 
     def _repo(self, **kwargs: object) -> RepoStatus:
-        defaults = dict(
-            name="owner/repo",
-            fido_running=False,
-            issue=None,
-            pending=0,
-            completed=0,
-            current_task=None,
-            claude_pid=None,
-            claude_uptime=None,
-            worker_what=None,
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
-        )
+        defaults = {
+            "name": "owner/repo",
+            "fido_running": False,
+            "issue": None,
+            "pending": 0,
+            "completed": 0,
+            "current_task": None,
+            "claude_pid": None,
+            "claude_uptime": None,
+            "worker_what": None,
+            "crash_count": 0,
+            "last_crash_error": None,
+            "worker_stuck": False,
+        }
         defaults.update(kwargs)
         return RepoStatus(**defaults)
 
@@ -1635,20 +1635,20 @@ class TestFormatAgentLine:
 
 class TestFormatStatus:
     def _repo(self, **kwargs: object) -> RepoStatus:
-        defaults = dict(
-            name="owner/repo",
-            fido_running=False,
-            issue=None,
-            pending=0,
-            completed=0,
-            current_task=None,
-            claude_pid=None,
-            claude_uptime=None,
-            worker_what=None,
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
-        )
+        defaults = {
+            "name": "owner/repo",
+            "fido_running": False,
+            "issue": None,
+            "pending": 0,
+            "completed": 0,
+            "current_task": None,
+            "claude_pid": None,
+            "claude_uptime": None,
+            "worker_what": None,
+            "crash_count": 0,
+            "last_crash_error": None,
+            "worker_stuck": False,
+        }
         defaults.update(kwargs)
         return RepoStatus(**defaults)
 
@@ -2260,20 +2260,20 @@ class TestFormatStatusColor:
     """Color tests: verify ANSI codes appear under FORCE_COLOR=1."""
 
     def _repo(self, **kwargs: object) -> RepoStatus:
-        defaults = dict(
-            name="owner/repo",
-            fido_running=False,
-            issue=None,
-            pending=0,
-            completed=0,
-            current_task=None,
-            claude_pid=None,
-            claude_uptime=None,
-            worker_what=None,
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
-        )
+        defaults = {
+            "name": "owner/repo",
+            "fido_running": False,
+            "issue": None,
+            "pending": 0,
+            "completed": 0,
+            "current_task": None,
+            "claude_pid": None,
+            "claude_uptime": None,
+            "worker_what": None,
+            "crash_count": 0,
+            "last_crash_error": None,
+            "worker_stuck": False,
+        }
         defaults.update(kwargs)
         return RepoStatus(**defaults)
 
@@ -2579,20 +2579,20 @@ class TestProviderColoredStatus:
     """
 
     def _repo(self, **kwargs: object) -> RepoStatus:
-        defaults = dict(
-            name="owner/repo",
-            fido_running=False,
-            issue=None,
-            pending=0,
-            completed=0,
-            current_task=None,
-            claude_pid=None,
-            claude_uptime=None,
-            worker_what=None,
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
-        )
+        defaults = {
+            "name": "owner/repo",
+            "fido_running": False,
+            "issue": None,
+            "pending": 0,
+            "completed": 0,
+            "current_task": None,
+            "claude_pid": None,
+            "claude_uptime": None,
+            "worker_what": None,
+            "crash_count": 0,
+            "last_crash_error": None,
+            "worker_stuck": False,
+        }
         defaults.update(kwargs)
         return RepoStatus(**defaults)
 
@@ -2900,20 +2900,20 @@ class TestParseIssueCache:
 
 class TestFormatCacheLine:
     def _repo(self, **kwargs: object) -> RepoStatus:
-        defaults = dict(
-            name="owner/repo",
-            fido_running=False,
-            issue=None,
-            pending=0,
-            completed=0,
-            current_task=None,
-            claude_pid=None,
-            claude_uptime=None,
-            worker_what=None,
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
-        )
+        defaults = {
+            "name": "owner/repo",
+            "fido_running": False,
+            "issue": None,
+            "pending": 0,
+            "completed": 0,
+            "current_task": None,
+            "claude_pid": None,
+            "claude_uptime": None,
+            "worker_what": None,
+            "crash_count": 0,
+            "last_crash_error": None,
+            "worker_stuck": False,
+        }
         defaults.update(kwargs)
         return RepoStatus(**defaults)
 
@@ -2980,20 +2980,20 @@ class TestFormatCacheLine:
 
 class TestFormatStatusCacheLineIntegration:
     def _repo(self, **kwargs: object) -> RepoStatus:
-        defaults = dict(
-            name="owner/repo",
-            fido_running=False,
-            issue=None,
-            pending=0,
-            completed=0,
-            current_task=None,
-            claude_pid=None,
-            claude_uptime=None,
-            worker_what=None,
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
-        )
+        defaults = {
+            "name": "owner/repo",
+            "fido_running": False,
+            "issue": None,
+            "pending": 0,
+            "completed": 0,
+            "current_task": None,
+            "claude_pid": None,
+            "claude_uptime": None,
+            "worker_what": None,
+            "crash_count": 0,
+            "last_crash_error": None,
+            "worker_stuck": False,
+        }
         defaults.update(kwargs)
         return RepoStatus(**defaults)
 
@@ -3165,20 +3165,20 @@ class TestFormatRateLimitLine:
 
 class TestFormatStatusRateLimitIntegration:
     def _repo(self, **kwargs: object) -> RepoStatus:
-        defaults = dict(
-            name="owner/repo",
-            fido_running=False,
-            issue=None,
-            pending=0,
-            completed=0,
-            current_task=None,
-            claude_pid=None,
-            claude_uptime=None,
-            worker_what=None,
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
-        )
+        defaults = {
+            "name": "owner/repo",
+            "fido_running": False,
+            "issue": None,
+            "pending": 0,
+            "completed": 0,
+            "current_task": None,
+            "claude_pid": None,
+            "claude_uptime": None,
+            "worker_what": None,
+            "crash_count": 0,
+            "last_crash_error": None,
+            "worker_stuck": False,
+        }
         defaults.update(kwargs)
         return RepoStatus(**defaults)
 

@@ -335,20 +335,20 @@ class TestStatusFallbacks:
     def _make_repo(self, **kwargs: object) -> object:
         from fido.status import RepoStatus
 
-        defaults: dict[str, object] = dict(
-            name="owner/repo",
-            fido_running=False,
-            issue=None,
-            pending=0,
-            completed=0,
-            current_task=None,
-            claude_pid=None,
-            claude_uptime=None,
-            worker_what=None,
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
-        )
+        defaults: dict[str, object] = {
+            "name": "owner/repo",
+            "fido_running": False,
+            "issue": None,
+            "pending": 0,
+            "completed": 0,
+            "current_task": None,
+            "claude_pid": None,
+            "claude_uptime": None,
+            "worker_what": None,
+            "crash_count": 0,
+            "last_crash_error": None,
+            "worker_stuck": False,
+        }
         defaults.update(kwargs)
         return RepoStatus(**defaults)  # type: ignore[arg-type]
 
@@ -965,10 +965,10 @@ class TestCodexSessionLeafBranches:
         }
         fake.is_alive.return_value = True
         fake.pid = 1234
-        defaults: dict = dict(
-            client_factory=lambda **_: fake,
-            model=ProviderModel("gpt-5", "medium"),
-        )
+        defaults: dict = {
+            "client_factory": lambda **_: fake,
+            "model": ProviderModel("gpt-5", "medium"),
+        }
         defaults.update(kwargs)
         return CodexSession(system_file, work_dir=tmp_path, **defaults)
 
