@@ -2455,65 +2455,6 @@ class TestEventsIngressFsmCollapsed:
             oracle.check_dispatch("test/repo", "delivery-1")
 
 
-class TestEventsDispatchTrailingNone:
-    """Cover the trailing ``return None`` fall-throughs in dispatch
-    (events.py:1335, 1395)."""
-
-    @staticmethod
-    def _config_and_repo_cfg() -> object:
-        config = MagicMock()
-        config.allowed_bots = frozenset()
-        config.repos = {}
-        repo_cfg = MagicMock()
-        repo_cfg.name = "test/repo"
-        repo_cfg.membership = MagicMock()
-        repo_cfg.membership.collaborators = frozenset(["alice"])
-        repo_cfg.membership.team_members = frozenset()
-        return config, repo_cfg
-
-    def test_review_comment_with_no_comment_id_falls_through(self) -> None:
-        # events.py:1335 — pull_request_review_comment with comment_id None
-        # passes the early-returns but skips the enqueue branch.
-        from fido.events import dispatch
-
-        config, repo_cfg = self._config_and_repo_cfg()
-        payload = {
-            "action": "created",
-            "repository": {"full_name": "test/repo"},
-            "comment": {
-                "user": {"login": "alice"},
-                "body": "comment",
-                # no "id" key → comment_id stays None
-            },
-            "pull_request": {"number": 1, "title": "T", "body": "B"},
-        }
-        result = dispatch("pull_request_review_comment", payload, config, repo_cfg)
-        assert result is None
-
-    def test_issue_comment_with_no_number_falls_through(self) -> None:
-        # events.py:1395 — issue_comment with number/comment_id None.
-        from fido.events import dispatch
-
-        config, repo_cfg = self._config_and_repo_cfg()
-        payload = {
-            "action": "created",
-            "repository": {"full_name": "test/repo"},
-            "comment": {
-                "user": {"login": "alice"},
-                "body": "comment",
-                "id": 42,
-            },
-            "issue": {
-                # number missing
-                "pull_request": {"url": "https://github.com/.../pull/1"},
-                "title": "T",
-                "body": "B",
-            },
-        }
-        result = dispatch("issue_comment", payload, config, repo_cfg)
-        assert result is None
-
-
 class TestEventsThreadResolved:
     """Cover ``_thread_task_is_stale_resolved`` early-return branches."""
 

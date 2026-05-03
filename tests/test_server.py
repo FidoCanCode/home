@@ -168,7 +168,12 @@ def server(tmp_path: Path) -> object:
 class TestSignatureVerification:
     def test_valid_signature(self, server: tuple) -> None:
         url, cfg = server
-        body = json.dumps({"hook_id": 1}).encode()
+        body = json.dumps(
+            {
+                "hook_id": 1,
+                "repository": {"full_name": "other/repo", "default_branch": "main"},
+            }
+        ).encode()
         sig = _sign(body, cfg.secret)
         req = urllib.request.Request(
             url,
@@ -1601,6 +1606,69 @@ class TestInvalidJson:
         assert exc_info.value.code == 400
 
 
+class TestMalformedPayload:
+    """Payloads missing schema-required keys return 500 so GitHub retries."""
+
+    def _post_signed(self, url: str, cfg: Config, event: str, payload: dict) -> int:
+        body = json.dumps(payload).encode()
+        sig = _sign(body, cfg.secret)
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-GitHub-Event": event,
+                "X-GitHub-Delivery": "test",
+                "X-Hub-Signature-256": sig,
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req)
+        return exc_info.value.code
+
+    def test_missing_repository_returns_500(self, server: tuple) -> None:
+        url, cfg = server
+        assert self._post_signed(url, cfg, "issues", {"action": "opened"}) == 500
+
+    def test_missing_default_branch_returns_500(self, server: tuple) -> None:
+        url, cfg = server
+        assert (
+            self._post_signed(
+                url, cfg, "issues", {"repository": {"full_name": "owner/repo"}}
+            )
+            == 500
+        )
+
+    def test_missing_action_on_pull_request_returns_500(self, server: tuple) -> None:
+        url, cfg = server
+        assert (
+            self._post_signed(
+                url,
+                cfg,
+                "pull_request",
+                {
+                    "repository": {
+                        "full_name": "owner/repo",
+                        "default_branch": "main",
+                    }
+                },
+            )
+            == 500
+        )
+
+
+def _payload(repo_owner: str = "owner") -> dict:
+    """Base webhook payload fragment with the repository block every event needs."""
+    return {
+        "repository": {
+            "full_name": f"{repo_owner}/repo",
+            "owner": {"login": repo_owner},
+            "default_branch": "main",
+        },
+    }
+
+
 def _post_webhook(url: str, cfg: Config, event: str, payload: dict) -> int:
     body = json.dumps(payload).encode()
     sig = _sign(body, cfg.secret)
@@ -1659,20 +1727,12 @@ class TestReplyPromiseKey:
 class TestPatchIssueCache:
     """Tests for ``_patch_issue_cache`` — webhook → cache event patcher (#812)."""
 
-    def _payload(self, repo_owner: str = "owner") -> dict:
-        return {
-            "repository": {
-                "full_name": f"{repo_owner}/repo",
-                "owner": {"login": repo_owner},
-            },
-        }
-
     def test_assigned_event_patches_cache(self, server: tuple) -> None:
         url, cfg = server
         cache = MagicMock()
         WebhookHandler.registry.get_issue_cache.return_value = cache
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "assigned",
             "issue": {
                 "number": 42,
@@ -1697,7 +1757,7 @@ class TestPatchIssueCache:
         cache = MagicMock()
         WebhookHandler.registry.get_issue_cache.return_value = cache
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "synchronize",
             "pull_request": {"number": 7},
         }
@@ -1710,7 +1770,7 @@ class TestPatchIssueCache:
         cache = MagicMock()
         WebhookHandler.registry.get_issue_cache.return_value = cache
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "labeled",  # not a picker-relevant action
             "issue": {
                 "number": 42,
@@ -1731,7 +1791,7 @@ class TestPatchIssueCache:
         cache.apply_event.side_effect = RuntimeError("boom")
         WebhookHandler.registry.get_issue_cache.return_value = cache
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "assigned",
             "issue": {
                 "number": 42,
@@ -1748,18 +1808,10 @@ class TestPatchIssueCache:
 class TestProcessAction:
     """Tests for _process_action — the background thread that dispatches actions."""
 
-    def _payload(self, repo_owner: str = "owner") -> dict:
-        return {
-            "repository": {
-                "full_name": f"{repo_owner}/repo",
-                "owner": {"login": repo_owner},
-            },
-        }
-
     def test_dispatch_triggers_worker_on_merged_pr(self, server: tuple) -> None:
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 7, "merged": True},
         }
@@ -1774,7 +1826,7 @@ class TestProcessAction:
         """DEFER files a GitHub issue instead — no tasks.json entry."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 202,
@@ -1804,7 +1856,7 @@ class TestProcessAction:
         )
         assert promise is not None
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 203,
@@ -1834,7 +1886,7 @@ class TestProcessAction:
         creation."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 510,
@@ -1867,7 +1919,7 @@ class TestProcessAction:
 
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 511,
@@ -1900,7 +1952,7 @@ class TestProcessAction:
         # NOT collapsed and do wake the worker.
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "submitted",
             "review": {
                 "id": 888,
@@ -1924,7 +1976,7 @@ class TestProcessAction:
         """
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 14, "merged": True},
         }
@@ -1986,7 +2038,7 @@ class TestProcessAction:
 
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 99, "merged": True},
         }
@@ -2002,7 +2054,7 @@ class TestProcessAction:
     def test_exception_in_process_action_does_not_crash(self, server: tuple) -> None:
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 13, "merged": True},
         }
@@ -2018,7 +2070,7 @@ class TestProcessAction:
         """On exception with no comment context (e.g., merged PR), no reaction."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 22, "merged": True},
         }
@@ -2035,7 +2087,7 @@ class TestProcessAction:
         url, cfg = server
         # review submission: reply_to=None, thread=None, review_comments set
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "submitted",
             "review": {
                 "id": 888,
@@ -2116,7 +2168,7 @@ class TestProcessAction:
     def test_dispatch_error_returns_500(self, server: tuple) -> None:
         """When dispatch raises, return 500 so GitHub retries the delivery."""
         url, cfg = server
-        payload = {**self._payload(), "action": "created"}
+        payload = {**_payload(), "action": "created"}
         WebhookHandler._fn_dispatch = MagicMock(side_effect=RuntimeError("boom"))
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _post_webhook(url, cfg, "pull_request_review_comment", payload)
@@ -2126,7 +2178,7 @@ class TestProcessAction:
         """dispatch() must be called before the HTTP response is written."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 999,
@@ -2162,7 +2214,7 @@ class TestProcessAction:
         """A pull_request_review_comment triggers unblock_tasks so BLOCKED tasks resume."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 700,
@@ -2187,7 +2239,7 @@ class TestProcessAction:
         """A top-level PR comment triggers unblock_tasks so BLOCKED tasks resume."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 701,
@@ -2217,7 +2269,7 @@ class TestProcessAction:
         """A PR merge event (no comment body) must NOT trigger unblock_tasks."""
         url, cfg = server
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 72, "merged": True},
         }
@@ -2238,7 +2290,7 @@ class TestProcessAction:
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 950,
@@ -2267,7 +2319,7 @@ class TestProcessAction:
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": 1007,
@@ -2397,9 +2449,13 @@ class TestProcessActionInner:
     def test_action_with_reply_to_failure_marks_promise_retryable(
         self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
     ) -> None:
-        """When reply_to_comment raises, _fail_reply marks the promise
-        retryable and the outer try/except swallows the exception
-        (signaling a 'confused' reaction via _signal_action_error)."""
+        """When reply_to_comment raises a recoverable error, _fail_reply marks
+        the promise retryable and the narrowed except swallows the exception
+        (signaling a 'confused' reaction via _signal_action_error).
+        Logic bugs (KeyError, TypeError, etc.) are NOT swallowed — only
+        requests.RequestException and friends are caught."""
+        import requests
+
         action = Action(
             prompt="comment",
             reply_to={
@@ -2412,17 +2468,42 @@ class TestProcessActionInner:
             },
             comment_body="boom",
         )
-        mock_reply = MagicMock(side_effect=RuntimeError("boom"))
+        mock_reply = MagicMock(side_effect=requests.RequestException("API down"))
         WebhookHandler._fn_reply_to_comment = mock_reply
         WebhookHandler._fn_unblock_tasks = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
-        # _process_action_inner swallows the exception (logs + signal).
+        # _process_action_inner swallows the recoverable exception (logs + signal).
         handler._process_action_inner(action, repo_cfg, self._activity())
         # _signal_action_error fired → confused reaction posted.
         handler.gh.add_reaction.assert_called_with(
             "owner/repo", "pulls", 200, "confused"
         )
+
+    def test_action_with_reply_to_logic_bug_propagates(
+        self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
+    ) -> None:
+        """Logic bugs (e.g. KeyError) from reply_to_comment are NOT swallowed —
+        they propagate so the watchdog sees the crash."""
+        action = Action(
+            prompt="comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 201,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="boom",
+        )
+        mock_reply = MagicMock(side_effect=KeyError("missing_key"))
+        WebhookHandler._fn_reply_to_comment = mock_reply
+        WebhookHandler._fn_unblock_tasks = MagicMock()
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        with pytest.raises(KeyError):
+            handler._process_action_inner(action, repo_cfg, self._activity())
 
     def test_action_with_review_comments_calls_reply_to_review(
         self, cfg: Config, repo_cfg: RepoConfig
@@ -2496,8 +2577,10 @@ class TestProcessActionInner:
     def test_action_with_comment_body_failure_marks_promise_retryable(
         self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
     ) -> None:
-        """Issue-comment path: handler raises → _fail_reply marks
-        retryable, outer try/except swallows + signals."""
+        """Issue-comment path: recoverable error raises → _fail_reply marks
+        retryable, narrowed except swallows + signals.  Logic bugs propagate."""
+        import requests
+
         action = Action(
             prompt="issue comment",
             thread={
@@ -2510,7 +2593,7 @@ class TestProcessActionInner:
             },
             comment_body="boom",
         )
-        mock_reply = MagicMock(side_effect=RuntimeError("boom"))
+        mock_reply = MagicMock(side_effect=requests.RequestException("API down"))
         WebhookHandler._fn_reply_to_issue_comment = mock_reply
         WebhookHandler._fn_unblock_tasks = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
@@ -2590,6 +2673,13 @@ class TestProcessActionInner:
         )
         handler._signal_action_error(action)  # should not raise
 
+    def test_signal_action_error_no_op_when_no_thread(self, cfg: Config) -> None:
+        """_signal_action_error is a no-op when the action has no thread or
+        reply_to — non-comment events have no comment to react on."""
+        handler = self._handler(cfg)
+        handler._signal_action_error(Action(prompt="push event"))
+        handler.gh.add_reaction.assert_not_called()
+
 
 class TestSynchronousPreemption:
     """Verify that preemption fires on the HTTP handler thread, before the
@@ -2601,18 +2691,10 @@ class TestSynchronousPreemption:
     can be de-scheduled and the worker turn can complete.
     """
 
-    def _payload(self, repo_owner: str = "owner") -> dict:
-        return {
-            "repository": {
-                "full_name": f"{repo_owner}/repo",
-                "owner": {"login": repo_owner},
-            },
-        }
-
     def _issue_comment_payload(self, comment_id: int = 900) -> dict:
         """An issue_comment on a PR produces a durable-demand wakeup action."""
         return {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": comment_id,
@@ -2862,7 +2944,7 @@ class TestSynchronousPreemption:
         WebhookHandler._fn_create_task = MagicMock()
 
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 81, "merged": True},
         }
@@ -2900,18 +2982,10 @@ class TestUntriagedInboxWiring:
     """Verify that _do_post_inner / _process_action correctly enter/exit the
     per-repo untriaged inbox for preempting webhook actions (#1067)."""
 
-    def _payload(self, repo_owner: str = "owner") -> dict:
-        return {
-            "repository": {
-                "full_name": f"{repo_owner}/repo",
-                "owner": {"login": repo_owner},
-            },
-        }
-
     def _issue_comment_payload(self, comment_id: int = 950) -> dict:
         """An issue_comment on a PR produces a durable-demand wakeup action."""
         return {
-            **self._payload(),
+            **_payload(),
             "action": "created",
             "comment": {
                 "id": comment_id,
@@ -2931,7 +3005,7 @@ class TestUntriagedInboxWiring:
 
     def _check_run_failure_payload(self) -> dict:
         return {
-            **self._payload(),
+            **_payload(),
             "action": "completed",
             "check_run": {
                 "name": "ci",
@@ -2973,7 +3047,7 @@ class TestUntriagedInboxWiring:
         WebhookHandler._fn_launch_worker = MagicMock()
 
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 81, "merged": True},
         }
@@ -3022,7 +3096,7 @@ class TestUntriagedInboxWiring:
         WebhookHandler._fn_launch_worker = MagicMock()
 
         payload = {
-            **self._payload(),
+            **_payload(),
             "action": "closed",
             "pull_request": {"number": 82, "merged": True},
         }
@@ -3191,7 +3265,9 @@ class TestBootstrapIssueCaches:
         mock_gh.find_all_open_issues.assert_any_call("b", "r2")
 
     def test_per_repo_failure_is_swallowed(self, tmp_path: Path) -> None:
-        """A single GitHub API error must not prevent fido from starting."""
+        """A single transient GitHub API error must not prevent fido from starting."""
+        import requests
+
         from fido.server import bootstrap_issue_caches
 
         repos = {
@@ -3199,7 +3275,10 @@ class TestBootstrapIssueCaches:
             "b/r2": RepoConfig(name="b/r2", work_dir=tmp_path),
         }
         mock_gh = MagicMock()
-        mock_gh.find_all_open_issues.side_effect = [RuntimeError("API down"), []]
+        mock_gh.find_all_open_issues.side_effect = [
+            requests.RequestException("API down"),
+            [],
+        ]
         mock_cache_r2 = MagicMock()
         mock_registry = MagicMock()
         mock_registry.get_issue_cache.side_effect = lambda name: (
@@ -3211,6 +3290,19 @@ class TestBootstrapIssueCaches:
 
         # Second repo should still be bootstrapped.
         mock_cache_r2.load_inventory.assert_called_once()
+
+    def test_logic_bug_in_bootstrap_propagates(self, tmp_path: Path) -> None:
+        """Non-transient errors (logic bugs, auth failures) must propagate
+        loudly so misconfiguration is caught at startup, not silently deferred."""
+        from fido.server import bootstrap_issue_caches
+
+        repos = {"a/r1": RepoConfig(name="a/r1", work_dir=tmp_path)}
+        mock_gh = MagicMock()
+        mock_gh.find_all_open_issues.side_effect = RuntimeError("not logged in")
+        mock_registry = MagicMock()
+
+        with pytest.raises(RuntimeError, match="not logged in"):
+            bootstrap_issue_caches(repos, mock_gh, mock_registry)
 
     def test_wakes_worker_after_successful_load(self, tmp_path: Path) -> None:
         """Worker is woken after a successful cache load so it rescans immediately (#995)."""
@@ -3246,6 +3338,8 @@ class TestBootstrapIssueCaches:
 
     def test_does_not_wake_worker_on_failed_load(self, tmp_path: Path) -> None:
         """A failed bootstrap must not wake the worker — the cache is cold (#995)."""
+        import requests
+
         from fido.server import bootstrap_issue_caches
 
         repos = {
@@ -3253,7 +3347,10 @@ class TestBootstrapIssueCaches:
             "b/r2": RepoConfig(name="b/r2", work_dir=tmp_path),
         }
         mock_gh = MagicMock()
-        mock_gh.find_all_open_issues.side_effect = [RuntimeError("API down"), []]
+        mock_gh.find_all_open_issues.side_effect = [
+            requests.RequestException("API down"),
+            [],
+        ]
         mock_registry = MagicMock()
         mock_registry.get_issue_cache.return_value = MagicMock()
 

@@ -1385,13 +1385,13 @@ class TestDispatchIssuesAssigned:
         assert result is not None
         assert "#1" in result.prompt
 
-    def test_no_number_returns_none(self, tmp_path: Path) -> None:
+    def test_zero_number_returns_none(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
         payload = {
             **_payload(),
             "action": "assigned",
             "assignee": {"login": "fido"},
-            "issue": {"title": "test"},
+            "issue": {"number": 0, "title": "test"},
         }
         result = dispatch("issues", payload, cfg, _repo_cfg(tmp_path))
         assert result is None
@@ -6756,10 +6756,6 @@ class TestTaskSnapshot:
 
     def test_empty_list(self) -> None:
         assert _task_snapshot([]) == []
-
-    def test_missing_fields_default_to_empty_string(self) -> None:
-        tasks = [{"id": "x"}]
-        assert _task_snapshot(tasks) == [("x", "", "")]
 
     def test_order_is_preserved(self) -> None:
         tasks = [

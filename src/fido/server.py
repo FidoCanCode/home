@@ -19,6 +19,8 @@ from typing import IO, Any, cast
 from urllib.parse import urlparse
 from xml.etree.ElementTree import Element, SubElement, register_namespace, tostring
 
+import requests
+
 from fido import provider
 from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
@@ -35,7 +37,7 @@ from fido.events import (
     reply_to_review,
     thread_lineage_comment_ids,
 )
-from fido.github import GitHub
+from fido.github import GitHub, GraphQLError
 from fido.infra import (
     Clock,
     Filesystem,
@@ -711,8 +713,32 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._respond(400, "invalid json")
             return
 
-        # Route by repo
-        repo_name = payload.get("repository", {}).get("full_name", "")
+        # Route by repo — all keys below are schema-required on real GitHub
+        # webhook payloads.  KeyError means malformed payload → 500 so GitHub
+        # retries and the failure surfaces rather than silently routing to
+        # "unregistered repo" or disabling self-restart.
+        try:
+            repo_name = payload["repository"]["full_name"]
+            # Pre-compute self-restart triggers — needed for both registered and
+            # unregistered repos (_self_restart verifies the runner's git remote).
+            default_branch = payload["repository"]["default_branch"]
+            is_pr_merged = (
+                event == "pull_request"
+                and payload["action"] == "closed"
+                and bool(payload["pull_request"]["merged"])
+            )
+            is_default_push = (
+                event == "push" and payload["ref"] == f"refs/heads/{default_branch}"
+            )
+        except KeyError as exc:
+            log.exception(
+                "webhook: malformed payload, missing key %s (event=%s delivery=%s)",
+                exc,
+                event,
+                delivery,
+            )
+            self._respond(500, "malformed payload")
+            return
         repo_cfg = self.config.repos.get(repo_name)
 
         log.info(
@@ -721,20 +747,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
             payload.get("action", "-"),
             repo_name,
             delivery,
-        )
-
-        # Pre-compute self-restart triggers — needed for both registered and
-        # unregistered repos (_self_restart verifies the runner's git remote).
-        default_branch = payload.get("repository", {}).get("default_branch", "")
-        is_pr_merged = (
-            event == "pull_request"
-            and payload.get("action") == "closed"
-            and bool(payload.get("pull_request", {}).get("merged"))
-        )
-        is_default_push = (
-            event == "push"
-            and bool(default_branch)
-            and payload.get("ref") == f"refs/heads/{default_branch}"
         )
 
         if not repo_cfg:
@@ -1136,7 +1148,18 @@ class WebhookHandler(BaseHTTPRequestHandler):
             # Let the outer _process_action handler halt fido — we must not
             # swallow a leak into the generic "confused reaction" path below.
             raise
-        except Exception:
+        except (
+            requests.RequestException,
+            GraphQLError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            OSError,
+        ):
+            # Recoverable: transient GitHub/network failures and task-file I/O
+            # contention.  Signal confused reaction so the author sees something
+            # went wrong, then let this webhook thread exit cleanly.
+            # Logic bugs (KeyError, TypeError, AttributeError, etc.) are NOT
+            # caught here — they propagate and crash the thread loudly.
             log.exception("error processing action")
             self._signal_action_error(action)
 
@@ -1418,7 +1441,15 @@ def bootstrap_issue_caches(
             inventory = gh.find_all_open_issues(owner, repo_name)
             cache.load_inventory(inventory, snapshot_started_at=snapshot_started_at)
             registry.wake(name)
-        except Exception:
+        except (
+            requests.RequestException,
+            GraphQLError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ):
+            # Transient GitHub/network failure — ReconcileWatchdog heals within
+            # the hour.  Auth errors (RuntimeError) and logic bugs are NOT
+            # caught; they crash startup loud so misconfiguration is visible.
             log.exception(
                 "startup: failed to bootstrap issue cache for %s — "
                 "ReconcileWatchdog will heal within the hour",
