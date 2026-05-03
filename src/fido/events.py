@@ -1141,10 +1141,10 @@ def dispatch(
         return None
 
     if event == "issues" and action == "assigned":
-        assignee = payload.get("assignee", {}).get("login", "")
-        issue = payload.get("issue", {})
-        number = issue.get("number")
-        title = issue.get("title", "")
+        assignee = payload["assignee"]["login"]
+        issue = payload["issue"]
+        number = issue["number"]
+        title = issue["title"]
         if not number:
             return None
         log.info("issue #%s assigned to %s: %s", number, assignee, title)
@@ -1154,11 +1154,11 @@ def dispatch(
         return Action(prompt=f"New issue #{number} assigned to {assignee}: {title}")
 
     if event == "pull_request_review" and action == "submitted":
-        review = payload.get("review", {})
-        pr = payload.get("pull_request", {})
+        review = payload["review"]
+        pr = payload["pull_request"]
         number = pr.get("number")
-        state = review.get("state", "")
-        user = review.get("user", {}).get("login", "")
+        state = review["state"]
+        user = review["user"]["login"]
         review_id = review.get("id")
         if not number:
             return None
@@ -1178,11 +1178,11 @@ def dispatch(
         )
 
     if event == "pull_request_review_comment" and action in {"created", "edited"}:
-        comment = payload.get("comment", {})
-        pr = payload.get("pull_request", {})
+        comment = payload["comment"]
+        pr = payload["pull_request"]
         number = pr.get("number")
-        user = comment.get("user", {}).get("login", "")
-        comment_id = comment.get("id")
+        user = comment["user"]["login"]
+        comment_id = comment["id"]
         if user.lower() in ("fidocancode", "fido-can-code"):
             log.debug("ignoring own comment on PR #%s", number)
             return None
@@ -1194,57 +1194,55 @@ def dispatch(
         comment_body = comment.get("body", "") or ""
         log.info("comment on PR #%s by %s: %s", number, user, comment_body[:80])
         is_bot = user.endswith("[bot]")
-        if comment_id is not None:
-            comment_id = int(comment_id)
-            wev = wct_oracle.EvtReviewComment(1, number, comment_id, user, is_bot)
-            cmd = wct_oracle.translate(wev)
-            assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
-            assert isinstance(cmd.cmd_kind, wct_oracle.ReviewLine), "translate_total"
-            _enqueue_pr_comment_webhook(
-                repo_cfg=repo_cfg,
-                repo=repo,
-                pr_number=number,
-                comment_type="pulls",
-                comment=comment,
-                author=user,
-                is_bot=is_bot,
-                body=comment_body,
-                delivery_id=delivery_id,
-                payload=payload,
-            )
-            prefix = (
-                "Queued edited review comment"
-                if action == "edited"
-                else "Queued review comment"
-            )
-            return _queued_pr_comment_action(
-                prompt=(
-                    f"{prefix} on PR #{number} by {user}"
-                    f" ({'bot' if is_bot else 'human/owner'})"
-                ),
-                repo=repo,
-                pr_number=number,
-                comment_type="pulls",
-                comment_id=comment_id,
-                html_url=comment.get("html_url", ""),
-                author=user,
-                is_bot=is_bot,
-                context={
-                    "comment_body": comment_body,
-                    "delivery_id": delivery_id,
-                    "pr_title": pr.get("title", ""),
-                    "pr_body": pr.get("body", "") or "",
-                    "file": comment.get("path", ""),
-                    "line": comment.get("line"),
-                    "diff_hunk": comment.get("diff_hunk", ""),
-                },
-            )
-        return None
+        comment_id = int(comment_id)
+        wev = wct_oracle.EvtReviewComment(1, number, comment_id, user, is_bot)
+        cmd = wct_oracle.translate(wev)
+        assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
+        assert isinstance(cmd.cmd_kind, wct_oracle.ReviewLine), "translate_total"
+        _enqueue_pr_comment_webhook(
+            repo_cfg=repo_cfg,
+            repo=repo,
+            pr_number=number,
+            comment_type="pulls",
+            comment=comment,
+            author=user,
+            is_bot=is_bot,
+            body=comment_body,
+            delivery_id=delivery_id,
+            payload=payload,
+        )
+        prefix = (
+            "Queued edited review comment"
+            if action == "edited"
+            else "Queued review comment"
+        )
+        return _queued_pr_comment_action(
+            prompt=(
+                f"{prefix} on PR #{number} by {user}"
+                f" ({'bot' if is_bot else 'human/owner'})"
+            ),
+            repo=repo,
+            pr_number=number,
+            comment_type="pulls",
+            comment_id=comment_id,
+            html_url=comment.get("html_url", ""),
+            author=user,
+            is_bot=is_bot,
+            context={
+                "comment_body": comment_body,
+                "delivery_id": delivery_id,
+                "pr_title": pr.get("title", ""),
+                "pr_body": pr.get("body", "") or "",
+                "file": comment.get("path", ""),
+                "line": comment.get("line"),
+                "diff_hunk": comment.get("diff_hunk", ""),
+            },
+        )
 
     if event == "issue_comment" and action in {"created", "edited"}:
-        comment = payload.get("comment", {})
-        issue = payload.get("issue", {})
-        user = comment.get("user", {}).get("login", "")
+        comment = payload["comment"]
+        issue = payload["issue"]
+        user = comment["user"]["login"]
         pr = issue.get("pull_request")
         if not pr:
             log.debug("issue_comment on non-PR issue — ignoring")
@@ -1255,61 +1253,58 @@ def dispatch(
         if not _is_allowed(user, repo_cfg, config):
             log.debug("ignoring comment by %s (not allowed)", user)
             return None
-        number = issue.get("number")
+        number = issue["number"]
         comment_body = comment.get("body", "") or ""
-        comment_id = comment.get("id")
+        comment_id = int(comment["id"])
         is_bot = user.endswith("[bot]")
         log.info("PR comment on #%s by %s: %s", number, user, comment_body[:80])
-        if number is not None and comment_id is not None:
-            comment_id = int(comment_id)
-            wev = wct_oracle.EvtIssueComment(1, number, comment_id, user, is_bot)
-            cmd = wct_oracle.translate(wev)
-            assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
-            assert isinstance(cmd.cmd_kind, wct_oracle.TopLevelPR), "translate_total"
-            _enqueue_pr_comment_webhook(
-                repo_cfg=repo_cfg,
-                repo=repo,
-                pr_number=number,
-                comment_type="issues",
-                comment=comment,
-                author=user,
-                is_bot=is_bot,
-                body=comment_body,
-                delivery_id=delivery_id,
-                payload=payload,
-            )
-            prefix = (
-                "Queued edited PR top-level comment"
-                if action == "edited"
-                else "Queued PR top-level comment"
-            )
-            return _queued_pr_comment_action(
-                prompt=f"{prefix} on #{number} by {user}",
-                repo=repo,
-                pr_number=number,
-                comment_type="issues",
-                comment_id=comment_id,
-                html_url=comment.get("html_url", ""),
-                author=user,
-                is_bot=is_bot,
-                context={
-                    "comment_body": comment_body,
-                    "delivery_id": delivery_id,
-                    "pr_title": issue.get("title", ""),
-                    "pr_body": issue.get("body", "") or "",
-                },
-            )
-        return None
+        wev = wct_oracle.EvtIssueComment(1, number, comment_id, user, is_bot)
+        cmd = wct_oracle.translate(wev)
+        assert isinstance(cmd, wct_oracle.CmdComment), "translate_total"
+        assert isinstance(cmd.cmd_kind, wct_oracle.TopLevelPR), "translate_total"
+        _enqueue_pr_comment_webhook(
+            repo_cfg=repo_cfg,
+            repo=repo,
+            pr_number=number,
+            comment_type="issues",
+            comment=comment,
+            author=user,
+            is_bot=is_bot,
+            body=comment_body,
+            delivery_id=delivery_id,
+            payload=payload,
+        )
+        prefix = (
+            "Queued edited PR top-level comment"
+            if action == "edited"
+            else "Queued PR top-level comment"
+        )
+        return _queued_pr_comment_action(
+            prompt=f"{prefix} on #{number} by {user}",
+            repo=repo,
+            pr_number=number,
+            comment_type="issues",
+            comment_id=comment_id,
+            html_url=comment.get("html_url", ""),
+            author=user,
+            is_bot=is_bot,
+            context={
+                "comment_body": comment_body,
+                "delivery_id": delivery_id,
+                "pr_title": issue.get("title", ""),
+                "pr_body": issue.get("body", "") or "",
+            },
+        )
 
     if event == "check_run" and action == "completed":
-        check = payload.get("check_run", {})
-        conclusion = check.get("conclusion", "")
+        check = payload["check_run"]
+        conclusion = check["conclusion"]
         if conclusion not in ("failure", "timed_out"):
             log.debug("check_run completed with %s — ignoring", conclusion)
             return None
-        name = check.get("name", "")
-        prs = check.get("pull_requests", [])
-        pr_nums = [pr.get("number") for pr in prs if pr.get("number")]
+        name = check["name"]
+        prs = check["pull_requests"]
+        pr_nums = [pr["number"] for pr in prs]
         log.info("CI failure: %s (%s) on PRs %s", name, conclusion, pr_nums)
         _ci_conclusion = (
             wct_oracle.CIFailure()
@@ -1326,25 +1321,21 @@ def dispatch(
         )
 
     if event == "pull_request" and action == "closed":
-        pr = payload.get("pull_request", {})
-        number = pr.get("number")
-        if number is not None:
-            removed = FidoStore(repo_cfg.work_dir).clear_pr_comment_queue(
-                repo=repo,
-                pr_number=int(number),
-            )
-            if removed:
-                log.info(
-                    "cleared %d queued comment(s) for closed PR #%s", removed, number
-                )
-        if not pr.get("merged"):
+        pr = payload["pull_request"]
+        number = pr["number"]
+        removed = FidoStore(repo_cfg.work_dir).clear_pr_comment_queue(
+            repo=repo,
+            pr_number=int(number),
+        )
+        if removed:
+            log.info("cleared %d queued comment(s) for closed PR #%s", removed, number)
+        if not pr["merged"]:
             log.debug("PR #%s closed without merge — ignoring", number)
             return None
         log.info("PR #%s merged", number)
-        if number is not None:
-            wev = wct_oracle.EvtPRMerged(1, number)
-            cmd = wct_oracle.translate(wev)
-            assert isinstance(cmd, wct_oracle.CmdPRMerged), "translate_total"
+        wev = wct_oracle.EvtPRMerged(1, number)
+        cmd = wct_oracle.translate(wev)
+        assert isinstance(cmd, wct_oracle.CmdPRMerged), "translate_total"
         return Action(prompt=f"PR #{number} merged — cleanup")
 
     log.debug("ignored event: %s (action=%s)", event, action)
@@ -2060,7 +2051,7 @@ def _task_snapshot(task_list: list[dict[str, Any]]) -> list[tuple[str, str, str]
     Used by :func:`_rewrite_pr_description` to detect whether the task list
     changed while Opus was generating the PR description.
     """
-    return [(t["id"], t.get("status", ""), t.get("title", "")) for t in task_list]
+    return [(t["id"], t["status"], t["title"]) for t in task_list]
 
 
 def _rewrite_pr_description(
@@ -2173,17 +2164,17 @@ def _load_active_context_for_rescope(
     issue_data = gh.view_issue(repo_name, issue_number)
     issue_ctx = ActiveIssue(
         number=issue_number,
-        title=issue_data.get("title", ""),
-        body=issue_data.get("body", ""),
+        title=issue_data["title"],
+        body=issue_data.get("body") or "",
     )
     if not isinstance(pr_number, int):
         return issue_ctx, None
     pr_data = gh.get_pr(repo_name, pr_number)
     pr_ctx = ActivePR(
         number=pr_number,
-        title=pr_data.get("title", "") or "",
+        title=pr_data["title"],
         url=f"https://github.com/{repo_name}/pull/{pr_number}",
-        body=pr_data.get("body", "") or "",
+        body=pr_data["body"] or "",
     )
     return issue_ctx, pr_ctx
 

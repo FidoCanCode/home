@@ -2362,8 +2362,8 @@ class Worker:
         if config is None or repo_cfg is None:
             raise RuntimeError("thread handling requires explicit config and repo_cfg")
         pr_data = self.gh.get_pr(repo_ctx.repo, pr_number)
-        pr_title = pr_data.get("title") or ""
-        pr_body = pr_data.get("body") or ""
+        pr_title = pr_data["title"]
+        pr_body = pr_data["body"] or ""
         promise_by_anchor = {
             promise.anchor_comment_id: promise
             for promise in promises
@@ -2455,8 +2455,8 @@ class Worker:
         if config is None or repo_cfg is None:
             raise RuntimeError("queued comment handling requires explicit config")
         pr_data = self.gh.get_pr(repo_ctx.repo, queued.pr_number)
-        pr_title = pr_data.get("title") or ""
-        pr_body = pr_data.get("body") or ""
+        pr_title = pr_data["title"]
+        pr_body = pr_data["body"] or ""
         promise: ReplyPromiseRecord | None = None
         try:
             action = self._queued_comment_action(
@@ -3176,8 +3176,8 @@ class Worker:
         else:
             issue_number = None
         pr_data = self.gh.get_pr(repo_ctx.repo, pr_number)
-        pr_title = pr_data.get("title", "") or ""
-        pr_body = pr_data.get("body", "") or ""
+        pr_title = pr_data["title"]
+        pr_body = pr_data["body"] or ""
         pr_url = f"https://github.com/{repo_ctx.repo}/pull/{pr_number}"
         active_ctx = render_active_context(
             issue=ActiveIssue(
@@ -3457,7 +3457,7 @@ class Worker:
         if self._tasks.list():
             return  # already have tasks — nothing to seed
         pr_data = self.gh.get_pr(repo, pr_number)
-        body = pr_data.get("body") or ""
+        body = pr_data["body"] or ""
         match = re.search(
             r"<!-- WORK_QUEUE_START -->(.*?)<!-- WORK_QUEUE_END -->",
             body,
