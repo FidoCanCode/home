@@ -1179,6 +1179,49 @@ class TestRocqLspMoreBranches:
         assert record_updated.body == "updated"
 
 
+class TestCopilotCLIOwnerMore:
+    """Cover the ``owner`` branches that need a registered repo_name
+    (copilotcli.py:975-981)."""
+
+    @staticmethod
+    def _build_session(tmp_path: Path, repo_name: str | None = "test/repo"):
+        from fido.copilotcli import CopilotCLISession
+
+        runtime = MagicMock()
+        runtime.ensure_session.return_value = "sess-1"
+        runtime.pid = 4321
+        return CopilotCLISession(
+            tmp_path / "sys.md",
+            work_dir=tmp_path,
+            model="gpt-5",
+            runtime=runtime,
+            repo_name=repo_name,
+        )
+
+    def test_owner_returns_none_when_no_talker_registered(
+        self, tmp_path: Path
+    ) -> None:
+        # copilotcli.py:975-977 — get_talker None or wrong kind.
+        from fido import provider as provider_module
+
+        session = self._build_session(tmp_path)
+        with patch.object(provider_module, "get_talker", return_value=None):
+            assert session.owner is None
+
+    def test_owner_returns_none_when_no_thread_matches(
+        self, tmp_path: Path
+    ) -> None:
+        # copilotcli.py:978-981 — talker.kind == worker but thread_id absent.
+        from fido import provider as provider_module
+
+        session = self._build_session(tmp_path)
+        fake_talker = MagicMock()
+        fake_talker.kind = "worker"
+        fake_talker.thread_id = -1
+        with patch.object(provider_module, "get_talker", return_value=fake_talker):
+            assert session.owner is None
+
+
 class TestCopilotCLIOwner:
     def test_owner_returns_none_when_repo_name_is_unset(self, tmp_path: Path) -> None:
         """``owner`` property short-circuits to None when repo_name is
@@ -1545,6 +1588,79 @@ class TestCodexCLIErrorBranch:
             )
         assert exc_info.value.returncode == 1
         assert "codex died" in exc_info.value.stderr
+
+
+class TestWorkerLeafBranches:
+    """Cover small leaf branches in worker.py."""
+
+    @staticmethod
+    def _make_worker(tmp_path: Path):
+        """Construct a Worker via the test scaffolding in tests/test_worker.py."""
+        from tests.test_worker import Worker
+
+        return Worker(tmp_path, MagicMock())
+
+    def test_task_still_current_returns_false_when_state_mismatches(
+        self, tmp_path: Path
+    ) -> None:
+        """``_task_still_current`` returns False when state.json's
+        current_task_id is different from the requested task_id (worker.py:2945)."""
+        from fido.state import State
+
+        worker = self._make_worker(tmp_path)
+        fido_dir = tmp_path / ".fido"
+        fido_dir.mkdir()
+        # Set state's current_task_id to something different.
+        with State(fido_dir).modify() as state:
+            state["current_task_id"] = "task-abc"
+        assert worker._task_still_current(fido_dir, "task-xyz") is False  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _make_worker_with_stubs(tmp_path: Path):
+        """Build a Worker whose provider_agent and tasks are MagicMocks
+        so we can drive the empty-msg branches without real I/O."""
+        from tests.test_worker import Worker
+
+        provider_agent = MagicMock()
+        provider_agent.generate_reply.return_value = ""
+        provider_agent.voice_model = "model"
+        return Worker(
+            tmp_path,
+            MagicMock(),  # gh
+            provider_agent=provider_agent,
+        )
+
+    def test_report_task_completed_no_commit_raises_when_msg_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """``_report_task_completed_without_commit`` raises ValueError when
+        the provider returns an empty message (worker.py:2972)."""
+        worker = self._make_worker_with_stubs(tmp_path)
+        prompts_stub = MagicMock()
+        prompts_stub.task_completed_without_commit_comment_prompt.return_value = "p"
+        with patch.object(worker, "_get_prompts", return_value=prompts_stub):
+            with pytest.raises(ValueError, match="completed without commit"):
+                worker._report_task_completed_without_commit(  # type: ignore[attr-defined]
+                    "test/repo", 1, "task-id", "task-title"
+                )
+
+    def test_report_task_stuck_no_commit_raises_when_msg_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """``_report_task_stuck_no_commits`` raises ValueError when
+        the provider returns an empty message (worker.py:3007)."""
+        worker = self._make_worker_with_stubs(tmp_path)
+        prompts_stub = MagicMock()
+        prompts_stub.task_stuck_no_commit_comment_prompt.return_value = "p"
+        # Patch tasks helper since update is called before generate_reply.
+        worker._tasks = MagicMock()  # type: ignore[attr-defined]
+        fido_dir = tmp_path / ".fido"
+        fido_dir.mkdir()
+        with patch.object(worker, "_get_prompts", return_value=prompts_stub):
+            with pytest.raises(ValueError, match="stuck no-commit"):
+                worker._report_task_stuck_no_commits(  # type: ignore[attr-defined]
+                    fido_dir, "test/repo", 1, "task-id", "task-title", 5
+                )
 
 
 class _FakeAppServerForCoverage:
