@@ -731,7 +731,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 event == "push" and payload["ref"] == f"refs/heads/{default_branch}"
             )
         except KeyError as exc:
-            log.warning(
+            log.exception(
                 "webhook: malformed payload, missing key %s (event=%s delivery=%s)",
                 exc,
                 event,
