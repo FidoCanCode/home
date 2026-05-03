@@ -2228,6 +2228,143 @@ class TestWorkerOracleAssertion:
                 _assert_ci_failure_matches_oracle(task_list, "tests", "FAILURE", "run-1")
 
 
+class TestClaudeIterEventsCancelPaths:
+    """Cover the cancel-path BrokenPipeError fallback in iter_events
+    (claude.py:1283-1287)."""
+
+    def _build_session_in_turn(self, tmp_path):
+        """Build a ClaudeSession whose FSM is in AwaitingReply (i.e.
+        in_turn=True) so the cancel branch fires."""
+        import subprocess
+        from unittest.mock import MagicMock
+
+        from fido.claude import ClaudeSession
+        from fido.rocq import claude_session as stream_fsm
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 99999
+        proc.stdin = MagicMock()
+        proc.stdin.closed = False
+        proc.stdin.write.side_effect = BrokenPipeError("test pipe broken")
+        proc.stdout = MagicMock()
+        proc.stdout.readline = MagicMock(return_value="")  # always EOF
+        proc.stderr = MagicMock()
+        # poll=None keeps the process "alive" so the loop runs the
+        # cancel-drain-timeout branch instead of breaking on process exit.
+        proc.poll = MagicMock(return_value=None)
+        proc.kill = MagicMock()
+        proc.wait = MagicMock(return_value=0)
+        proc.returncode = 0
+
+        session_ref: list[ClaudeSession] = []
+
+        def selector_that_cancels(*_a, **_kw):
+            session_ref[0]._cancel.set()
+            return ([], [], [])
+
+        session = ClaudeSession(
+            system_file,
+            popen=MagicMock(return_value=proc),
+            selector=selector_that_cancels,
+        )
+        session_ref.append(session)
+        # Force the FSM to AwaitingReply so iter_events sees in_turn=True.
+        session._stream_state = stream_fsm.AwaitingReply()  # type: ignore[attr-defined]
+        return session, proc
+
+    def test_cancel_boundary_without_ack_kills_and_recovers(
+        self, tmp_path: Path
+    ) -> None:
+        # claude.py:1383-1391 — type=result arrives after cancel was fired
+        # but no control_response ack was seen → kill + recover + raise.
+        import json
+        import subprocess
+        from unittest.mock import MagicMock
+
+        from fido.claude import ClaudeSession, ClaudeStreamError
+        from fido.rocq import claude_session as stream_fsm
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("sys")
+
+        # Yield exactly one ``type=result`` line — that satisfies the
+        # boundary condition.  The cancel signal fires from the selector
+        # before the read, so by the time we see ``result`` cancel_ack_seen
+        # is still False.
+        result_line = json.dumps({"type": "result", "result": "ok"}) + "\n"
+
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 99999
+        proc.stdin = MagicMock()
+        proc.stdin.closed = False
+        proc.stdout = MagicMock()
+        proc.stdout.readline = MagicMock(side_effect=[result_line, ""])
+        proc.stderr = MagicMock()
+        proc.poll = MagicMock(return_value=None)
+        proc.kill = MagicMock()
+        proc.wait = MagicMock(return_value=0)
+        proc.returncode = 0
+
+        session_ref: list[ClaudeSession] = []
+        # First selector call: arm cancel and return no fds → loop iterates
+        # again so the cancel-handling block at line 1258 fires (sending
+        # the interrupt and recording cancelled_at + cancel_request_id).
+        # Second call: stdout ready → read the result line and trigger
+        # the no-ack boundary check.
+        select_calls = iter([
+            ([], [], []),
+            ([proc.stdout], [], []),
+        ])
+
+        def selector_that_cancels(*_a, **_kw):
+            session_ref[0]._cancel.set()
+            try:
+                return next(select_calls)
+            except StopIteration:
+                return ([], [], [])
+
+        session = ClaudeSession(
+            system_file,
+            popen=MagicMock(return_value=proc),
+            selector=selector_that_cancels,
+        )
+        session_ref.append(session)
+        session.recover = MagicMock()  # type: ignore[method-assign]
+        session._stream_state = stream_fsm.AwaitingReply()  # type: ignore[attr-defined]
+
+        with pytest.raises(ClaudeStreamError):
+            list(session.iter_events())
+        assert proc.kill.called
+        session.recover.assert_called()
+        session.stop()
+
+    def test_send_control_interrupt_failure_keeps_iter_events_running(
+        self, tmp_path: Path
+    ) -> None:
+        # claude.py:1283-1287 — BrokenPipeError when writing the interrupt
+        # is logged and the loop continues with cancel_request_id=None.
+        # Use a fast cancel-drain timeout so the test exits quickly.
+        import fido.claude as _claude_mod
+        from fido.claude import ClaudeStreamError
+
+        original = _claude_mod._CANCEL_DRAIN_TIMEOUT
+        _claude_mod._CANCEL_DRAIN_TIMEOUT = 0.05
+        try:
+            session, proc = self._build_session_in_turn(tmp_path)
+            session.recover = MagicMock()  # type: ignore[method-assign]
+            # The drain timeout will fire and raise ClaudeStreamError
+            # AFTER line 1283-1287 has been executed.
+            with pytest.raises(ClaudeStreamError):
+                list(session.iter_events())
+            session.stop()
+            del proc
+        finally:
+            _claude_mod._CANCEL_DRAIN_TIMEOUT = original
+
+
 class TestClaudeStderrPump:
     """Cover the stderr pump loop in ClaudeSession (claude.py:691-693)."""
 
