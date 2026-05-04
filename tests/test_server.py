@@ -30,6 +30,7 @@ from fido.server import FidoHTTPServer, PreflightError, WebhookHandler, _repo_st
 from fido.store import FidoStore
 from fido.tasks import Tasks
 from fido.types import TaskStatus, TaskType
+from tests.fakes import _FakeDispatcher
 
 
 class RepoConfig(_RepoConfig):
@@ -2133,6 +2134,7 @@ class TestProcessAction:
         handler.config = cfg
         handler.registry = WorkerRegistry(MagicMock())
         handler.gh = MagicMock()
+        handler.dispatchers = {"owner/repo": _FakeDispatcher()}
         phases: list[str] = []
 
         def reply_to_issue_comment(*args: object) -> tuple[str, list[str]]:
@@ -2173,8 +2175,7 @@ class TestProcessAction:
         """When dispatch raises, return 500 so GitHub retries the delivery."""
         url, cfg = server
         payload = {**_payload(), "action": "created"}
-        mock_dispatcher = MagicMock()
-        mock_dispatcher.dispatch.side_effect = RuntimeError("boom")
+        mock_dispatcher = _FakeDispatcher(dispatch_side_effect=RuntimeError("boom"))
         WebhookHandler.dispatchers = {"owner/repo": mock_dispatcher}
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _post_webhook(url, cfg, "pull_request_review_comment", payload)
@@ -2208,9 +2209,8 @@ class TestProcessAction:
             call_order.append(f"respond_{code}")
             original_respond(self, code, msg)
 
-        mock_dispatcher = MagicMock()
-        mock_dispatcher.dispatch.side_effect = lambda *_a, **_kw: call_order.append(
-            "dispatch"
+        mock_dispatcher = _FakeDispatcher(
+            dispatch_side_effect=lambda *_a, **_kw: call_order.append("dispatch")
         )
         WebhookHandler.dispatchers = {"owner/repo": mock_dispatcher}
         WebhookHandler._respond = fake_respond  # type: ignore[method-assign]
@@ -2394,6 +2394,7 @@ class TestProcessActionInner:
         handler.config = cfg
         handler.gh = MagicMock()
         handler.registry = MagicMock()
+        handler.dispatchers = {"owner/repo": _FakeDispatcher()}
         return handler
 
     def _activity(self) -> MagicMock:

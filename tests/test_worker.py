@@ -74,6 +74,7 @@ from fido.worker import (
 from fido.worker import (
     WorkerThread as _WorkerThreadBase,
 )
+from tests.fakes import _FakeDispatcher
 
 _MISSING = object()
 
@@ -124,6 +125,8 @@ class Worker(_WorkerBase):
             )
         if "issue_cache" not in kwargs:
             kwargs["issue_cache"] = IssueTreeCache(kwargs.get("repo_name", "test/repo"))
+        if "dispatcher" not in kwargs:
+            kwargs["dispatcher"] = _FakeDispatcher()
         super().__init__(work_dir, gh, *args, **kwargs)
 
     def assert_git_identity(self, *, phase: str) -> None:
@@ -152,6 +155,8 @@ class WorkerThread(_WorkerThreadBase):
             )
         if "issue_cache" not in kwargs:
             kwargs["issue_cache"] = IssueTreeCache(repo_name)
+        if "dispatcher" not in kwargs:
+            kwargs["dispatcher"] = _FakeDispatcher()
         super().__init__(work_dir, repo_name, gh, *args, **kwargs)
 
 
@@ -2416,7 +2421,12 @@ class TestAssertGitIdentity:
         gh = MagicMock()
         gh.get_authenticated_identity.return_value = self._EXPECTED
         return (
-            _WorkerBase(tmp_path, gh, issue_cache=IssueTreeCache("test/repo")),
+            _WorkerBase(
+                tmp_path,
+                gh,
+                dispatcher=_FakeDispatcher(),
+                issue_cache=IssueTreeCache("test/repo"),
+            ),
             gh,
         )
 
@@ -6160,10 +6170,7 @@ class TestRunSeedTasksIntegration:
             return 0
 
         def _run_once(first: bool) -> None:
-            from fido.events import Dispatcher
-
-            mock_dispatcher = MagicMock(spec=Dispatcher)
-            mock_dispatcher.backfill_missed_pr_comments.side_effect = _backfill
+            mock_dispatcher = _FakeDispatcher(backfill_side_effect=_backfill)
             worker = Worker(
                 tmp_path,
                 gh,
@@ -6213,10 +6220,7 @@ class TestRunSeedTasksIntegration:
 
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        from fido.events import Dispatcher
-
-        mock_dispatcher = MagicMock(spec=Dispatcher)
-        mock_dispatcher.backfill_missed_pr_comments.return_value = 0
+        mock_dispatcher = _FakeDispatcher(backfill_return=0)
         worker = Worker(
             tmp_path,
             gh,
@@ -6258,9 +6262,7 @@ class TestRunSeedTasksIntegration:
         avoid one superfluous API round-trip."""
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        from fido.events import Dispatcher
-
-        mock_dispatcher = MagicMock(spec=Dispatcher)
+        mock_dispatcher = _FakeDispatcher()
         worker = Worker(
             tmp_path,
             gh,
@@ -6284,7 +6286,7 @@ class TestRunSeedTasksIntegration:
             patch.object(worker, "seed_tasks_from_pr_body"),
         ):
             worker.run()
-        mock_dispatcher.backfill_missed_pr_comments.assert_not_called()
+        assert mock_dispatcher.backfill_calls == []
 
     def test_seed_not_called_when_find_or_create_pr_raises(
         self, tmp_path: Path

@@ -846,7 +846,7 @@ def queue_reply_tasks(
     is_bot: bool = False,
     registry: Any = None,  # noqa: ANN401  # WorkerRegistry-or-ActivityReporter; either works
     create_task_fn: Callable[..., object] | None = None,
-    dispatcher: "Dispatcher | None" = None,
+    dispatcher: "Dispatcher",
 ) -> int:
     """Create any tasks implied by a reply outcome.
 
@@ -879,6 +879,7 @@ def _apply_reply_result(
     gh: GitHub,
     thread: dict[str, Any] | None,
     registry: ActivityReporter,
+    dispatcher: "Dispatcher",
 ) -> None:
     """Apply task side effects from a recovered reply."""
     queue_reply_tasks(
@@ -889,6 +890,7 @@ def _apply_reply_result(
         gh,
         thread=thread,
         registry=registry,
+        dispatcher=dispatcher,
     )
 
 
@@ -911,6 +913,7 @@ def recover_reply_promises(
     gh: GitHub,
     pr_number: int,
     registry: ActivityReporter,
+    dispatcher: "Dispatcher",
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
@@ -1016,6 +1019,7 @@ def recover_reply_promises(
             gh,
             action.thread,
             registry,
+            dispatcher,
         )
         _ack_promises(store, (promise_id for promise_id, _ in group))
         processed_any = True
@@ -1084,6 +1088,7 @@ def recover_reply_promises(
             gh,
             thread=action.reply_to,
             registry=registry,
+            dispatcher=dispatcher,
         )
         _ack_promises(store, (group_promise_id for group_promise_id, _ in group))
         processed_any = True
@@ -1112,14 +1117,12 @@ class Dispatcher:
     repo and hold them in a ``dict[str, Dispatcher]`` collaborator rather than
     reaching into a class-level function slot.
 
-    ``gh`` is optional because :meth:`dispatch` does not use it.  Pass ``gh``
-    when constructing a ``Dispatcher`` that will call
-    :meth:`backfill_missed_pr_comments` or :meth:`launch_sync`.
+    ``gh`` is required because :meth:`backfill_missed_pr_comments` and
+    :meth:`launch_sync` both use it.  The composition root always has a real
+    ``GitHub`` instance, so there is no production case where ``gh`` is absent.
     """
 
-    def __init__(
-        self, config: Config, repo_cfg: RepoConfig, gh: GitHub | None = None
-    ) -> None:
+    def __init__(self, config: Config, repo_cfg: RepoConfig, gh: GitHub) -> None:
         self._config = config
         self._repo_cfg = repo_cfg
         self._gh = gh
@@ -1392,7 +1395,6 @@ class Dispatcher:
         ``tasks.json``.  This method is intended to run **once per
         WorkerThread lifetime** (at startup) — not every iteration.
         """
-        assert self._gh is not None, "gh required for backfill_missed_pr_comments"
         repo_cfg = self._repo_cfg
         log.info("backfill: scanning PR #%s for missed top-level comments", pr_number)
         comments = self._gh.get_issue_comments(repo_cfg.name, pr_number)
@@ -1435,7 +1437,6 @@ class Dispatcher:
 
     def launch_sync(self) -> None:
         """Sync tasks.json → PR body in a background thread."""
-        assert self._gh is not None, "gh required for launch_sync"
         from fido.tasks import sync_tasks_background
 
         sync_tasks_background(self._repo_cfg.work_dir, self._gh)
@@ -2557,7 +2558,7 @@ def create_task(
     thread: dict[str, Any] | None = None,
     registry: ActivityReporter | None = None,
     *,
-    dispatcher: "Dispatcher | None" = None,
+    dispatcher: "Dispatcher",
     _get_commit_summary_fn: Callable[[Path], str] = _get_commit_summary,
     _reorder_background_fn: Callable[..., None] = _reorder_tasks_background,
     _tasks: Tasks | None = None,
@@ -2630,8 +2631,7 @@ def create_task(
     task_type = TaskType.THREAD if thread else TaskType.SPEC
     log.info("creating task: %s", prompt[:100])
     new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)
-    if dispatcher is not None:
-        dispatcher.launch_sync()
+    dispatcher.launch_sync()
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)
         if _reorder_background_fn is _reorder_tasks_background:

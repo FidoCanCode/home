@@ -51,6 +51,7 @@ from fido.synthesis_call import SynthesisExhaustedError
 from fido.synthesis_executor import CommentTarget
 from fido.types import ActiveIssue, ActivePR, RescopeIntent
 from fido.worker import ActivityReporter
+from tests.fakes import _FakeDispatcher
 
 
 def _synthesis_response(
@@ -277,6 +278,7 @@ class TestRecoverReplyPromises:
             MagicMock(),
             7,
             registry=MagicMock(spec=ActivityReporter),
+            dispatcher=_FakeDispatcher(),
         )
 
     def test_recovers_issue_comment_promise(self, tmp_path: Path) -> None:
@@ -305,6 +307,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert result is True
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
@@ -350,6 +353,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         mock_reply.assert_not_called()
         assert store.promise(promise.promise_id).state == "acked"
@@ -382,6 +386,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         mock_reply.assert_not_called()
         assert store.promise(promise.promise_id).state == "acked"
@@ -404,6 +409,7 @@ class TestRecoverReplyPromises:
             gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
+            dispatcher=_FakeDispatcher(),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "failed"
         self._assert_recovery_matches_oracle(
@@ -425,6 +431,7 @@ class TestRecoverReplyPromises:
             gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
+            dispatcher=_FakeDispatcher(),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "failed"
         self._assert_recovery_matches_oracle(
@@ -452,6 +459,7 @@ class TestRecoverReplyPromises:
             gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
+            dispatcher=_FakeDispatcher(),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
         assert [
@@ -482,6 +490,7 @@ class TestRecoverReplyPromises:
             gh,
             7,
             registry=MagicMock(spec=ActivityReporter),
+            dispatcher=_FakeDispatcher(),
         )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
         assert [
@@ -516,6 +525,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         mock_reply.assert_not_called()
         assert [
@@ -550,6 +560,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert FidoStore(tmp_path).claim_state(302) == "retryable_failed"
         assert FidoStore(tmp_path).recoverable_promises()[0].state == "failed"
@@ -582,6 +593,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         mock_reply.assert_not_called()
         assert [
@@ -617,6 +629,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert FidoStore(tmp_path).claim_state(205) == "retryable_failed"
         assert FidoStore(tmp_path).recoverable_promises()[0].state == "failed"
@@ -652,6 +665,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert result is True
         mock_create_task.assert_not_called()
@@ -691,6 +705,7 @@ class TestRecoverReplyPromises:
                     gh,
                     7,
                     registry=MagicMock(spec=ActivityReporter),
+                    dispatcher=_FakeDispatcher(),
                 )
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "prepared"
 
@@ -744,6 +759,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert result is True
         assert mock_reply.call_args.args[0].comment_body == "first\n\n---\n\nsecond"
@@ -805,6 +821,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert result is True
         assert mock_reply.call_args.args[0].comment_body == "first\n\n---\n\nsecond"
@@ -867,6 +884,7 @@ class TestRecoverReplyPromises:
                 7,
                 agent=_client(),
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
 
         store = FidoStore(tmp_path)
@@ -936,6 +954,7 @@ class TestRecoverReplyPromises:
                     gh,
                     7,
                     registry=MagicMock(spec=ActivityReporter),
+                    dispatcher=_FakeDispatcher(),
                 )
         store = FidoStore(tmp_path)
         assert store.promise(first.promise_id).state == "prepared"
@@ -1001,6 +1020,7 @@ class TestRecoverReplyPromises:
                 7,
                 agent=_client(),
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
 
         store = FidoStore(tmp_path)
@@ -1087,6 +1107,7 @@ class TestRecoverReplyPromises:
                     gh,
                     7,
                     registry=MagicMock(spec=ActivityReporter),
+                    dispatcher=_FakeDispatcher(),
                 )
         assert mock_reply.call_count == 0
         mock_create_task.assert_not_called()
@@ -1151,6 +1172,7 @@ class TestRecoverReplyPromises:
                 gh,
                 7,
                 registry=MagicMock(spec=ActivityReporter),
+                dispatcher=_FakeDispatcher(),
             )
         assert result is True
         assert mock_reply.call_count == 2
@@ -1387,7 +1409,7 @@ class TestReplyPromiseHelpers:
 class TestDispatchPing:
     def test_returns_none(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "ping", {"hook_id": 123, **_payload()}
         )
         assert result is None
@@ -1402,7 +1424,9 @@ class TestDispatchIssuesAssigned:
             "assignee": {"login": "fido"},
             "issue": {"number": 1, "title": "test issue"},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("issues", payload)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "issues", payload
+        )
         assert result is not None
         assert "#1" in result.prompt
 
@@ -1414,7 +1438,9 @@ class TestDispatchIssuesAssigned:
             "assignee": {"login": "fido"},
             "issue": {"number": 0, "title": "test"},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("issues", payload)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "issues", payload
+        )
         assert result is None
 
 
@@ -1435,7 +1461,7 @@ class TestDispatchReviewComment:
             },
             "pull_request": {"number": 5, "title": "pr title", "body": "pr body"},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review_comment", payload
         )
         assert result is not None
@@ -1463,7 +1489,7 @@ class TestDispatchReviewComment:
             },
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review_comment", payload
         )
         assert result is not None
@@ -1490,7 +1516,7 @@ class TestDispatchReviewComment:
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
 
-        result = Dispatcher(cfg, repo_cfg).dispatch(
+        result = Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "pull_request_review_comment",
             payload,
             delivery_id="delivery-review-125",
@@ -1530,12 +1556,12 @@ class TestDispatchReviewComment:
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
 
-        Dispatcher(cfg, repo_cfg).dispatch(
+        Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "pull_request_review_comment",
             payload,
             delivery_id="delivery-review-126-a",
         )
-        Dispatcher(cfg, repo_cfg).dispatch(
+        Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "pull_request_review_comment",
             payload,
             delivery_id="delivery-review-126-b",
@@ -1563,7 +1589,7 @@ class TestDispatchReviewComment:
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
 
-        Dispatcher(cfg, repo_cfg).dispatch(
+        Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "pull_request_review_comment",
             payload,
             delivery_id="delivery-review-127-a",
@@ -1577,7 +1603,7 @@ class TestDispatchReviewComment:
                 "updated_at": "2026-04-30T12:05:00Z",
             },
         }
-        result = Dispatcher(cfg, repo_cfg).dispatch(
+        result = Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "pull_request_review_comment",
             edited_payload,
             delivery_id="delivery-review-127-b",
@@ -1598,7 +1624,7 @@ class TestDispatchReviewComment:
             "comment": {"id": 1, "body": "done", "user": {"login": "FidoCanCode"}},
             "pull_request": {"number": 5},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review_comment", payload
         )
         assert result is None
@@ -1611,7 +1637,7 @@ class TestDispatchReviewComment:
             "comment": {"id": 1, "body": "hi", "user": {"login": "rando"}},
             "pull_request": {"number": 5},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review_comment", payload
         )
         assert result is None
@@ -1629,7 +1655,9 @@ class TestDispatchCheckRun:
                 "pull_requests": [{"number": 3}],
             },
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("check_run", payload)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "check_run", payload
+        )
         assert result is not None
         assert "CI failure" in result.prompt
         assert result.preempts_worker is True
@@ -1641,7 +1669,9 @@ class TestDispatchCheckRun:
             "action": "completed",
             "check_run": {"conclusion": "success", "name": "lint", "pull_requests": []},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("check_run", payload)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "check_run", payload
+        )
         assert result is None
 
 
@@ -1664,7 +1694,9 @@ class TestDispatchPullRequest:
             "action": "closed",
             "pull_request": {"number": 7, "merged": True},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("pull_request", payload)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request", payload
+        )
         assert result is not None
         assert "merged" in result.prompt
         assert FidoStore(tmp_path).pending_pr_comments(repo="owner/repo") == []
@@ -1687,7 +1719,9 @@ class TestDispatchPullRequest:
             "action": "closed",
             "pull_request": {"number": 7, "merged": False},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("pull_request", payload)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "pull_request", payload
+        )
         assert result is None
         assert FidoStore(tmp_path).pending_pr_comments(repo="owner/repo") == []
 
@@ -1711,7 +1745,9 @@ class TestDispatchIssueComment:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("issue_comment", payload)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "issue_comment", payload
+        )
         assert result is not None
         assert result.comment_body is None
         assert result.preempts_worker is True
@@ -1746,7 +1782,7 @@ class TestDispatchIssueComment:
             },
         }
 
-        result = Dispatcher(cfg, repo_cfg).dispatch(
+        result = Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "issue_comment",
             payload,
             delivery_id="delivery-issue-457",
@@ -1785,7 +1821,7 @@ class TestDispatchIssueComment:
             },
         }
 
-        Dispatcher(cfg, repo_cfg).dispatch(
+        Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "issue_comment", payload, delivery_id="delivery-a"
         )
         edited_payload = {
@@ -1797,7 +1833,7 @@ class TestDispatchIssueComment:
                 "updated_at": "2026-04-30T12:05:00Z",
             },
         }
-        result = Dispatcher(cfg, repo_cfg).dispatch(
+        result = Dispatcher(cfg, repo_cfg, MagicMock()).dispatch(
             "issue_comment", edited_payload, delivery_id="delivery-b"
         )
 
@@ -1816,14 +1852,16 @@ class TestDispatchIssueComment:
             "comment": {"id": 1, "body": "hi", "user": {"login": "owner"}},
             "issue": {"number": 10, "title": "issue"},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("issue_comment", payload)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "issue_comment", payload
+        )
         assert result is None
 
 
 class TestDispatchUnknown:
     def test_unknown_event(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "unknown_event",
             {**_payload(), "action": "whatever"},
         )
@@ -2096,6 +2134,7 @@ class TestReplyToComment:
                 MagicMock(),
                 thread=None,
                 registry=None,
+                dispatcher=_FakeDispatcher(),
             )
         mock_create_task.assert_not_called()
 
@@ -2122,6 +2161,7 @@ class TestReplyToComment:
                 MagicMock(),
                 thread=thread,
                 registry=None,
+                dispatcher=_FakeDispatcher(),
             )
         mock_create_task.assert_called_once()
         _, kwargs = mock_create_task.call_args
@@ -3402,6 +3442,7 @@ class TestCreateTask:
                 mock_gh,
                 thread=thread,
                 _tasks=mock_tasks,
+                dispatcher=_FakeDispatcher(),
                 _get_commit_summary_fn=lambda wd: "",
             )
         warns = [
@@ -3414,7 +3455,7 @@ class TestCreateTask:
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         mock_gh = MagicMock()
         mock_tasks = self._mock_tasks()
-        mock_dispatcher = MagicMock()
+        mock_dispatcher = _FakeDispatcher()
         create_task(
             "do something",
             cfg,
@@ -3426,7 +3467,7 @@ class TestCreateTask:
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=None
         )
-        mock_dispatcher.launch_sync.assert_called_once_with()
+        assert mock_dispatcher.launch_sync_calls == 1
 
     def test_passes_thread(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
@@ -3442,7 +3483,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
@@ -3465,7 +3506,7 @@ class TestCreateTask:
             thread=thread,
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         mock_tasks.add.assert_not_called()
         assert result["status"] == "skipped_resolved"
@@ -3495,7 +3536,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
@@ -3525,7 +3566,7 @@ class TestCreateTask:
             thread=thread,
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         mock_tasks.add.assert_not_called()
         assert result["status"] == "skipped_resolved"
@@ -3554,7 +3595,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
@@ -3584,7 +3625,7 @@ class TestCreateTask:
             thread=thread,
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         mock_tasks.add.assert_not_called()
         assert result["status"] == "skipped_resolved"
@@ -3607,7 +3648,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         mock_tasks.add.assert_called_once()
 
@@ -3627,7 +3668,7 @@ class TestCreateTask:
             repo_cfg,
             MagicMock(),
             _tasks=mock_tasks,
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         assert result == fake_task
 
@@ -3650,6 +3691,7 @@ class TestCreateTask:
                 MagicMock(),
                 thread=thread,
                 create_task_fn=fake_create,
+                dispatcher=_FakeDispatcher(),
             )
             == 1
         )
@@ -3692,7 +3734,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )  # no registry
         registry.abort_task.assert_not_called()
 
@@ -3730,7 +3772,7 @@ class TestCreateTask:
             MagicMock(),
             registry=registry,
             _tasks=mock_tasks,
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )  # no thread
         registry.abort_task.assert_not_called()
 
@@ -3763,7 +3805,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         registry.abort_task.assert_not_called()
 
@@ -3810,7 +3852,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         registry.abort_task.assert_not_called()
 
@@ -3838,7 +3880,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         registry.abort_task.assert_not_called()
 
@@ -3870,7 +3912,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         registry.abort_task.assert_not_called()
 
@@ -3902,7 +3944,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         registry.abort_task.assert_not_called()
 
@@ -3958,7 +4000,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         # ABORT_KEEP: current task stays in tasks.json
@@ -3990,7 +4032,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         # task should still be in tasks.json (ABORT_KEEP)
@@ -4021,7 +4063,7 @@ class TestCreateTask:
             _tasks=mock_tasks,
             _reorder_background_fn=MagicMock(),
             _get_commit_summary_fn=lambda wd: "",
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         registry.abort_task.assert_not_called()
 
@@ -4040,7 +4082,7 @@ class TestCreateTask:
             MagicMock(),
             registry=registry,
             _tasks=mock_tasks,
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
@@ -4061,7 +4103,7 @@ class TestCreateTask:
             MagicMock(),
             registry=registry,
             _tasks=mock_tasks,
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
@@ -4086,7 +4128,7 @@ class TestCreateTask:
             MagicMock(),
             registry=registry,
             _tasks=mock_tasks,
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         registry.abort_task.assert_not_called()
 
@@ -4115,7 +4157,7 @@ class TestCreateTask:
                 reorder_called.append((wd, cs, cfg, gh, rc, reg))
             ),
             _tasks=mock_tasks,
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         assert len(reorder_called) == 1
         assert reorder_called[0][0] == tmp_path
@@ -4143,7 +4185,7 @@ class TestCreateTask:
             MagicMock(),
             _reorder_background_fn=lambda *a: reorder_called.append(a),
             _tasks=mock_tasks,
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         assert reorder_called == []
 
@@ -4154,7 +4196,7 @@ class TestCreateTask:
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         mock_tasks = self._mock_tasks()
-        mock_dispatcher = MagicMock()
+        mock_dispatcher = _FakeDispatcher()
         with patch("fido.events._rewrite_pr_description") as mock_rewrite:
             create_task(
                 "Spec task",
@@ -4192,7 +4234,7 @@ class TestCreateTask:
                 cs
             ),
             _tasks=mock_tasks,
-            dispatcher=MagicMock(),
+            dispatcher=_FakeDispatcher(),
         )
         assert summaries == ["custom summary"]
 
@@ -4201,7 +4243,7 @@ class TestCreateTask:
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         result = create_task(
-            "do a thing", cfg, repo_cfg, MagicMock(), dispatcher=MagicMock()
+            "do a thing", cfg, repo_cfg, MagicMock(), dispatcher=_FakeDispatcher()
         )
         assert result["title"] == "do a thing"
 
@@ -5607,7 +5649,7 @@ class TestDispatchPullRequestReview:
             },
             "pull_request": {"number": 3},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review", payload
         )
         assert result is not None
@@ -5622,7 +5664,7 @@ class TestDispatchPullRequestReview:
             "review": {"state": "approved", "user": {"login": "owner"}},
             "pull_request": {"number": 3},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review", payload
         )
         assert result is not None
@@ -5636,7 +5678,7 @@ class TestDispatchPullRequestReview:
             "review": {"id": 1, "state": "approved", "user": {"login": "owner"}},
             "pull_request": {},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review", payload
         )
         assert result is None
@@ -5649,7 +5691,7 @@ class TestDispatchPullRequestReview:
             "review": {"id": 1, "state": "approved", "user": {"login": "stranger"}},
             "pull_request": {"number": 3},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review", payload
         )
         assert result is None
@@ -5666,7 +5708,7 @@ class TestDispatchPullRequestReview:
             "review": {"id": 77, "state": "commented", "user": {"login": "owner"}},
             "pull_request": {"number": 4},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review",
             payload,
             delivery_id="delivery-commented-1",
@@ -5685,7 +5727,7 @@ class TestDispatchPullRequestReview:
             "review": {"id": 78, "state": "approved", "user": {"login": "owner"}},
             "pull_request": {"number": 5},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review",
             payload,
             delivery_id="delivery-approved-1",
@@ -5708,7 +5750,7 @@ class TestDispatchPullRequestReview:
             },
             "pull_request": {"number": 6},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review",
             payload,
             delivery_id="delivery-changes-requested-1",
@@ -5727,7 +5769,7 @@ class TestDispatchPullRequestReview:
             "review": {"id": 80, "state": "dismissed", "user": {"login": "owner"}},
             "pull_request": {"number": 7},
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review",
             payload,
             delivery_id="delivery-dismissed-1",
@@ -5748,7 +5790,9 @@ class TestDispatchCheckRunNoPrs:
                 "pull_requests": [],
             },
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("check_run", payload)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "check_run", payload
+        )
         assert result is not None
         assert "unknown PR" in result.prompt
 
@@ -5766,7 +5810,9 @@ class TestDispatchIssueCommentSelf:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("issue_comment", payload)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "issue_comment", payload
+        )
         assert result is None
 
     def test_unallowed_user_ignored(self, tmp_path: Path) -> None:
@@ -5781,7 +5827,9 @@ class TestDispatchIssueCommentSelf:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("issue_comment", payload)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
+            "issue_comment", payload
+        )
         assert result is None
 
 
@@ -5800,7 +5848,7 @@ class TestDispatchReviewCommentNoNumber:
             },
             "pull_request": {},  # no number
         }
-        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path), MagicMock()).dispatch(
             "pull_request_review_comment", payload
         )
         assert result is None
@@ -7245,7 +7293,7 @@ class TestDispatcher:
     def test_dispatch_routes_ping_to_none(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
         repo_cfg = _repo_cfg(tmp_path)
-        d = Dispatcher(cfg, repo_cfg)
+        d = Dispatcher(cfg, repo_cfg, MagicMock())
         result = d.dispatch("ping", {"hook_id": 1})
         assert result is None
 
@@ -7257,7 +7305,7 @@ class TestDispatcher:
             "assignee": {"login": "rhencke"},
             "issue": {"number": 7, "title": "Do the thing"},
         }
-        d = Dispatcher(cfg, repo_cfg)
+        d = Dispatcher(cfg, repo_cfg, MagicMock())
         result = d.dispatch("issues", payload)
         assert isinstance(result, Action)
         assert "7" in result.prompt

@@ -27,6 +27,7 @@ from fido.tasks import (
     _thread_task_for_auto_resolve_oracle,
     review_thread_for_auto_resolve_oracle,
 )
+from tests.fakes import _FakeDispatcher
 
 # ---------------------------------------------------------------------------
 # provider_factory.py — fallback ValueError branches
@@ -1847,7 +1848,7 @@ class TestEventsCreateTaskExitUntriaged:
                     gh,
                     thread=thread,
                     registry=registry,
-                    dispatcher=MagicMock(),
+                    dispatcher=_FakeDispatcher(),
                     _reorder_background_fn=boom,
                     _get_commit_summary_fn=lambda wd: "summary",
                     _tasks=tasks,

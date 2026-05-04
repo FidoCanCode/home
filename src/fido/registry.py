@@ -745,7 +745,7 @@ def _make_thread(
     provider: Provider | None = None,
     session_issue: int | None = None,
     config: Config | None = None,
-    dispatchers: "dict[str, Dispatcher] | None" = None,
+    dispatchers: "dict[str, Dispatcher]",
     _WorkerThread: type[WorkerThread] = WorkerThread,
 ) -> WorkerThread:
     """Default factory: create a WorkerThread with the provided GitHub client.
@@ -764,7 +764,7 @@ def _make_thread(
         session_issue=session_issue,
         config=config,
         repo_cfg=repo_cfg,
-        dispatcher=dispatchers.get(repo_cfg.name) if dispatchers is not None else None,
+        dispatcher=dispatchers[repo_cfg.name],
         issue_cache=registry.get_issue_cache(repo_cfg.name),
     )
 
@@ -773,8 +773,8 @@ def make_registry(
     repos: dict[str, RepoConfig],
     gh: GitHub,
     config: Config | None = None,
-    dispatchers: "dict[str, Dispatcher] | None" = None,
     *,
+    dispatchers: "dict[str, Dispatcher]",
     _thread_factory: Callable[..., WorkerThread] = _make_thread,
 ) -> WorkerRegistry:
     """Create a :class:`WorkerRegistry` and start threads for all repos.

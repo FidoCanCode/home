@@ -1172,9 +1172,9 @@ class Worker:
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
-        dispatcher: "Dispatcher | None" = None,
         first_iteration: bool = False,
         *,
+        dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
     ) -> None:
         self.work_dir = work_dir
@@ -2431,6 +2431,7 @@ class Worker:
                 thread=action.reply_to,
                 is_bot=action.is_bot,
                 registry=self._registry,
+                dispatcher=self._dispatcher,
             )
         log.info("threads done")
         tasks.sync_tasks_background(self.work_dir, self.gh)
@@ -2510,6 +2511,7 @@ class Worker:
                 else action.thread,
                 is_bot=action.is_bot,
                 registry=self._registry,
+                dispatcher=self._dispatcher,
             )
             store.ack_promise(promise.promise_id)
         except Exception as exc:
@@ -4064,6 +4066,7 @@ class Worker:
                 self.gh,
                 pr_number,
                 self._registry,
+                self._dispatcher,
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
             )
@@ -4073,11 +4076,10 @@ class Worker:
                 # Runs only on the first iteration per WorkerThread lifetime so
                 # the steady-state loop stays fast; create_task dedups on
                 # comment_id so re-tasking already-handled comments is a no-op.
-                if self._dispatcher is not None:
-                    self._dispatcher.backfill_missed_pr_comments(
-                        pr_number,
-                        gh_user=repo_ctx.gh_user,
-                    )
+                self._dispatcher.backfill_missed_pr_comments(
+                    pr_number,
+                    gh_user=repo_ctx.gh_user,
+                )
                 self._first_iteration = False
             if pr_is_fresh:
                 log.info("fresh PR — skipping CI/thread/rescope checks")
@@ -4168,8 +4170,8 @@ class WorkerThread(threading.Thread):
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
-        dispatcher: "Dispatcher | None" = None,
         *,
+        dispatcher: "Dispatcher",
         issue_cache: IssueTreeCache,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)

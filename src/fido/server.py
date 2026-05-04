@@ -761,8 +761,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         # Dispatch BEFORE acknowledging — if dispatch raises, return 500 so
         # GitHub retries instead of treating the event as successfully handled.
-        dispatcher = self.dispatchers.get(repo_name)
-        assert dispatcher is not None, "dispatcher not wired — call run() first"
+        dispatcher = self.dispatchers[repo_name]
         try:
             action = dispatcher.dispatch(
                 event,
@@ -1085,7 +1084,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         is_bot=action.is_bot,
                         registry=self.registry,
                         create_task_fn=type(self)._fn_create_task,
-                        dispatcher=self.dispatchers.get(repo_cfg.name),
+                        dispatcher=self.dispatchers[repo_cfg.name],
                     )
 
             if action.review_comments:
@@ -1130,7 +1129,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     is_bot=action.is_bot,
                     registry=self.registry,
                     create_task_fn=type(self)._fn_create_task,
-                    dispatcher=self.dispatchers.get(repo_cfg.name),
+                    dispatcher=self.dispatchers[repo_cfg.name],
                 )
 
             log.info(
