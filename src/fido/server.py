@@ -1529,14 +1529,15 @@ def run(
 
     WebhookHandler.config = config
     WebhookHandler.gh = gh
-    WebhookHandler.dispatcher = Dispatcher(config, gh)
+    dispatcher = Dispatcher(config, gh)
+    WebhookHandler.dispatcher = dispatcher
     WebhookHandler.static_files = StaticFiles(
         Path(__file__).resolve().parent / "static"
     )
     WebhookHandler.provider_factory = DefaultProviderFactory(
         session_system_file=config.sub_dir / "persona.md"
     )
-    registry = _make_registry(config.repos, gh, config)
+    registry = _make_registry(config.repos, gh, config, dispatcher=dispatcher)
     WebhookHandler.registry = registry
     # Bootstrap issue caches eagerly so the picker has populated data immediately —
     # even for repos whose worker resumes on an existing issue and never calls

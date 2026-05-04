@@ -645,6 +645,7 @@ class TestMakeThread:
             session_issue=None,
             config=None,
             repo_cfg=cfg,
+            dispatcher=None,
             issue_cache=mock_registry.get_issue_cache.return_value,
         )
         mock_registry.get_issue_cache.assert_called_once_with("foo/bar")

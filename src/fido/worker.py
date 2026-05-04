@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from fido.events import Action
+    from fido.events import Action, Dispatcher
 
 import requests as _requests
 
@@ -1154,6 +1154,7 @@ class Worker:
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
+        dispatcher: "Dispatcher | None" = None,
         first_iteration: bool = False,
         *,
         issue_cache: IssueTreeCache,
@@ -1179,6 +1180,7 @@ class Worker:
         self._prompts = prompts
         self._config = config
         self._repo_cfg = repo_cfg
+        self._dispatcher = dispatcher
         self._provider_factory = (
             DefaultProviderFactory(session_system_file=_sub_dir() / "persona.md")
             if provider_factory is None
@@ -4022,15 +4024,22 @@ class Worker:
                 # Runs only on the first iteration per WorkerThread lifetime so
                 # the steady-state loop stays fast; create_task dedups on
                 # comment_id so re-tasking already-handled comments is a no-op.
-                from fido.events import backfill_missed_pr_comments
+                if self._dispatcher is not None:
+                    self._dispatcher.backfill_missed_pr_comments(
+                        recovery_repo_cfg,
+                        pr_number,
+                        gh_user=repo_ctx.gh_user,
+                    )
+                else:
+                    from fido.events import backfill_missed_pr_comments
 
-                backfill_missed_pr_comments(
-                    recovery_config,
-                    recovery_repo_cfg,
-                    self.gh,
-                    pr_number,
-                    gh_user=repo_ctx.gh_user,
-                )
+                    backfill_missed_pr_comments(
+                        recovery_config,
+                        recovery_repo_cfg,
+                        self.gh,
+                        pr_number,
+                        gh_user=repo_ctx.gh_user,
+                    )
                 self._first_iteration = False
             if pr_is_fresh:
                 log.info("fresh PR — skipping CI/thread/rescope checks")
@@ -4121,6 +4130,7 @@ class WorkerThread(threading.Thread):
         config: Config | None = None,
         repo_cfg: RepoConfig | None = None,
         provider_factory: DefaultProviderFactory | None = None,
+        dispatcher: "Dispatcher | None" = None,
         *,
         issue_cache: IssueTreeCache,
     ) -> None:
@@ -4167,6 +4177,7 @@ class WorkerThread(threading.Thread):
         self._session_issue: int | None = session_issue
         self._config = config
         self._repo_cfg = repo_cfg
+        self._dispatcher = dispatcher
         self._bootstrap_session: PromptSession | None = session
         # True until the first ``Worker.run()`` returns — flipped after that so
         # the one-shot startup backfill (fix #794) only fires once per thread.
@@ -4445,6 +4456,7 @@ class WorkerThread(threading.Thread):
                     config=self._config,
                     repo_cfg=self._repo_cfg,
                     provider_factory=self._provider_factory,
+                    dispatcher=self._dispatcher,
                     first_iteration=self._is_first_iteration,
                     issue_cache=self._issue_cache,
                 )

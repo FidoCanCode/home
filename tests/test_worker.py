@@ -5957,7 +5957,11 @@ class TestRunSeedTasksIntegration:
 
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh, first_iteration=True)
+        from fido.events import Dispatcher
+
+        mock_dispatcher = MagicMock(spec=Dispatcher)
+        mock_dispatcher.backfill_missed_pr_comments.return_value = 0
+        worker = Worker(tmp_path, gh, first_iteration=True, dispatcher=mock_dispatcher)
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(
@@ -5975,7 +5979,6 @@ class TestRunSeedTasksIntegration:
             patch.object(worker, "handle_ci", return_value=False),
             patch.object(worker, "handle_queued_comments", return_value=False),
             patch.object(worker, "handle_threads", return_value=False),
-            patch("fido.events.backfill_missed_pr_comments", return_value=0),
             caplog.at_level(logging.WARNING, logger="fido"),
         ):
             worker.run()
@@ -5993,7 +5996,10 @@ class TestRunSeedTasksIntegration:
         avoid one superfluous API round-trip."""
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh, first_iteration=True)
+        from fido.events import Dispatcher
+
+        mock_dispatcher = MagicMock(spec=Dispatcher)
+        worker = Worker(tmp_path, gh, first_iteration=True, dispatcher=mock_dispatcher)
         repo_ctx = self._make_mock_repo_ctx()
         with (
             patch.object(
@@ -6008,10 +6014,9 @@ class TestRunSeedTasksIntegration:
                 worker, "find_or_create_pr", return_value=(42, "fix-bug", True)
             ),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("fido.events.backfill_missed_pr_comments") as mock_backfill,
         ):
             worker.run()
-        mock_backfill.assert_not_called()
+        mock_dispatcher.backfill_missed_pr_comments.assert_not_called()
 
     def test_seed_not_called_when_find_or_create_pr_raises(
         self, tmp_path: Path
@@ -14407,10 +14412,11 @@ class TestWorkerThread:
             config: object = None,
             repo_cfg: object = None,
             provider_factory: object = None,
+            dispatcher: object = None,
             first_iteration: bool = False,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, first_iteration, issue_cache
+            del provider_factory, dispatcher, first_iteration, issue_cache
             captured.append(abort_task)
             self_w.work_dir = work_dir
             self_w.gh = gh
@@ -14514,10 +14520,11 @@ class TestWorkerThread:
             config: object = None,
             repo_cfg: object = None,
             provider_factory: object = None,
+            dispatcher: object = None,
             first_iteration: bool = False,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, first_iteration, issue_cache
+            del provider_factory, dispatcher, first_iteration, issue_cache
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -14568,10 +14575,11 @@ class TestWorkerThread:
             config: object = None,
             repo_cfg: object = None,
             provider_factory: object = None,
+            dispatcher: object = None,
             first_iteration: bool = False,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, first_iteration, issue_cache
+            del provider_factory, dispatcher, first_iteration, issue_cache
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
@@ -14956,10 +14964,11 @@ class TestWorkerThread:
             config: object = None,
             repo_cfg: object = None,
             provider_factory: object = None,
+            dispatcher: object = None,
             first_iteration: bool = False,
             issue_cache: object = None,
         ) -> None:
-            del provider_factory, first_iteration, issue_cache
+            del provider_factory, dispatcher, first_iteration, issue_cache
             self_w.work_dir = work_dir
             self_w.gh = gh
             self_w._abort_task = abort_task
