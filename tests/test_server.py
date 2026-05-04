@@ -21,6 +21,7 @@ from fido.config import Config
 from fido.config import RepoConfig as _RepoConfig
 from fido.events import (
     Action,
+    Dispatcher,
     WebhookIngressOracle,
 )
 from fido.infra import Infra
@@ -112,7 +113,7 @@ def _sign(body: bytes, secret: bytes) -> str:
 def _restore_handler_fns() -> object:
     saved = {
         "gh": WebhookHandler.gh,
-        "_fn_dispatch": WebhookHandler._fn_dispatch,
+        "dispatcher": WebhookHandler.dispatcher,
         "_fn_reply_to_comment": WebhookHandler._fn_reply_to_comment,
         "_fn_reply_to_review": WebhookHandler._fn_reply_to_review,
         "_fn_reply_to_issue_comment": WebhookHandler._fn_reply_to_issue_comment,
@@ -155,6 +156,7 @@ def server(tmp_path: Path) -> object:
     cfg = _config(tmp_path)
     WebhookHandler.config = cfg
     WebhookHandler.registry = MagicMock()
+    WebhookHandler.dispatcher = Dispatcher(cfg, MagicMock())
     WebhookHandler._fn_spawn_bg = staticmethod(_capturing_spawn_bg)  # type: ignore[assignment]
     srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
     port = srv.server_address[1]
@@ -2170,7 +2172,9 @@ class TestProcessAction:
         """When dispatch raises, return 500 so GitHub retries the delivery."""
         url, cfg = server
         payload = {**_payload(), "action": "created"}
-        WebhookHandler._fn_dispatch = MagicMock(side_effect=RuntimeError("boom"))
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.side_effect = RuntimeError("boom")
+        WebhookHandler.dispatcher = mock_dispatcher
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert exc_info.value.code == 500
@@ -2203,7 +2207,11 @@ class TestProcessAction:
             call_order.append(f"respond_{code}")
             original_respond(self, code, msg)
 
-        WebhookHandler._fn_dispatch = fake_dispatch
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.side_effect = lambda *_a, **_kw: call_order.append(
+            "dispatch"
+        )
+        WebhookHandler.dispatcher = mock_dispatcher
         WebhookHandler._respond = fake_respond  # type: ignore[method-assign]
         try:
             _post_webhook(url, cfg, "pull_request_review_comment", payload)
@@ -4501,6 +4509,7 @@ class TestSelfRestart:
         mock_registry = MagicMock()
         WebhookHandler.config = cfg
         WebhookHandler.registry = mock_registry
+        WebhookHandler.dispatcher = Dispatcher(cfg, MagicMock())
         srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
         port = srv.server_address[1]
         t = threading.Thread(

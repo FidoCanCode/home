@@ -26,9 +26,9 @@ from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
 from fido.events import (
     Action,
+    Dispatcher,
     WebhookIngressOracle,
     create_task,
-    dispatch,
     launch_worker,
     queue_reply_tasks,
     reply_outcome_creates_tasks,
@@ -622,10 +622,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
     # Injectable collaborators — set as class attributes so HTTP-driven tests
     # can replace them without patching module-level names.
     gh: GitHub | None = None
+    dispatcher: Dispatcher | None = None
     # Infrastructure ports — set by server.run() composition root.
     infra: Infra = real_infra()
     static_files: StaticFiles | None = None
-    _fn_dispatch = staticmethod(dispatch)
     _fn_reply_to_comment = staticmethod(reply_to_comment)
     _fn_reply_to_review = staticmethod(reply_to_review)
     _fn_reply_to_issue_comment = staticmethod(reply_to_issue_comment)
@@ -761,11 +761,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         # Dispatch BEFORE acknowledging — if dispatch raises, return 500 so
         # GitHub retries instead of treating the event as successfully handled.
+        assert self.dispatcher is not None, "dispatcher not wired — call run() first"
         try:
-            action = type(self)._fn_dispatch(
+            action = self.dispatcher.dispatch(
                 event,
                 payload,
-                self.config,
                 repo_cfg,
                 delivery_id=delivery,
                 oracle=type(self).ingress_oracle,
@@ -1527,6 +1527,7 @@ def run(
 
     WebhookHandler.config = config
     WebhookHandler.gh = gh
+    WebhookHandler.dispatcher = Dispatcher(config, gh)
     WebhookHandler.static_files = StaticFiles(
         Path(__file__).resolve().parent / "static"
     )
