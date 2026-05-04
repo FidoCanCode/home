@@ -3238,29 +3238,36 @@ class TestCreateTask:
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         mock_gh = MagicMock()
         mock_tasks = self._mock_tasks()
-        with patch("fido.events.launch_sync") as mock_sync:
-            create_task("do something", cfg, repo_cfg, mock_gh, _tasks=mock_tasks)
+        mock_dispatcher = MagicMock()
+        create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            _tasks=mock_tasks,
+            dispatcher=mock_dispatcher,
+        )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=None
         )
-        mock_sync.assert_called_once_with(cfg, repo_cfg, mock_gh)
+        mock_dispatcher.launch_sync.assert_called_once_with(repo_cfg)
 
     def test_passes_thread(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         thread = {"repo": "a/b", "pr": 1, "comment_id": 5}
         mock_tasks = self._mock_tasks()
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
         )
@@ -3274,16 +3281,16 @@ class TestCreateTask:
         mock_tasks = self._mock_tasks()
         mock_gh = MagicMock()
         mock_gh.is_thread_resolved_for_comment.return_value = True
-        with patch("fido.events.launch_sync"):
-            result = create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-            )
+        result = create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            dispatcher=MagicMock(),
+        )
         mock_tasks.add.assert_not_called()
         assert result["status"] == "skipped_resolved"
 
@@ -3303,17 +3310,17 @@ class TestCreateTask:
             {"id": 1002, "author": "owner", "body": "actually queue it"},
             {"id": 1003, "author": "FidoCanCode", "body": "will do"},
         ]
-        with patch("fido.events.launch_sync"):
-            result = create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        result = create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
         )
@@ -3334,16 +3341,16 @@ class TestCreateTask:
             {"id": 1001, "author": "FidoCanCode", "body": "fixed"},
             {"id": 1002, "author": "owner", "body": "new follow-up"},
         ]
-        with patch("fido.events.launch_sync"):
-            result = create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-            )
+        result = create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            dispatcher=MagicMock(),
+        )
         mock_tasks.add.assert_not_called()
         assert result["status"] == "skipped_resolved"
 
@@ -3362,17 +3369,17 @@ class TestCreateTask:
             {"id": 1001, "author": "FidoCanCode", "body": "fixed"},
             {"id": 1002, "author": "copilot[bot]", "body": "suggestion"},
         ]
-        with patch("fido.events.launch_sync"):
-            result = create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        result = create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )
         mock_tasks.add.assert_called_once_with(
             title="do something", task_type=ANY, thread=thread
         )
@@ -3393,16 +3400,16 @@ class TestCreateTask:
             {"id": 1001, "author": "FidoCanCode", "body": "fixed"},
             {"id": 1002, "author": "drive-by", "body": "noise"},
         ]
-        with patch("fido.events.launch_sync"):
-            result = create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-            )
+        result = create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            dispatcher=MagicMock(),
+        )
         mock_tasks.add.assert_not_called()
         assert result["status"] == "skipped_resolved"
 
@@ -3415,17 +3422,17 @@ class TestCreateTask:
         mock_tasks = self._mock_tasks()
         mock_gh = MagicMock()
         mock_gh.is_thread_resolved_for_comment.side_effect = RuntimeError("api down")
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "do something",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )
         mock_tasks.add.assert_called_once()
 
     def test_returns_created_task(self, tmp_path: Path) -> None:
@@ -3438,10 +3445,14 @@ class TestCreateTask:
             "type": "spec",
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            result = create_task(
-                "do something", cfg, repo_cfg, MagicMock(), _tasks=mock_tasks
-            )
+        result = create_task(
+            "do something",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            _tasks=mock_tasks,
+            dispatcher=MagicMock(),
+        )
         assert result == fake_task
 
     def test_queue_reply_tasks_counts_only_created_tasks(self, tmp_path: Path) -> None:
@@ -3496,17 +3507,17 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )  # no registry
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )  # no registry
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_new_task_has_no_thread(self, tmp_path: Path) -> None:
@@ -3536,15 +3547,15 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Another plain task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                registry=registry,
-                _tasks=mock_tasks,
-            )  # no thread
+        create_task(
+            "Another plain task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            registry=registry,
+            _tasks=mock_tasks,
+            dispatcher=MagicMock(),
+        )  # no thread
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_no_current_task_in_state(self, tmp_path: Path) -> None:
@@ -3566,18 +3577,18 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_current_task_has_thread(self, tmp_path: Path) -> None:
@@ -3613,18 +3624,18 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "New thread task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=new_thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "New thread task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=new_thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_state_file_absent(self, tmp_path: Path) -> None:
@@ -3641,18 +3652,18 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_current_task_not_in_tasks_json(self, tmp_path: Path) -> None:
@@ -3673,18 +3684,18 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )
         registry.abort_task.assert_not_called()
 
     def test_no_abort_when_state_has_no_current_task(self, tmp_path: Path) -> None:
@@ -3705,18 +3716,18 @@ class TestCreateTask:
         }
         registry = MagicMock()
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )
         registry.abort_task.assert_not_called()
 
     def _setup_abort_scenario(
@@ -3761,18 +3772,18 @@ class TestCreateTask:
             "thread": thread,
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         # ABORT_KEEP: current task stays in tasks.json
         remaining = json.loads((fido_dir / "tasks.json").read_text())
@@ -3793,18 +3804,18 @@ class TestCreateTask:
             "thread": thread,
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         # task should still be in tasks.json (ABORT_KEEP)
         remaining = json.loads((fido_dir / "tasks.json").read_text())
@@ -3824,18 +3835,18 @@ class TestCreateTask:
             "thread": thread,
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                registry=registry,
-                _tasks=mock_tasks,
-                _reorder_background_fn=MagicMock(),
-                _get_commit_summary_fn=lambda wd: "",
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            registry=registry,
+            _tasks=mock_tasks,
+            _reorder_background_fn=MagicMock(),
+            _get_commit_summary_fn=lambda wd: "",
+            dispatcher=MagicMock(),
+        )
         registry.abort_task.assert_not_called()
 
     def test_ci_preempts_thread(self, tmp_path: Path) -> None:
@@ -3846,15 +3857,15 @@ class TestCreateTask:
         registry, fido_dir = self._setup_abort_scenario(tmp_path, "thread")
         fake_task = {"id": "t-ci", "title": "CI fix", "status": "pending", "type": "ci"}
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "CI fix",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                registry=registry,
-                _tasks=mock_tasks,
-            )
+        create_task(
+            "CI fix",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            registry=registry,
+            _tasks=mock_tasks,
+            dispatcher=MagicMock(),
+        )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
@@ -3867,15 +3878,15 @@ class TestCreateTask:
         registry, fido_dir = self._setup_abort_scenario(tmp_path, "spec")
         fake_task = {"id": "t-ci", "title": "CI fix", "status": "pending", "type": "ci"}
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "CI fix",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                registry=registry,
-                _tasks=mock_tasks,
-            )
+        create_task(
+            "CI fix",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            registry=registry,
+            _tasks=mock_tasks,
+            dispatcher=MagicMock(),
+        )
         registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
         remaining = json.loads((fido_dir / "tasks.json").read_text())
         assert any(t["id"] == "t-current" for t in remaining)
@@ -3892,15 +3903,15 @@ class TestCreateTask:
             "type": "spec",
         }
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "New spec task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                registry=registry,
-                _tasks=mock_tasks,
-            )
+        create_task(
+            "New spec task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            registry=registry,
+            _tasks=mock_tasks,
+            dispatcher=MagicMock(),
+        )
         registry.abort_task.assert_not_called()
 
     def test_thread_task_triggers_reorder_background(self, tmp_path: Path) -> None:
@@ -3917,19 +3928,19 @@ class TestCreateTask:
         mock_gh = MagicMock()
         reorder_called: list[tuple] = []
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Comment task",
-                cfg,
-                repo_cfg,
-                mock_gh,
-                thread=thread,
-                _get_commit_summary_fn=lambda wd: "abc1234 add thing",
-                _reorder_background_fn=lambda wd, cs, cfg, gh, rc, reg: (
-                    reorder_called.append((wd, cs, cfg, gh, rc, reg))
-                ),
-                _tasks=mock_tasks,
-            )
+        create_task(
+            "Comment task",
+            cfg,
+            repo_cfg,
+            mock_gh,
+            thread=thread,
+            _get_commit_summary_fn=lambda wd: "abc1234 add thing",
+            _reorder_background_fn=lambda wd, cs, cfg, gh, rc, reg: (
+                reorder_called.append((wd, cs, cfg, gh, rc, reg))
+            ),
+            _tasks=mock_tasks,
+            dispatcher=MagicMock(),
+        )
         assert len(reorder_called) == 1
         assert reorder_called[0][0] == tmp_path
         assert reorder_called[0][1] == "abc1234 add thing"
@@ -3949,15 +3960,15 @@ class TestCreateTask:
         }
         reorder_called: list = []
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "Spec task",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                _reorder_background_fn=lambda *a: reorder_called.append(a),
-                _tasks=mock_tasks,
-            )
+        create_task(
+            "Spec task",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            _reorder_background_fn=lambda *a: reorder_called.append(a),
+            _tasks=mock_tasks,
+            dispatcher=MagicMock(),
+        )
         assert reorder_called == []
 
     def test_spec_task_does_not_call_rewrite_pr_description(
@@ -3967,12 +3978,15 @@ class TestCreateTask:
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         mock_tasks = self._mock_tasks()
-        with (
-            patch("fido.events.launch_sync"),
-            patch("fido.events._rewrite_pr_description") as mock_rewrite,
-        ):
+        mock_dispatcher = MagicMock()
+        with patch("fido.events._rewrite_pr_description") as mock_rewrite:
             create_task(
-                "Spec task", cfg, repo_cfg, MagicMock(), _tasks=mock_tasks
+                "Spec task",
+                cfg,
+                repo_cfg,
+                MagicMock(),
+                _tasks=mock_tasks,
+                dispatcher=mock_dispatcher,
             )  # thread=None
         mock_rewrite.assert_not_called()
 
@@ -3991,27 +4005,28 @@ class TestCreateTask:
         }
         summaries: list[str] = []
         mock_tasks = self._mock_tasks(fake_task)
-        with patch("fido.events.launch_sync"):
-            create_task(
-                "t",
-                cfg,
-                repo_cfg,
-                MagicMock(),
-                thread=thread,
-                _get_commit_summary_fn=lambda wd: "custom summary",
-                _reorder_background_fn=lambda wd, cs, cfg, gh, rc, reg: (
-                    summaries.append(cs)
-                ),
-                _tasks=mock_tasks,
-            )
+        create_task(
+            "t",
+            cfg,
+            repo_cfg,
+            MagicMock(),
+            thread=thread,
+            _get_commit_summary_fn=lambda wd: "custom summary",
+            _reorder_background_fn=lambda wd, cs, cfg, gh, rc, reg: summaries.append(
+                cs
+            ),
+            _tasks=mock_tasks,
+            dispatcher=MagicMock(),
+        )
         assert summaries == ["custom summary"]
 
     def test_default_tasks_creates_task_in_file(self, tmp_path: Path) -> None:
         """When _tasks is not passed, create_task constructs Tasks(work_dir) itself."""
         cfg = self._cfg(tmp_path)
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        with patch("fido.events.launch_sync"):
-            result = create_task("do a thing", cfg, repo_cfg, MagicMock())
+        result = create_task(
+            "do a thing", cfg, repo_cfg, MagicMock(), dispatcher=MagicMock()
+        )
         assert result["title"] == "do a thing"
 
         from fido.tasks import Tasks

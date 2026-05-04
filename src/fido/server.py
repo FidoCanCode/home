@@ -1085,6 +1085,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         is_bot=action.is_bot,
                         registry=self.registry,
                         create_task_fn=type(self)._fn_create_task,
+                        dispatcher=self.dispatcher,
                     )
 
             if action.review_comments:
@@ -1129,6 +1130,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     is_bot=action.is_bot,
                     registry=self.registry,
                     create_task_fn=type(self)._fn_create_task,
+                    dispatcher=self.dispatcher,
                 )
 
             log.info(

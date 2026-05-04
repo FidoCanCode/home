@@ -846,6 +846,7 @@ def queue_reply_tasks(
     is_bot: bool = False,
     registry: Any = None,  # noqa: ANN401  # WorkerRegistry-or-ActivityReporter; either works
     create_task_fn: Callable[..., object] | None = None,
+    dispatcher: "Dispatcher | None" = None,
 ) -> int:
     """Create any tasks implied by a reply outcome.
 
@@ -863,6 +864,7 @@ def queue_reply_tasks(
             gh,
             thread=thread,
             registry=registry,
+            dispatcher=dispatcher,
         )
         if not (isinstance(task, dict) and task.get("status") == "skipped_resolved"):
             created += 1
@@ -2467,6 +2469,7 @@ def create_task(
     thread: dict[str, Any] | None = None,
     registry: WorkerRegistry | None = None,
     *,
+    dispatcher: "Dispatcher | None" = None,
     _get_commit_summary_fn: Callable[[Path], str] = _get_commit_summary,
     _reorder_background_fn: Callable[..., None] = _reorder_tasks_background,
     _tasks: Tasks | None = None,
@@ -2539,7 +2542,10 @@ def create_task(
     task_type = TaskType.THREAD if thread else TaskType.SPEC
     log.info("creating task: %s", prompt[:100])
     new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)
-    launch_sync(config, repo_cfg, gh)
+    if dispatcher is not None:
+        dispatcher.launch_sync(repo_cfg)
+    else:
+        launch_sync(config, repo_cfg, gh)
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)
         if registry is not None and _reorder_background_fn is _reorder_tasks_background:
