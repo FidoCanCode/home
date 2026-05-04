@@ -1426,7 +1426,9 @@ class Dispatcher:
                 f"PR top-level comment on #{pr_number} by {user} "
                 f"({'bot' if is_bot else 'human/owner'}):\n\n{body}"
             )
-            create_task(prompt, self._config, repo_cfg, self._gh, thread=thread)
+            create_task(
+                prompt, self._config, repo_cfg, self._gh, thread=thread, dispatcher=self
+            )
         log.info("backfill: PR #%s — inspected %d comments", pr_number, len(comments))
         return len(comments)
 
@@ -1437,25 +1439,6 @@ class Dispatcher:
 
         sync_tasks_background(self._repo_cfg.work_dir, self._gh)
         log.info("sync-tasks launched")
-
-
-def dispatch(
-    event: str,
-    payload: dict[str, Any],
-    config: Config,
-    repo_cfg: RepoConfig,
-    *,
-    delivery_id: str | None = None,
-    oracle: WebhookIngressOracle | None = None,
-) -> Action | None:
-    """Thin compatibility shim — delegates to :class:`Dispatcher`.
-
-    Use :meth:`Dispatcher.dispatch` directly; this free function is kept
-    only until all callers have migrated.
-    """
-    return Dispatcher(config, repo_cfg).dispatch(
-        event, payload, delivery_id=delivery_id, oracle=oracle
-    )
 
 
 def _load_persona(config: Config) -> str:
@@ -2658,8 +2641,6 @@ def create_task(
     new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)
     if dispatcher is not None:
         dispatcher.launch_sync()
-    else:
-        launch_sync(config, repo_cfg, gh)
     if thread:
         commit_summary = _get_commit_summary_fn(repo_cfg.work_dir)
         if registry is not None and _reorder_background_fn is _reorder_tasks_background:
@@ -2684,33 +2665,6 @@ def create_task(
     if registry is not None:
         _maybe_abort_for_new_task(repo_cfg, new_task, registry)
     return new_task
-
-
-def backfill_missed_pr_comments(
-    config: Config,
-    repo_cfg: RepoConfig,
-    gh: GitHub,
-    pr_number: int,
-    *,
-    gh_user: str,
-) -> int:
-    """Thin compatibility shim — delegates to :class:`Dispatcher`.
-
-    Use :meth:`Dispatcher.backfill_missed_pr_comments` directly; this free
-    function is kept only until all callers have migrated.
-    """
-    return Dispatcher(config, repo_cfg, gh).backfill_missed_pr_comments(
-        pr_number, gh_user=gh_user
-    )
-
-
-def launch_sync(config: Config, repo_cfg: RepoConfig, gh: GitHub) -> None:
-    """Thin compatibility shim — delegates to :class:`Dispatcher`.
-
-    Use :meth:`Dispatcher.launch_sync` directly; this free function is kept
-    only until all callers have migrated.
-    """
-    Dispatcher(config, repo_cfg, gh).launch_sync()
 
 
 def launch_worker(repo_cfg: RepoConfig, registry: WorkerRegistry) -> None:

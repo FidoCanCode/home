@@ -33,8 +33,6 @@ from fido.events import (
     _task_snapshot,
     build_review_comment_action,
     create_task,
-    dispatch,
-    launch_sync,
     launch_worker,
     needs_more_context,
     queue_reply_tasks,
@@ -1367,8 +1365,8 @@ class TestReplyPromiseHelpers:
 class TestDispatchPing:
     def test_returns_none(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
-        result = dispatch(
-            "ping", {"hook_id": 123, **_payload()}, cfg, _repo_cfg(tmp_path)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+            "ping", {"hook_id": 123, **_payload()}
         )
         assert result is None
 
@@ -1382,7 +1380,7 @@ class TestDispatchIssuesAssigned:
             "assignee": {"login": "fido"},
             "issue": {"number": 1, "title": "test issue"},
         }
-        result = dispatch("issues", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("issues", payload)
         assert result is not None
         assert "#1" in result.prompt
 
@@ -1394,7 +1392,7 @@ class TestDispatchIssuesAssigned:
             "assignee": {"login": "fido"},
             "issue": {"number": 0, "title": "test"},
         }
-        result = dispatch("issues", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("issues", payload)
         assert result is None
 
 
@@ -1415,8 +1413,8 @@ class TestDispatchReviewComment:
             },
             "pull_request": {"number": 5, "title": "pr title", "body": "pr body"},
         }
-        result = dispatch(
-            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+            "pull_request_review_comment", payload
         )
         assert result is not None
         assert result.reply_to is None
@@ -1443,8 +1441,8 @@ class TestDispatchReviewComment:
             },
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
-        result = dispatch(
-            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+            "pull_request_review_comment", payload
         )
         assert result is not None
         assert result.thread is not None
@@ -1470,11 +1468,9 @@ class TestDispatchReviewComment:
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
 
-        result = dispatch(
+        result = Dispatcher(cfg, repo_cfg).dispatch(
             "pull_request_review_comment",
             payload,
-            cfg,
-            repo_cfg,
             delivery_id="delivery-review-125",
         )
 
@@ -1512,18 +1508,14 @@ class TestDispatchReviewComment:
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
 
-        dispatch(
+        Dispatcher(cfg, repo_cfg).dispatch(
             "pull_request_review_comment",
             payload,
-            cfg,
-            repo_cfg,
             delivery_id="delivery-review-126-a",
         )
-        dispatch(
+        Dispatcher(cfg, repo_cfg).dispatch(
             "pull_request_review_comment",
             payload,
-            cfg,
-            repo_cfg,
             delivery_id="delivery-review-126-b",
         )
 
@@ -1549,11 +1541,9 @@ class TestDispatchReviewComment:
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
 
-        dispatch(
+        Dispatcher(cfg, repo_cfg).dispatch(
             "pull_request_review_comment",
             payload,
-            cfg,
-            repo_cfg,
             delivery_id="delivery-review-127-a",
         )
         edited_payload = {
@@ -1565,11 +1555,9 @@ class TestDispatchReviewComment:
                 "updated_at": "2026-04-30T12:05:00Z",
             },
         }
-        result = dispatch(
+        result = Dispatcher(cfg, repo_cfg).dispatch(
             "pull_request_review_comment",
             edited_payload,
-            cfg,
-            repo_cfg,
             delivery_id="delivery-review-127-b",
         )
 
@@ -1588,8 +1576,8 @@ class TestDispatchReviewComment:
             "comment": {"id": 1, "body": "done", "user": {"login": "FidoCanCode"}},
             "pull_request": {"number": 5},
         }
-        result = dispatch(
-            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+            "pull_request_review_comment", payload
         )
         assert result is None
 
@@ -1601,8 +1589,8 @@ class TestDispatchReviewComment:
             "comment": {"id": 1, "body": "hi", "user": {"login": "rando"}},
             "pull_request": {"number": 5},
         }
-        result = dispatch(
-            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+            "pull_request_review_comment", payload
         )
         assert result is None
 
@@ -1619,7 +1607,7 @@ class TestDispatchCheckRun:
                 "pull_requests": [{"number": 3}],
             },
         }
-        result = dispatch("check_run", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("check_run", payload)
         assert result is not None
         assert "CI failure" in result.prompt
         assert result.preempts_worker is True
@@ -1631,7 +1619,7 @@ class TestDispatchCheckRun:
             "action": "completed",
             "check_run": {"conclusion": "success", "name": "lint", "pull_requests": []},
         }
-        result = dispatch("check_run", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("check_run", payload)
         assert result is None
 
 
@@ -1654,7 +1642,7 @@ class TestDispatchPullRequest:
             "action": "closed",
             "pull_request": {"number": 7, "merged": True},
         }
-        result = dispatch("pull_request", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("pull_request", payload)
         assert result is not None
         assert "merged" in result.prompt
         assert FidoStore(tmp_path).pending_pr_comments(repo="owner/repo") == []
@@ -1677,7 +1665,7 @@ class TestDispatchPullRequest:
             "action": "closed",
             "pull_request": {"number": 7, "merged": False},
         }
-        result = dispatch("pull_request", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("pull_request", payload)
         assert result is None
         assert FidoStore(tmp_path).pending_pr_comments(repo="owner/repo") == []
 
@@ -1701,7 +1689,7 @@ class TestDispatchIssueComment:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("issue_comment", payload)
         assert result is not None
         assert result.comment_body is None
         assert result.preempts_worker is True
@@ -1736,11 +1724,9 @@ class TestDispatchIssueComment:
             },
         }
 
-        result = dispatch(
+        result = Dispatcher(cfg, repo_cfg).dispatch(
             "issue_comment",
             payload,
-            cfg,
-            repo_cfg,
             delivery_id="delivery-issue-457",
         )
 
@@ -1777,7 +1763,9 @@ class TestDispatchIssueComment:
             },
         }
 
-        dispatch("issue_comment", payload, cfg, repo_cfg, delivery_id="delivery-a")
+        Dispatcher(cfg, repo_cfg).dispatch(
+            "issue_comment", payload, delivery_id="delivery-a"
+        )
         edited_payload = {
             **payload,
             "action": "edited",
@@ -1787,8 +1775,8 @@ class TestDispatchIssueComment:
                 "updated_at": "2026-04-30T12:05:00Z",
             },
         }
-        result = dispatch(
-            "issue_comment", edited_payload, cfg, repo_cfg, delivery_id="delivery-b"
+        result = Dispatcher(cfg, repo_cfg).dispatch(
+            "issue_comment", edited_payload, delivery_id="delivery-b"
         )
 
         assert result is not None
@@ -1806,18 +1794,16 @@ class TestDispatchIssueComment:
             "comment": {"id": 1, "body": "hi", "user": {"login": "owner"}},
             "issue": {"number": 10, "title": "issue"},
         }
-        result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("issue_comment", payload)
         assert result is None
 
 
 class TestDispatchUnknown:
     def test_unknown_event(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)
-        result = dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
             "unknown_event",
             {**_payload(), "action": "whatever"},
-            cfg,
-            _repo_cfg(tmp_path),
         )
         assert result is None
 
@@ -5234,16 +5220,14 @@ class TestBackfillMissedPrComments:
     def test_creates_task_for_allowed_collaborator_comment(
         self, tmp_path: Path
     ) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [self._comment(100)]
         mock_gh.is_thread_resolved_for_comment.return_value = False
         cfg = self._cfg(tmp_path)
         repo_cfg = self._repo_cfg(tmp_path)
         with patch("fido.events.create_task") as mock_create:
-            count = backfill_missed_pr_comments(
-                cfg, repo_cfg, mock_gh, 1, gh_user="fidocancode"
+            count = Dispatcher(cfg, repo_cfg, mock_gh).backfill_missed_pr_comments(
+                1, gh_user="fidocancode"
             )
         assert count == 1
         mock_create.assert_called_once()
@@ -5253,37 +5237,25 @@ class TestBackfillMissedPrComments:
         assert kwargs["thread"]["author"] == "rhencke"
 
     def test_skips_fido_own_comments(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="fidocancode", body="my own reply")
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                1,
-                gh_user="FidoCanCode",
-            )
+            Dispatcher(
+                self._cfg(tmp_path), self._repo_cfg(tmp_path), mock_gh
+            ).backfill_missed_pr_comments(1, gh_user="FidoCanCode")
         mock_create.assert_not_called()
 
     def test_skips_by_gh_user_case_insensitive(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="Alice", body="mine")
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                1,
-                gh_user="alice",
-            )
+            Dispatcher(
+                self._cfg(tmp_path), self._repo_cfg(tmp_path), mock_gh
+            ).backfill_missed_pr_comments(1, gh_user="alice")
         mock_create.assert_not_called()
 
     def test_skips_fido_literal_name_even_if_gh_user_mismatch(
@@ -5291,81 +5263,61 @@ class TestBackfillMissedPrComments:
     ) -> None:
         """Defense in depth: even if ``gh_user`` is misconfigured, comments
         from the literal fido account must never trigger a backfill task."""
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="fido-can-code", body="my reply")
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                1,
-                gh_user="mis-configured-bot",
-            )
+            Dispatcher(
+                self._cfg(tmp_path), self._repo_cfg(tmp_path), mock_gh
+            ).backfill_missed_pr_comments(1, gh_user="mis-configured-bot")
         mock_create.assert_not_called()
 
     def test_skips_non_allowed_users(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="random-stranger")
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
+            Dispatcher(
                 self._cfg(tmp_path),
                 self._repo_cfg(tmp_path, collaborators=frozenset({"rhencke"})),
                 mock_gh,
-                1,
-                gh_user="fidocancode",
-            )
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
         mock_create.assert_not_called()
 
     def test_allows_configured_bots(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="dependabot[bot]", body="bump dep")
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
+            Dispatcher(
                 self._cfg(tmp_path, allowed_bots=frozenset({"dependabot[bot]"})),
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                1,
-                gh_user="fidocancode",
-            )
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
         assert mock_create.call_count == 1
         _, kwargs = mock_create.call_args
         assert "bot" in kwargs["thread"]["author"]
 
     def test_prompt_marks_bot_vs_human(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, user="rhencke", body="human msg"),
             self._comment(101, user="bot[bot]", body="bot msg"),
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
+            Dispatcher(
                 self._cfg(tmp_path, allowed_bots=frozenset({"bot[bot]"})),
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                1,
-                gh_user="fidocancode",
-            )
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
         prompts = [c.args[0] for c in mock_create.call_args_list]
         assert any("human/owner" in p for p in prompts)
         assert any("(bot)" in p for p in prompts)
 
     def test_skips_empty_login_and_missing_id(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             {"id": 1, "user": {"login": ""}, "body": "x"},
@@ -5373,28 +5325,18 @@ class TestBackfillMissedPrComments:
             {"id": 2, "user": None, "body": "x"},
         ]
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                1,
-                gh_user="fidocancode",
-            )
+            Dispatcher(
+                self._cfg(tmp_path), self._repo_cfg(tmp_path), mock_gh
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
         mock_create.assert_not_called()
 
     def test_empty_comment_list_is_noop(self, tmp_path: Path) -> None:
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = []
         with patch("fido.events.create_task") as mock_create:
-            count = backfill_missed_pr_comments(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                1,
-                gh_user="fidocancode",
-            )
+            count = Dispatcher(
+                self._cfg(tmp_path), self._repo_cfg(tmp_path), mock_gh
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
         assert count == 0
         mock_create.assert_not_called()
 
@@ -5404,8 +5346,6 @@ class TestBackfillMissedPrComments:
         reply_to_issue_comment completes comment ids in SQLite after posting;
         backfill must honour that durable claim and skip re-queueing.
         """
-        from fido.events import backfill_missed_pr_comments
-
         mock_gh = MagicMock()
         mock_gh.get_issue_comments.return_value = [
             self._comment(100, body="already answered"),
@@ -5419,13 +5359,9 @@ class TestBackfillMissedPrComments:
         FidoStore(tmp_path).ack_promise(promise.promise_id)
 
         with patch("fido.events.create_task") as mock_create:
-            backfill_missed_pr_comments(
-                self._cfg(tmp_path),
-                self._repo_cfg(tmp_path),
-                mock_gh,
-                1,
-                gh_user="fidocancode",
-            )
+            Dispatcher(
+                self._cfg(tmp_path), self._repo_cfg(tmp_path), mock_gh
+            ).backfill_missed_pr_comments(1, gh_user="fidocancode")
 
         # Only comment 200 (unclaimed) should be queued.
         assert mock_create.call_count == 1
@@ -5451,15 +5387,15 @@ class TestLaunchSync:
         cfg = self._cfg(tmp_path)
         mock_gh = MagicMock()
         with patch("fido.tasks.sync_tasks_background") as mock_sync:
-            launch_sync(cfg, self._repo_cfg(tmp_path), mock_gh)
+            Dispatcher(cfg, self._repo_cfg(tmp_path), mock_gh).launch_sync()
         mock_sync.assert_called_once_with(tmp_path, mock_gh)
 
     def test_does_not_raise(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         with patch("fido.tasks.sync_tasks_background"):
-            launch_sync(
+            Dispatcher(
                 cfg, self._repo_cfg(tmp_path), _make_mock_gh()
-            )  # should not raise
+            ).launch_sync()  # should not raise
 
 
 class TestLaunchWorker:
@@ -5485,7 +5421,9 @@ class TestDispatchPullRequestReview:
             },
             "pull_request": {"number": 3},
         }
-        result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+            "pull_request_review", payload
+        )
         assert result is not None
         assert result.review_comments is not None
         assert result.review_comments["review_id"] == 55
@@ -5498,7 +5436,9 @@ class TestDispatchPullRequestReview:
             "review": {"state": "approved", "user": {"login": "owner"}},
             "pull_request": {"number": 3},
         }
-        result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+            "pull_request_review", payload
+        )
         assert result is not None
         assert result.review_comments is None
 
@@ -5510,7 +5450,9 @@ class TestDispatchPullRequestReview:
             "review": {"id": 1, "state": "approved", "user": {"login": "owner"}},
             "pull_request": {},
         }
-        result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+            "pull_request_review", payload
+        )
         assert result is None
 
     def test_not_allowed_user_ignored(self, tmp_path: Path) -> None:
@@ -5521,7 +5463,9 @@ class TestDispatchPullRequestReview:
             "review": {"id": 1, "state": "approved", "user": {"login": "stranger"}},
             "pull_request": {"number": 3},
         }
-        result = dispatch("pull_request_review", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+            "pull_request_review", payload
+        )
         assert result is None
 
     def test_commented_review_collapsed_by_oracle(self, tmp_path: Path) -> None:
@@ -5536,11 +5480,9 @@ class TestDispatchPullRequestReview:
             "review": {"id": 77, "state": "commented", "user": {"login": "owner"}},
             "pull_request": {"number": 4},
         }
-        result = dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
             "pull_request_review",
             payload,
-            cfg,
-            _repo_cfg(tmp_path),
             delivery_id="delivery-commented-1",
             oracle=oracle,
         )
@@ -5557,11 +5499,9 @@ class TestDispatchPullRequestReview:
             "review": {"id": 78, "state": "approved", "user": {"login": "owner"}},
             "pull_request": {"number": 5},
         }
-        result = dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
             "pull_request_review",
             payload,
-            cfg,
-            _repo_cfg(tmp_path),
             delivery_id="delivery-approved-1",
             oracle=oracle,
         )
@@ -5582,11 +5522,9 @@ class TestDispatchPullRequestReview:
             },
             "pull_request": {"number": 6},
         }
-        result = dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
             "pull_request_review",
             payload,
-            cfg,
-            _repo_cfg(tmp_path),
             delivery_id="delivery-changes-requested-1",
             oracle=oracle,
         )
@@ -5603,11 +5541,9 @@ class TestDispatchPullRequestReview:
             "review": {"id": 80, "state": "dismissed", "user": {"login": "owner"}},
             "pull_request": {"number": 7},
         }
-        result = dispatch(
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
             "pull_request_review",
             payload,
-            cfg,
-            _repo_cfg(tmp_path),
             delivery_id="delivery-dismissed-1",
             oracle=oracle,
         )
@@ -5626,7 +5562,7 @@ class TestDispatchCheckRunNoPrs:
                 "pull_requests": [],
             },
         }
-        result = dispatch("check_run", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("check_run", payload)
         assert result is not None
         assert "unknown PR" in result.prompt
 
@@ -5644,7 +5580,7 @@ class TestDispatchIssueCommentSelf:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("issue_comment", payload)
         assert result is None
 
     def test_unallowed_user_ignored(self, tmp_path: Path) -> None:
@@ -5659,7 +5595,7 @@ class TestDispatchIssueCommentSelf:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        result = dispatch("issue_comment", payload, cfg, _repo_cfg(tmp_path))
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch("issue_comment", payload)
         assert result is None
 
 
@@ -5678,8 +5614,8 @@ class TestDispatchReviewCommentNoNumber:
             },
             "pull_request": {},  # no number
         }
-        result = dispatch(
-            "pull_request_review_comment", payload, cfg, _repo_cfg(tmp_path)
+        result = Dispatcher(cfg, _repo_cfg(tmp_path)).dispatch(
+            "pull_request_review_comment", payload
         )
         assert result is None
 
