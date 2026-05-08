@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from frozendict import frozendict
 
-from fido.atomic import AtomicReader, AtomicUpdater
+from fido.atomic import AtomicUpdater
 from fido.atomic import create_atomic as _create_atomic
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
@@ -23,6 +23,7 @@ from fido.rocq import worker_registry_crash as registry_fsm
 from fido.worker import WorkerThread
 
 if TYPE_CHECKING:
+    from fido.atomic import AtomicReader
     from fido.events import Dispatcher
 
 log = logging.getLogger(__name__)
