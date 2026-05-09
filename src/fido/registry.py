@@ -223,11 +223,14 @@ class WorkerRegistry:
         thread_factory: Callable[..., WorkerThread],
         state_updater: "AtomicUpdater[FidoState]",
     ) -> None:
+        # _threads is single-writer: only start() (called from the watchdog
+        # daemon thread or from the startup sequence) ever writes to it.
+        # HTTP handler threads (wake, abort_task, get_session, …) only read.
+        # CPython 3.14t's per-object dict lock makes individual dict.get() /
+        # dict.__setitem__ calls safe without an additional application-level
+        # lock, and the single-writer discipline means readers never observe a
+        # half-installed entry.  No _threads_lock needed.
         self._threads: dict[str, WorkerThread] = {}
-        # _threads_lock guards _threads: written by start() on the watchdog
-        # thread, read from HTTP handler threads (wake, abort_task, get_session,
-        # etc.).  Python 3.14t has no GIL — dict reads and writes are not atomic.
-        self._threads_lock = threading.Lock()
         self._factory = thread_factory
         self._status_lock = threading.Lock()
         # _state_updater is the write-only face of the atomic FidoState cell.
@@ -324,8 +327,7 @@ class WorkerRegistry:
         """
         provider = None
         session_issue = None
-        with self._threads_lock:
-            old_thread = self._threads.get(repo_cfg.name)
+        old_thread = self._threads.get(repo_cfg.name)
         if old_thread is None:
             # No predecessor — initial start: Absent → Active.
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
@@ -355,8 +357,7 @@ class WorkerRegistry:
             # the no_start_while_active violation as an immediate AssertionError.
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
         thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
-        with self._threads_lock:
-            self._threads[repo_cfg.name] = thread
+        self._threads[repo_cfg.name] = thread
         _name = repo_cfg.name
         _now = _utcnow()
         # Prepopulate the full RepoState with zero values.  Crash history
@@ -379,8 +380,7 @@ class WorkerRegistry:
 
         No-op if no thread is registered for that repo.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         if thread:
             thread.wake()
 
@@ -393,15 +393,13 @@ class WorkerRegistry:
 
         No-op if no thread is registered for that repo.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         if thread:
             thread.abort_task(task_id=task_id)
 
     def recover_provider(self, repo_name: str) -> bool:
         """Recover the attached provider session for *repo_name*, if present."""
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         if thread is None:
             return False
         return thread.recover_provider()
@@ -551,33 +549,33 @@ class WorkerRegistry:
 
     def stop_all(self) -> None:
         """Request every managed thread to stop after its current iteration."""
-        with self._threads_lock:
-            threads = list(self._threads.values())
+        threads = list(self._threads.values())
         for thread in threads:
             thread.stop()
 
     def stop_and_join(self, repo_name: str, timeout: float = 30.0) -> None:
         """Stop the thread for *repo_name* and wait up to *timeout* seconds for it to exit.
 
+        Reads the thread reference from ``_threads`` outside any lock (single-writer
+        dict, so the read is safe), then calls ``stop()`` and ``join()`` outside any
+        lock — eliminating the original lock-across-join contention that caused
+        ``/status.json`` to stall for up to 30 seconds (#1342).
+
         No-op if no thread is registered for that repo.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         if thread:
             thread.stop()
             thread.join(timeout=timeout)
 
     def is_alive(self, repo_name: str) -> bool:
         """Return True if the thread for *repo_name* is currently alive."""
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         return thread is not None and thread.is_alive()
 
     def get_thread_crash_error(self, repo_name: str) -> str | None:
         """Return the crash_error stored on the thread for *repo_name*, or None."""
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
-        return thread.crash_error if thread is not None else None
+        return self._threads[repo_name].crash_error
 
     def get_session_owner(self, repo_name: str) -> str | None:
         """Return the name of the thread currently holding the ClaudeSession lock.
@@ -586,8 +584,7 @@ class WorkerRegistry:
         registered thread.  Returns ``None`` when no thread is registered for
         the repo, no session exists, or the lock is currently free.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         return thread.session_owner if thread is not None else None
 
     def get_session_alive(self, repo_name: str) -> bool:
@@ -597,8 +594,7 @@ class WorkerRegistry:
         currently holds still reports ``session_alive=True`` so status display
         can distinguish "session exists, idle" from "no session".
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         return thread.session_alive if thread is not None else False
 
     def get_session_pid(self, repo_name: str) -> int | None:
@@ -608,26 +604,22 @@ class WorkerRegistry:
         pgrep — the system prompt file path changed in #456 so the pgrep
         heuristic in :mod:`fido.status` can no longer locate it.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         return thread.session_pid if thread is not None else None
 
     def get_session_dropped_count(self, repo_name: str) -> int:
         """Return how many stale persistent session ids were dropped for *repo_name*."""
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         return thread.session_dropped_count if thread is not None else 0
 
     def get_session_sent_count(self, repo_name: str) -> int:
         """Return the number of messages sent to the current session subprocess for *repo_name*."""
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         return thread.session_sent_count if thread is not None else 0
 
     def get_session_received_count(self, repo_name: str) -> int:
         """Return the number of events received from the current session subprocess for *repo_name*."""
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         return thread.session_received_count if thread is not None else 0
 
     def set_rescoping(self, repo_name: str, active: bool) -> None:
@@ -860,8 +852,7 @@ class WorkerRegistry:
         when no worker thread is registered for the repo or the thread has
         not yet created its session.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         if thread is None:
             return None
         provider = thread.current_provider()

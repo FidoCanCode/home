@@ -239,9 +239,10 @@ class TestWorkerRegistry:
         reg, _, reader = self._make_registry()
         assert reg.is_alive("unknown/repo") is False
 
-    def test_get_thread_crash_error_returns_none_for_unknown_repo(self) -> None:
+    def test_get_thread_crash_error_raises_for_unknown_repo(self) -> None:
         reg, _, reader = self._make_registry()
-        assert reg.get_thread_crash_error("unknown/repo") is None
+        with pytest.raises(KeyError):
+            reg.get_thread_crash_error("unknown/repo")
 
     def test_get_session_owner_returns_none_for_unknown_repo(self) -> None:
         reg, _, reader = self._make_registry()
