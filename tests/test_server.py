@@ -79,7 +79,6 @@ def _repo_state(
             last_crash_time=_EPOCH,
         ),
         webhook_activities=webhook_activities,
-        thread_handle=None,
     )
 
 
@@ -1920,7 +1919,7 @@ class TestProcessAction:
         handler = WebhookHandler.__new__(WebhookHandler)
         handler.config = cfg
         reader, updater = create_fido_atomic()
-        handler.registry = WorkerRegistry(MagicMock(), reader, updater)
+        handler.registry = WorkerRegistry(MagicMock(), updater)
         handler.registry.start(cfg.repos["owner/repo"])
         handler.gh = MagicMock()
         handler.dispatchers = {"owner/repo": _FakeDispatcher()}

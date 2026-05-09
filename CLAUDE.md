@@ -324,6 +324,32 @@ durable store handles *across runs*. Don't conflate them.
 **Reviewer signal:** if an action is taken before the corresponding record is
 written to `tasks.json` (or another durable store), the order is wrong.
 
+### FidoState is a SCADA display projection — not a source of truth
+
+`FidoState` is a frozen, atomically-swapped snapshot whose sole purpose is
+lock-free status serialisation (`/status.json` and `./fido status`).  It is a
+**display projection**, not the authoritative state.
+
+Two rules follow from this:
+
+1. **`AtomicReader[FidoState]` belongs exclusively to the status serialisation
+   path.**  The composition root passes the reader to `WebhookHandler.state_reader`
+   and to nothing else.  `WorkerRegistry`, workers, event handlers, and all other
+   app code must never hold the reader face.  Violations make every future
+   `status.json` enhancement a cross-cutting change.
+
+2. **Mutable objects must not live inside `FidoState` (or any of its nested
+   frozen dataclasses).**  The snapshot must be recursively immutable.  A
+   frozen dataclass field that *references* a mutable object (e.g. a
+   `WorkerThread`) breaks the lock-free promise — snapshot readers can observe
+   partial mutations through the reference even though the field itself is
+   frozen.  Thread references live in a plain dict on `WorkerRegistry`; only
+   frozen, value-type data belongs in `FidoState`.
+
+**Reviewer signal:** if any class other than the status serialisation path
+holds an `AtomicReader[FidoState]`, or if any `FidoState` / `RepoState` field
+references a mutable object, that's a violation of this boundary.
+
 ### Rocq-modeled coordination boundary
 
 Long-term coordination work under #710 must make the scheduler/reducer

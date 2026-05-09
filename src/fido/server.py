@@ -1565,7 +1565,6 @@ def run(
         gh,
         config,
         dispatchers=dispatchers,
-        state_reader=state_reader,
         state_updater=state_updater,
     )
     WebhookHandler.registry = registry

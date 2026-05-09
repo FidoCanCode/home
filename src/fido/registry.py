@@ -107,24 +107,6 @@ class WebhookActivity:
 
 
 @dataclass(frozen=True, slots=True)
-class ThreadHandle:
-    """Frozen reference to a :class:`~fido.worker.WorkerThread`.
-
-    Stored inside :class:`RepoState` so snapshot readers can reach the
-    thread's session metadata and liveness state without holding any lock.
-    The thread itself is mutable — ``ThreadHandle`` only freezes the
-    *reference*, not the object it points to.
-
-    ``thread_handle`` is ``None`` only in a zero-value :class:`RepoState`
-    that was constructed before :meth:`~WorkerRegistry.start` ran for that
-    repo.  After :meth:`~WorkerRegistry.start` completes the field is always
-    non-``None``.
-    """
-
-    thread: WorkerThread
-
-
-@dataclass(frozen=True, slots=True)
 class RepoState:
     """Per-repo sub-snapshot within :class:`FidoState`.
 
@@ -146,16 +128,15 @@ class RepoState:
     repo.  Published from the authoritative ``_webhook_activities`` dict on
     :class:`WorkerRegistry` via :meth:`~WorkerRegistry._publish_webhook_activities`; starts empty.
 
-    *thread_handle* is a :class:`ThreadHandle` wrapping the
-    :class:`~fido.worker.WorkerThread` for this repo.  Populated by
-    :meth:`~WorkerRegistry.start`; ``None`` only before the first start
-    (which never happens in the normal lifecycle).  All thread lookups
-    read from this field via the lock-free snapshot.
-
     As subsequent lock-free PRs migrate fields out of the per-lock dicts in
     :class:`WorkerRegistry`, those fields grow here (e.g. ``rescoping``).
     Each migration removes the corresponding lock and dict from
     ``WorkerRegistry.__init__``.
+
+    **Thread references do not belong here.**  :class:`WorkerThread` is mutable,
+    so storing a reference inside the recursively-immutable snapshot would break
+    the lock-free promise of :class:`FidoState`.  Thread lookups go through
+    ``WorkerRegistry._threads`` instead.
     """
 
     key: str
@@ -163,7 +144,6 @@ class RepoState:
     activity: WorkerActivity
     crash_record: WorkerCrash
     webhook_activities: tuple[WebhookActivity, ...]
-    thread_handle: ThreadHandle | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,16 +205,21 @@ class WorkerRegistry:
     Threads are created via the injected *thread_factory* so tests can
     supply mock threads without patching module-level names.
 
-    Holds both faces of the atomic :class:`FidoState` cell: the updater for
-    writing thread and activity state into the snapshot, and the reader for
-    lock-free thread lookups via :meth:`_get_thread`.  Status serialisation
-    reads the snapshot directly via the reader passed to
-    :class:`~fido.server.WebhookHandler` at the composition root.
+    Holds only the **updater** face of the atomic :class:`FidoState` cell.
+    The reader face belongs exclusively to the status serialisation path
+    (``WebhookHandler.state_reader``).  ``WorkerRegistry`` never reads from
+    ``FidoState`` — it is a SCADA display projection for lock-free status
+    reporting, not a source of truth for app logic.
+
+    Thread references live in a plain ``_threads`` dict — written only by the
+    watchdog thread in :meth:`start`, read by command paths.  Mutable objects
+    like :class:`~fido.worker.WorkerThread` must never appear inside the
+    recursively-immutable :class:`FidoState` snapshot.
 
     Usage::
 
         state_reader, state_updater = create_fido_atomic()
-        registry = WorkerRegistry(my_factory, state_reader, state_updater)
+        registry = WorkerRegistry(my_factory, state_updater)
         registry.start(repo_cfg)   # create + start thread
         registry.wake("owner/repo")  # nudge thread to check for work
         registry.stop_all()          # clean shutdown
@@ -243,19 +228,20 @@ class WorkerRegistry:
     def __init__(
         self,
         thread_factory: Callable[..., WorkerThread],
-        state_reader: "AtomicReader[FidoState]",
         state_updater: "AtomicUpdater[FidoState]",
     ) -> None:
         self._factory = thread_factory
         self._status_lock = threading.Lock()
-        # _state_reader is the read face of the atomic FidoState cell.
-        # Lock-free thread lookups (wake, abort_task, get_session, …) call
-        # _get_thread() which reads thread_handle from the snapshot via this reader.
-        self._state_reader: "AtomicReader[FidoState]" = state_reader
         # _state_updater is the write face of the atomic FidoState cell.
         # Writers call _state_updater.update(selector, value) to CAS-install a
         # value at a Lens path.
         self._state_updater: AtomicUpdater[FidoState] = state_updater
+        # Per-repo thread references.  Written only by start() (called from
+        # the single watchdog thread during crash recovery, or sequentially
+        # during startup).  Read by command paths (wake, abort_task, stop_*,
+        # get_session, …).  No lock needed — single-writer, and readers only
+        # need a point-in-time reference.
+        self._threads: dict[str, WorkerThread] = {}
         # Owner-side crash records: the watchdog increments death_count here,
         # then publishes the result into FidoState via a pure lens write.
         # Only the watchdog thread writes; start() reads during crash recovery
@@ -291,16 +277,13 @@ class WorkerRegistry:
         self._webhook_lock = threading.Lock()
 
     def _get_thread(self, repo_name: str) -> WorkerThread | None:
-        """Return the :class:`~fido.worker.WorkerThread` for *repo_name* from
-        the lock-free snapshot, or ``None`` if no thread has been started.
+        """Return the :class:`~fido.worker.WorkerThread` for *repo_name*, or
+        ``None`` if no thread has been started.
 
-        Reads :attr:`RepoState.thread_handle` via the atomic reader — no lock
-        acquisition needed.  All thread lookups go through this method.
+        Reads from the plain ``_threads`` dict — no lock needed (single-writer).
+        All thread lookups go through this method.
         """
-        repo_state = self._state_reader.get().repos.get(repo_name)
-        if repo_state is None or repo_state.thread_handle is None:
-            return None
-        return repo_state.thread_handle.thread
+        return self._threads.get(repo_name)
 
     def _registry_fsm_transition(
         self, repo_name: str, event: registry_fsm.Event
@@ -389,6 +372,9 @@ class WorkerRegistry:
         thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
         _name = repo_cfg.name
         _now = _utcnow()
+        # Store the mutable thread reference in the plain dict — never in
+        # FidoState (which must be recursively immutable).
+        self._threads[_name] = thread
         # Prepopulate the full RepoState with zero values.  Crash history
         # comes from the class-owned _crash_records (not from FidoState),
         # so this is a pure write — no read-modify-write CAS.
@@ -399,7 +385,6 @@ class WorkerRegistry:
             activity=_zero_activity(_name),
             crash_record=crash_record,
             webhook_activities=(),
-            thread_handle=ThreadHandle(thread=thread),
         )
         self._state_updater.update(lambda root: root.repos[_name], new_repo)
         thread.start()
@@ -579,13 +564,7 @@ class WorkerRegistry:
 
     def stop_all(self) -> None:
         """Request every managed thread to stop after its current iteration."""
-        snapshot = self._state_reader.get()
-        threads = [
-            rs.thread_handle.thread
-            for rs in snapshot.repos.values()
-            if rs.thread_handle is not None
-        ]
-        for thread in threads:
+        for thread in list(self._threads.values()):
             thread.stop()
 
     def stop_and_join(self, repo_name: str, timeout: float = 30.0) -> None:
@@ -965,7 +944,6 @@ def make_registry(
     config: Config | None = None,
     *,
     dispatchers: "dict[str, Dispatcher]",
-    state_reader: "AtomicReader[FidoState]",
     state_updater: "AtomicUpdater[FidoState]",
     _thread_factory: Callable[..., WorkerThread] = _make_thread,
 ) -> WorkerRegistry:
@@ -974,8 +952,9 @@ def make_registry(
     Uses :func:`_make_thread` as the factory; all threads share the provided
     :class:`~fido.github.GitHub` client.  The caller (composition root) is
     responsible for creating the atomic cell via :func:`create_fido_atomic`
-    and passing both faces here.  Pass a custom registry directly
-    (with a mock factory) in tests instead of calling this.
+    and passing both faces here — the updater comes to us, the reader stays
+    at the composition root for status serialisation.  Pass a custom registry
+    directly (with a mock factory) in tests instead of calling this.
     """
 
     def factory(
@@ -994,7 +973,7 @@ def make_registry(
             dispatchers=dispatchers,
         )
 
-    registry = WorkerRegistry(factory, state_reader, state_updater)
+    registry = WorkerRegistry(factory, state_updater)
     for repo_cfg in repos.values():
         registry.start(repo_cfg)
     return registry

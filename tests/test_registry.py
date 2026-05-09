@@ -11,7 +11,6 @@ import pytest
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import ProviderID
 from fido.registry import (
-    ThreadHandle,
     WorkerCrash,
     WorkerRegistry,
     _make_thread,
@@ -42,7 +41,7 @@ class TestWorkerRegistry:
     ) -> tuple[WorkerRegistry, MagicMock, object]:
         factory = MagicMock()
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         if repos:
             for name in repos:
                 reg.start(_repo(name, Path("/tmp/fake")))
@@ -60,7 +59,7 @@ class TestWorkerRegistry:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         # First start — no prior thread
         reg.start(cfg)
@@ -90,7 +89,7 @@ class TestWorkerRegistry:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         threads[0].is_alive.return_value = False
@@ -106,7 +105,7 @@ class TestWorkerRegistry:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         # Simulate orderly shutdown: was_stopped is True (session was already stopped)
@@ -147,7 +146,7 @@ class TestWorkerRegistry:
     def test_stop_all_calls_stop_on_every_thread(self, tmp_path: Path) -> None:
         factory = MagicMock(side_effect=[MagicMock(), MagicMock()])
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         reg.start(_repo("foo/baz", tmp_path))
         reg.stop_all()
@@ -166,7 +165,7 @@ class TestWorkerRegistry:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         reg.start(_repo("foo/baz", tmp_path))
         reg.stop_all()
@@ -553,7 +552,7 @@ class TestWorkerRegistry:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         reg.record_crash("foo/bar", "boom")
@@ -569,7 +568,7 @@ class TestWorkerRegistry:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         cfg = _repo("foo/bar", tmp_path)
         reg.start(cfg)
         # Simulate a crash so the FSM accepts the second start
@@ -582,60 +581,19 @@ class TestWorkerRegistry:
         threads[1].is_alive.return_value = True
         assert reg.is_alive("foo/bar") is True
 
-    # ── ThreadHandle in RepoState snapshot ───────────────────────────────
-
-    def test_start_publishes_thread_handle_to_snapshot(self, tmp_path: Path) -> None:
-        """start() stores the new WorkerThread in RepoState.thread_handle."""
-        reader, updater = create_fido_atomic()
-        factory = MagicMock()
-        reg = WorkerRegistry(factory, reader, updater)
-        cfg = _repo("foo/bar", tmp_path)
-        reg.start(cfg)
-        handle = reader.get().repos["foo/bar"].thread_handle
-        assert handle is not None
-        assert isinstance(handle, ThreadHandle)
-        assert handle.thread is factory.return_value
-
-    def test_start_thread_handle_is_nonnull_after_start(self, tmp_path: Path) -> None:
-        """thread_handle is non-None in the snapshot immediately after start()."""
-        reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
-        reg.start(_repo("foo/bar", tmp_path))
-        assert reader.get().repos["foo/bar"].thread_handle is not None
-
-    def test_start_replaces_thread_handle_on_restart(self, tmp_path: Path) -> None:
-        """After a crash restart, thread_handle points to the new thread."""
-        threads = [MagicMock(), MagicMock()]
-        factory = MagicMock(side_effect=threads)
-        reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
-        cfg = _repo("foo/bar", tmp_path)
-        reg.start(cfg)
-        first_handle = reader.get().repos["foo/bar"].thread_handle
-        assert first_handle is not None
-        assert first_handle.thread is threads[0]
-        # Simulate crash so FSM accepts the second start
-        threads[0].is_alive.return_value = False
-        threads[0].was_stopped = False
-        reg.start(cfg)
-        second_handle = reader.get().repos["foo/bar"].thread_handle
-        assert second_handle is not None
-        assert second_handle.thread is threads[1]
-        assert second_handle is not first_handle
-
-    # ── _get_thread snapshot lookup ──────────────────────────────────────
+    # ── _get_thread dict lookup ──────────────────────────────────────────
 
     def test_get_thread_returns_none_for_unknown_repo(self) -> None:
-        """_get_thread returns None when no snapshot entry exists."""
-        reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        """_get_thread returns None when no thread has been started."""
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         assert reg._get_thread("unknown/repo") is None  # pyright: ignore[reportPrivateUsage]
 
-    def test_get_thread_returns_thread_from_snapshot(self, tmp_path: Path) -> None:
-        """_get_thread returns the thread stored in the snapshot."""
-        reader, updater = create_fido_atomic()
+    def test_get_thread_returns_thread_from_dict(self, tmp_path: Path) -> None:
+        """_get_thread returns the thread stored in _threads dict."""
+        _, updater = create_fido_atomic()
         factory = MagicMock()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         thread = reg._get_thread("foo/bar")  # pyright: ignore[reportPrivateUsage]
         assert thread is factory.return_value
@@ -734,7 +692,6 @@ class TestMakeRegistry:
             {"foo/bar": cfg},
             MagicMock(),
             dispatchers={},
-            state_reader=reader,
             state_updater=updater,
             _thread_factory=MagicMock(return_value=mock_thread),
         )
@@ -750,7 +707,6 @@ class TestMakeRegistry:
             {"foo/bar": cfg1, "foo/baz": cfg2},
             MagicMock(),
             dispatchers={},
-            state_reader=reader,
             state_updater=updater,
             _thread_factory=mock_factory,
         )
@@ -759,9 +715,7 @@ class TestMakeRegistry:
 
     def test_empty_repos_returns_empty_registry(self) -> None:
         reader, updater = create_fido_atomic()
-        result = make_registry(
-            {}, MagicMock(), dispatchers={}, state_reader=reader, state_updater=updater
-        )
+        result = make_registry({}, MagicMock(), dispatchers={}, state_updater=updater)
         assert isinstance(result, WorkerRegistry)
         assert result.is_alive("anything") is False
 
@@ -774,7 +728,6 @@ class TestMakeRegistry:
             {"foo/bar": cfg},
             MagicMock(),
             dispatchers={},
-            state_reader=reader,
             state_updater=updater,
             _thread_factory=MagicMock(return_value=mock_thread),
         )
@@ -799,7 +752,6 @@ class TestMakeRegistry:
             MagicMock(),
             config,
             dispatchers={},
-            state_reader=reader,
             state_updater=updater,
             _thread_factory=mock_factory,
         )
@@ -809,7 +761,7 @@ class TestMakeRegistry:
 class TestWebhookActivity:
     def test_registers_and_unregisters(self, tmp_path: Path) -> None:
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_webhook_activities("foo/bar") == []
         with reg.webhook_activity("foo/bar", "triaging"):
@@ -822,7 +774,7 @@ class TestWebhookActivity:
         import pytest as _pytest
 
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with _pytest.raises(RuntimeError):
             with reg.webhook_activity("foo/bar", "oops"):
@@ -831,7 +783,7 @@ class TestWebhookActivity:
 
     def test_multiple_concurrent_activities(self, tmp_path: Path) -> None:
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "first"):
             with reg.webhook_activity("foo/bar", "second"):
@@ -843,7 +795,7 @@ class TestWebhookActivity:
 
     def test_activities_isolated_per_repo(self, tmp_path: Path) -> None:
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("a/b", tmp_path))
         reg.start(_repo("c/d", tmp_path))
         with reg.webhook_activity("a/b", "work-ab"):
@@ -855,12 +807,12 @@ class TestWebhookActivity:
 
     def test_unknown_repo_returns_empty_list(self) -> None:
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         assert reg.get_webhook_activities("ghost/repo") == []
 
     def test_handle_can_update_description(self, tmp_path: Path) -> None:
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling") as activity:
             assert reg.get_webhook_activities("foo/bar")[0].description == "handling"
@@ -869,7 +821,7 @@ class TestWebhookActivity:
 
     def test_handle_update_after_exit_is_noop(self, tmp_path: Path) -> None:
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling") as activity:
             pass
@@ -878,7 +830,7 @@ class TestWebhookActivity:
 
     def test_unknown_handle_update_is_noop(self, tmp_path: Path) -> None:
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling"):
             reg.set_webhook_description("foo/bar", -1, "triaging")
@@ -886,14 +838,14 @@ class TestWebhookActivity:
 
     def test_unknown_repo_handle_update_is_noop(self) -> None:
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.set_webhook_description("ghost/repo", 1, "triaging")
         assert reg.get_webhook_activities("ghost/repo") == []
 
     def test_publishes_to_fido_state_when_repo_started(self, tmp_path: Path) -> None:
         """webhook_activity publishes activities into FidoState when start() has run."""
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling"):
             acts = reader.get().repos["foo/bar"].webhook_activities
@@ -904,7 +856,7 @@ class TestWebhookActivity:
     def test_publishes_description_update_to_fido_state(self, tmp_path: Path) -> None:
         """set_webhook_description publishes the update into FidoState."""
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "original") as handle:
             handle.set_description("updated")
@@ -916,33 +868,33 @@ class TestWebhookActivity:
 class TestRescoping:
     def test_is_rescoping_false_for_unknown_repo(self) -> None:
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         assert reg.is_rescoping("unknown/repo") is False
 
     def test_set_rescoping_true(self) -> None:
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.set_rescoping("foo/bar", True)
         assert reg.is_rescoping("foo/bar") is True
 
     def test_set_rescoping_false_clears_flag(self) -> None:
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.set_rescoping("foo/bar", True)
         reg.set_rescoping("foo/bar", False)
         assert reg.is_rescoping("foo/bar") is False
 
     def test_rescoping_is_per_repo(self) -> None:
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        reg = WorkerRegistry(MagicMock(), updater)
         reg.set_rescoping("foo/bar", True)
         assert reg.is_rescoping("foo/bar") is True
         assert reg.is_rescoping("foo/baz") is False
 
     def test_rescoping_is_threadsafe(self) -> None:
         """Concurrent set_rescoping and is_rescoping calls must not corrupt state."""
-        reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(MagicMock(), reader, updater)
+        _, updater = create_fido_atomic()
+        reg = WorkerRegistry(MagicMock(), updater)
         errors: list[Exception] = []
 
         def toggler(repo: str) -> None:
@@ -975,7 +927,7 @@ class TestUntriagedInbox:
 
     def _reg(self) -> WorkerRegistry:
         reader, updater = create_fido_atomic()
-        return WorkerRegistry(MagicMock(), reader, updater)
+        return WorkerRegistry(MagicMock(), updater)
 
     # ── has_untriaged ─────────────────────────────────────────────────────
 
@@ -1206,7 +1158,7 @@ class TestPreemptionFsmOracle:
 
     def _reg(self) -> WorkerRegistry:
         reader, updater = create_fido_atomic()
-        return WorkerRegistry(MagicMock(), reader, updater)
+        return WorkerRegistry(MagicMock(), updater)
 
     # ── worker_blocked_when_nonempty ─────────────────────────────────────
 
@@ -1432,7 +1384,7 @@ class TestRegistryFsmOracle:
 
     def _reg(self) -> WorkerRegistry:
         reader, updater = create_fido_atomic()
-        return WorkerRegistry(MagicMock(), reader, updater)
+        return WorkerRegistry(MagicMock(), updater)
 
     def _cfg(self, tmp_path: Path, name: str = "foo/bar") -> RepoConfig:
         return _repo(name, tmp_path)
@@ -1520,7 +1472,7 @@ class TestRegistryFsmOracle:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         cfg = self._cfg(tmp_path)
         reg.start(cfg)
         assert isinstance(
@@ -1543,7 +1495,7 @@ class TestRegistryFsmOracle:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         cfg = self._cfg(tmp_path)
         reg.start(cfg)
         # Simulate orderly stop
@@ -1567,7 +1519,7 @@ class TestRegistryFsmOracle:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         cfg = self._cfg(tmp_path)
         reg.start(cfg)
         # Leave thread alive (is_alive() returns a truthy MagicMock by default)
@@ -1580,7 +1532,7 @@ class TestRegistryFsmOracle:
         threads = [MagicMock(), MagicMock()]
         factory = MagicMock(side_effect=threads)
         reader, updater = create_fido_atomic()
-        reg = WorkerRegistry(factory, reader, updater)
+        reg = WorkerRegistry(factory, updater)
         reg.start(_repo("org/a", tmp_path))
         reg.start(_repo("org/b", tmp_path))
         assert isinstance(

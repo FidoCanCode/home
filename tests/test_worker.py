@@ -803,7 +803,7 @@ class TestWorker:
         from fido.registry import WorkerRegistry, create_fido_atomic
 
         reader, updater = create_fido_atomic()
-        registry = WorkerRegistry(MagicMock(), reader, updater)
+        registry = WorkerRegistry(MagicMock(), updater)
         # Prepopulate FidoState so report_activity can lens-write into it.
         for i in range(3):
             registry.start(_default_repo_cfg(tmp_path, repo_name=f"owner/repo{i}"))
