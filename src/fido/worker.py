@@ -1945,7 +1945,12 @@ class Worker:
                     # crash (closes #1275): post a Fido-voice comment, mark
                     # the PR ready, request review.
                     self._finalize_setup_with_no_tasks(
-                        repo_ctx, issue, issue_title, pr_number, slug
+                        repo_ctx,
+                        issue,
+                        issue_title,
+                        pr_number,
+                        slug,
+                        closed_sub_issues=closed_sub_issues,
                     )
             log.info(
                 "PR: #%s  https://github.com/%s/pull/%s",
@@ -2052,7 +2057,12 @@ class Worker:
             # helper's diff guard will leave it as draft if there's nothing
             # to review (#1194), and the comment will still explain why.
             self._finalize_setup_with_no_tasks(
-                repo_ctx, issue, issue_title, pr_number, slug
+                repo_ctx,
+                issue,
+                issue_title,
+                pr_number,
+                slug,
+                closed_sub_issues=closed_sub_issues,
             )
             log.info("PR: #%s opened with 0 tasks (setup found no work)", pr_number)
             log.info("PR: #%s  %s", pr_number, url)
@@ -2928,6 +2938,8 @@ class Worker:
         issue_title: str,
         pr_number: int,
         slug: str,
+        *,
+        closed_sub_issues: list[ClosedSubIssue] | None = None,
     ) -> None:
         """Setup produced 0 tasks because the work appears already complete —
         finalize the PR rather than crash.
@@ -2936,6 +2948,10 @@ class Worker:
         needed, posts it, marks the PR ready for review, and requests review
         from the configured collaborators.  Closes #1275 (worker crash-loop
         on the previous ``RuntimeError("setup produced no tasks ...")``).
+
+        When *closed_sub_issues* is provided, the comment is structured around
+        the sub-issues that covered the scope instead of the generic
+        branch-vs-issue explanation.
 
         Idempotent on :data:`_NO_TASKS_PR_COMMENT_MARKER`: a second call on
         a PR already finalized via this path will not re-post or re-mark.
@@ -2949,9 +2965,30 @@ class Worker:
                 pr_number,
             )
             return
-        body_text = safe_voice_turn(
-            self._provider_agent,
-            (
+        if closed_sub_issues:
+            sub_lines: list[str] = []
+            for sub in closed_sub_issues:
+                if sub.pr_number is not None:
+                    state_desc = f"PR #{sub.pr_number} ({sub.close_state})"
+                else:
+                    state_desc = sub.close_state
+                sub_lines.append(f"  - #{sub.number}: {sub.title} — {state_desc}")
+            sub_summary = "\n".join(sub_lines)
+            prompt = (
+                f'Setup just finished for issue #{issue} ("{issue_title}"). '
+                "The scope is fully covered by the following closed sub-issues:\n\n"
+                f"{sub_summary}\n\n"
+                "Write a PR comment in your voice (1-2 short paragraphs) "
+                "explaining that the work is already done because these sub-issues "
+                "covered the full scope. List each sub-issue by number with a "
+                "brief note about its close state (merged PR, closed without merge, "
+                "or closed with no PR). Conclude that there's nothing left to do "
+                "and the PR is ready for review. "
+                "Output ONLY the comment body — no preamble, no markdown fence, "
+                "no signature."
+            )
+        else:
+            prompt = (
                 f'Setup just finished for issue #{issue} ("{issue_title}") and '
                 "produced zero new tasks because the work on this branch already "
                 "covers what the issue asked for. Write a PR comment in your "
@@ -2960,7 +2997,10 @@ class Worker:
                 "branch vs what the issue asked for, and conclude that the PR "
                 "is ready for review. Output ONLY the comment body — no "
                 "preamble, no markdown fence, no signature."
-            ),
+            )
+        body_text = safe_voice_turn(
+            self._provider_agent,
+            prompt,
             model=self._provider_agent.voice_model,
             log_prefix="finalize_setup_no_tasks",
         )

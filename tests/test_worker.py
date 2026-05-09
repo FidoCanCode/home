@@ -6007,6 +6007,243 @@ class TestFinalizeSetupWithNoTasks:
         gh.pr_ready.assert_called_once()
         gh.add_pr_reviewers.assert_not_called()
 
+    # ── Closed sub-issue coverage ─────────────────────────────────────────
+
+    def test_sub_issue_prompt_includes_sub_issue_numbers_and_titles(
+        self, tmp_path: Path
+    ) -> None:
+        """When closed_sub_issues are provided, the voice prompt lists them."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(
+            tmp_path, comment_text="Already covered by sub-issues."
+        )
+        subs = [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            ),
+            ClosedSubIssue(
+                number=11,
+                title="Handle storage",
+                body="",
+                close_state="closed_no_pr",
+                pr_number=None,
+                pr_body="",
+            ),
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                5,
+                "My issue",
+                42,
+                "fix-bug",
+                closed_sub_issues=subs,
+            )
+        # The voice turn must have been called — extract the prompt
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "#10" in prompt_arg
+        assert "Handle auth" in prompt_arg
+        assert "#11" in prompt_arg
+        assert "Handle storage" in prompt_arg
+
+    def test_sub_issue_prompt_includes_pr_number_for_linked_pr(
+        self, tmp_path: Path
+    ) -> None:
+        """Linked PR numbers appear in the prompt for sub-issues that have one."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path)
+        subs = [
+            ClosedSubIssue(
+                number=7,
+                title="Feature A",
+                body="",
+                close_state="merged",
+                pr_number=99,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                1,
+                "Parent",
+                10,
+                "slug",
+                closed_sub_issues=subs,
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "PR #99" in prompt_arg
+
+    def test_sub_issue_prompt_omits_pr_for_no_pr_sub_issue(
+        self, tmp_path: Path
+    ) -> None:
+        """Sub-issues with no linked PR show close_state only (no 'PR #None')."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, agent = self._make_worker(tmp_path)
+        subs = [
+            ClosedSubIssue(
+                number=3,
+                title="Deferred task",
+                body="",
+                close_state="closed_no_pr",
+                pr_number=None,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                1,
+                "Parent",
+                10,
+                "slug",
+                closed_sub_issues=subs,
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        assert "closed_no_pr" in prompt_arg
+        assert "PR #None" not in prompt_arg
+
+    def test_sub_issue_comment_posted_with_marker(self, tmp_path: Path) -> None:
+        """The comment generated from sub-issue context still carries the idempotency marker."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh, _agent = self._make_worker(
+            tmp_path, comment_text="Sub-issues handled everything."
+        )
+        subs = [
+            ClosedSubIssue(
+                number=5,
+                title="First sub",
+                body="",
+                close_state="merged",
+                pr_number=6,
+                pr_body="",
+            )
+        ]
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                1,
+                "Parent",
+                10,
+                "slug",
+                closed_sub_issues=subs,
+            )
+        gh.comment_issue.assert_called_once()
+        body = gh.comment_issue.call_args.args[2]
+        assert "Sub-issues handled everything." in body
+        assert "<!-- fido:no-tasks-finalize -->" in body
+
+    def test_generic_prompt_used_when_no_sub_issues(self, tmp_path: Path) -> None:
+        """With closed_sub_issues=None (default), the original generic prompt is used."""
+        worker, gh, agent = self._make_worker(
+            tmp_path, comment_text="Branch covers it."
+        )
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(), 5, "My issue", 42, "fix-bug"
+            )
+        agent.run_turn.assert_called_once()
+        prompt_arg = (
+            agent.run_turn.call_args.kwargs.get("prompt")
+            or agent.run_turn.call_args.args[0]
+        )
+        # Generic prompt talks about the branch covering the issue
+        assert "branch" in prompt_arg.lower()
+        # No sub-issue list in prompt
+        assert (
+            "sub-issues" not in prompt_arg.lower()
+            or "closed sub-issues" not in prompt_arg
+        )
+
+    def test_no_pr_setup_no_tasks_passes_sub_issues_to_finalize(
+        self, tmp_path: Path
+    ) -> None:
+        """find_or_create_pr (new-PR path) passes closed_sub_issues to finalize."""
+        from fido.types import ClosedSubIssue
+
+        mock_client = _client(return_value="Nothing to plan — already done.")
+        mock_client.generate_branch_name.return_value = "fix-bug"
+
+        class MockGH(MagicMock):
+            pass
+
+        gh = MockGH()
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
+        gh.get_issue_comments.return_value = []
+        gh.find_closed_prs_as_context.return_value = []
+        gh.find_closed_unmerged_prs_for_issue.return_value = []
+        subs = [
+            ClosedSubIssue(
+                number=1,
+                title="Sub A",
+                body="",
+                close_state="merged",
+                pr_number=2,
+                pr_body="",
+            )
+        ]
+        gh.fetch_closed_sub_issues.return_value = subs
+
+        from fido.worker import Worker
+
+        worker = Worker(
+            tmp_path,
+            gh,
+            provider_agent=mock_client,
+            registry=MagicMock(spec=ActivityReporter),
+        )
+        finalize_calls: list[dict] = []
+
+        def capture_finalize(*args: object, **kwargs: object) -> None:
+            finalize_calls.append({"args": args, "kwargs": kwargs})
+
+        with (
+            patch.object(worker, "_git"),
+            patch.object(worker, "_reset_local_workspace"),
+            patch.object(worker, "_pr_has_real_diff", return_value=True),
+            patch("fido.worker.build_prompt"),
+            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(
+                worker, "_finalize_setup_with_no_tasks", side_effect=capture_finalize
+            ),
+        ):
+            from fido.worker import RepoContext, RepoMembership
+
+            repo_ctx = RepoContext(
+                repo="owner/proj",
+                owner="owner",
+                repo_name="proj",
+                gh_user="fido-bot",
+                default_branch="main",
+                membership=RepoMembership(collaborators=frozenset()),
+            )
+            worker.find_or_create_pr(tmp_path / "fido", repo_ctx, 5, "Issue title")
+        assert len(finalize_calls) == 1
+        assert finalize_calls[0]["kwargs"].get("closed_sub_issues") == subs
+
 
 class TestResetLocalWorkspaceAndRetryAck:
     """Fresh-retry workspace reset + retry-acknowledgement comment (closes
