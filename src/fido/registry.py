@@ -149,8 +149,8 @@ class RepoState:
     *thread_handle* is a :class:`ThreadHandle` wrapping the
     :class:`~fido.worker.WorkerThread` for this repo.  Populated by
     :meth:`~WorkerRegistry.start`; ``None`` only before the first start
-    (which never happens in the normal lifecycle).  Lock-free readers use
-    this field instead of acquiring ``_threads_lock``.
+    (which never happens in the normal lifecycle).  All thread lookups
+    read from this field via the lock-free snapshot.
 
     As subsequent lock-free PRs migrate fields out of the per-lock dicts in
     :class:`WorkerRegistry`, those fields grow here (e.g. ``rescoping``).
@@ -246,11 +246,6 @@ class WorkerRegistry:
         state_reader: "AtomicReader[FidoState]",
         state_updater: "AtomicUpdater[FidoState]",
     ) -> None:
-        self._threads: dict[str, WorkerThread] = {}
-        # _threads_lock guards _threads: written by start() on the watchdog
-        # thread, read from stop_all/stop_and_join (not yet migrated to the
-        # snapshot).  Python 3.14t has no GIL — dict reads and writes are not atomic.
-        self._threads_lock = threading.Lock()
         self._factory = thread_factory
         self._status_lock = threading.Lock()
         # _state_reader is the read face of the atomic FidoState cell.
@@ -300,8 +295,7 @@ class WorkerRegistry:
         the lock-free snapshot, or ``None`` if no thread has been started.
 
         Reads :attr:`RepoState.thread_handle` via the atomic reader — no lock
-        acquisition needed.  Callers that only need to *invoke* thread methods
-        (wake, abort, session lookups) use this instead of ``_threads_lock``.
+        acquisition needed.  All thread lookups go through this method.
         """
         repo_state = self._state_reader.get().repos.get(repo_name)
         if repo_state is None or repo_state.thread_handle is None:
@@ -363,8 +357,7 @@ class WorkerRegistry:
         """
         provider = None
         session_issue = None
-        with self._threads_lock:
-            old_thread = self._threads.get(repo_cfg.name)
+        old_thread = self._get_thread(repo_cfg.name)
         if old_thread is None:
             # No predecessor — initial start: Absent → Active.
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
@@ -394,8 +387,6 @@ class WorkerRegistry:
             # the no_start_while_active violation as an immediate AssertionError.
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
         thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
-        with self._threads_lock:
-            self._threads[repo_cfg.name] = thread
         _name = repo_cfg.name
         _now = _utcnow()
         # Prepopulate the full RepoState with zero values.  Crash history
@@ -588,8 +579,12 @@ class WorkerRegistry:
 
     def stop_all(self) -> None:
         """Request every managed thread to stop after its current iteration."""
-        with self._threads_lock:
-            threads = list(self._threads.values())
+        snapshot = self._state_reader.get()
+        threads = [
+            rs.thread_handle.thread
+            for rs in snapshot.repos.values()
+            if rs.thread_handle is not None
+        ]
         for thread in threads:
             thread.stop()
 
@@ -598,8 +593,7 @@ class WorkerRegistry:
 
         No-op if no thread is registered for that repo.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._get_thread(repo_name)
         if thread:
             thread.stop()
             thread.join(timeout=timeout)
