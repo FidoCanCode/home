@@ -223,11 +223,14 @@ class WorkerRegistry:
         thread_factory: Callable[..., WorkerThread],
         state_updater: "AtomicUpdater[FidoState]",
     ) -> None:
+        # _threads is single-writer: only start() (called from the watchdog
+        # daemon thread or from the startup sequence) ever writes to it.
+        # HTTP handler threads (wake, abort_task, get_session, …) only read.
+        # CPython 3.14t's per-object dict lock makes individual dict.get() /
+        # dict.__setitem__ calls safe without an additional application-level
+        # lock, and the single-writer discipline means readers never observe a
+        # half-installed entry.  No _threads_lock needed.
         self._threads: dict[str, WorkerThread] = {}
-        # _threads_lock guards _threads: written by start() on the watchdog
-        # thread, read from HTTP handler threads (wake, abort_task, get_session,
-        # etc.).  Python 3.14t has no GIL — dict reads and writes are not atomic.
-        self._threads_lock = threading.Lock()
         self._factory = thread_factory
         self._status_lock = threading.Lock()
         # _state_updater is the write-only face of the atomic FidoState cell.
@@ -324,8 +327,7 @@ class WorkerRegistry:
         """
         provider = None
         session_issue = None
-        with self._threads_lock:
-            old_thread = self._threads.get(repo_cfg.name)
+        old_thread = self._threads.get(repo_cfg.name)
         if old_thread is None:
             # No predecessor — initial start: Absent → Active.
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
@@ -355,8 +357,7 @@ class WorkerRegistry:
             # the no_start_while_active violation as an immediate AssertionError.
             self._registry_fsm_transition(repo_cfg.name, registry_fsm.Launch())
         thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
-        with self._threads_lock:
-            self._threads[repo_cfg.name] = thread
+        self._threads[repo_cfg.name] = thread
         _name = repo_cfg.name
         _now = _utcnow()
         # Prepopulate the full RepoState with zero values.  Crash history
