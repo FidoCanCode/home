@@ -548,18 +548,21 @@ class WorkerRegistry:
 
     def stop_all(self) -> None:
         """Request every managed thread to stop after its current iteration."""
-        with self._threads_lock:
-            threads = list(self._threads.values())
+        threads = list(self._threads.values())
         for thread in threads:
             thread.stop()
 
     def stop_and_join(self, repo_name: str, timeout: float = 30.0) -> None:
         """Stop the thread for *repo_name* and wait up to *timeout* seconds for it to exit.
 
+        Reads the thread reference from ``_threads`` outside any lock (single-writer
+        dict, so the read is safe), then calls ``stop()`` and ``join()`` outside any
+        lock — eliminating the original lock-across-join contention that caused
+        ``/status.json`` to stall for up to 30 seconds (#1342).
+
         No-op if no thread is registered for that repo.
         """
-        with self._threads_lock:
-            thread = self._threads.get(repo_name)
+        thread = self._threads.get(repo_name)
         if thread:
             thread.stop()
             thread.join(timeout=timeout)
