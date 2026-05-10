@@ -11,6 +11,8 @@ If the context includes a **## Closed sub-issues** section, the parent issue has
 
 **Subtraction rule**: A closed sub-issue represents scope that is done — regardless of whether its PR merged. Merged, closed-without-merge, cancelled, deferred, and won't-fix all count the same: the sub-issue's scope is off the table. Do not re-implement work covered by a closed sub-issue.
 
+**Maintainer override (not yet implemented)**: In the future, a maintainer comment may put closed scope back in play (e.g. "actually, reopen that part"). That mechanism is not available yet — the subtraction rule is currently absolute.
+
 **Two outcomes after subtraction**:
 - **All scope covered by closed sub-issues** → emit `no-tasks-needed`. The `reason` should name each sub-issue and what it covered so the auto-posted comment is useful.
 - **Some scope remains uncovered** → proceed to Plan, but scope the task list to only the uncovered remainder.
