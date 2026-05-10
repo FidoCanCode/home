@@ -1336,16 +1336,86 @@ class TestGitHubClass:
         assert pr_num is None
 
     def test_find_linked_pr_bare_mention_not_treated_as_keyword(self) -> None:
-        """A CrossReferencedEvent with willCloseTarget=False is a bare mention
-        ('see #123') — must not be added to keyword_prs."""
+        """A CrossReferencedEvent with willCloseTarget=False and no closing
+        keyword in body/title is a bare mention ('see #123') — must not be
+        added to keyword_prs."""
         gh, mock_s = self._gh()
         pr = self._gql_pr_simple(100, "MERGED", merged=True)
+        # No body/title → no closing keyword → bare mention → skip.
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [self._gql_cross_ref(pr, will_close=False)]
         )
         pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
         assert pr_num is None
         assert merged is False
+
+    def test_find_linked_pr_keyword_in_body_accepted_when_will_close_false(
+        self,
+    ) -> None:
+        """A CrossReferencedEvent with willCloseTarget=False but a closing
+        keyword in the PR body is treated as a keyword PR.  This handles
+        already-closed sub-issues where willCloseTarget is always false."""
+        gh, mock_s = self._gh()
+        pr = {
+            **self._gql_pr_simple(100, "MERGED", merged=True),
+            "body": "Closes #42\n\nSome implementation notes.",
+            "title": "Add feature",
+        }
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr, will_close=False)]
+        )
+        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 100
+        assert merged is True
+
+    def test_find_linked_pr_keyword_in_title_accepted_when_will_close_false(
+        self,
+    ) -> None:
+        """A closing keyword in the PR title (rather than body) is also
+        sufficient when willCloseTarget is false."""
+        gh, mock_s = self._gh()
+        pr = {
+            **self._gql_pr_simple(100, "MERGED", merged=True),
+            "body": "Just some notes.",
+            "title": "Fixes #42: add the thing",
+        }
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr, will_close=False)]
+        )
+        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 100
+        assert merged is True
+
+    def test_find_linked_pr_keyword_wrong_number_skipped(self) -> None:
+        """A closing keyword referencing a different issue number does not
+        count — the PR is still treated as a bare mention and skipped."""
+        gh, mock_s = self._gh()
+        pr = {
+            **self._gql_pr_simple(100, "MERGED", merged=True),
+            "body": "Closes #99",
+            "title": "Something unrelated",
+        }
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr, will_close=False)]
+        )
+        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num is None
+        assert merged is False
+
+    def test_find_linked_pr_keyword_case_insensitive(self) -> None:
+        """The closing keyword regex is case-insensitive (CLOSES, fixes, etc.)."""
+        gh, mock_s = self._gh()
+        pr = {
+            **self._gql_pr_simple(100, "MERGED", merged=True),
+            "body": "RESOLVES #42",
+            "title": "",
+        }
+        mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
+            [self._gql_cross_ref(pr, will_close=False)]
+        )
+        pr_num, merged = gh._find_linked_pr_for_issue("o/r", 42)
+        assert pr_num == 100
+        assert merged is True
 
     def test_find_linked_pr_bare_mention_falls_back_to_sidebar(self) -> None:
         """A bare mention (willCloseTarget=False) is skipped; a sidebar

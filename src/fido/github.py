@@ -18,6 +18,20 @@ log = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT: int = 30  # seconds for all outbound GitHub HTTP requests
 
+# Matches GitHub's closing-keyword syntax in PR body/title text.
+# Used to identify closing PRs for already-closed issues, where
+# willCloseTarget is always false once the target is closed.
+_CLOSING_KEYWORD_RE: re.Pattern[str] = re.compile(
+    r"(?i)(?:closes|fixes|resolves)\s+#(\d+)"
+)
+
+
+def _has_closing_keyword(text: str, issue_number: int | str) -> bool:
+    """Return ``True`` when *text* contains a closing keyword referencing *issue_number*."""
+    target = str(issue_number)
+    return any(m.group(1) == target for m in _CLOSING_KEYWORD_RE.finditer(text))
+
+
 # Retry schedule for transient GitHub failures on idempotent GETs (#664).
 # Delays in seconds between successive attempts.  Total retry budget is
 # ~14s of wall clock on top of the per-request _HTTP_TIMEOUT.  Only applied
@@ -648,6 +662,8 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                 number
                 state
                 merged
+                body
+                title
               }
             }
           }
@@ -693,13 +709,23 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
             for node in items["nodes"]:
                 typename = node["__typename"]
                 if typename == "CrossReferencedEvent":
-                    # Only treat as a keyword/closing PR when willCloseTarget
-                    # is true — bare "see #123" mentions fire the same event
-                    # but must not be mistaken for the PR that closed the issue.
-                    if not node.get("willCloseTarget"):
-                        continue
                     pr = node.get("source") or {}
                     if pr.get("__typename") != "PullRequest":
+                        continue
+                    # Treat as a keyword/closing PR when willCloseTarget is
+                    # true, OR when the PR body/title contains a closing
+                    # keyword referencing this issue.  willCloseTarget is
+                    # false once the target issue is already closed, so a
+                    # pure willCloseTarget check incorrectly rejects real
+                    # closing PRs for already-closed sub-issues.  The
+                    # keyword fallback catches those; bare mentions ("see
+                    # #42") that lack a keyword are still skipped.
+                    will_close = node.get("willCloseTarget", False)
+                    pr_body = pr.get("body") or ""
+                    pr_title = pr.get("title") or ""
+                    if not will_close and not _has_closing_keyword(
+                        pr_body + " " + pr_title, number
+                    ):
                         continue
                     pr_num = pr["number"]
                     if pr_num not in keyword_prs:
