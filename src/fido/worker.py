@@ -2927,16 +2927,17 @@ class Worker:
         * :class:`NoTasksNeeded` — no-op; the caller's empty-list check
           falls through to the no-tasks finalize path.
 
-        Parse failure is non-fatal: log a warning and return ``("", False)``.
-        An empty :meth:`Tasks.list` is the existing signal for "setup found no
-        work", and the no-tasks finalize path handles it — but without
-        *explicit_no_tasks* it will not close the parent issue.
+        Parse failure raises :exc:`RuntimeError` so the worker loop retries
+        rather than silently becoming an empty plan.  Synthetic success from a
+        real failure is worse than a loud crash.
         """
         try:
             outcome = parse_setup_outcome(output)
         except ValueError as exc:
-            log.warning("setup sentinel parse failed: %s — treating as no tasks", exc)
-            return "", False
+            raise RuntimeError(
+                f"setup sentinel parse failed: {exc} — failing closed rather than "
+                "treating as empty plan"
+            ) from exc
         if isinstance(outcome, NoTasksNeeded):
             log.info("setup outcome: no-tasks-needed (%s)", outcome.reason)
             return outcome.pr_description, True

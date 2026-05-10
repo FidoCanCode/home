@@ -5023,15 +5023,19 @@ class TestFindOrCreatePr:
         mock_client = _client(return_value="No work needed.")
         worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
-        gh.get_issue_comments.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        mock_start = MagicMock(return_value=("sess-1", ""))
+        mock_start = MagicMock(
+            return_value=(
+                "sess-1",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
         with (
             patch.object(worker, "_git"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_pr_has_real_diff", return_value=True),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
             patch("fido.worker.build_prompt", mock_build),
             patch("fido.worker.provider_start", mock_start),
         ):
@@ -5050,16 +5054,21 @@ class TestFindOrCreatePr:
         mock_client = _client(return_value="No work needed.")
         worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
-        gh.get_issue_comments.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
         with (
             patch.object(worker, "_git"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_pr_has_real_diff", return_value=True),
+            patch.object(worker, "_finalize_setup_with_no_tasks"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -5079,7 +5088,13 @@ class TestFindOrCreatePr:
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch.object(worker, "_pr_has_real_diff", return_value=True),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
         ):
             result = worker.find_or_create_pr(
                 fido_dir, self._make_repo_ctx(), 5, "Issue title"
@@ -5108,7 +5123,13 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", side_effect=list_tasks_side_effect),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
 
@@ -5253,7 +5274,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5283,7 +5310,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             caplog.at_level(logging.INFO, logger="fido"),
@@ -5300,7 +5333,9 @@ class TestFindOrCreatePr:
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        mock_start = MagicMock(return_value=("s", ""))
+        mock_start = MagicMock(
+            return_value=("s", '{"setup_outcome": "no-tasks-needed", "reason": "test"}')
+        )
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
@@ -5331,7 +5366,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
@@ -5351,7 +5392,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5386,7 +5433,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
@@ -5426,7 +5479,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
@@ -5451,7 +5510,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git", side_effect=side_effect),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5480,7 +5545,13 @@ class TestFindOrCreatePr:
             patch.object(worker, "_reset_local_workspace"),
             patch.object(worker, "_pr_has_real_diff", return_value=True),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.tasks.Tasks.list", return_value=[]),
         ):
             result = worker.find_or_create_pr(
@@ -5507,7 +5578,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5537,7 +5614,13 @@ class TestFindOrCreatePr:
             patch.object(worker, "_git"),
             patch.object(worker, "_post_retry_acknowledgement", mock_retry),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.worker._write_pr_description"),
             patch(
                 "fido.tasks.Tasks.list",
@@ -5560,7 +5643,13 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(
@@ -5585,7 +5674,13 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Do the thing")
@@ -5604,7 +5699,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
@@ -5629,7 +5730,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
@@ -5665,7 +5772,13 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 7, "title")
@@ -5684,7 +5797,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
@@ -5717,7 +5836,13 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -5751,7 +5876,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
@@ -5775,7 +5906,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
@@ -5804,7 +5941,13 @@ class TestFindOrCreatePr:
         with (
             patch.object(worker, "_git"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("s", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "s",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
@@ -5833,7 +5976,13 @@ class TestFindOrCreatePr:
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
             patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch.object(worker, "_finalize_setup_with_no_tasks"),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
@@ -5898,14 +6047,12 @@ class TestApplySetupOutcome:
         assert desc == "## Why\n\nNothing to do.\n\nFixes #2."
         assert explicit is True
 
-    def test_invalid_sentinel_creates_no_tasks(self, tmp_path: Path) -> None:
-        """Parse failure is non-fatal — log + return; existing no-tasks
-        finalize path takes over."""
+    def test_invalid_sentinel_raises(self, tmp_path: Path) -> None:
+        """Parse failure raises RuntimeError — fail closed rather than becoming
+        a silent empty plan."""
         worker = self._make_worker(tmp_path)
-        desc, explicit = worker._apply_setup_outcome("just some prose, no sentinel")  # type: ignore[attr-defined]
-        assert worker._tasks.list() == []  # type: ignore[attr-defined]
-        assert desc == ""
-        assert explicit is False
+        with pytest.raises(RuntimeError, match="setup sentinel parse failed"):
+            worker._apply_setup_outcome("just some prose, no sentinel")  # type: ignore[attr-defined]
 
     def test_sentinel_with_narration_above(self, tmp_path: Path) -> None:
         worker = self._make_worker(tmp_path)
@@ -6426,7 +6573,13 @@ class TestFinalizeSetupWithNoTasks:
             patch.object(worker, "_reset_local_workspace"),
             patch.object(worker, "_pr_has_real_diff", return_value=True),
             patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+                ),
+            ),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(
                 worker, "_finalize_setup_with_no_tasks", side_effect=capture_finalize
@@ -6445,8 +6598,8 @@ class TestFinalizeSetupWithNoTasks:
             worker.find_or_create_pr(tmp_path / "fido", repo_ctx, 5, "Issue title")
         assert len(finalize_calls) == 1
         assert finalize_calls[0]["kwargs"].get("closed_sub_issues") == subs
-        # provider_start returned "" → parse failure → explicit_no_tasks=False
-        assert finalize_calls[0]["kwargs"].get("explicit_no_tasks") is False
+        # provider_start returned NoTasksNeeded sentinel → explicit_no_tasks=True
+        assert finalize_calls[0]["kwargs"].get("explicit_no_tasks") is True
 
 
 class TestResetLocalWorkspaceAndRetryAck:
