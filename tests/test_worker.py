@@ -12242,6 +12242,58 @@ class TestExecuteTask:
         assert "PR #77" in context
         assert "Previous fix" in context
 
+    def test_execute_task_context_includes_closed_sub_issues(
+        self, tmp_path: Path
+    ) -> None:
+        """Closed sub-issues stored on the worker appear in the task-execution context."""
+        from fido.types import ClosedSubIssue
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        State(fido_dir).save({"issue": 7})
+        gh.view_issue.return_value = {
+            "title": "Parent issue",
+            "body": "Do the thing",
+            "state": "OPEN",
+        }
+        gh.get_pr.return_value = {"title": "", "body": ""}
+        gh.find_closed_prs_as_context.return_value = []
+        worker._closed_sub_issues = [
+            ClosedSubIssue(
+                number=42,
+                title="Sub: already done",
+                body="Implemented the widget.",
+                close_state="merged",
+                pr_number=55,
+                pr_body="Adds widget.",
+                state_reason=None,
+                pr_repo=None,
+            )
+        ]
+        task = self._pending_task("Do remaining work")
+        mock_build = MagicMock()
+        with (
+            patch("fido.tasks.Tasks.list", return_value=[task]),
+            patch.object(worker, "set_status"),
+            patch("fido.worker.build_prompt", mock_build),
+            patch(
+                "fido.worker.provider_run",
+                return_value=("sid", self._commit_complete_output()),
+            ),
+            patch.object(worker, "_git", self._simple_git_mock()),
+            patch("fido.worker.HarnessCommitter") as mock_hc_cls,
+            patch.object(worker, "ensure_pushed", return_value=True),
+            patch("fido.tasks.Tasks.complete_with_resolve"),
+            patch("fido.tasks.sync_tasks"),
+        ):
+            mock_hc_cls.return_value.commit.return_value = CommitSuccess(sha="abc123")
+            worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        _, _, context = mock_build.call_args.args
+        assert "## Closed sub-issues" in context
+        assert "#42" in context
+        assert "Sub: already done" in context
+        assert "Implemented the widget." in context
+
     # ── sentinel behavior tests ───────────────────────────────────────────
 
     def test_commit_complete_sentinel_pushes_and_completes(

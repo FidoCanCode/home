@@ -1240,6 +1240,7 @@ class Worker:
         self._membership = membership if membership is not None else RepoMembership()
         self._session_issue: int | None = session_issue
         self._next_turn_session_mode = TurnSessionMode.REUSE
+        self._closed_sub_issues: list[ClosedSubIssue] = []
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
         self._prompts = prompts
         self._config = config
@@ -1911,6 +1912,7 @@ class Worker:
                 closed_sub_issues: list[ClosedSubIssue] = (
                     self.gh.fetch_closed_sub_issues(repo_ctx.repo, issue)
                 )
+                self._closed_sub_issues = closed_sub_issues
                 active_ctx = render_active_context(
                     issue=ActiveIssue(number=issue, title=issue_title, body=issue_body),
                     pr=ActivePR(
@@ -2022,6 +2024,7 @@ class Worker:
         closed_sub_issues: list[ClosedSubIssue] = self.gh.fetch_closed_sub_issues(
             repo_ctx.repo, issue
         )
+        self._closed_sub_issues = closed_sub_issues
         active_ctx = render_active_context(
             issue=ActiveIssue(number=issue, title=issue_title, body=issue_body),
             pr=None,
@@ -3517,6 +3520,8 @@ class Worker:
                 description=task.get("description", ""),
             ),
             prior_attempts=prior_attempts,
+            closed_sub_issues=self._closed_sub_issues or None,
+            parent_repo=repo_ctx.repo,
         )
         context = f"{active_ctx}\n\n" + "\n".join(context_parts)
         build_prompt(fido_dir, "task", context, labels=issue_labels)
