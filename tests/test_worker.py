@@ -6176,6 +6176,144 @@ class TestFinalizeSetupWithNoTasks:
             or "closed sub-issues" not in prompt_arg
         )
 
+    # ── sub-issue all-covered path, no diff: close issue directly ─────────────
+
+    def _make_subs(self) -> list:
+        from fido.types import ClosedSubIssue
+
+        return [
+            ClosedSubIssue(
+                number=10,
+                title="Handle auth",
+                body="",
+                close_state="merged",
+                pr_number=20,
+                pr_body="",
+            )
+        ]
+
+    def test_sub_issue_no_diff_posts_comment_to_issue_not_pr(
+        self, tmp_path: Path
+    ) -> None:
+        """When closed_sub_issues covers all scope and no real diff, comment
+        goes to the parent issue number — not the PR number."""
+        worker, gh, _agent = self._make_worker(
+            tmp_path, comment_text="Already covered."
+        )
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+            )
+        gh.comment_issue.assert_called_once()
+        repo_arg, num_arg, _body_arg = gh.comment_issue.call_args.args
+        assert repo_arg == "owner/proj"
+        # Must post to the issue (5), NOT the PR (42)
+        assert num_arg == 5
+
+    def test_sub_issue_no_diff_closes_pr(self, tmp_path: Path) -> None:
+        """The empty draft PR is closed on the sub-issue all-covered path."""
+        worker, gh, _agent = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+            )
+        gh.close_pr.assert_called_once_with("owner/proj", 42)
+
+    def test_sub_issue_no_diff_closes_issue(self, tmp_path: Path) -> None:
+        """The parent issue is closed directly on the sub-issue all-covered path."""
+        worker, gh, _agent = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+            )
+        gh.close_issue.assert_called_once_with("owner/proj", 5)
+
+    def test_sub_issue_no_diff_does_not_mark_pr_ready(self, tmp_path: Path) -> None:
+        """On the sub-issue all-covered path, pr_ready is never called."""
+        worker, gh, _agent = self._make_worker(tmp_path)
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+            )
+        gh.pr_ready.assert_not_called()
+
+    def test_sub_issue_no_diff_idempotent_on_issue_marker(self, tmp_path: Path) -> None:
+        """If the parent issue already has the finalize marker, skip re-posting."""
+        worker, gh, agent = self._make_worker(tmp_path)
+        # Return the marker on the ISSUE comments (get_issue_comments called
+        # with issue number 5, not PR number 42)
+        gh.get_issue_comments.return_value = [
+            {"body": "Already done.\n\n<!-- fido:no-tasks-finalize -->"},
+        ]
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+            )
+        agent.run_turn.assert_not_called()
+        gh.comment_issue.assert_not_called()
+        gh.close_pr.assert_not_called()
+        gh.close_issue.assert_not_called()
+
+    def test_sub_issue_with_real_diff_uses_pr_path(self, tmp_path: Path) -> None:
+        """When closed_sub_issues is set but the branch HAS a real diff, use
+        the existing PR-ready path (comment on PR, mark ready, request review)."""
+        worker, gh, _agent = self._make_worker(
+            tmp_path, comment_text="Sub-issues covered it."
+        )
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            worker._finalize_setup_with_no_tasks(
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+            )
+        gh.comment_issue.assert_called_once()
+        _repo, num_arg, _body = gh.comment_issue.call_args.args
+        # Comment goes on the PR (42), not the issue (5)
+        assert num_arg == 42
+        gh.pr_ready.assert_called_once_with("owner/proj", 42)
+        # No close calls
+        gh.close_pr.assert_not_called()
+        gh.close_issue.assert_not_called()
+
     def test_no_pr_setup_no_tasks_passes_sub_issues_to_finalize(
         self, tmp_path: Path
     ) -> None:

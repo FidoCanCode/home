@@ -9,13 +9,11 @@ Check for CLAUDE.md files. Note the test command, commit discipline, and any oth
 
 If the context includes a **## Closed sub-issues** section, the parent issue has sub-issues that are already closed. Before planning, read each entry and subtract its scope from the parent's remaining work.
 
-**Subtraction rule**: A closed sub-issue represents scope that is done — regardless of whether its PR merged. Merged, closed-without-merge, cancelled, deferred, and won't-fix all count the same: the sub-issue's scope is off the table. Do not re-implement work covered by a closed sub-issue unless a maintainer explicitly says otherwise.
-
-**Maintainer-override escape hatch**: If a comment on the parent issue (or on the sub-issue itself) says something like "actually do this too" or "we need to redo this part", honour that and include the affected scope in your plan.
+**Subtraction rule**: A closed sub-issue represents scope that is done — regardless of whether its PR merged. Merged, closed-without-merge, cancelled, deferred, and won't-fix all count the same: the sub-issue's scope is off the table. Do not re-implement work covered by a closed sub-issue.
 
 **Two outcomes after subtraction**:
 - **All scope covered by closed sub-issues** → emit `no-tasks-needed`. The `reason` should name each sub-issue and what it covered so the auto-posted comment is useful.
-- **Some scope remains uncovered** (or overridden) → proceed to Plan, but scope the task list to only the uncovered remainder.
+- **Some scope remains uncovered** → proceed to Plan, but scope the task list to only the uncovered remainder.
 
 ### 3. Plan
 Break the request into the smallest meaningful tasks — one task per logical commit, ordered so each builds on the previous.

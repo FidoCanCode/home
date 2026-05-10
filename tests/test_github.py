@@ -401,6 +401,44 @@ class TestGitHubClass:
         assert "repos/o/r/issues/7/comments" in url
         assert mock_s.post.call_args.kwargs["json"]["body"] == "hello"
 
+    def test_close_issue_patches_state_closed(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_s.patch.return_value = mock_resp
+        gh.close_issue("owner/repo", 42)
+        url = mock_s.patch.call_args.args[0]
+        assert "repos/owner/repo/issues/42" in url
+        assert mock_s.patch.call_args.kwargs["json"]["state"] == "closed"
+
+    def test_close_issue_raises_on_error(self) -> None:
+        import requests as _requests
+
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = _requests.HTTPError("404")
+        mock_s.patch.return_value = mock_resp
+        with pytest.raises(_requests.HTTPError, match="404"):
+            gh.close_issue("owner/repo", 99)
+
+    def test_close_pr_patches_pulls_state_closed(self) -> None:
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_s.patch.return_value = mock_resp
+        gh.close_pr("owner/repo", 77)
+        url = mock_s.patch.call_args.args[0]
+        assert "repos/owner/repo/pulls/77" in url
+        assert mock_s.patch.call_args.kwargs["json"]["state"] == "closed"
+
+    def test_close_pr_raises_on_error(self) -> None:
+        import requests as _requests
+
+        gh, mock_s = self._gh()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = _requests.HTTPError("422")
+        mock_s.patch.return_value = mock_resp
+        with pytest.raises(_requests.HTTPError, match="422"):
+            gh.close_pr("owner/repo", 33)
+
     def test_fetch_sibling_threads_returns_threads(self) -> None:
         gh, mock_s = self._gh()
         comments = [

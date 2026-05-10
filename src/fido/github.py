@@ -736,6 +736,14 @@ class GitHub:
         """Post a comment on an issue."""
         return self._post_json(f"/repos/{repo}/issues/{number}/comments", body=body)
 
+    def close_issue(self, repo: str, number: int | str) -> None:
+        """Close an issue by setting state=closed."""
+        self._patch(f"/repos/{repo}/issues/{number}", state="closed")
+
+    def close_pr(self, repo: str, pr: int | str) -> None:
+        """Close a PR (without merging) by setting state=closed."""
+        self._patch(f"/repos/{repo}/pulls/{pr}", state="closed")
+
     def delete_issue_comment(self, repo: str, comment_id: int | str) -> None:
         """Delete an issue/PR top-level comment by id.
 
