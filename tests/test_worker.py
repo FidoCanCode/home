@@ -1768,6 +1768,40 @@ class TestWorker:
         # handle_ci was only called on iteration 2
         assert ci_calls == [2]
 
+    def test_run_returns_zero_when_find_or_create_pr_returns_sentinel(
+        self, tmp_path: Path
+    ) -> None:
+        """When find_or_create_pr returns None (all-covered terminal close),
+        _run_iteration returns 0 immediately without running task execution
+        or merge logic."""
+        mock_ctx = self._make_mock_ctx(tmp_path)
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "Issue", "body": "", "state": "OPEN"}
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
+        mock_execute = MagicMock(return_value=False)
+        mock_merge = MagicMock(return_value=0)
+        with (
+            patch.object(worker, "create_context", return_value=mock_ctx),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "get_current_issue", return_value=5),
+            patch.object(worker, "post_pickup_comment"),
+            # Terminal sentinel — all-covered close path fired
+            patch.object(worker, "find_or_create_pr", return_value=None),
+            patch.object(worker, "execute_task", mock_execute),
+            patch.object(worker, "handle_promote_merge", mock_merge),
+        ):
+            result = worker.run()
+        # Must return 0 (idle / nothing to do)
+        assert result == 0
+        # Must not try to execute tasks or promote/merge on a closed PR
+        mock_execute.assert_not_called()
+        mock_merge.assert_not_called()
+
 
 class TestWorkerFindNextIssue:
     """Tests for Worker.find_next_issue."""
@@ -5035,7 +5069,7 @@ class TestFindOrCreatePr:
             patch.object(worker, "_git"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
             patch("fido.worker.build_prompt", mock_build),
             patch("fido.worker.provider_start", mock_start),
         ):
@@ -5060,7 +5094,7 @@ class TestFindOrCreatePr:
             patch.object(worker, "_git"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
             patch("fido.worker.build_prompt", mock_build),
             patch(
                 "fido.worker.provider_start",
@@ -5320,7 +5354,7 @@ class TestFindOrCreatePr:
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
             caplog.at_level(logging.INFO, logger="fido"),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "new branch" in caplog.text
@@ -5342,7 +5376,7 @@ class TestFindOrCreatePr:
             patch("fido.worker.provider_start", mock_start),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY, labels=None)
@@ -5375,7 +5409,7 @@ class TestFindOrCreatePr:
             ),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -5442,7 +5476,7 @@ class TestFindOrCreatePr:
             ),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         # _reset_local_workspace fires first: checkout default, fetch, reset
@@ -5488,7 +5522,7 @@ class TestFindOrCreatePr:
             ),
             patch("fido.worker._write_pr_description"),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert ["branch", "-D", "slug"] in git_calls
@@ -5650,7 +5684,7 @@ class TestFindOrCreatePr:
                     '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
                 ),
             ),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(
                 fido_dir,
@@ -5681,7 +5715,7 @@ class TestFindOrCreatePr:
                     '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
                 ),
             ),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Do the thing")
         _, _, context = mock_build.call_args.args
@@ -5707,7 +5741,7 @@ class TestFindOrCreatePr:
                 ),
             ),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(
                 fido_dir,
@@ -5738,7 +5772,7 @@ class TestFindOrCreatePr:
                 ),
             ),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -5779,7 +5813,7 @@ class TestFindOrCreatePr:
                     '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
                 ),
             ),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 7, "title")
         gh.fetch_closed_sub_issues.assert_called_once_with("owner/proj", 7)
@@ -5805,7 +5839,7 @@ class TestFindOrCreatePr:
                 ),
             ),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 9, "title")
         gh.fetch_closed_sub_issues.assert_called_once_with("owner/proj", 9)
@@ -5843,7 +5877,7 @@ class TestFindOrCreatePr:
                     '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
                 ),
             ),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -5884,7 +5918,7 @@ class TestFindOrCreatePr:
                 ),
             ),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -5914,7 +5948,7 @@ class TestFindOrCreatePr:
                 ),
             ),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -5949,7 +5983,7 @@ class TestFindOrCreatePr:
                 ),
             ),
             patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
@@ -5983,13 +6017,75 @@ class TestFindOrCreatePr:
                     '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
                 ),
             ),
-            patch.object(worker, "_finalize_setup_with_no_tasks"),
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
         ):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert "## Prior attempts" in context
         assert "PR #88" in context
         assert "First attempt" in context
+
+    # ── Terminal sentinel (None return) ───────────────────────────────────────
+
+    def test_new_pr_returns_none_when_terminal_close_fires(
+        self, tmp_path: Path
+    ) -> None:
+        """find_or_create_pr returns None (new-PR path) when _finalize_setup_with_no_tasks
+        returns True (all-covered terminal close path)."""
+        mock_client = _client(return_value="All covered.")
+        mock_client.generate_branch_name.return_value = "fix-bug"
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = None
+        gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch.object(worker, "_reset_local_workspace"),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "done"}',
+                ),
+            ),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            # Simulate the all-covered terminal close path
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=True),
+        ):
+            result = worker.find_or_create_pr(
+                fido_dir, self._make_repo_ctx(), 5, "title"
+            )
+        assert result is None
+
+    def test_open_pr_returns_none_when_terminal_close_fires(
+        self, tmp_path: Path
+    ) -> None:
+        """find_or_create_pr returns None (open-PR resume path) when
+        _finalize_setup_with_no_tasks returns True."""
+        mock_client = _client(return_value="All covered.")
+        worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
+        gh.find_pr.return_value = self._open_pr(number=20, slug="fix-bug")
+        fido_dir = self._fido_dir(tmp_path)
+        with (
+            patch.object(worker, "_git"),
+            patch("fido.tasks.Tasks.list", return_value=[]),
+            patch.object(worker, "seed_tasks_from_pr_body"),
+            patch("fido.worker.build_prompt"),
+            patch(
+                "fido.worker.provider_start",
+                return_value=(
+                    "sess",
+                    '{"setup_outcome": "no-tasks-needed", "reason": "done"}',
+                ),
+            ),
+            # Simulate the all-covered terminal close path
+            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=True),
+        ):
+            result = worker.find_or_create_pr(
+                fido_dir, self._make_repo_ctx(), 5, "title"
+            )
+        assert result is None
 
 
 class TestApplySetupOutcome:
@@ -6118,7 +6214,7 @@ class TestFinalizeSetupWithNoTasks:
         )
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
-                self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
             )
         agent.run_turn.assert_called_once()
         gh.comment_issue.assert_called_once()
@@ -6135,7 +6231,7 @@ class TestFinalizeSetupWithNoTasks:
         worker, gh, _agent = self._make_worker(tmp_path)
         with patch.object(worker, "_pr_has_real_diff", return_value=False):
             worker._finalize_setup_with_no_tasks(
-                self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
             )
         gh.comment_issue.assert_called_once()
         gh.pr_ready.assert_not_called()
@@ -6149,7 +6245,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
-                self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
             )
         agent.run_turn.assert_not_called()
         gh.comment_issue.assert_not_called()
@@ -6165,7 +6261,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
-                self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
             )
         gh.comment_issue.assert_called_once()
 
@@ -6173,6 +6269,7 @@ class TestFinalizeSetupWithNoTasks:
         worker, gh, _agent = self._make_worker(tmp_path)
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(collaborators=frozenset()),
                 5,
                 "Issue title",
@@ -6214,6 +6311,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 5,
                 "My issue",
@@ -6251,6 +6349,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 1,
                 "Parent",
@@ -6284,6 +6383,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 1,
                 "Parent",
@@ -6319,6 +6419,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 1,
                 "Parent",
@@ -6354,6 +6455,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 5,
                 "My issue",
@@ -6391,6 +6493,7 @@ class TestFinalizeSetupWithNoTasks:
         # has_real_diff=False, explicit_no_tasks=False (not an issue-close path)
         with patch.object(worker, "_pr_has_real_diff", return_value=False):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 5,
                 "My issue",
@@ -6426,6 +6529,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 1,
                 "Parent",
@@ -6460,6 +6564,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 1,
                 "Parent",
@@ -6479,7 +6584,7 @@ class TestFinalizeSetupWithNoTasks:
         )
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
-                self._make_repo_ctx(), 5, "My issue", 42, "fix-bug"
+                tmp_path, self._make_repo_ctx(), 5, "My issue", 42, "fix-bug"
             )
         agent.run_turn.assert_called_once()
         prompt_arg = (
@@ -6511,6 +6616,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 5,
                 "My issue",
@@ -6546,6 +6652,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=False):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 issue=5,
                 issue_title="My issue",
@@ -6579,6 +6686,7 @@ class TestFinalizeSetupWithNoTasks:
         ]
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 5,
                 "My issue",
@@ -6622,6 +6730,7 @@ class TestFinalizeSetupWithNoTasks:
         subs = self._make_subs()
         with patch.object(worker, "_pr_has_real_diff", return_value=False):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 issue=5,
                 issue_title="My issue",
@@ -6643,6 +6752,7 @@ class TestFinalizeSetupWithNoTasks:
         subs = self._make_subs()
         with patch.object(worker, "_pr_has_real_diff", return_value=False):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 issue=5,
                 issue_title="My issue",
@@ -6660,6 +6770,7 @@ class TestFinalizeSetupWithNoTasks:
         subs = self._make_subs()
         with patch.object(worker, "_pr_has_real_diff", return_value=False):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 issue=5,
                 issue_title="My issue",
@@ -6677,6 +6788,7 @@ class TestFinalizeSetupWithNoTasks:
         subs = self._make_subs()
         with patch.object(worker, "_pr_has_real_diff", return_value=False):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 issue=5,
                 issue_title="My issue",
@@ -6701,6 +6813,7 @@ class TestFinalizeSetupWithNoTasks:
         subs = self._make_subs()
         with patch.object(worker, "_pr_has_real_diff", return_value=False):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 issue=5,
                 issue_title="My issue",
@@ -6728,6 +6841,7 @@ class TestFinalizeSetupWithNoTasks:
         subs = self._make_subs()
         with patch.object(worker, "_pr_has_real_diff", return_value=False):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 issue=5,
                 issue_title="My issue",
@@ -6754,6 +6868,7 @@ class TestFinalizeSetupWithNoTasks:
         subs = self._make_subs()
         with patch.object(worker, "_pr_has_real_diff", return_value=True):
             worker._finalize_setup_with_no_tasks(
+                tmp_path,
                 self._make_repo_ctx(),
                 issue=5,
                 issue_title="My issue",
@@ -6770,6 +6885,87 @@ class TestFinalizeSetupWithNoTasks:
         # No close calls
         gh.close_pr.assert_not_called()
         gh.close_issue.assert_not_called()
+
+    # ── Return value / terminal sentinel ──────────────────────────────────────
+
+    def test_returns_true_on_all_covered_no_diff_close_path(
+        self, tmp_path: Path
+    ) -> None:
+        """_finalize_setup_with_no_tasks returns True when the all-covered
+        terminal close path fires (sub-issues + no diff + explicit_no_tasks)."""
+        worker, gh, _agent = self._make_worker(tmp_path, comment_text="All covered.")
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            result = worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=True,
+            )
+        assert result is True
+
+    def test_returns_false_on_standard_pr_path(self, tmp_path: Path) -> None:
+        """_finalize_setup_with_no_tasks returns False on the ordinary PR-ready path."""
+        worker, gh, _agent = self._make_worker(
+            tmp_path, comment_text="Branch covers it."
+        )
+        with patch.object(worker, "_pr_has_real_diff", return_value=True):
+            result = worker._finalize_setup_with_no_tasks(
+                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+            )
+        assert result is False
+
+    def test_returns_false_on_no_diff_standard_path(self, tmp_path: Path) -> None:
+        """_finalize_setup_with_no_tasks returns False when no diff but NOT
+        the all-covered path (e.g. explicit_no_tasks=False)."""
+        worker, gh, _agent = self._make_worker(tmp_path)
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            result = worker._finalize_setup_with_no_tasks(
+                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+            )
+        assert result is False
+
+    def test_clears_durable_state_on_all_covered_close_path(
+        self, tmp_path: Path
+    ) -> None:
+        """When the terminal close path fires, state.json keys are cleared
+        so a restart does not re-adopt the now-closed issue."""
+        from fido.state import State
+
+        worker, gh, _agent = self._make_worker(tmp_path, comment_text="All covered.")
+        gh.get_issue_comments.return_value = []
+        subs = self._make_subs()
+        # Pre-populate state with issue/PR tracking keys
+        with State(tmp_path).modify() as state:
+            state["issue"] = 5
+            state["issue_title"] = "My issue"
+            state["issue_started_at"] = "2026-01-01T00:00:00Z"
+            state["pr_number"] = 42
+            state["pr_title"] = "My issue (closes #5)"
+            state["current_task_id"] = "abc-123"
+        with patch.object(worker, "_pr_has_real_diff", return_value=False):
+            worker._finalize_setup_with_no_tasks(
+                tmp_path,
+                self._make_repo_ctx(),
+                issue=5,
+                issue_title="My issue",
+                pr_number=42,
+                slug="fix-bug",
+                closed_sub_issues=subs,
+                explicit_no_tasks=True,
+            )
+        remaining = State(tmp_path).load()
+        assert "issue" not in remaining
+        assert "issue_title" not in remaining
+        assert "issue_started_at" not in remaining
+        assert "pr_number" not in remaining
+        assert "pr_title" not in remaining
+        assert "current_task_id" not in remaining
 
     def test_no_pr_setup_no_tasks_passes_sub_issues_to_finalize(
         self, tmp_path: Path

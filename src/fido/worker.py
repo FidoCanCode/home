@@ -1857,12 +1857,16 @@ class Worker:
         issue_title: str,
         issue_body: str = "",
         issue_labels: list[str] | None = None,
-    ) -> tuple[int, str, bool]:
+    ) -> tuple[int, str, bool] | None:
         """Find or create the branch and draft PR for *issue*.
 
         Returns ``(pr_number, slug, is_fresh)`` where *is_fresh* is ``True``
         for a newly-created PR and ``False`` for an existing/resumed one.
-        Raises ``RuntimeError`` if setup produces no tasks.
+        Returns ``None`` when the all-covered terminal close path fires —
+        i.e. closed sub-issues fully cover the issue's scope, the setup turn
+        returned :class:`NoTasksNeeded`, and the branch has no real diff.
+        In that case the parent issue and draft PR have already been closed;
+        the caller must stop immediately without running any further logic.
 
         Workflow:
         - **Existing closed PR**: ignore it and create a fresh PR.
@@ -1948,7 +1952,8 @@ class Worker:
                     # branch already covers the issue.  Finalize rather than
                     # crash (closes #1275): post a Fido-voice comment, mark
                     # the PR ready, request review.
-                    self._finalize_setup_with_no_tasks(
+                    terminal = self._finalize_setup_with_no_tasks(
+                        fido_dir,
                         repo_ctx,
                         issue,
                         issue_title,
@@ -1958,6 +1963,8 @@ class Worker:
                         explicit_no_tasks=explicit_no_tasks,
                         no_tasks_reason=no_tasks_reason,
                     )
+                    if terminal:
+                        return None
             log.info(
                 "PR: #%s  https://github.com/%s/pull/%s",
                 pr_number,
@@ -2068,7 +2075,8 @@ class Worker:
             # created so it has only the wip:start commit; the finalize
             # helper's diff guard will leave it as draft if there's nothing
             # to review (#1194), and the comment will still explain why.
-            self._finalize_setup_with_no_tasks(
+            terminal = self._finalize_setup_with_no_tasks(
+                fido_dir,
                 repo_ctx,
                 issue,
                 issue_title,
@@ -2078,6 +2086,8 @@ class Worker:
                 explicit_no_tasks=explicit_no_tasks,
                 no_tasks_reason=no_tasks_reason,
             )
+            if terminal:
+                return None
             log.info("PR: #%s opened with 0 tasks (setup found no work)", pr_number)
             log.info("PR: #%s  %s", pr_number, url)
             return pr_number, slug, True
@@ -2963,6 +2973,7 @@ class Worker:
 
     def _finalize_setup_with_no_tasks(
         self,
+        fido_dir: Path,
         repo_ctx: RepoContext,
         issue: int,
         issue_title: str,
@@ -2972,9 +2983,15 @@ class Worker:
         closed_sub_issues: list[ClosedSubIssue] | None = None,
         explicit_no_tasks: bool = False,
         no_tasks_reason: str = "",
-    ) -> None:
+    ) -> bool:
         """Setup produced 0 tasks because the work appears already complete —
         finalize the PR rather than crash.
+
+        Returns ``True`` when the all-covered terminal close path fires
+        (*closed_sub_issues* fully covers scope, *explicit_no_tasks* is
+        ``True``, and the branch has no real diff), signalling to the caller
+        that the issue and PR have been closed and no further iteration is
+        needed.  Returns ``False`` on all other (PR-ready / standard) paths.
 
         When *closed_sub_issues* covers the full scope, *explicit_no_tasks*
         is ``True``, and the branch has no real diff, posts a coverage comment
@@ -3088,13 +3105,27 @@ class Worker:
                     "skipping comment, still ensuring close",
                     issue,
                 )
+            # Clear durable state before closing so a restart does not
+            # re-adopt the now-closed issue.
+            with State(fido_dir).modify() as state:
+                state.pop("issue", None)
+                state.pop("issue_title", None)
+                state.pop("issue_started_at", None)
+                state.pop("pr_number", None)
+                state.pop("pr_title", None)
+                state.pop("current_task_id", None)
+            log.info(
+                "Issue #%s / PR #%s: cleared durable state (sub-issue all-covered path)",
+                issue,
+                pr_number,
+            )
             self.gh.close_pr(repo_ctx.repo, pr_number)
             log.info(
                 "PR #%s: closed empty draft (sub-issue all-covered path)", pr_number
             )
             self.gh.close_issue(repo_ctx.repo, issue)
             log.info("Issue #%s: closed (sub-issue all-covered path)", issue)
-            return
+            return True
 
         # ── standard PR-based path ────────────────────────────────────────────
         existing = self.gh.get_issue_comments(repo_ctx.repo, pr_number)
@@ -3103,7 +3134,7 @@ class Worker:
                 "PR #%s: setup produced no tasks — finalize already posted, skipping",
                 pr_number,
             )
-            return
+            return False
         if closed_sub_issues:
             reason_section = (
                 f"\nThe planner's analysis of what each sub-issue covered:\n{no_tasks_reason}\n"
@@ -3176,7 +3207,7 @@ class Worker:
                 pr_number,
                 repo_ctx.default_branch,
             )
-            return
+            return False
         self.gh.pr_ready(repo_ctx.repo, pr_number)
         log.info("PR #%s: setup produced no tasks — marked ready for review", pr_number)
         if repo_ctx.collaborators:
@@ -3187,6 +3218,7 @@ class Worker:
                 pr_number,
                 ", ".join(reviewers),
             )
+        return False
 
     def _post_empty_pr_comment_once(self, repo: str, pr_number: int) -> None:
         """Post a one-time BLOCKED comment when the empty-diff guard refuses
@@ -4260,7 +4292,7 @@ class Worker:
             self._ensure_pickup_comment(
                 ctx.fido_dir, repo_ctx.repo, issue, issue_title, repo_ctx.gh_user
             )
-            pr_number, slug, pr_is_fresh = self.find_or_create_pr(
+            focp_result = self.find_or_create_pr(
                 ctx.fido_dir,
                 repo_ctx,
                 issue,
@@ -4268,6 +4300,18 @@ class Worker:
                 issue_body,
                 issue_labels=issue_labels,
             )
+            if focp_result is None:
+                # The all-covered terminal close path fired: closed sub-issues
+                # fully covered the issue's scope, the draft PR and parent issue
+                # have been closed, and durable state has been cleared.  Stop
+                # here — do not run promise recovery, PR-body seeding, task
+                # execution, or merge logic on a now-closed PR.
+                log.info(
+                    "issue #%s: all-covered terminal close — stopping iteration",
+                    issue,
+                )
+                return 0
+            pr_number, slug, pr_is_fresh = focp_result
             if self._first_iteration:
                 recovered_comments = FidoStore(
                     self.work_dir

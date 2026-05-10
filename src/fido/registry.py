@@ -567,8 +567,7 @@ class WorkerRegistry:
         Public wrapper around :meth:`_publish_provider_snapshot`, satisfying the
         :class:`~fido.worker.ActivityReporter` protocol so workers can trigger
         snapshot publication at loop-iteration boundaries — after session attach
-        and after each :class:`~fido.worker.Worker` turn — so the SCADA display
-        stays fresh during active turns without a separate polling thread.
+        and after each :class:`~fido.worker.Worker` turn.
         """
         self._publish_provider_snapshot(repo_name)
 
