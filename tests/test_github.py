@@ -1752,8 +1752,9 @@ class TestGitHubClass:
             )
         ]
 
-    def test_fetch_closed_sub_issues_sorted_by_number(self) -> None:
+    def test_fetch_closed_sub_issues_preserves_api_order(self) -> None:
         gh, mock_s = self._gh()
+        # API returns [20, 5, 12] — GitHub's priority order, not numeric order.
         items = [
             self._sub_issue_item(20, state="closed"),
             self._sub_issue_item(5, state="closed"),
@@ -1762,7 +1763,7 @@ class TestGitHubClass:
         mock_s.get.return_value = self._sub_issues_page(items)
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline([])
         result = gh.fetch_closed_sub_issues("o/r", 10)
-        assert [r.number for r in result] == [5, 12, 20]
+        assert [r.number for r in result] == [20, 5, 12]
 
     def test_fetch_closed_sub_issues_handles_none_body(self) -> None:
         gh, mock_s = self._gh()

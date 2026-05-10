@@ -824,9 +824,8 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         No recursion — direct children only.  Every parent issue summarises
         its children; traversing further would be prohibitively expensive.
         """
-        items = sorted(
-            self._paginate(f"{self.BASE}/repos/{repo}/issues/{number}/sub_issues"),
-            key=lambda x: int(x.get("number", 0)),
+        items = list(
+            self._paginate(f"{self.BASE}/repos/{repo}/issues/{number}/sub_issues")
         )
         result: list[ClosedSubIssue] = []
         for item in items:
