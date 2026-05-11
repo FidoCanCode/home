@@ -8,15 +8,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fido.config import RepoConfig as _RepoConfig
-from fido.provider import ProviderID
-from fido.registry import (
+from fido.appstate import (
     ProviderSnapshot,
     ThreadSnapshot,
     WorkerCrash,
+    create_fido_atomic,
+)
+from fido.config import RepoConfig as _RepoConfig
+from fido.provider import ProviderID
+from fido.registry import (
     WorkerRegistry,
     _make_thread,
-    create_fido_atomic,
     make_registry,
 )
 from fido.rocq import worker_registry_crash as registry_fsm

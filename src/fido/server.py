@@ -22,6 +22,7 @@ from xml.etree.ElementTree import Element, SubElement, register_namespace, tostr
 import requests
 
 from fido import provider
+from fido.appstate import FidoState, create_fido_atomic
 from fido.atomic import AtomicReader, AtomicUpdater
 from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
@@ -50,10 +51,8 @@ from fido.provider import ProviderLimitWindow
 from fido.provider_factory import DefaultProviderFactory
 from fido.rate_limit import GitHubLimit, RateLimitMonitor
 from fido.registry import (
-    FidoState,
     WebhookActivityHandle,
     WorkerRegistry,
-    create_fido_atomic,
     make_registry,
 )
 from fido.rocq import self_restart as restart_fsm

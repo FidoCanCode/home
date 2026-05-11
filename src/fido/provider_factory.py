@@ -2,8 +2,8 @@
 
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
 from fido.claude import ClaudeAPI, ClaudeClient, ClaudeCode
 from fido.codex import Codex, CodexAPI, CodexClient
@@ -16,9 +16,6 @@ from fido.provider import (
     ProviderAPI,
     ProviderID,
 )
-
-if TYPE_CHECKING:
-    from fido.registry import FidoState
 
 
 class DefaultProviderFactory:
@@ -53,7 +50,7 @@ class DefaultProviderFactory:
         work_dir: Path,
         repo_name: str,
         session: PromptSession | None,
-        state_updater: "AtomicUpdater[FidoState] | None" = None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> Provider:
         match repo_cfg.provider:
             case ProviderID.CLAUDE_CODE:

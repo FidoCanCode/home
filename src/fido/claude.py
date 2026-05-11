@@ -13,11 +13,12 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import requests as _requests
 
 from fido import provider
+from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
 from fido.idle_timeout import IdleDeadline
 from fido.provider import (
@@ -36,9 +37,6 @@ from fido.provider import (
 )
 from fido.rocq import claude_session as stream_fsm
 from fido.session_agent import SessionBackedAgent
-
-if TYPE_CHECKING:
-    from fido.registry import FidoState
 
 log = logging.getLogger(__name__)
 
@@ -1668,7 +1666,7 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
         work_dir: Path | str | None = None,
         repo_name: str | None = None,
         session: PromptSession | None = None,
-        state_updater: "AtomicUpdater[FidoState] | None" = None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
         self._runner = runner
         self._streaming_runner = streaming_runner

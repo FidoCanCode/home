@@ -15,7 +15,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any, TypeVar
 
 import acp
 from acp.exceptions import RequestError
@@ -32,6 +32,7 @@ from acp.schema import (
 )
 
 from fido import provider
+from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
 from fido.provider import (
     OwnedSession,
@@ -47,9 +48,6 @@ from fido.provider import (
     coerce_provider_model,
 )
 from fido.session_agent import SessionBackedAgent
-
-if TYPE_CHECKING:
-    from fido.registry import FidoState
 
 log = logging.getLogger(__name__)
 
@@ -1288,7 +1286,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         repo_name: str | None = None,
         session: PromptSession | None = None,
         api: CopilotCLIAPI | None = None,
-        state_updater: "AtomicUpdater[FidoState] | None" = None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
         self._runner = runner
         self._sleep_fn = sleep_fn

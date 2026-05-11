@@ -800,7 +800,8 @@ class TestWorker:
         self, tmp_path: Path
     ) -> None:
         """Concurrent set_status calls on different workers sharing a registry serialize."""
-        from fido.registry import WorkerRegistry, create_fido_atomic
+        from fido.appstate import create_fido_atomic
+        from fido.registry import WorkerRegistry
 
         _, updater = create_fido_atomic()
         registry = WorkerRegistry(MagicMock(), updater)

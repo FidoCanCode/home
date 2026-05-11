@@ -17,8 +17,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fido import provider
+from fido.appstate import create_fido_atomic
 from fido.provider_factory import DefaultProviderFactory
-from fido.registry import WorkerRegistry, create_fido_atomic
+from fido.registry import WorkerRegistry
 from fido.tasks import (
     _merge_thread_lineage,
     _review_thread_contains_comment,

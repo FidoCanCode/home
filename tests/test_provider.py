@@ -301,7 +301,7 @@ class TestProviderModuleBoundary:
 
     def test_provider_snapshot_holds_only_primitive_values(self) -> None:
         """ProviderSnapshot must contain only primitive types — no live session refs."""
-        from fido.registry import ProviderSnapshot
+        from fido.appstate import ProviderSnapshot
 
         snap = ProviderSnapshot(
             session_owner="worker",

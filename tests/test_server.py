@@ -1853,8 +1853,9 @@ class TestProcessAction:
         mock_gh.add_reaction.assert_not_called()
 
     def test_issue_comment_webhook_activity_tracks_phase(self, tmp_path: Path) -> None:
+        from fido.appstate import create_fido_atomic
         from fido.events import Action
-        from fido.registry import WorkerRegistry, create_fido_atomic
+        from fido.registry import WorkerRegistry
 
         cfg = _config(tmp_path)
         handler = WebhookHandler.__new__(WebhookHandler)
@@ -2097,8 +2098,9 @@ class TestProcessAction:
         """
         from contextlib import contextmanager
 
+        from fido.appstate import ProviderSnapshot, create_fido_atomic
         from fido.events import Action
-        from fido.registry import ProviderSnapshot, WorkerRegistry, create_fido_atomic
+        from fido.registry import WorkerRegistry
 
         cfg = _config(tmp_path)
         handler = WebhookHandler.__new__(WebhookHandler)
@@ -2197,8 +2199,9 @@ class TestProcessAction:
         """
         from contextlib import contextmanager
 
+        from fido.appstate import ProviderSnapshot, create_fido_atomic
         from fido.events import Action
-        from fido.registry import ProviderSnapshot, WorkerRegistry, create_fido_atomic
+        from fido.registry import WorkerRegistry
 
         cfg = _config(tmp_path)
         handler = WebhookHandler.__new__(WebhookHandler)

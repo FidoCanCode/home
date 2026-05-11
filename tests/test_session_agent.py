@@ -1,18 +1,15 @@
 from pathlib import Path
-from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
 
+from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
 from fido.provider import (
     ProviderModel,
     TurnSessionMode,
 )
 from fido.session_agent import SessionBackedAgent
-
-if TYPE_CHECKING:
-    from fido.registry import FidoState
 
 
 class _FakeAgent(SessionBackedAgent):
@@ -28,7 +25,7 @@ class _FakeAgent(SessionBackedAgent):
         repo_name: str | None = None,
         session: object = None,
         session_factory: object = None,
-        state_updater: "AtomicUpdater[FidoState] | None" = None,
+        state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
         self._session_factory = (
             MagicMock() if session_factory is None else session_factory
