@@ -1240,7 +1240,7 @@ class Worker:
         self._membership = membership if membership is not None else RepoMembership()
         self._session_issue: int | None = session_issue
         self._next_turn_session_mode = TurnSessionMode.REUSE
-        self._closed_sub_issues: list[ClosedSubIssue] = []
+
         self._tasks = _tasks if _tasks is not None else Tasks(work_dir)
         self._prompts = prompts
         self._config = config
@@ -1912,7 +1912,6 @@ class Worker:
                 closed_sub_issues: list[ClosedSubIssue] = (
                     self.gh.fetch_closed_sub_issues(repo_ctx.repo, issue)
                 )
-                self._closed_sub_issues = closed_sub_issues
                 active_ctx = render_active_context(
                     issue=ActiveIssue(number=issue, title=issue_title, body=issue_body),
                     pr=ActivePR(
@@ -2024,7 +2023,6 @@ class Worker:
         closed_sub_issues: list[ClosedSubIssue] = self.gh.fetch_closed_sub_issues(
             repo_ctx.repo, issue
         )
-        self._closed_sub_issues = closed_sub_issues
         active_ctx = render_active_context(
             issue=ActiveIssue(number=issue, title=issue_title, body=issue_body),
             pr=None,
@@ -3108,8 +3106,15 @@ class Worker:
                     "skipping comment, still ensuring close",
                     issue,
                 )
-            # Clear durable state before closing so a restart does not
-            # re-adopt the now-closed issue.
+            self.gh.close_pr(repo_ctx.repo, pr_number)
+            log.info(
+                "PR #%s: closed empty draft (sub-issue all-covered path)", pr_number
+            )
+            self.gh.close_issue(repo_ctx.repo, issue)
+            log.info("Issue #%s: closed (sub-issue all-covered path)", issue)
+            # Clear durable state after both closes succeed so a crash
+            # between close_pr and close_issue retries idempotently
+            # instead of orphaning a still-open issue.
             with State(fido_dir).modify() as state:
                 state.pop("issue", None)
                 state.pop("issue_title", None)
@@ -3122,87 +3127,92 @@ class Worker:
                 issue,
                 pr_number,
             )
-            self.gh.close_pr(repo_ctx.repo, pr_number)
-            log.info(
-                "PR #%s: closed empty draft (sub-issue all-covered path)", pr_number
-            )
-            self.gh.close_issue(repo_ctx.repo, issue)
-            log.info("Issue #%s: closed (sub-issue all-covered path)", issue)
             return True
 
         # ── standard PR-based path ────────────────────────────────────────────
+        #
+        # The marker suppresses re-posting the comment on crash-retry, but
+        # pr_ready / add_pr_reviewers still run unconditionally (they are
+        # API-idempotent) so a crash between the comment and the ready call
+        # is retried correctly.
         existing = self.gh.get_issue_comments(repo_ctx.repo, pr_number)
-        if any(_NO_TASKS_PR_COMMENT_MARKER in (c.get("body") or "") for c in existing):
+        already_posted = any(
+            _NO_TASKS_PR_COMMENT_MARKER in (c.get("body") or "") for c in existing
+        )
+        if already_posted:
             log.info(
-                "PR #%s: setup produced no tasks — finalize already posted, skipping",
+                "PR #%s: setup produced no tasks — finalize already posted, "
+                "skipping comment",
                 pr_number,
             )
-            return False
-        if closed_sub_issues:
-            reason_section = (
-                f"\nThe planner's analysis of what each sub-issue covered:\n{no_tasks_reason}\n"
-                if no_tasks_reason
-                else ""
-            )
-            if has_real_diff:
-                # The branch carries real work AND closed sub-issues covered
-                # the rest — together they leave nothing remaining.  Use a
-                # prompt that names both contributors so the voice comment
-                # accurately reflects that it's the *combination* of
-                # sub-issues + branch diff that closes the gap, not the
-                # sub-issues alone.
-                prompt = (
-                    f'Setup just finished for issue #{issue} ("{issue_title}"). '
-                    "The combination of closed sub-issues and the existing branch "
-                    "diff leaves no remaining tasks:\n\n"
-                    f"{sub_summary}\n"
-                    f"{reason_section}\n"
-                    "Write a PR comment in your voice (1-2 short paragraphs) "
-                    "explaining that the closed sub-issues covered part of the "
-                    "scope and the existing branch covers the rest, so there is "
-                    "nothing left to implement. Conclude that the PR is ready for "
-                    "review. "
-                    "Output ONLY the comment body — no preamble, no markdown fence, "
-                    "no signature."
-                )
-            else:
-                # Branch has no real diff but sub-issues cover the scope and
-                # this is NOT an explicit NoTasksNeeded (that path returns
-                # early above).  Use the coverage-focused wording.
-                prompt = (
-                    f'Setup just finished for issue #{issue} ("{issue_title}"). '
-                    "The scope is fully covered by the following closed sub-issues:\n\n"
-                    f"{sub_summary}\n"
-                    f"{reason_section}\n"
-                    "Write a PR comment in your voice (1-2 short paragraphs) "
-                    "explaining that the work is already done because these sub-issues "
-                    "covered the full scope. List each sub-issue by number with a "
-                    "brief note about what it covered and its close state (merged PR, "
-                    "closed without merge, or closed with no PR). Conclude that "
-                    "there's nothing left to do and the PR is ready for review. "
-                    "Output ONLY the comment body — no preamble, no markdown fence, "
-                    "no signature."
-                )
         else:
-            prompt = (
-                f'Setup just finished for issue #{issue} ("{issue_title}") and '
-                "produced zero new tasks because the work on this branch already "
-                "covers what the issue asked for. Write a PR comment in your "
-                "voice (1-2 short paragraphs) justifying why this PR has no "
-                "further tasks left to plan. Reference what's actually on the "
-                "branch vs what the issue asked for, and conclude that the PR "
-                "is ready for review. Output ONLY the comment body — no "
-                "preamble, no markdown fence, no signature."
+            if closed_sub_issues:
+                reason_section = (
+                    f"\nThe planner's analysis of what each sub-issue covered:\n{no_tasks_reason}\n"
+                    if no_tasks_reason
+                    else ""
+                )
+                if has_real_diff:
+                    # The branch carries real work AND closed sub-issues covered
+                    # the rest — together they leave nothing remaining.  Use a
+                    # prompt that names both contributors so the voice comment
+                    # accurately reflects that it's the *combination* of
+                    # sub-issues + branch diff that closes the gap, not the
+                    # sub-issues alone.
+                    prompt = (
+                        f'Setup just finished for issue #{issue} ("{issue_title}"). '
+                        "The combination of closed sub-issues and the existing branch "
+                        "diff leaves no remaining tasks:\n\n"
+                        f"{sub_summary}\n"
+                        f"{reason_section}\n"
+                        "Write a PR comment in your voice (1-2 short paragraphs) "
+                        "explaining that the closed sub-issues covered part of the "
+                        "scope and the existing branch covers the rest, so there is "
+                        "nothing left to implement. Conclude that the PR is ready for "
+                        "review. "
+                        "Output ONLY the comment body — no preamble, no markdown fence, "
+                        "no signature."
+                    )
+                else:
+                    # Branch has no real diff but sub-issues cover the scope and
+                    # this is NOT an explicit NoTasksNeeded (that path returns
+                    # early above).  Use the coverage-focused wording.
+                    prompt = (
+                        f'Setup just finished for issue #{issue} ("{issue_title}"). '
+                        "The scope is fully covered by the following closed sub-issues:\n\n"
+                        f"{sub_summary}\n"
+                        f"{reason_section}\n"
+                        "Write a PR comment in your voice (1-2 short paragraphs) "
+                        "explaining that the work is already done because these sub-issues "
+                        "covered the full scope. List each sub-issue by number with a "
+                        "brief note about what it covered and its close state (merged PR, "
+                        "closed without merge, or closed with no PR). Conclude that "
+                        "there's nothing left to do and the PR is ready for review. "
+                        "Output ONLY the comment body — no preamble, no markdown fence, "
+                        "no signature."
+                    )
+            else:
+                prompt = (
+                    f'Setup just finished for issue #{issue} ("{issue_title}") and '
+                    "produced zero new tasks because the work on this branch already "
+                    "covers what the issue asked for. Write a PR comment in your "
+                    "voice (1-2 short paragraphs) justifying why this PR has no "
+                    "further tasks left to plan. Reference what's actually on the "
+                    "branch vs what the issue asked for, and conclude that the PR "
+                    "is ready for review. Output ONLY the comment body — no "
+                    "preamble, no markdown fence, no signature."
+                )
+            body_text = safe_voice_turn(
+                self._provider_agent,
+                prompt,
+                model=self._provider_agent.voice_model,
+                log_prefix="finalize_setup_no_tasks",
             )
-        body_text = safe_voice_turn(
-            self._provider_agent,
-            prompt,
-            model=self._provider_agent.voice_model,
-            log_prefix="finalize_setup_no_tasks",
-        )
-        body = f"{body_text.strip()}\n\n{_NO_TASKS_PR_COMMENT_MARKER}"
-        self.gh.comment_issue(repo_ctx.repo, pr_number, body)
-        log.info("PR #%s: setup produced no tasks — posted finalize comment", pr_number)
+            body = f"{body_text.strip()}\n\n{_NO_TASKS_PR_COMMENT_MARKER}"
+            self.gh.comment_issue(repo_ctx.repo, pr_number, body)
+            log.info(
+                "PR #%s: setup produced no tasks — posted finalize comment", pr_number
+            )
         if not has_real_diff:
             log.warning(
                 "PR #%s: setup produced no tasks but branch has no diff vs %s — "
@@ -3479,6 +3489,7 @@ class Worker:
         issue_title = ""
         issue_body = ""
         prior_attempts: list[ClosedPR] = []
+        closed_sub_issues: list[ClosedSubIssue] | None = None
         if isinstance(issue_number, int):
             issue_data = self.gh.view_issue(repo_ctx.repo, issue_number)
             issue_title = issue_data.get("title", "")
@@ -3486,6 +3497,8 @@ class Worker:
             prior_attempts = self.gh.find_closed_prs_as_context(
                 repo_ctx.repo, issue_number, repo_ctx.gh_user
             )
+            fetched = self.gh.fetch_closed_sub_issues(repo_ctx.repo, issue_number)
+            closed_sub_issues = fetched or None
         else:
             issue_number = None
         pr_data = self.gh.get_pr(repo_ctx.repo, pr_number)
@@ -3520,7 +3533,7 @@ class Worker:
                 description=task.get("description", ""),
             ),
             prior_attempts=prior_attempts,
-            closed_sub_issues=self._closed_sub_issues or None,
+            closed_sub_issues=closed_sub_issues,
             parent_repo=repo_ctx.repo,
         )
         context = f"{active_ctx}\n\n" + "\n".join(context_parts)
@@ -4315,7 +4328,7 @@ class Worker:
                     "issue #%s: all-covered terminal close — stopping iteration",
                     issue,
                 )
-                return 0
+                return 1
             pr_number, slug, pr_is_fresh = focp_result
             if self._first_iteration:
                 recovered_comments = FidoStore(

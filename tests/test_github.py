@@ -1250,6 +1250,39 @@ class TestGitHubClass:
         }
         assert gh.find_closed_unmerged_prs_for_issue("o/r", 206, "fido") == []
 
+    # --- colon-form closing keyword regression tests ---
+
+    def test_find_pr_matches_colon_form(self) -> None:
+        """'Fixes: #N' (colon form) must match, not just 'Fixes #N'."""
+        gh, mock_s = self._gh()
+        pr = self._gql_pr(10, "feat", "OPEN", "fido", "Fixes: #5")
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        result = gh.find_pr("o/r", 5, "fido")
+        assert result is not None
+        assert result["number"] == 10
+
+    def test_find_pr_matches_closes_colon_form(self) -> None:
+        """'Closes: #N' (colon form) must match."""
+        gh, mock_s = self._gh()
+        pr = self._gql_pr(11, "feat", "OPEN", "fido", "Closes: #7")
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        result = gh.find_pr("o/r", 7, "fido")
+        assert result is not None
+        assert result["number"] == 11
+
+    def test_find_closed_unmerged_matches_colon_form(self) -> None:
+        """'Resolves: #N' (colon form) must match for closed-unmerged lookup."""
+        gh, mock_s = self._gh()
+        pr = self._gql_pr_full(300, "CLOSED", "fido", "Resolves: #42", merged=False)
+        mock_s.post.return_value.json.return_value = self._gql_timeline(
+            [self._cross_ref_node(pr)]
+        )
+        assert gh.find_closed_unmerged_prs_for_issue("o/r", 42, "fido") == [300]
+
     # --- find_closed_prs_as_context ---
 
     def test_find_closed_prs_as_context_returns_empty_when_no_closed_prs(self) -> None:

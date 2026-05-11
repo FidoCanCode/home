@@ -460,8 +460,6 @@ class GitHub:
         Returns the first open PR found in timeline order.
         """
         owner, name = repo.split("/", 1)
-        _CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
-        pattern = re.compile(rf"(?i)\b{_CLOSING}\s+#{issue_number}\b")
         query = (
             "query($owner:String!,$repo:String!,$number:Int!,$cursor:String){"
             "repository(owner:$owner,name:$repo){"
@@ -506,7 +504,10 @@ class GitHub:
                         continue
                     body = pr.get("body", "") or ""
                     title = pr.get("title", "") or ""
-                    if not (pattern.search(body) or pattern.search(title)):
+                    if not (
+                        _has_closing_keyword(body, issue_number)
+                        or _has_closing_keyword(title, issue_number)
+                    ):
                         continue
                     pr_cache.setdefault(pr["number"], pr)
                     keyword_prs.add(pr["number"])
@@ -556,8 +557,6 @@ class GitHub:
         PR on the same branch never triggers a retry comment.
         """
         owner, name = repo.split("/", 1)
-        _CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
-        pattern = re.compile(rf"(?i)\b{_CLOSING}\s+#{issue_number}\b")
         query = (
             "query($owner:String!,$repo:String!,$number:Int!,$cursor:String){"
             "repository(owner:$owner,name:$repo){"
@@ -602,7 +601,10 @@ class GitHub:
                         continue
                     body = pr.get("body", "") or ""
                     title = pr.get("title", "") or ""
-                    if not (pattern.search(body) or pattern.search(title)):
+                    if not (
+                        _has_closing_keyword(body, issue_number)
+                        or _has_closing_keyword(title, issue_number)
+                    ):
                         continue
                     pr_cache.setdefault(pr["number"], pr)
                     keyword_prs.add(pr["number"])
