@@ -1283,8 +1283,13 @@ class TestCopilotCLISession:
             snapshot_publisher=Recorder(),
         )
         session.prompt("hello", model=None, system_prompt=None)
-        assert len(published) == 1
+        # sent publication fires first, then received publication after the
+        # runtime.prompt() call increments the counter.
+        assert len(published) == 2
         assert published[0]["sent_count"] == 1
+        assert published[0]["received_count"] == 0
+        assert published[1]["sent_count"] == 1
+        assert published[1]["received_count"] == 1
 
     def test_snapshot_publisher_none_is_noop(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
