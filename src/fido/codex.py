@@ -26,6 +26,7 @@ from fido.provider import (
     ProviderLimitSnapshot,
     ProviderLimitWindow,
     ProviderModel,
+    ProviderStatsPublisher,
     coerce_provider_model,
     model_name,
 )
@@ -1139,6 +1140,7 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
         work_dir: Path | str | None = None,
         repo_name: str | None = None,
         session: PromptSession | None = None,
+        stats_publisher: ProviderStatsPublisher | None = None,
     ) -> None:
         self._runner = runner
         self._session_factory = (
@@ -1150,6 +1152,7 @@ class CodexClient(SessionBackedAgent, ProviderAgent):
             work_dir=work_dir,
             repo_name=repo_name,
             session=session,
+            stats_publisher=stats_publisher,
         )
 
     @property

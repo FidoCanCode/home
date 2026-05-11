@@ -8,11 +8,13 @@ from fido.codex import Codex, CodexAPI, CodexClient
 from fido.config import RepoConfig
 from fido.copilotcli import CopilotCLI, CopilotCLIAPI, CopilotCLIClient
 from fido.provider import (
+    NullProviderStatsPublisher,
     PromptSession,
     Provider,
     ProviderAgent,
     ProviderAPI,
     ProviderID,
+    ProviderStatsPublisher,
 )
 
 
@@ -48,7 +50,13 @@ class DefaultProviderFactory:
         work_dir: Path,
         repo_name: str,
         session: PromptSession | None,
+        stats_publisher: ProviderStatsPublisher | None = None,
     ) -> Provider:
+        publisher: ProviderStatsPublisher = (
+            stats_publisher
+            if stats_publisher is not None
+            else NullProviderStatsPublisher()
+        )
         match repo_cfg.provider:
             case ProviderID.CLAUDE_CODE:
                 return ClaudeCode(
@@ -57,6 +65,7 @@ class DefaultProviderFactory:
                         work_dir=work_dir,
                         repo_name=repo_name,
                         session=session,
+                        stats_publisher=publisher,
                     )
                 )
             case ProviderID.COPILOT_CLI:
@@ -70,6 +79,7 @@ class DefaultProviderFactory:
                         work_dir=work_dir,
                         repo_name=repo_name,
                         session=session,
+                        stats_publisher=publisher,
                     ),
                 )
             case ProviderID.CODEX:
@@ -79,6 +89,7 @@ class DefaultProviderFactory:
                         work_dir=work_dir,
                         repo_name=repo_name,
                         session=session,
+                        stats_publisher=publisher,
                     )
                 )
             case _:

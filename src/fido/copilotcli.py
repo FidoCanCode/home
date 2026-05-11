@@ -42,6 +42,7 @@ from fido.provider import (
     ProviderLimitSnapshot,
     ProviderLimitWindow,
     ProviderModel,
+    ProviderStatsPublisher,
     ReasoningEffort,
     coerce_provider_model,
 )
@@ -1284,6 +1285,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         repo_name: str | None = None,
         session: PromptSession | None = None,
         api: CopilotCLIAPI | None = None,
+        stats_publisher: ProviderStatsPublisher | None = None,
     ) -> None:
         self._runner = runner
         self._sleep_fn = sleep_fn
@@ -1299,6 +1301,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
             work_dir=work_dir,
             repo_name=repo_name,
             session=session,
+            stats_publisher=stats_publisher,
         )
 
     @property

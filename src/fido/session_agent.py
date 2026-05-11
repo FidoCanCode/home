@@ -8,8 +8,10 @@ from pathlib import Path
 
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
+    NullProviderStatsPublisher,
     PromptSession,
     ProviderModel,
+    ProviderStatsPublisher,
     TurnSessionMode,
 )
 
@@ -30,6 +32,7 @@ class SessionBackedAgent:
         work_dir: Path | str | None,
         repo_name: str | None,
         session: PromptSession | None,
+        stats_publisher: ProviderStatsPublisher | None = None,
     ) -> None:
         self._session_fn = session_fn
         self._session_system_file = session_system_file
@@ -37,6 +40,11 @@ class SessionBackedAgent:
         self._repo_name = repo_name
         self._session_lock = threading.Lock()
         self._session: PromptSession | None = session
+        self._stats_publisher: ProviderStatsPublisher = (
+            stats_publisher
+            if stats_publisher is not None
+            else NullProviderStatsPublisher()
+        )
 
     @property
     def session(self) -> PromptSession | None:
