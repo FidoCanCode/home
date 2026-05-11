@@ -47,6 +47,11 @@ class SessionBackedAgent:
         )
 
     @property
+    def stats_publisher(self) -> ProviderStatsPublisher:
+        """Return the injected :class:`~fido.provider.ProviderStatsPublisher`."""
+        return self._stats_publisher
+
+    @property
     def session(self) -> PromptSession | None:
         with self._session_lock:
             return self._session

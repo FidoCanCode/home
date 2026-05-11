@@ -3,7 +3,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fido.provider import ProviderModel, TurnSessionMode
+from fido.provider import (
+    NullProviderStatsPublisher,
+    ProviderModel,
+    ProviderStatsPublisher,
+    TurnSessionMode,
+)
 from fido.session_agent import SessionBackedAgent
 
 
@@ -20,6 +25,7 @@ class _FakeAgent(SessionBackedAgent):
         repo_name: str | None = None,
         session: object = None,
         session_factory: object = None,
+        stats_publisher: ProviderStatsPublisher | None = None,
     ) -> None:
         self._session_factory = (
             MagicMock() if session_factory is None else session_factory
@@ -30,6 +36,7 @@ class _FakeAgent(SessionBackedAgent):
             work_dir=work_dir,
             repo_name=repo_name,
             session=session,
+            stats_publisher=stats_publisher,
         )
 
     def _spawn_owned_session(
@@ -266,3 +273,12 @@ class TestSessionBackedAgent:
         agent = _FakeAgent(session=session)
         assert agent.run_turn("hi", retry_on_preempt=True) == "done"
         assert session.prompt.call_count == 2
+
+    def test_stats_publisher_defaults_to_null_publisher(self) -> None:
+        agent = _FakeAgent()
+        assert isinstance(agent.stats_publisher, NullProviderStatsPublisher)
+
+    def test_stats_publisher_stores_injected_publisher(self) -> None:
+        fake = NullProviderStatsPublisher()
+        agent = _FakeAgent(stats_publisher=fake)
+        assert agent.stats_publisher is fake

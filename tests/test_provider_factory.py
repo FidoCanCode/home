@@ -2,7 +2,7 @@ from pathlib import Path
 
 from fido.config import RepoConfig
 from fido.copilotcli import CopilotCLIAPI, CopilotCLIClient
-from fido.provider import ProviderID
+from fido.provider import NullProviderStatsPublisher, ProviderID
 from fido.provider_factory import DefaultProviderFactory
 
 
@@ -195,3 +195,49 @@ class TestProviderSessionIdExtraction:
             )
             == "codex-sess"
         )
+
+
+class TestProviderStatsPublisherWiring:
+    """create_provider threads ProviderStatsPublisher through to every agent type."""
+
+    def test_default_publisher_is_null_for_all_providers(self, tmp_path: Path) -> None:
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        factory = DefaultProviderFactory(session_system_file=system_file)
+        for provider_id in (
+            ProviderID.CLAUDE_CODE,
+            ProviderID.CODEX,
+            ProviderID.COPILOT_CLI,
+        ):
+            prov = factory.create_provider(
+                RepoConfig(name="owner/repo", work_dir=tmp_path, provider=provider_id),
+                work_dir=tmp_path,
+                repo_name="owner/repo",
+                session=None,
+            )
+            assert isinstance(prov.agent.stats_publisher, NullProviderStatsPublisher), (
+                f"{provider_id}: expected NullProviderStatsPublisher by default"
+            )
+
+    def test_injected_publisher_reachable_on_all_agent_types(
+        self, tmp_path: Path
+    ) -> None:
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        factory = DefaultProviderFactory(session_system_file=system_file)
+        for provider_id in (
+            ProviderID.CLAUDE_CODE,
+            ProviderID.CODEX,
+            ProviderID.COPILOT_CLI,
+        ):
+            fake = NullProviderStatsPublisher()
+            prov = factory.create_provider(
+                RepoConfig(name="owner/repo", work_dir=tmp_path, provider=provider_id),
+                work_dir=tmp_path,
+                repo_name="owner/repo",
+                session=None,
+                stats_publisher=fake,
+            )
+            assert prov.agent.stats_publisher is fake, (
+                f"{provider_id}: injected publisher not reachable on agent"
+            )
