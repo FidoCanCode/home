@@ -716,7 +716,8 @@ class TestClaudeSessionInit:
         assert "--output-format" in cmd
         assert "stream-json" in cmd[cmd.index("--output-format") + 1]
         assert "--verbose" in cmd
-        assert "--dangerously-skip-permissions" in cmd
+        assert "--permission-mode" in cmd
+        assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
         assert "--system-prompt-file" in cmd
         assert str(system_file) in cmd
 
@@ -1967,7 +1968,8 @@ class TestClaudeSessionIsAliveAndReset:
         session.reset("claude-sonnet-4-6")
         assert session._proc is new_proc
         assert fake_popen.call_count == 2
-        assert fake_popen.call_args.args[0][8] == "claude-sonnet-4-6"
+        cmd = fake_popen.call_args.args[0]
+        assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-6"
 
     def test_reset_registers_new_proc_in_active_children(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"

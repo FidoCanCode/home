@@ -634,7 +634,13 @@ class ClaudeSession(OwnedSession):
             "--output-format",
             "stream-json",
             "--verbose",
-            "--dangerously-skip-permissions",
+            # `dontAsk` makes `--allowedTools` the actual gate: anything not
+            # in the allowlist is silently denied without an interactive
+            # prompt.  `--dangerously-skip-permissions` would bypass the
+            # allowlist entirely, letting handler/synthesis phases call
+            # Edit/Write/Bash regardless of the read-only restriction (#1669).
+            "--permission-mode",
+            "dontAsk",
             "--model",
             self._model,
             "--system-prompt-file",
@@ -1829,7 +1835,8 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
             "--output-format",
             "stream-json",
             "--verbose",
-            "--dangerously-skip-permissions",
+            "--permission-mode",
+            "dontAsk",
             "--system-prompt-file",
             str(system_file),
             "--print",
@@ -1864,7 +1871,8 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
             "--output-format",
             "stream-json",
             "--verbose",
-            "--dangerously-skip-permissions",
+            "--permission-mode",
+            "dontAsk",
             "--resume",
             session_id,
             "--print",
