@@ -7714,6 +7714,9 @@ class TestRunSeedTasksIntegration:
 
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        # Keep the orphan sweep (#1691) from clearing the recovered entry —
+        # the recovered comment's PR is still open in this scenario.
+        gh.get_pr.return_value = {"state": "open"}
         mock_dispatcher = _FakeDispatcher(backfill_return=0)
         worker = Worker(
             tmp_path,
@@ -13716,6 +13719,61 @@ class TestCiReadyForReview:
             self._check("ci / lint", "FAILURE"),
         ]
         assert ci_ready_for_review(checks, ["ci / test"]) is True
+
+
+class TestSweepOrphanPrComments:
+    """Tests for Worker.sweep_orphan_pr_comments (#1691).
+
+    Catches the race where a comment-created webhook arrives after the
+    PR-close webhook fires.  ``clear_pr_comment_queue`` runs on close
+    but can't catch entries that haven't been enqueued yet — those sit
+    in the queue forever because the worker only ever drains the
+    currently-assigned PR.
+    """
+
+    def _make_worker(self, tmp_path: Path) -> tuple[Worker, MagicMock]:
+        gh = MagicMock()
+        return (
+            Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter)),
+            gh,
+        )
+
+    def _enqueue(self, tmp_path: Path, *, pr_number: int, comment_id: int) -> None:
+        FidoStore(tmp_path).enqueue_pr_comment(
+            delivery_id=f"delivery-{pr_number}-{comment_id}",
+            repo="owner/repo",
+            pr_number=pr_number,
+            comment_type="pulls",
+            comment_id=comment_id,
+            author="someone",
+            is_bot=True,
+            body="late comment",
+            github_created_at="2026-04-30T12:00:00Z",
+            payload_json="{}",
+        )
+
+    def test_clears_entries_for_closed_prs_and_keeps_open(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        self._enqueue(tmp_path, pr_number=7, comment_id=701)  # closed
+        self._enqueue(tmp_path, pr_number=7, comment_id=702)  # closed
+        self._enqueue(tmp_path, pr_number=8, comment_id=801)  # still open
+
+        def fake_get_pr(_repo: str, pr: int | str) -> dict[str, str]:
+            return {"state": "closed"} if int(pr) == 7 else {"state": "open"}
+
+        gh.get_pr.side_effect = fake_get_pr
+
+        cleared = worker.sweep_orphan_pr_comments("owner/repo")
+
+        assert cleared == 2
+        remaining = FidoStore(tmp_path).pending_pr_numbers(repo="owner/repo")
+        assert remaining == [8]
+
+    def test_returns_zero_when_no_pending_entries(self, tmp_path: Path) -> None:
+        worker, gh = self._make_worker(tmp_path)
+        cleared = worker.sweep_orphan_pr_comments("owner/repo")
+        assert cleared == 0
+        gh.get_pr.assert_not_called()
 
 
 class TestHandlePromoteMerge:

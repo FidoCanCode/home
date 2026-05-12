@@ -2550,6 +2550,32 @@ class Worker:
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True
 
+    def sweep_orphan_pr_comments(self, repo: str) -> int:
+        """Drop queued PR-comment entries whose PR is closed (#1691).
+
+        ``clear_pr_comment_queue`` already runs on the ``pull_request/closed``
+        webhook, but comments can arrive *after* the close webhook fires —
+        a Codex bot review on a just-merged PR, for example.  Those entries
+        sit in the queue forever because the worker only ever drains the
+        currently-assigned PR, and Fido has long since moved on.
+
+        Run this once per ``WorkerThread`` lifetime to clean up the orphans
+        from previous runs and from any post-merge comment races.
+        """
+        store = FidoStore(self.work_dir)
+        cleared = 0
+        for pr_number in store.pending_pr_numbers(repo=repo):
+            pr_data = self.gh.get_pr(repo, pr_number)
+            if pr_data["state"] != "open":
+                cleared += store.clear_pr_comment_queue(repo=repo, pr_number=pr_number)
+        if cleared:
+            log.info(
+                "sweep_orphan_pr_comments: cleared %d entries for closed PRs in %s",
+                cleared,
+                repo,
+            )
+        return cleared
+
     def handle_queued_comments(
         self,
         fido_dir: Path,
@@ -4385,6 +4411,7 @@ class Worker:
                         len(recovered_comments),
                         repo_ctx.repo,
                     )
+                self.sweep_orphan_pr_comments(repo_ctx.repo)
             recovery_provider = (
                 self._ensure_provider().provider_id
                 if self._repo_cfg is None
