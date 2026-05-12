@@ -705,3 +705,51 @@ class TestCallSynthesisVerificationTurn:
         assert result.reply_text == "Original reply."
         assert result.change_request is None
         assert agent.run_turn.call_count == 3
+
+    def test_context_overflow_error_propagates_from_verify_turn(self) -> None:
+        """ContextOverflowError in verify must propagate — not be swallowed."""
+        from fido.provider import ContextOverflowError
+
+        raw = _make_raw(reply_text="Reply.", change_request=None)
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [raw, ContextOverflowError("overflow")]
+        prompts = _make_prompts()
+
+        with pytest.raises(ContextOverflowError):
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+    def test_session_leak_error_propagates_from_verify_turn(self) -> None:
+        """SessionLeakError in verify must propagate — not be swallowed."""
+        from fido.provider import SessionLeakError
+
+        raw = _make_raw(reply_text="Reply.", change_request=None)
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [raw, SessionLeakError("leak")]
+        prompts = _make_prompts()
+
+        with pytest.raises(SessionLeakError):
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+    def test_context_overflow_error_propagates_from_derive_turn(self) -> None:
+        """ContextOverflowError in derive must propagate — not be swallowed."""
+        from fido.provider import ContextOverflowError
+
+        raw = _make_raw(reply_text="Reply.", change_request=None)
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [raw, "No", ContextOverflowError("overflow")]
+        prompts = _make_prompts()
+
+        with pytest.raises(ContextOverflowError):
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+    def test_session_leak_error_propagates_from_derive_turn(self) -> None:
+        """SessionLeakError in derive must propagate — not be swallowed."""
+        from fido.provider import SessionLeakError
+
+        raw = _make_raw(reply_text="Reply.", change_request=None)
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [raw, "No", SessionLeakError("leak")]
+        prompts = _make_prompts()
+
+        with pytest.raises(SessionLeakError):
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)

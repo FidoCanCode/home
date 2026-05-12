@@ -19,7 +19,12 @@ import logging
 from typing import Any
 
 from fido.prompts import Prompts
-from fido.provider import READ_ONLY_ALLOWED_TOOLS, ProviderAgent
+from fido.provider import (
+    READ_ONLY_ALLOWED_TOOLS,
+    ContextOverflowError,
+    ProviderAgent,
+    SessionLeakError,
+)
 from fido.synthesis import (
     VALID_REACTIONS,
     CommentResponse,
@@ -116,6 +121,8 @@ def _check_and_promote(
             change_request=derived,
             insights=response.insights,
         )
+    except ContextOverflowError, SessionLeakError:
+        raise
     except Exception as exc:
         log.warning(
             "synthesis guard: verification turn failed (%s) — "
