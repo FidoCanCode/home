@@ -97,6 +97,64 @@ def _is_cancel_sentinel(text: str) -> bool:
     )
 
 
+# #1216: Copilot CLI emits "Info: ...", "Warning: ...", "Error: ..." as
+# agent_message_chunk events when retrying API calls.  These get prepended to
+# the real assistant reply text.  Strip them before the result leaves the
+# session boundary.
+#
+# Two-layer defence:
+#   1. Chunk-level: drop diagnostic chunks in record_session_update before they
+#      enter _prompt_chunks.  Each diagnostic line arrives as a complete chunk
+#      so this handles both newline-terminated and non-newline-terminated shapes.
+#   2. Assembled-text fallback: _strip_copilot_chatter strips any leading run of
+#      newline-terminated chatter lines from the joined text, catching anything
+#      that slips through (e.g. a partial chunk spanning a diagnostic prefix).
+#
+# The cancel sentinel ("Info: Operation cancelled by user") is excluded from
+# both layers so _is_cancel_sentinel still fires when stop_reason is not set.
+_COPILOT_CHATTER_CHUNK_RE = re.compile(r"^(?:Info|Warning|Error): ")
+_COPILOT_CHATTER_LINE_RE = re.compile(
+    r"(?:Info|Warning|Error): (?!Operation cancelled by user)[^\n]*\n"
+)
+
+
+def _is_copilot_chatter_chunk(text: str) -> bool:
+    """Return True when *text* is a standalone Copilot CLI diagnostic chunk.
+
+    The CLI emits ``Info:``, ``Warning:``, and ``Error:`` status lines as
+    individual ``agent_message_chunk`` events.  Each such chunk is a complete
+    diagnostic message that should not appear in the final reply body.
+
+    The cancel sentinel ``"Info: Operation cancelled by user"`` is excluded so
+    :func:`_is_cancel_sentinel` still fires when the stop_reason is not
+    ``"cancelled"``.
+    """
+    if not _COPILOT_CHATTER_CHUNK_RE.match(text):
+        return False
+    return not text.startswith(_COPILOT_CANCEL_SENTINEL)
+
+
+def _strip_copilot_chatter(text: str) -> str:
+    """Strip Copilot CLI diagnostic prefix lines from assembled reply text.
+
+    The CLI emits ``Info:``, ``Warning:``, and ``Error:`` status lines as
+    ``agent_message_chunk`` events that are concatenated before the real
+    assistant reply.  Strip any leading run of such newline-terminated lines
+    so they do not appear in GitHub comment bodies.
+
+    The cancel sentinel ``"Info: Operation cancelled by user"`` is preserved
+    so :func:`_is_cancel_sentinel` continues to fire when the stop_reason
+    is not ``"cancelled"``.
+    """
+    result = text
+    while True:
+        m = _COPILOT_CHATTER_LINE_RE.match(result)
+        if m is None:
+            break
+        result = result[m.end() :]
+    return result
+
+
 def _iter_jsonl(output: str) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for line in output.splitlines():
@@ -687,7 +745,12 @@ class CopilotACPRuntime:
         if update_type == "agent_message_chunk":
             content = getattr(update, "content", None)
             text = getattr(content, "text", None)
-            if isinstance(text, str):
+            # #1216: drop diagnostic chatter chunks before they enter
+            # _prompt_chunks.  Each "Info: / Warning: / Error: " status line
+            # arrives as a complete standalone chunk; filter at this boundary
+            # so even non-newline-terminated chatter never reaches the reply.
+            # The cancel sentinel is preserved so _is_cancel_sentinel fires.
+            if isinstance(text, str) and not _is_copilot_chatter_chunk(text):
                 self._prompt_chunks.append(text)
             return
         if update_type == "tool_call":
@@ -1185,6 +1248,9 @@ class CopilotCLISession(OwnedSession):
         self._session_id = session_id
         if model is not None:
             self._model = coerce_provider_model(model)
+        # #1216: strip diagnostic chatter ("Info: ...", "Warning: ...",
+        # "Error: ...") that the CLI prepends when retrying API calls.
+        result = _strip_copilot_chatter(result)
         cancelled = stop_reason == "cancelled" or _is_cancel_sentinel(result)
         self._last_turn_cancelled = cancelled
         _log_for_repo(

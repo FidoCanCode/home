@@ -28,10 +28,12 @@ from fido.copilotcli import (
     _combine_prompt,
     _CopilotACPClient,
     _is_cancel_sentinel,
+    _is_copilot_chatter_chunk,
     _is_copilot_quota_error,
     _is_line_limit_overrun_error,
     _normalize_model,
     _preview_log_value,
+    _strip_copilot_chatter,
     _TerminalManager,
     _tool_input_preview,
     extract_result_text,
@@ -361,6 +363,166 @@ class TestHelpers:
         client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
         client._run_cli_prompt("body", model="gpt-5", timeout=1)
         assert "gpt-5" in runner.call_args.args[0]
+
+
+class TestStripCopilotChatter:
+    def test_strips_double_info_prefix(self) -> None:
+        # Regression for #1216: two retry-info lines before the real reply.
+        text = (
+            "Info: Request failed due to a transient API error. Retrying...\n"
+            "Info: Request failed due to a transient API error. Retrying...\n"
+            "You're right, I missed those details on the first pass."
+        )
+        assert (
+            _strip_copilot_chatter(text)
+            == "You're right, I missed those details on the first pass."
+        )
+
+    def test_strips_warning_and_error_prefix_lines(self) -> None:
+        text = "Warning: something degraded\nError: retry failed\nReal reply here."
+        assert _strip_copilot_chatter(text) == "Real reply here."
+
+    def test_clean_text_passes_through_unchanged(self) -> None:
+        text = "You're right, no chatter here."
+        assert _strip_copilot_chatter(text) == text
+
+    def test_info_in_middle_not_stripped(self) -> None:
+        # Only leading chatter is stripped; Info: that appears after real
+        # content is part of the assistant reply and must be preserved.
+        text = "Real content\nInfo: some status\nMore content"
+        assert _strip_copilot_chatter(text) == text
+
+    def test_empty_string_passes_through(self) -> None:
+        assert _strip_copilot_chatter("") == ""
+
+    def test_chatter_only_returns_empty(self) -> None:
+        text = "Info: Request failed due to a transient API error. Retrying...\n"
+        assert _strip_copilot_chatter(text) == ""
+
+    def test_cancel_sentinel_not_stripped(self) -> None:
+        # The cancel sentinel must survive stripping so _is_cancel_sentinel
+        # still fires when stop_reason is not "cancelled" (#666).
+        text = "Info: Operation cancelled by user\n"
+        assert _strip_copilot_chatter(text) == text
+
+    def test_session_prompt_strips_chatter_prefix(self, tmp_path: Path) -> None:
+        # Integration: chatter emitted by FakeRuntime is stripped before
+        # _prompt_locked returns the result to the caller.
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        runtime = FakeRuntime()
+        runtime.next_prompt = (
+            "Info: Request failed due to a transient API error. Retrying...\n"
+            "You're right, the fix is straightforward.",
+            "end_turn",
+            "sess-next",
+        )
+        session = CopilotCLISession(
+            system_file,
+            work_dir=tmp_path,
+            model=CopilotCLIClient.work_model,
+            runtime=runtime,
+        )
+        result = session.prompt("do the thing")
+        assert result == "You're right, the fix is straightforward."
+
+
+class TestIsCopilotChatterChunk:
+    def test_info_chunk_is_chatter(self) -> None:
+        assert _is_copilot_chatter_chunk(
+            "Info: Request failed due to a transient API error. Retrying..."
+        )
+
+    def test_warning_chunk_is_chatter(self) -> None:
+        assert _is_copilot_chatter_chunk("Warning: degraded service")
+
+    def test_error_chunk_is_chatter(self) -> None:
+        assert _is_copilot_chatter_chunk("Error: connection reset")
+
+    def test_cancel_sentinel_is_not_chatter(self) -> None:
+        # The cancel sentinel must survive so _is_cancel_sentinel still fires.
+        assert not _is_copilot_chatter_chunk("Info: Operation cancelled by user")
+
+    def test_real_content_is_not_chatter(self) -> None:
+        assert not _is_copilot_chatter_chunk("You're right, I missed those details.")
+
+    def test_info_not_at_start_is_not_chatter(self) -> None:
+        # Only chunks that *start* with the prefix are diagnostic.
+        assert not _is_copilot_chatter_chunk("Here is some info: background")
+
+    def test_empty_string_is_not_chatter(self) -> None:
+        assert not _is_copilot_chatter_chunk("")
+
+
+class TestChunkLevelChatterFiltering:
+    def test_chatter_chunks_not_in_prompt_result(self, tmp_path: Path) -> None:
+        # Regression for #1216 (no-newline case): chatter chunks without
+        # trailing \n are filtered at the chunk level in record_session_update
+        # before they enter _prompt_chunks.
+        connection = FakeConnection(load_supported=True)
+
+        async def _prompt_with_chatter(prompt: list[object], session_id: str) -> object:
+            del prompt
+            assert connection.client is not None
+            runtime = connection.client._runtime
+            for chunk_text in [
+                "Info: Request failed due to a transient API error. Retrying...",
+                "Info: Request failed due to a transient API error. Retrying...",
+                "You're right, the fix is straightforward.",
+            ]:
+                runtime.record_session_update(
+                    session_id,
+                    SimpleNamespace(
+                        session_update="agent_message_chunk",
+                        content=SimpleNamespace(text=chunk_text),
+                    ),
+                )
+            return SimpleNamespace(stop_reason="end_turn")
+
+        connection.prompt = _prompt_with_chatter  # type: ignore[method-assign]
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=_spawn_factory(connection),
+        )
+        try:
+            session_id = runtime.ensure_session(None, None)
+            text, stop_reason, _ = runtime.prompt(session_id, "hello", None)
+            assert text == "You're right, the fix is straightforward."
+            assert stop_reason == "end_turn"
+        finally:
+            runtime.stop()
+
+    def test_cancel_sentinel_chunk_preserved(self, tmp_path: Path) -> None:
+        # The cancel sentinel must pass through chunk filtering so
+        # _is_cancel_sentinel can detect cancelled turns when stop_reason
+        # is not "cancelled" (#666).
+        connection = FakeConnection(load_supported=True)
+
+        async def _prompt_with_sentinel(
+            prompt: list[object], session_id: str
+        ) -> object:
+            del prompt
+            assert connection.client is not None
+            connection.client._runtime.record_session_update(
+                session_id,
+                SimpleNamespace(
+                    session_update="agent_message_chunk",
+                    content=SimpleNamespace(text="Info: Operation cancelled by user"),
+                ),
+            )
+            return SimpleNamespace(stop_reason="end_turn")
+
+        connection.prompt = _prompt_with_sentinel  # type: ignore[method-assign]
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=_spawn_factory(connection),
+        )
+        try:
+            session_id = runtime.ensure_session(None, None)
+            text, _, _ = runtime.prompt(session_id, "hello", None)
+            assert text == "Info: Operation cancelled by user"
+        finally:
+            runtime.stop()
 
 
 class TestTerminalManager:
