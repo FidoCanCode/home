@@ -2550,6 +2550,31 @@ class Worker:
         tasks.sync_tasks_background(self.work_dir, self.gh)
         return True
 
+    def sweep_orphan_pr_comments(self, repo: str) -> int:
+        """Drop queued PR-comment entries whose PR is closed (#1691).
+
+        ``clear_pr_comment_queue`` already runs on the ``pull_request/closed``
+        webhook, but comments can arrive *after* the close webhook fires —
+        a Codex bot review on a just-merged PR, for example.  Those entries
+        sit in the queue forever because the worker only ever drains the
+        currently-assigned PR, and Fido has long since moved on.
+
+        Run this once per ``WorkerThread`` lifetime to clean up the orphans
+        from previous runs and from any post-merge comment races.
+        """
+        store = FidoStore(self.work_dir)
+        cleared = 0
+        for pr_number in store.pending_pr_numbers(repo=repo):
+            if self.gh.get_pr_state(repo, pr_number) != "open":
+                cleared += store.clear_pr_comment_queue(repo=repo, pr_number=pr_number)
+        if cleared:
+            log.info(
+                "sweep_orphan_pr_comments: cleared %d entries for closed PRs in %s",
+                cleared,
+                repo,
+            )
+        return cleared
+
     def handle_queued_comments(
         self,
         fido_dir: Path,
@@ -4310,6 +4335,15 @@ class Worker:
         session_fresh = self._provider is None or self._provider.agent.session is None
         if session_fresh:
             self.create_session()
+        if self._first_iteration:
+            # Run before issue selection so idle repos (no current issue,
+            # acquired-sub-issues abandonment, all-covered terminal close)
+            # still get their orphan queue swept (#1691, codex P2 on PR
+            # #1695).  The sibling recover_in_progress_pr_comments inside
+            # the post-find_or_create_pr block runs later because it
+            # reconciles in-progress claim state for the PR about to be
+            # drained — that's appropriate to gate on having a PR.
+            self.sweep_orphan_pr_comments(repo_ctx.repo)
         try:
             issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
             if issue is None:
