@@ -1168,6 +1168,53 @@ class TestWorker:
             worker.run()
         mock_create.assert_called_once_with()
 
+    def test_first_iteration_sweep_runs_for_idle_repo_with_no_issue(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex P2 (#1695): the orphan sweep must fire even when issue
+        selection returns None — otherwise idle repos never clean their
+        post-merge orphan queue entries because ``_is_first_iteration``
+        flips to False on the next attempt and the sweep never runs."""
+        # Enqueue a comment whose PR is now closed.
+        FidoStore(tmp_path).enqueue_pr_comment(
+            delivery_id="d1",
+            repo="owner/repo",
+            pr_number=999,
+            comment_type="pulls",
+            comment_id=42,
+            author="someone",
+            is_bot=True,
+            body="late comment",
+            github_created_at="2026-04-30T12:00:00Z",
+            payload_json="{}",
+        )
+        gh = self._make_gh()
+        gh.get_pr_state.return_value = "closed"
+        worker = Worker(
+            tmp_path,
+            gh,
+            first_iteration=True,
+            registry=MagicMock(spec=ActivityReporter),
+        )
+        with (
+            patch.object(
+                worker, "create_context", return_value=self._make_mock_ctx(tmp_path)
+            ),
+            patch.object(
+                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
+            ),
+            patch.object(worker, "setup_hooks", return_value=("c", "s")),
+            patch.object(worker, "teardown_hooks"),
+            patch.object(worker, "create_session"),
+            patch.object(worker, "stop_session"),
+            patch.object(worker, "get_current_issue", return_value=None),
+            patch.object(worker, "find_next_issue", return_value=None),
+        ):
+            worker.run()
+
+        # The sweep cleared the orphan even though no issue was selected.
+        assert FidoStore(tmp_path).pending_pr_numbers(repo="owner/repo") == []
+
     def test_run_recovers_reply_promises_before_normal_handlers(
         self, tmp_path: Path
     ) -> None:

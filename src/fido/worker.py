@@ -4335,6 +4335,15 @@ class Worker:
         session_fresh = self._provider is None or self._provider.agent.session is None
         if session_fresh:
             self.create_session()
+        if self._first_iteration:
+            # Run before issue selection so idle repos (no current issue,
+            # acquired-sub-issues abandonment, all-covered terminal close)
+            # still get their orphan queue swept (#1691, codex P2 on PR
+            # #1695).  The sibling recover_in_progress_pr_comments inside
+            # the post-find_or_create_pr block runs later because it
+            # reconciles in-progress claim state for the PR about to be
+            # drained — that's appropriate to gate on having a PR.
+            self.sweep_orphan_pr_comments(repo_ctx.repo)
         try:
             issue = self.get_current_issue(ctx.fido_dir, repo_ctx.repo)
             if issue is None:
@@ -4410,7 +4419,6 @@ class Worker:
                         len(recovered_comments),
                         repo_ctx.repo,
                     )
-                self.sweep_orphan_pr_comments(repo_ctx.repo)
             recovery_provider = (
                 self._ensure_provider().provider_id
                 if self._repo_cfg is None
