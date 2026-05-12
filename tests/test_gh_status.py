@@ -1,7 +1,7 @@
 """Tests for fido.gh_status — GitHub profile status CLI."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -53,13 +53,12 @@ class TestGeneratePersonaStatus:
         assert result == "woof"
 
     def test_creates_default_client_when_none(self) -> None:
-        with patch(
-            "fido.gh_status.ClaudeClient",
-            return_value=_client(),
-        ) as mock_cls:
-            mock_cls.return_value.run_turn.return_value = "woof"
-            generate_persona_status("test", "persona")
-            mock_cls.assert_called_once_with()
+        mock_client = _client()
+        mock_client.run_turn.return_value = "woof"
+        result = generate_persona_status(
+            "test", "persona", _client_factory=lambda: mock_client
+        )
+        assert result == "woof"
 
     def test_uses_retry_on_preempt_via_safe_voice_turn(self) -> None:
         """safe_voice_turn always passes retry_on_preempt=True to run_turn."""
@@ -94,13 +93,12 @@ class TestGeneratePersonaEmoji:
         assert result == ":rocket:"
 
     def test_creates_default_client_when_none(self) -> None:
-        with patch(
-            "fido.gh_status.ClaudeClient",
-            return_value=_client(),
-        ) as mock_cls:
-            mock_cls.return_value.generate_status_emoji.return_value = ":dog:"
-            generate_persona_emoji("test", "persona")
-            mock_cls.assert_called_once_with()
+        mock_client = _client()
+        mock_client.generate_status_emoji.return_value = ":dog:"
+        result = generate_persona_emoji(
+            "test", "persona", _client_factory=lambda: mock_client
+        )
+        assert result == ":dog:"
 
 
 class TestSetGhStatus:
@@ -148,11 +146,12 @@ class TestSetGhStatus:
         mock_client = _client()
         mock_client.run_turn.return_value = "woof"
         mock_client.generate_status_emoji.return_value = ":dog:"
-        with patch(
-            "fido.gh_status._default_provider_factories",
-            return_value=(lambda: mock_client,),
-        ):
-            set_gh_status("test", persona_path=persona_file, _gh=mock_gh)
+        set_gh_status(
+            "test",
+            persona_path=persona_file,
+            _gh=mock_gh,
+            _default_factories_fn=lambda: (lambda: mock_client,),
+        )
         mock_gh.set_user_status.assert_called_once_with("woof", ":dog:", busy=True)
 
     def test_tries_next_provider_when_first_fails(self, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -218,17 +217,15 @@ class TestDefaultProviderFactories:
         persona_file.write_text("persona")
         mock_gh = MagicMock()
 
-        with (
-            patch(
-                "fido.gh_status._default_provider_factories",
-                side_effect=RuntimeError("No running fido repo configs found"),
-            ),
-            pytest.raises(RuntimeError, match="No running fido repo configs found"),
-        ):
+        def _raises() -> tuple[object, ...]:
+            raise RuntimeError("No running fido repo configs found")
+
+        with pytest.raises(RuntimeError, match="No running fido repo configs found"):
             set_gh_status(
                 "test",
                 persona_path=persona_file,
                 _gh=mock_gh,
+                _default_factories_fn=_raises,
             )
 
         mock_gh.set_user_status.assert_not_called()
@@ -255,17 +252,15 @@ class TestDefaultProviderFactories:
         first = _client()
         second = _client()
         factory.create_agent.side_effect = [first, second]
-        with (
-            patch("fido.gh_status.DefaultProviderFactory", return_value=factory),
-        ):
-            factories = _default_provider_factories(
-                _running_repo_configs_fn=lambda: [
-                    claude_cfg,
-                    copilot_cfg,
-                    duplicate_claude_cfg,
-                ],
-            )
-            assert [build() for build in factories] == [first, second]
+        factories = _default_provider_factories(
+            _running_repo_configs_fn=lambda: [
+                claude_cfg,
+                copilot_cfg,
+                duplicate_claude_cfg,
+            ],
+            _provider_factory_cls=lambda session_system_file: factory,
+        )
+        assert [build() for build in factories] == [first, second]
         factory.create_agent.assert_any_call(
             claude_cfg,
             work_dir=claude_cfg.work_dir,
@@ -286,14 +281,7 @@ class TestMain:
         def fake_set(msg: str, **kw: object) -> None:
             calls.append(msg)
 
-        import fido.gh_status
-
-        orig = fido.gh_status.set_gh_status
-        fido.gh_status.set_gh_status = fake_set
-        try:
-            main(["set", "hello", "world"], _GitHub=MagicMock)
-        finally:
-            fido.gh_status.set_gh_status = orig
+        main(["set", "hello", "world"], _GitHub=MagicMock, _set_gh_status=fake_set)
         assert calls == ["hello world"]
 
     def test_no_args(self) -> None:
@@ -314,10 +302,9 @@ class TestMain:
         def fake_set(msg: str, **kw: object) -> None:
             calls.append(msg)
 
-        with (
-            patch("sys.argv", ["fido-gh-status", "set", "from", "argv"]),
-            patch("fido.gh_status.set_gh_status", fake_set),
-        ):
-            main(_GitHub=MagicMock)
-
+        main(
+            _GitHub=MagicMock,
+            _set_gh_status=fake_set,
+            _get_argv=lambda: ["set", "from", "argv"],
+        )
         assert calls == ["from argv"]

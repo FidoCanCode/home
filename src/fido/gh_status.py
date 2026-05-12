@@ -46,6 +46,9 @@ _FALLBACK_MESSAGES = (
 def _default_provider_factories(
     *,
     _running_repo_configs_fn: Callable[[], list[RepoConfig]] = running_repo_configs,
+    _provider_factory_cls: Callable[
+        ..., DefaultProviderFactory
+    ] = DefaultProviderFactory,
 ) -> tuple[Callable[[], ProviderAgent], ...]:
     """Return provider factories for the providers configured on the live fido."""
 
@@ -53,7 +56,7 @@ def _default_provider_factories(
     if not repo_cfgs:
         raise RuntimeError("No running fido repo configs found")
 
-    provider_factory = DefaultProviderFactory(session_system_file=_PERSONA_PATH)
+    provider_factory = _provider_factory_cls(session_system_file=_PERSONA_PATH)
     factories: list[Callable[[], ProviderAgent]] = []
     seen_providers: set[object] = set()
     for repo_cfg in repo_cfgs:
@@ -84,9 +87,10 @@ def generate_persona_status(
     persona: str,
     *,
     provider: ProviderAgent | None = None,
+    _client_factory: Callable[[], ProviderAgent] = ClaudeClient,
 ) -> str:
     if provider is None:
-        provider = ClaudeClient()
+        provider = _client_factory()
     system = f"{persona}\n\n{_STATUS_SYSTEM}" if persona else _STATUS_SYSTEM
     return safe_voice_turn(
         provider,
@@ -103,9 +107,10 @@ def generate_persona_emoji(
     persona: str,
     *,
     provider: ProviderAgent | None = None,
+    _client_factory: Callable[[], ProviderAgent] = ClaudeClient,
 ) -> str:
     if provider is None:
-        provider = ClaudeClient()
+        provider = _client_factory()
     system = f"{persona}\n\n{_EMOJI_SYSTEM}" if persona else _EMOJI_SYSTEM
     result = provider.generate_status_emoji(
         f"Pick an emoji for this status: {status_text}",
@@ -125,6 +130,9 @@ def set_gh_status(
     provider: ProviderAgent | None = None,
     _gh: GitHub,
     _provider_factories: Sequence[Callable[[], ProviderAgent]] | None = None,
+    _default_factories_fn: Callable[
+        [], Sequence[Callable[[], ProviderAgent]]
+    ] = _default_provider_factories,
     _choice: Callable[[Sequence[str]], str] = random.choice,
 ) -> None:
     try:
@@ -135,7 +143,7 @@ def set_gh_status(
         providers = (provider,)
     else:
         provider_factories = (
-            _default_provider_factories()
+            _default_factories_fn()
             if _provider_factories is None
             else tuple(_provider_factories)
         )
@@ -156,12 +164,18 @@ def set_gh_status(
     _gh.set_user_status(_choice(_FALLBACK_MESSAGES), ":sleeping:", busy=True)
 
 
-def main(argv: list[str] | None = None, *, _GitHub: type[GitHub] = GitHub) -> None:
-    argv = sys.argv[1:] if argv is None else argv
+def main(
+    argv: list[str] | None = None,
+    *,
+    _GitHub: type[GitHub] = GitHub,
+    _set_gh_status: Callable[..., None] = set_gh_status,
+    _get_argv: Callable[[], list[str]] = lambda: sys.argv[1:],
+) -> None:
+    argv = _get_argv() if argv is None else argv
     if len(argv) < 2 or argv[0] != "set":
         print("Usage: fido-gh-status set <message>", file=sys.stderr)
         raise SystemExit(1)
-    set_gh_status(" ".join(argv[1:]), _gh=_GitHub())
+    _set_gh_status(" ".join(argv[1:]), _gh=_GitHub())
 
 
 if __name__ == "__main__":  # pragma: no cover
