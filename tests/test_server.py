@@ -2552,6 +2552,247 @@ class TestProcessActionInner:
             "owner/repo", "issues", 500, "confused"
         )
 
+    def test_eyes_reaction_posted_for_review_comment(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """review-comment action → eyes posted before triage begins (#1243)."""
+        action = Action(
+            prompt="review comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 101,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="please fix this",
+            is_bot=False,
+        )
+        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        handler.gh.add_reaction.assert_any_call("owner/repo", "pulls", 101, "eyes")
+
+    def test_eyes_reaction_posted_for_top_level_pr_comment(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """top-level PR comment action → eyes posted before triage begins (#1243)."""
+        action = Action(
+            prompt="issue comment",
+            thread={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 301,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "issues",
+            },
+            comment_body="any thoughts?",
+            is_bot=False,
+        )
+        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
+            return_value=("ANSWER", [])
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        handler.gh.add_reaction.assert_any_call("owner/repo", "issues", 301, "eyes")
+
+    def test_eyes_reaction_skipped_for_bot_action(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """is_bot=True → eyes reaction must not be posted."""
+        action = Action(
+            prompt="bot comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 201,
+                "url": "https://example.com",
+                "author": "somebot[bot]",
+                "comment_type": "pulls",
+            },
+            comment_body="automated feedback",
+            is_bot=True,
+        )
+        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        for call in handler.gh.add_reaction.call_args_list:
+            assert call.args[3] != "eyes", f"eyes was posted for bot action: {call}"
+
+    def test_eyes_reaction_skipped_for_non_comment_action(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """Non-comment webhook actions (no reply_to, no comment_body) → no reaction."""
+        action = Action(prompt="push event")
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        handler.gh.add_reaction.assert_not_called()
+
+    def test_eyes_reaction_failure_does_not_abort_handler(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """add_reaction failure for eyes must not abort the webhook handler."""
+        import requests
+
+        action = Action(
+            prompt="review comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 102,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="please fix",
+            is_bot=False,
+        )
+        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler.gh.add_reaction.side_effect = requests.RequestException("network down")
+        # Should not raise — eyes failure is best-effort.
+        handler._process_action_inner(action, repo_cfg, self._activity())
+
+    def test_eyes_removed_on_review_comment_dedup_skip(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """When _prepare_reply returns None (dedup skip), the eyes reaction is
+        removed so it doesn't linger on a comment that won't receive a reply."""
+        action = Action(
+            prompt="review comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 111,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="please fix",
+            is_bot=False,
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        # Simulate dedup skip: _prepare_reply returns None
+        with patch.object(handler, "_prepare_reply", return_value=None):
+            with patch(
+                "fido.server.SynthesisExecutor.remove_eyes_reaction"
+            ) as mock_remove:
+                handler._process_action_inner(action, repo_cfg, self._activity())
+        mock_remove.assert_called_once()
+
+    def test_eyes_removed_on_pr_comment_dedup_skip(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """When _prepare_reply returns None for a top-level PR comment (dedup skip),
+        the eyes reaction is removed."""
+        action = Action(
+            prompt="pr comment",
+            comment_body="please fix",
+            thread={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 222,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "issues",
+            },
+            is_bot=False,
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        with patch.object(handler, "_prepare_reply", return_value=None):
+            with patch(
+                "fido.server.SynthesisExecutor.remove_eyes_reaction"
+            ) as mock_remove:
+                handler._process_action_inner(action, repo_cfg, self._activity())
+        mock_remove.assert_called_once()
+
+    def test_eyes_removed_on_recoverable_exception(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """When a recoverable exception is raised during action processing, the
+        eyes reaction is removed before signalling the confused reaction."""
+        import requests
+
+        action = Action(
+            prompt="review comment",
+            reply_to={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 333,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            comment_body="please fix",
+            is_bot=False,
+        )
+        WebhookHandler._fn_reply_to_comment = MagicMock(
+            side_effect=requests.RequestException("network down")
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        remove_order: list[str] = []
+        with patch(
+            "fido.server.SynthesisExecutor.remove_eyes_reaction",
+            side_effect=lambda _t: remove_order.append("remove_eyes"),
+        ):
+            with patch.object(
+                handler,
+                "_signal_action_error",
+                side_effect=lambda _a: remove_order.append("signal_error"),
+            ):
+                # Recoverable exception — should not propagate
+                handler._process_action_inner(action, repo_cfg, self._activity())
+        # Eyes must be removed before the confused reaction is signalled
+        assert remove_order == ["remove_eyes", "signal_error"]
+
+    def test_eyes_reaction_posted_for_queued_comment_action(
+        self, cfg: Config, repo_cfg: RepoConfig
+    ) -> None:
+        """Queued comment actions (thread set, comment_body=None, preempts_worker=True)
+        get the immediate eyes reaction — the production shape from the dispatcher."""
+        action = Action(
+            prompt="Queued review comment on PR #1 by owner (human/owner)",
+            preempts_worker=True,
+            is_bot=False,
+            thread={
+                "repo": "owner/repo",
+                "pr": 1,
+                "comment_id": 444,
+                "url": "https://example.com",
+                "author": "owner",
+                "comment_type": "pulls",
+            },
+            # comment_body intentionally None — matches _queued_pr_comment_action shape
+        )
+        WebhookHandler._fn_launch_worker = MagicMock()
+        handler = self._handler(cfg)
+        handler._process_action_inner(action, repo_cfg, self._activity())
+        handler.gh.add_reaction.assert_any_call("owner/repo", "pulls", 444, "eyes")
+
+    def test_remove_eyes_best_effort_noop_with_missing_fields(
+        self, cfg: Config
+    ) -> None:
+        """_remove_eyes_best_effort is a no-op when repo or comment_id is absent."""
+        handler = self._handler(cfg)
+        # Missing repo — should not call remove_eyes_reaction at all.
+        with patch("fido.server.SynthesisExecutor.remove_eyes_reaction") as mock_remove:
+            handler._remove_eyes_best_effort(handler.gh, {"comment_id": 99})
+        mock_remove.assert_not_called()
+        # Missing comment_id — same.
+        with patch("fido.server.SynthesisExecutor.remove_eyes_reaction") as mock_remove:
+            handler._remove_eyes_best_effort(handler.gh, {"repo": "owner/repo"})
+        mock_remove.assert_not_called()
+
     def test_describe_action_handles_each_action_shape(self, cfg: Config) -> None:
         """Cover all branches of _describe_action."""
         handler = self._handler(cfg)
