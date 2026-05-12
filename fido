@@ -1078,9 +1078,6 @@ case "$command" in
   task)
     run_fido_module_image fido.cli "${@:2}"
     ;;
-  gh-status)
-    run_fido_module_image fido.gh_status "${@:2}"
-    ;;
   chat)
     shift
     run_host_chat "$@"
