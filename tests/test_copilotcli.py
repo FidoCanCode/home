@@ -28,6 +28,7 @@ from fido.copilotcli import (
     _combine_prompt,
     _CopilotACPClient,
     _is_cancel_sentinel,
+    _is_copilot_chatter_chunk,
     _is_copilot_quota_error,
     _is_line_limit_overrun_error,
     _normalize_model,
@@ -424,6 +425,104 @@ class TestStripCopilotChatter:
         )
         result = session.prompt("do the thing")
         assert result == "You're right, the fix is straightforward."
+
+
+class TestIsCopilotChatterChunk:
+    def test_info_chunk_is_chatter(self) -> None:
+        assert _is_copilot_chatter_chunk(
+            "Info: Request failed due to a transient API error. Retrying..."
+        )
+
+    def test_warning_chunk_is_chatter(self) -> None:
+        assert _is_copilot_chatter_chunk("Warning: degraded service")
+
+    def test_error_chunk_is_chatter(self) -> None:
+        assert _is_copilot_chatter_chunk("Error: connection reset")
+
+    def test_cancel_sentinel_is_not_chatter(self) -> None:
+        # The cancel sentinel must survive so _is_cancel_sentinel still fires.
+        assert not _is_copilot_chatter_chunk("Info: Operation cancelled by user")
+
+    def test_real_content_is_not_chatter(self) -> None:
+        assert not _is_copilot_chatter_chunk("You're right, I missed those details.")
+
+    def test_info_not_at_start_is_not_chatter(self) -> None:
+        # Only chunks that *start* with the prefix are diagnostic.
+        assert not _is_copilot_chatter_chunk("Here is some info: background")
+
+    def test_empty_string_is_not_chatter(self) -> None:
+        assert not _is_copilot_chatter_chunk("")
+
+
+class TestChunkLevelChatterFiltering:
+    def test_chatter_chunks_not_in_prompt_result(self, tmp_path: Path) -> None:
+        # Regression for #1216 (no-newline case): chatter chunks without
+        # trailing \n are filtered at the chunk level in record_session_update
+        # before they enter _prompt_chunks.
+        connection = FakeConnection(load_supported=True)
+
+        async def _prompt_with_chatter(prompt: list[object], session_id: str) -> object:
+            del prompt
+            assert connection.client is not None
+            runtime = connection.client._runtime
+            for chunk_text in [
+                "Info: Request failed due to a transient API error. Retrying...",
+                "Info: Request failed due to a transient API error. Retrying...",
+                "You're right, the fix is straightforward.",
+            ]:
+                runtime.record_session_update(
+                    session_id,
+                    SimpleNamespace(
+                        session_update="agent_message_chunk",
+                        content=SimpleNamespace(text=chunk_text),
+                    ),
+                )
+            return SimpleNamespace(stop_reason="end_turn")
+
+        connection.prompt = _prompt_with_chatter  # type: ignore[method-assign]
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=_spawn_factory(connection),
+        )
+        try:
+            session_id = runtime.ensure_session(None, None)
+            text, stop_reason, _ = runtime.prompt(session_id, "hello", None)
+            assert text == "You're right, the fix is straightforward."
+            assert stop_reason == "end_turn"
+        finally:
+            runtime.stop()
+
+    def test_cancel_sentinel_chunk_preserved(self, tmp_path: Path) -> None:
+        # The cancel sentinel must pass through chunk filtering so
+        # _is_cancel_sentinel can detect cancelled turns when stop_reason
+        # is not "cancelled" (#666).
+        connection = FakeConnection(load_supported=True)
+
+        async def _prompt_with_sentinel(
+            prompt: list[object], session_id: str
+        ) -> object:
+            del prompt
+            assert connection.client is not None
+            connection.client._runtime.record_session_update(
+                session_id,
+                SimpleNamespace(
+                    session_update="agent_message_chunk",
+                    content=SimpleNamespace(text="Info: Operation cancelled by user"),
+                ),
+            )
+            return SimpleNamespace(stop_reason="end_turn")
+
+        connection.prompt = _prompt_with_sentinel  # type: ignore[method-assign]
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=_spawn_factory(connection),
+        )
+        try:
+            session_id = runtime.ensure_session(None, None)
+            text, _, _ = runtime.prompt(session_id, "hello", None)
+            assert text == "Info: Operation cancelled by user"
+        finally:
+            runtime.stop()
 
 
 class TestTerminalManager:
