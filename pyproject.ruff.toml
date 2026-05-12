@@ -220,6 +220,7 @@ select = [
   "PT031",
   "PTH124",
   "PTH210",
+  "TID251",
   "W",
 ]
 # PLC2401 = "non-ASCII characters in identifiers" — guards against the
@@ -227,6 +228,15 @@ select = [
 # U+043E vs ``Rescope`` with Latin ``o`` U+006F) that bit us once and is
 # invisible to a human reader.
 ignore = ["E501"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# unittest.mock.patch overrides module-level names from outside, hides ownership,
+# and resists constructor-DI.  Use MagicMock or a hand-rolled fake passed at
+# construction time instead.  See CLAUDE.md "OO + constructor-DI architecture"
+# and "Migration smells".
+"unittest.mock.patch".msg = "Use constructor-DI: pass a MagicMock or hand-rolled fake at construction time. See CLAUDE.md 'OO + constructor-DI architecture' and 'Migration smells'."
+"unittest.mock.patch.object".msg = "Same — use constructor-DI."
+"unittest.mock.patch.dict".msg = "Same — use constructor-DI or a fixture."
 
 [tool.ruff.lint.per-file-ignores]
 # Generated Rocq extraction output is format-checked by CI, but lint has
@@ -238,3 +248,24 @@ ignore = ["E501"]
   "ANN001", "ANN002", "ANN003", "ANN201", "ANN202", "ANN204", "ANN206", "ANN401",
   "E741", "F401", "F403", "F405", "F541", "F811", "F821", "F841", "I001",
 ]
+# TID251 (banned unittest.mock.patch) — migration in progress, #1222.
+# Each file below is a temporary exemption being retired one PR at a time.
+# Remove the entry for a file once its patch calls are replaced with constructor-DI.
+# Do NOT add new files here; fix them properly instead.
+"tests/test___main__.py" = ["TID251"]
+"tests/test_claude.py" = ["TID251"]
+"tests/test_color.py" = ["TID251"]
+"tests/test_coverage_fills.py" = ["TID251"]
+"tests/test_events.py" = ["TID251"]
+"tests/test_gh_status.py" = ["TID251"]
+"tests/test_github.py" = ["TID251"]
+"tests/test_harness_commit.py" = ["TID251"]
+"tests/test_infra.py" = ["TID251"]
+"tests/test_main.py" = ["TID251"]
+"tests/test_server.py" = ["TID251"]
+"tests/test_status.py" = ["TID251"]
+"tests/test_sync_tasks_cli.py" = ["TID251"]
+"tests/test_tasks.py" = ["TID251"]
+"tests/test_tests_main.py" = ["TID251"]
+"tests/test_turn_outcome.py" = ["TID251"]
+"tests/test_worker.py" = ["TID251"]
