@@ -1153,6 +1153,42 @@ class ClaudeSession(OwnedSession):
                 tid,
                 time.monotonic() - t_start,
             )
+            # Defensive cleanup on acquire (#1670): if a prior turn left
+            # the FSM in an in-flight state — ``Sending`` /
+            # ``AwaitingReply`` / ``Draining`` — recover (respawn the
+            # subprocess) before we Send.  An early return from
+            # ``consume_until_result`` (force-release mid-turn, idle
+            # timeout, network drop) can exit the ``with self:`` block
+            # without draining all events; the next acquirer would
+            # otherwise hit the FSM's ``Send rejected in state X``
+            # assertion and crash the worker thread.
+            #
+            # ``_stream_reset`` alone is unsafe here because
+            # ``OwnedSession.force_release()`` advances ownership before
+            # ``_on_force_release`` kills the old process, so the prior
+            # turn's subprocess may still be alive — silently flipping
+            # the FSM to Idle and writing a new user message would
+            # corrupt the protocol on a still-running prior turn.  A
+            # respawn kills the old subprocess and starts a clean one.
+            #
+            # ``Cancelled`` is *not* a leak: it's the steady state after
+            # a clean preemption and ``send()`` already handles
+            # ``Cancelled → Idle`` via ``TurnReturn`` (line 891).  We
+            # only intervene for the truly-in-flight states.
+            with self._stream_lock:
+                stale_state = self._stream_state
+                in_flight = isinstance(
+                    stale_state,
+                    stream_fsm.Sending | stream_fsm.AwaitingReply | stream_fsm.Draining,
+                )
+            if in_flight:
+                log.warning(
+                    "ClaudeSession[%s]: stream FSM was %s on prompt acquire "
+                    "— respawning subprocess to clear leaked in-flight turn",
+                    self._repo_name or "?",
+                    type(stale_state).__name__,
+                )
+                self.recover()
             if model is not None:
                 self.switch_model(model)
             self.switch_tools(allowed_tools)
