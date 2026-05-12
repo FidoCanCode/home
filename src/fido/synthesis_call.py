@@ -47,14 +47,14 @@ _RETRY_SUFFIX = (
 
 #: Matches future-tense commitment phrases (case-insensitive).
 _PROMISE_RE: re.Pattern[str] = re.compile(
-    r"\b(?:I'll|I will|I'm going to|I am going to)\b",
+    r"\b(?:I['\u2019]ll|I will|I['\u2019]m going to|I am going to)\b",
     re.IGNORECASE,
 )
 
 #: Matches negations that cancel a promise within the same sentence —
 #: e.g. "I will not fix this" or "I'll not do that".
 _NEGATION_RE: re.Pattern[str] = re.compile(
-    r"\b(?:will not|won't|not going to|I'll not)\b",
+    r"\b(?:will not|won['\u2019]t|not going to|I['\u2019]ll not)\b",
     re.IGNORECASE,
 )
 

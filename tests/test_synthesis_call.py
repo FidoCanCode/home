@@ -596,6 +596,23 @@ class TestDetectUnfulfilledPromises:
         assert result is not None
         assert "I'll" in result
 
+    # Edge case: Unicode right single quotation mark (U+2019)
+    def test_detects_curly_ill(self) -> None:
+        result = detect_unfulfilled_promises("I\u2019ll fix this.")
+        assert result is not None
+
+    def test_detects_curly_im_going_to(self) -> None:
+        result = detect_unfulfilled_promises("I\u2019m going to update the tests.")
+        assert result is not None
+
+    def test_curly_wont_not_detected(self) -> None:
+        result = detect_unfulfilled_promises("I won\u2019t make changes here.")
+        assert result is None
+
+    def test_curly_ill_not_not_detected(self) -> None:
+        result = detect_unfulfilled_promises("I\u2019ll not be adding that feature.")
+        assert result is None
+
 
 # ---------------------------------------------------------------------------
 # promote_answer_to_act
@@ -666,6 +683,15 @@ class TestPromoteAnswerToAct:
         promoted = promote_answer_to_act(response)
         assert promoted.change_request
         assert promoted.change_request.strip()
+
+    def test_promotes_curly_apostrophe_promise(self) -> None:
+        response = CommentResponse(
+            reasoning="thought",
+            reply_text="I\u2019ll update the docs.",
+        )
+        promoted = promote_answer_to_act(response)
+        assert promoted.change_request is not None
+        assert promoted.reply_text == response.reply_text
 
 
 # ---------------------------------------------------------------------------
