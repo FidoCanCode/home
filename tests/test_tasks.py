@@ -12,6 +12,7 @@ from fido.tasks import (
     Tasks,
     _apply_reorder,
     _assert_rescope_matches_oracle,
+    _build_task_list_snapshot,
     _compute_thread_changes,
     _find_duplicate_titles,
     _format_work_queue,
@@ -700,6 +701,68 @@ class TestUnblockTasks:
         assert Tasks(tmp_path).unblock_tasks() == 0
 
 
+# ── _build_task_list_snapshot ─────────────────────────────────────────────────
+
+
+class TestBuildTaskListSnapshot:
+    """The :class:`TaskListSnapshot` projection published from
+    :meth:`Tasks.on_mutate` after every tasks.json write (#1696)."""
+
+    def test_counts_pending_and_completed(self) -> None:
+        snap = _build_task_list_snapshot(
+            [
+                {"status": "pending", "title": "a"},
+                {"status": "pending", "title": "b"},
+                {"status": "completed", "title": "c"},
+                {"status": "in_progress", "title": "d"},
+            ]
+        )
+        assert snap.pending_task_count == 2
+        assert snap.completed_task_count == 1
+
+    def test_current_task_prefers_in_progress(self) -> None:
+        """When something is in_progress, ``current_task`` is its title and
+        ``task_number`` points at its 1-based position in non-completed."""
+        snap = _build_task_list_snapshot(
+            [
+                {"status": "completed", "title": "done"},
+                {"status": "pending", "title": "next"},
+                {"status": "in_progress", "title": "active"},
+                {"status": "pending", "title": "later"},
+            ]
+        )
+        assert snap.current_task == "active"
+        # non-completed = [next, active, later]; active is index 2.
+        assert snap.task_number == 2
+        assert snap.task_total == 3
+
+    def test_current_task_falls_back_to_first_pending(self) -> None:
+        snap = _build_task_list_snapshot(
+            [
+                {"status": "completed", "title": "done"},
+                {"status": "pending", "title": "do this"},
+                {"status": "pending", "title": "then that"},
+            ]
+        )
+        assert snap.current_task == "do this"
+        assert snap.task_number == 1
+        assert snap.task_total == 2
+
+    def test_all_completed_yields_zero_counters(self) -> None:
+        """Per #1696, the absent ``current_task`` is the empty string and
+        the absent ``task_number`` / ``task_total`` are 0 — uniform
+        zero sentinels, no None on the SCADA snapshot."""
+        snap = _build_task_list_snapshot(
+            [
+                {"status": "completed", "title": "a"},
+                {"status": "completed", "title": "b"},
+            ]
+        )
+        assert snap.current_task == ""
+        assert snap.task_number == 0
+        assert snap.task_total == 0
+
+
 # ── _parse_reorder_response ───────────────────────────────────────────────────
 
 
@@ -1214,7 +1277,7 @@ class TestReorderTasks:
 
     def test_skips_when_no_tasks(self, tmp_path: Path) -> None:
         client = _client("")
-        reorder_tasks(tmp_path, "", agent=client)
+        reorder_tasks(Tasks(tmp_path), "", agent=client)
         client.run_turn.assert_not_called()
 
     def test_creates_default_client_when_none(self, tmp_path: Path) -> None:
@@ -1225,19 +1288,19 @@ class TestReorderTasks:
             "fido.tasks.ClaudeClient",
             return_value=_client(""),
         ) as mock_cls:
-            reorder_tasks(tmp_path, "")
+            reorder_tasks(Tasks(tmp_path), "")
             mock_cls.assert_called_once_with()
 
     def test_skips_on_empty_opus_response(self, tmp_path: Path) -> None:
         self._add(tmp_path, "Task A")
         result_before = Tasks(tmp_path).list()
-        reorder_tasks(tmp_path, "", agent=_client(""))
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(""))
         assert Tasks(tmp_path).list() == result_before
 
     def test_skips_on_unparseable_response(self, tmp_path: Path) -> None:
         self._add(tmp_path, "Task A")
         result_before = Tasks(tmp_path).list()
-        reorder_tasks(tmp_path, "", agent=_client("not json"))
+        reorder_tasks(Tasks(tmp_path), "", agent=_client("not json"))
         assert Tasks(tmp_path).list() == result_before
 
     def test_preserves_snapshot_order_for_non_ci_tasks(self, tmp_path: Path) -> None:
@@ -1250,7 +1313,7 @@ class TestReorderTasks:
                 {"id": t1["id"], "title": "First", "description": ""},
             ]
         )
-        reorder_tasks(tmp_path, "", agent=_client(raw))
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
         result = Tasks(tmp_path).list()
         assert result[0]["id"] == t1["id"]
         assert result[1]["id"] == t2["id"]
@@ -1260,7 +1323,7 @@ class TestReorderTasks:
         raw = self._response(
             [{"id": t1["id"], "title": "New title", "description": ""}]
         )
-        reorder_tasks(tmp_path, "", agent=_client(raw))
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
         assert Tasks(tmp_path).list()[0]["title"] == "Old title"
 
     def test_keeps_task_opus_excludes(self, tmp_path: Path) -> None:
@@ -1269,7 +1332,7 @@ class TestReorderTasks:
         t1 = self._add(tmp_path, "Keep")
         t2 = self._add(tmp_path, "Still pending")
         raw = self._response([{"id": t1["id"], "title": "Keep", "description": ""}])
-        reorder_tasks(tmp_path, "", agent=_client(raw))
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
         result = Tasks(tmp_path).list()
         task2 = next(t for t in result if t["id"] == t2["id"])
         assert task2["status"] == "pending"
@@ -1280,7 +1343,7 @@ class TestReorderTasks:
         Tasks(tmp_path).complete_by_id(t1["id"])
         t2 = self._add(tmp_path, "Pending")
         raw = self._response([{"id": t2["id"], "title": "Pending", "description": ""}])
-        reorder_tasks(tmp_path, "", agent=_client(raw))
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
         result = Tasks(tmp_path).list()
         statuses = {t["id"]: t["status"] for t in result}
         assert statuses[t1["id"]] == "completed"
@@ -1292,7 +1355,7 @@ class TestReorderTasks:
         mock_prompts = MagicMock(spec=Prompts)
         mock_prompts.rescope_prompt.return_value = "prompt text"
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "feat: added thing",
             agent=_client(""),
             prompts=mock_prompts,
@@ -1327,7 +1390,7 @@ class TestReorderTasks:
 
         client = _client()
         client.run_turn.side_effect = slow_run_turn
-        reorder_tasks(tmp_path, "", agent=client)
+        reorder_tasks(Tasks(tmp_path), "", agent=client)
         result = Tasks(tmp_path).list()
         ids = [t["id"] for t in result]
         assert new_task_id[0] in ids  # not silently dropped
@@ -1357,7 +1420,7 @@ class TestReorderTasks:
             [{"id": t2["id"], "title": "Keep this", "description": ""}]
         )
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "",
             agent=_client(raw),
             _on_changes=lambda changes: received.extend(changes),
@@ -1390,7 +1453,7 @@ class TestReorderTasks:
             [{"id": t1["id"], "title": "Changed title", "description": "new"}]
         )
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "",
             agent=_client(raw),
             _on_changes=lambda changes: received.extend(changes),
@@ -1411,7 +1474,7 @@ class TestReorderTasks:
             [{"id": t1["id"], "title": "Spec task", "description": ""}]
         )
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "",
             agent=_client(raw),
             _on_changes=lambda changes: received.extend(changes),
@@ -1428,7 +1491,7 @@ class TestReorderTasks:
         raw = self._response(
             [{"id": t1["id"], "title": "Thread task", "description": "rewritten"}]
         )
-        reorder_tasks(tmp_path, "", agent=_client(raw), _on_changes=None)
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw), _on_changes=None)
         task1 = next(t for t in Tasks(tmp_path).list() if t["id"] == t1["id"])
         assert task1["description"] == "rewritten"
 
@@ -1448,7 +1511,7 @@ class TestReorderTasks:
         )
         affected: list[int] = []
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "",
             agent=_client(raw),
             _on_inprogress_affected=lambda _task_id: affected.append(1),
@@ -1467,7 +1530,7 @@ class TestReorderTasks:
         )
         affected: list[int] = []
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "",
             agent=_client(raw),
             _on_inprogress_affected=lambda _task_id: affected.append(1),
@@ -1489,7 +1552,7 @@ class TestReorderTasks:
         )
         affected: list[int] = []
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "",
             agent=_client(raw),
             _on_inprogress_affected=lambda _task_id: affected.append(1),
@@ -1509,7 +1572,7 @@ class TestReorderTasks:
         )
         affected: list[int] = []
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "",
             agent=_client(raw),
             _on_inprogress_affected=lambda _task_id: affected.append(1),
@@ -1531,7 +1594,7 @@ class TestReorderTasks:
             ]
         )
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "",
             agent=_client(raw),
             _on_inprogress_affected=None,
@@ -1545,7 +1608,7 @@ class TestReorderTasks:
         raw = self._response([{"id": t1["id"], "title": "Task A", "description": ""}])
         done_calls: list = []
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "",
             agent=_client(raw),
             _on_done=lambda: done_calls.append(1),
@@ -1555,7 +1618,7 @@ class TestReorderTasks:
     def test_on_done_not_called_when_no_tasks(self, tmp_path: Path) -> None:
         done_calls: list = []
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "",
             agent=_client("{}"),
             _on_done=lambda: done_calls.append(1),
@@ -1566,7 +1629,7 @@ class TestReorderTasks:
         self._add(tmp_path, "Task A")
         done_calls: list = []
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "",
             agent=_client(""),
             _on_done=lambda: done_calls.append(1),
@@ -1577,7 +1640,7 @@ class TestReorderTasks:
         self._add(tmp_path, "Task A")
         done_calls: list = []
         reorder_tasks(
-            tmp_path,
+            Tasks(tmp_path),
             "",
             agent=_client("not json at all"),
             _on_done=lambda: done_calls.append(1),
@@ -1606,7 +1669,7 @@ class TestReorderTasks:
         mock_prompts = MagicMock(spec=Prompts)
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
-        reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
         mock_prompts.rescope_duplicate_nudge.assert_called_once_with(
             ["Shared name"], attempts_remaining=2
         )
@@ -1632,7 +1695,7 @@ class TestReorderTasks:
         mock_prompts = MagicMock(spec=Prompts)
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
-        reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
         # All 3 nudges fired (1 initial + 3 nudge calls = 4 total)
         assert client.run_turn.call_count == 4
         tasks = Tasks(tmp_path).list()
@@ -1655,7 +1718,7 @@ class TestReorderTasks:
         mock_prompts = MagicMock(spec=Prompts)
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
-        reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
         # Nudge calls: attempts_remaining 2 → 1 → 0
         assert mock_prompts.rescope_duplicate_nudge.call_count == 3
         calls = mock_prompts.rescope_duplicate_nudge.call_args_list
@@ -1679,7 +1742,7 @@ class TestReorderTasks:
         mock_prompts = MagicMock(spec=Prompts)
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
-        reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
         tasks = Tasks(tmp_path).list()
         assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Alpha"
         assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
@@ -1700,7 +1763,7 @@ class TestReorderTasks:
         mock_prompts = MagicMock(spec=Prompts)
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
-        reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
         tasks = Tasks(tmp_path).list()
         assert next(t for t in tasks if t["id"] == t1["id"])["title"] == "Alpha"
         assert next(t for t in tasks if t["id"] == t2["id"])["title"] == "Beta"
@@ -1717,7 +1780,7 @@ class TestReorderTasks:
         client = _client(raw)
         mock_prompts = MagicMock(spec=Prompts)
         mock_prompts.rescope_prompt.return_value = "prompt"
-        reorder_tasks(tmp_path, "", agent=client, prompts=mock_prompts)
+        reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
         mock_prompts.rescope_duplicate_nudge.assert_not_called()
         assert client.run_turn.call_count == 1
 
