@@ -120,19 +120,23 @@ class SessionLockWatchdog:
             outstanding = session.outstanding_send_at
             if outstanding is None:
                 continue
+            # Require a current holder before evicting (#1710 codex P2).
+            # ``_fsm_release`` clears ``outstanding_send_at`` on every
+            # release path, but if a stale armed timestamp ever survived
+            # (race with concurrent acquire, future code change), this
+            # gate keeps the watchdog from evicting a freshly-acquired
+            # holder based on an aborted predecessor's silence.
+            talker = get_talker(repo_name)
+            if talker is None:
+                continue
             silent_for = (talker_now() - outstanding).total_seconds()
             if silent_for <= self.no_reply_seconds:
                 continue
-            talker = get_talker(repo_name)
-            label = (
-                f"tid={talker.thread_id} kind={talker.kind}, "
-                f"description={talker.description!r}"
-                if talker is not None
-                else "(no talker registered)"
-            )
             reason = (
                 f"no reply for {silent_for:.0f}s "
-                f"(deadline {self.no_reply_seconds:.0f}s, holder {label})"
+                f"(deadline {self.no_reply_seconds:.0f}s, "
+                f"holder tid={talker.thread_id} kind={talker.kind}, "
+                f"description={talker.description!r})"
             )
             log.warning(
                 "session-lock-watchdog[%s]: outstanding send past deadline — %s",

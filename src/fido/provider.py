@@ -941,6 +941,15 @@ class OwnedSession:
                     f"{type(ev).__name__} rejected in state "
                     f"{type(self._fsm_state).__name__}"
                 )
+            # Disarm the no-reply watchdog clock as part of releasing
+            # the lock.  Tying ``outstanding_send_at`` to the lock
+            # lifecycle means any release path — orderly exit, the
+            # exception path inside :meth:`prompt`, force_release after
+            # wedge — leaves the session "no-send-pending" so the
+            # watchdog can't evict a stale armed timestamp inherited
+            # from an aborted turn (#1710 codex P2).
+            with self._outstanding_send_lock:
+                self._outstanding_send_at = None
             if self._handler_queue:
                 # Hand ownership directly to the next waiting handler.
                 waiter = self._handler_queue.pop(0)

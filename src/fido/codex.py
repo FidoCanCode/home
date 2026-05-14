@@ -890,6 +890,13 @@ class CodexSession(OwnedSession):
             except TimeoutError:
                 continue
             idle_deadline.reset()
+            # Disarm the no-reply watchdog clock on every inbound turn
+            # event (turn/completed, item/completed, tool-only progress
+            # notifications, error frames, …), not just agent_message
+            # text — any data from the app-server proves the turn isn't
+            # wedged (#1710 codex P1).  The agent_message branch below
+            # only counts user-visible text for the metrics counters.
+            self._mark_received()
             method = notification.get("method")
             params = notification["params"]
             if method == "error":
@@ -910,7 +917,6 @@ class CodexSession(OwnedSession):
                     final_text = text
                     with self._state_lock:
                         self._received_count += 1
-                    self._mark_received()
                     self._notify_snapshot_publisher()
             completed = (
                 _extract_completed_turn(params) if method == "turn/completed" else None

@@ -432,6 +432,48 @@ def test_mark_received_clears_outstanding_send() -> None:
     assert session.outstanding_send_at is None
 
 
+def test_no_eviction_when_outstanding_set_but_no_talker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stale ``outstanding_send_at`` without a current talker must not
+    fire eviction (#1710 codex P2).  The release path normally clears
+    the timestamp, but this gate is the safety net for any future
+    race where a stale armed value survives lock release."""
+    repo_name = "FidoCanCode/home"
+    sent_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    session = _RecordingSession(repo_name, outstanding_send_at=sent_at)
+    registry = _StubRegistry({repo_name: session})
+    # No register_talker call — get_talker(repo_name) returns None.
+    monkeypatch.setattr(
+        session_lock_watchdog,
+        "talker_now",
+        lambda: sent_at + timedelta(seconds=3600),
+    )
+    watchdog = SessionLockWatchdog(
+        registry,  # type: ignore[arg-type]
+        {repo_name: _repo_config(repo_name)},
+        no_reply_seconds=60.0,
+    )
+    watchdog.run()
+    assert session.force_release_calls == [], (
+        "watchdog must not evict when no talker is currently registered"
+    )
+
+
+def test_release_clears_outstanding_send_at(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_fsm_release`` clears ``outstanding_send_at`` so a stale armed
+    timestamp from an aborted turn never survives lock release (#1710
+    codex P2)."""
+    # Build a real OwnedSession with the FSM primed for a worker hold.
+    session = _RecordingSession("FidoCanCode/home")
+    session._mark_send_outstanding()  # noqa: SLF001
+    assert session.outstanding_send_at is not None
+    # Drive the FSM to OwnedByWorker so _fsm_release accepts WorkerRelease.
+    session._fsm_acquire_worker()  # noqa: SLF001
+    session._fsm_release()  # noqa: SLF001
+    assert session.outstanding_send_at is None, "release must disarm the no-reply clock"
+
+
 def test_multi_send_restarts_no_reply_clock() -> None:
     """Calling ``_mark_send_outstanding`` twice in a row resets the
     clock — only the most recent unanswered send matters."""
