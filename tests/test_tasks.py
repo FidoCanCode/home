@@ -1243,6 +1243,28 @@ class TestApplyReorder:
             src = next(t for t in result if t["id"] == src_id)
             assert src["status"] == str(TaskStatus.COMPLETED)
 
+    def test_merge_with_unhashable_source_does_not_crash(self) -> None:
+        # codex on #1738: _apply_reorder must not raise TypeError when
+        # called with a malformed merge_sources list (e.g. nested list /
+        # dict).  In production the validator rejects this atomically;
+        # tests bypass the validator, so the adapter has its own
+        # isinstance(str) guard before the dict membership check.
+        current = [self._t("a", "Task A"), self._t("b", "Task B")]
+        items = [
+            {
+                "id": "a",
+                "title": "Merged",
+                "merge_sources": [["nested"], {"d": 1}, "b"],
+            },
+            {"id": "b", "title": "B", "status": "completed"},
+        ]
+        # Should fall through to the merge with only the valid source.
+        result = _apply_reorder(current, items)
+        target = next(t for t in result if t["id"] == "a")
+        b_completed = next(t for t in result if t["id"] == "b")
+        assert target["title"] == "Merged"
+        assert b_completed["status"] == str(TaskStatus.COMPLETED)
+
     def test_merge_uses_oracle_predicate_to_prove_no_lineage_lost(self) -> None:
         # The Rocq model's merge_preserves_source_lineage predicate is
         # extracted to Python; check it returns True after a real merge.

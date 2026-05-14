@@ -198,10 +198,16 @@ def _merge_source_oracle_ids(
     raw = item.get("merge_sources")
     if not isinstance(raw, list) or not raw:
         return []
-    # _validate_rescope_batch already rejects unknown ids, self-targeting,
+    # _validate_rescope_batch rejects unknown ids, self-targeting,
     # non-string entries, and duplicates atomically before this runs in
-    # production; trust the validator and just look up oracle ids.
-    return [ids_by_task_id[src] for src in raw if src in ids_by_task_id]
+    # production.  The isinstance(str) guard is a thin safety net for
+    # tests that exercise _apply_reorder directly: dict membership on a
+    # non-hashable value (e.g. a nested list) would raise TypeError.
+    return [
+        ids_by_task_id[src]
+        for src in raw
+        if isinstance(src, str) and src in ids_by_task_id
+    ]
 
 
 def _is_valid_anchor_id(value: object) -> bool:
