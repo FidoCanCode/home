@@ -1953,6 +1953,21 @@ class TestValidateRescopeBatch:
             "merging into a completed task is contradictory" in e for e in errors
         )
 
+    def test_same_source_into_multiple_targets_is_rejected(self) -> None:
+        # codex Medium on #1738: a source feeding multiple targets
+        # duplicates its lineage into each, which is split/rebuild
+        # semantics — not a merge.  Split lands under #1718.  This leaf
+        # rejects the contradictory shape: each source may merge into
+        # at most one target.
+        current = [self._t("a"), self._t("b"), self._t("c")]
+        items = [
+            {"id": "a", "title": "A", "merge_sources": ["c"]},
+            {"id": "b", "title": "B", "merge_sources": ["c"]},
+            {"id": "c", "title": "C", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any("may merge into at most one target" in e for e in errors)
+
     def test_empty_merge_sources_on_completed_target_is_harmless(self) -> None:
         # codex on #1738 (low): an empty merge_sources is the
         # documented "no merge" sentinel and shouldn't be rejected on a

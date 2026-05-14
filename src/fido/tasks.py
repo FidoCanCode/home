@@ -1173,7 +1173,15 @@ def _validate_rescope_batch(
     # invariant still holds (each source needs its own CompleteTask op).
     # Additionally, if a thread-bearing source feeds a non-thread
     # target, the merge would silently drop the source's comment lineage
-    # at materialization time (codex P1 on #1738).
+    # at materialization time (codex P1 on #1738).  And each source can
+    # be consumed by at most one merge target — feeding the same source
+    # into multiple targets duplicates its lineage instead of merging it
+    # (split/rebuild semantics, deferred to #1718; codex Medium on
+    # #1738).
+    source_to_targets: dict[str, list[str]] = {}
+    for _index, target_id, sources in merge_targets:
+        for source in sources:
+            source_to_targets.setdefault(source, []).append(target_id)
     for index, target_id, sources in merge_targets:
         target_has_thread = target_id in thread_bearing_ids
         for source in sources:
@@ -1188,6 +1196,14 @@ def _validate_rescope_batch(
                     f"item[{index}].merge_sources={source!r}: thread source "
                     f"into non-thread target {target_id!r} would drop its "
                     "comment lineage on disk"
+                )
+            other_targets = [t for t in source_to_targets[source] if t != target_id]
+            if other_targets:
+                errors.append(
+                    f"item[{index}].merge_sources={source!r}: source is also "
+                    f"merged into {other_targets!r}; each source may merge "
+                    "into at most one target (split/rebuild semantics belong "
+                    "to a later leaf, not this one)"
                 )
 
     return errors
