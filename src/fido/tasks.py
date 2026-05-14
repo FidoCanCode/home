@@ -1086,6 +1086,15 @@ def _validate_rescope_batch(
     thread_bearing_ids = {
         t["id"] for t in current if isinstance(t.get("thread"), dict) and "id" in t
     }
+    # Tasks already completed on disk: a merge into one of these would
+    # be silently dropped by _rescope_releases_for_oracle (which skips
+    # completed snapshot tasks) while _merge_source_ids would still
+    # suppress the source's completion notification (codex on #1738).
+    currently_completed_ids = {
+        t["id"]
+        for t in current
+        if "id" in t and t.get("status") == str(TaskStatus.COMPLETED)
+    }
     seen_ids: set[str] = set()
     explicitly_completed_ids: set[str] = set()
     merge_targets: list[tuple[int, str, list[str]]] = []
@@ -1135,28 +1144,34 @@ def _validate_rescope_batch(
                     f"item[{index}].merge_sources: must be a list, "
                     f"got {type(merge_sources).__name__}"
                 )
-            elif merge_sources and item.get("status") == str(TaskStatus.COMPLETED):
-                # codex on #1738: explicit-completion precedence (#1716)
-                # wins over merge in _rescope_releases_for_oracle, so a
-                # batch with both ``status="completed"`` and a NON-EMPTY
-                # ``merge_sources`` on the same target emits CompleteTask
-                # and silently drops the merge.  But _merge_source_ids()
-                # still reads the raw payload and treats sources as
-                # merged, so their completion notifications get
-                # suppressed too — the source tasks vanish from
-                # reply-back without lineage actually being preserved
-                # anywhere.  Rather than thread the emitted ops through
-                # the suppression path, reject the contradictory shape
-                # at the validator: completing the target means there is
-                # no pending work to absorb merged sources.  An empty
-                # ``merge_sources`` is the documented "no merge"
-                # sentinel (_merge_source_oracle_ids returns []) and is
-                # harmless on a completed target — don't reject.
+            elif merge_sources and (
+                item.get("status") == str(TaskStatus.COMPLETED)
+                or item_id in currently_completed_ids
+            ):
+                # codex on #1738: a non-empty merge_sources is silently
+                # dropped two ways and both leave the source vanished
+                # without lineage preserved:
+                #
+                # 1. Item carries status="completed" too — explicit-
+                #    completion precedence (#1716) wins, MergeTasks
+                #    never emitted, but _merge_source_ids still
+                #    suppresses the source's completion notification.
+                # 2. Target is already completed on disk —
+                #    _rescope_releases_for_oracle skips completed
+                #    snapshot tasks entirely, so MergeTasks again
+                #    never emitted with the same suppressed-
+                #    notification result.
+                #
+                # Reject both shapes at the validator: completing the
+                # target means there is no pending work to absorb
+                # merged sources.  Empty ``merge_sources`` is the
+                # documented "no merge" sentinel and is harmless.
                 errors.append(
                     f"item[{index}].merge_sources on {item_id!r}: target "
-                    'is also marked status="completed"; merging into a '
-                    "completed task is contradictory (CompleteTask wins "
-                    "over MergeTasks in the reducer; no merge would run)"
+                    "is completed (either via this batch or already on "
+                    "disk); merging into a completed task is contradictory "
+                    "(no MergeTasks would run; the source's lineage would "
+                    "be silently lost)"
                 )
             else:
                 source_strs: list[str] = []

@@ -1950,7 +1950,9 @@ class TestValidateRescopeBatch:
         ]
         errors = _validate_rescope_batch(current, items)
         assert any(
-            "merging into a completed task is contradictory" in e for e in errors
+            "merging into a completed task is contradictory" in e
+            and "via this batch" in e
+            for e in errors
         )
 
     def test_merge_sources_on_null_id_target_is_rejected(self) -> None:
@@ -1993,6 +1995,28 @@ class TestValidateRescopeBatch:
         ]
         errors = _validate_rescope_batch(current, items)
         assert any("may merge into at most one target" in e for e in errors)
+
+    def test_merge_into_already_completed_target_on_disk_is_rejected(
+        self,
+    ) -> None:
+        # codex on #1738: even when the item doesn't restate
+        # status="completed", merging into a target whose CURRENT
+        # status is already COMPLETED gets silently dropped by
+        # _rescope_releases_for_oracle (it skips completed snapshot
+        # tasks) — but _merge_source_ids still suppresses the source's
+        # completion notification.  Reject the shape at the validator.
+        target = self._t("target")
+        target["status"] = "completed"
+        items = [
+            {"id": "target", "title": "T", "merge_sources": ["source"]},
+            {"id": "source", "title": "S", "status": "completed"},
+        ]
+        current = [target, self._t("source")]
+        errors = _validate_rescope_batch(current, items)
+        assert any(
+            "merging into a completed task is contradictory" in e and "already on" in e
+            for e in errors
+        )
 
     def test_empty_merge_sources_on_completed_target_is_harmless(self) -> None:
         # codex on #1738 (low): an empty merge_sources is the
