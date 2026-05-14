@@ -28,6 +28,7 @@ from fido.tasks import (
     _task_source_comment_for_oracle,
     _task_status_for_oracle,
     _task_store_for_oracle,
+    _validate_rescope_batch,
     reorder_tasks,
     review_thread_for_auto_resolve_oracle,
 )
@@ -1494,6 +1495,88 @@ class TestFindDuplicateTitles:
         assert _find_duplicate_titles(items, existing_by_id) == ["Alpha"]
 
 
+# ── _validate_rescope_batch ───────────────────────────────────────────────────
+
+
+class TestValidateRescopeBatch:
+    """#1715: rescope batch validation runs before any commit.  Errors
+    reject the whole batch atomically — partial commits would leave
+    tasks.json in a state Opus didn't propose."""
+
+    def _t(self, task_id: str, title: str = "") -> dict:
+        return {
+            "id": task_id,
+            "title": title,
+            "type": "spec",
+            "status": "pending",
+            "description": "",
+        }
+
+    def test_empty_batch_is_valid(self) -> None:
+        assert _validate_rescope_batch([self._t("1")], []) == []
+
+    def test_known_id_with_changes_is_valid(self) -> None:
+        current = [self._t("1", "A")]
+        items = [{"id": "1", "title": "A renamed", "description": "x"}]
+        assert _validate_rescope_batch(current, items) == []
+
+    def test_null_id_is_treated_as_new_task_not_rejected(self) -> None:
+        current = [self._t("1")]
+        items = [{"id": None, "title": "Brand new", "description": ""}]
+        assert _validate_rescope_batch(current, items) == []
+
+    def test_unknown_source_id_is_rejected(self) -> None:
+        current = [self._t("1")]
+        items = [{"id": "999", "title": "Hallucinated"}]
+        errors = _validate_rescope_batch(current, items)
+        assert len(errors) == 1
+        assert "999" in errors[0]
+        assert "unknown source id" in errors[0]
+
+    def test_duplicate_item_id_is_rejected(self) -> None:
+        current = [self._t("1")]
+        items = [
+            {"id": "1", "title": "first"},
+            {"id": "1", "title": "second"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert len(errors) == 1
+        assert "duplicate" in errors[0]
+
+    def test_blank_id_is_rejected(self) -> None:
+        current = [self._t("1")]
+        items = [{"id": "", "title": "blank id"}]
+        errors = _validate_rescope_batch(current, items)
+        assert any("non-empty string" in e for e in errors)
+
+    def test_non_string_id_is_rejected(self) -> None:
+        current = [self._t("1")]
+        items = [{"id": 42, "title": "int id"}]
+        errors = _validate_rescope_batch(current, items)
+        assert any("non-empty string" in e for e in errors)
+
+    def test_non_dict_item_is_rejected(self) -> None:
+        current = [self._t("1")]
+        items = ["not a dict"]
+        errors = _validate_rescope_batch(current, items)  # type: ignore[arg-type]
+        assert any("not a dict" in e for e in errors)
+
+    def test_mixed_valid_and_invalid_collects_all_errors(self) -> None:
+        # Validator runs to completion so the operator sees every problem
+        # in one log scan, not just the first.
+        current = [self._t("1"), self._t("2")]
+        items = [
+            {"id": "1", "title": "OK"},  # valid
+            {"id": "999", "title": "ghost"},  # unknown source
+            {"id": "1", "title": "dup"},  # duplicate of OK
+            {"id": None, "title": "new"},  # valid (null = new)
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert len(errors) == 2
+        assert any("999" in e and "unknown" in e for e in errors)
+        assert any("duplicate" in e for e in errors)
+
+
 # ── reorder_tasks ─────────────────────────────────────────────────────────────
 
 
@@ -1533,6 +1616,62 @@ class TestReorderTasks:
         result_before = Tasks(tmp_path).list()
         reorder_tasks(Tasks(tmp_path), "", agent=_client("not json"))
         assert Tasks(tmp_path).list() == result_before
+
+    def test_invalid_batch_leaves_durable_list_unchanged(self, tmp_path: Path) -> None:
+        # #1715: a mixed batch — one valid item and one referencing a
+        # hallucinated id — must reject the WHOLE batch.  The valid
+        # item's rename does not partially commit; tasks.json stays as
+        # it was before reorder_tasks ran.
+        t1 = self._add(tmp_path, "Original")
+        before = Tasks(tmp_path).list()
+        raw = self._response(
+            [
+                {"id": t1["id"], "title": "Renamed", "description": ""},
+                {"id": "ghost-999", "title": "hallucinated"},
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        # Durable list is byte-for-byte identical to pre-call state.
+        assert Tasks(tmp_path).list() == before
+
+    def test_invalid_batch_skips_on_done(self, tmp_path: Path) -> None:
+        # codex on #1733: _on_done's contract is "post-successful reorder."
+        # Production wires it to sync_tasks (git push) and
+        # _rewrite_pr_description (GitHub API write); firing on rejection
+        # would cause unnecessary churn for invalid Opus output.
+        t1 = self._add(tmp_path, "Original")
+        raw = self._response([{"id": "ghost-999", "title": "hallucinated"}])
+        done_calls: list[int] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_done=lambda: done_calls.append(1),
+        )
+        assert done_calls == []
+        assert Tasks(tmp_path).list()[0]["title"] == t1["title"]
+
+    def test_invalid_batch_skips_on_changes_callback(self, tmp_path: Path) -> None:
+        # _on_changes is post-commit notification machinery; rejected
+        # batches mustn't fire it (there's no rescope to report on).
+        thread = {"repo": "r/r", "pr": 1, "comment_id": 99}
+        t1 = Tasks(tmp_path).add(
+            title="Thread task", task_type=TaskType.THREAD, thread=thread
+        )
+        raw = self._response(
+            [
+                {"id": t1["id"], "title": "Renamed", "description": ""},
+                {"id": "ghost-999", "title": "hallucinated"},
+            ]
+        )
+        received: list = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_changes=lambda changes: received.extend(changes),
+        )
+        assert received == []
 
     def test_preserves_snapshot_order_for_non_ci_tasks(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "First")

@@ -897,6 +897,67 @@ def _make_new_tasks_from_opus(
     return new_tasks
 
 
+def _validate_rescope_batch(
+    current: list[dict[str, Any]],
+    ordered_items: list[Any],
+) -> list[str]:
+    """Validate a rescope batch atomically.  Empty list = valid (#1715).
+
+    Returns a list of error messages.  The whole batch is rejected if any
+    check fails — partial commits would leave ``tasks.json`` in a state
+    Opus didn't propose, defeating the snapshot/replay model.
+
+    Checks:
+
+    * Each item must be a dict.
+    * An item with a non-null ``id`` must reference a task that currently
+      exists in the queue (snapshot or post-snapshot).  An unknown id
+      means Opus is operating on a hallucinated row; reject and let the
+      next iteration retry against fresh state.
+    * No two items may share the same non-null ``id`` (duplicate output —
+      both would target the same task and the second would be silently
+      dropped today).
+    * A non-null ``id`` must be a non-empty string.
+
+    Items with ``id is None`` (or absent) are new-task proposals; their
+    own validation lives in :func:`_make_new_tasks_from_opus` (blank-title
+    skip, etc.) — they are not rejected here.
+
+    Forward-looking: when #1716/1717/1718 add explicit delete/merge/split
+    operations to the rescope vocabulary, this is where their lineage-
+    preservation rules will live (e.g. merge into target T must keep
+    every source's source_comment in T's lineage_comment_ids).
+    """
+    errors: list[str] = []
+    known_ids = {t["id"] for t in current if "id" in t}
+    seen_ids: set[str] = set()
+
+    for index, item in enumerate(ordered_items):
+        if not isinstance(item, dict):
+            errors.append(f"item[{index}]: not a dict, got {type(item).__name__}")
+            continue
+        item_id = item.get("id")
+        if item_id is None:
+            continue
+        if not isinstance(item_id, str) or not item_id:
+            errors.append(
+                f"item[{index}].id: must be non-empty string, got {item_id!r}"
+            )
+            continue
+        if item_id not in known_ids:
+            errors.append(
+                f"item[{index}].id={item_id!r}: unknown source id "
+                "(not in current task queue)"
+            )
+        if item_id in seen_ids:
+            errors.append(
+                f"item[{index}].id={item_id!r}: duplicate (already appears earlier)"
+            )
+        seen_ids.add(item_id)
+
+    return errors
+
+
 def _find_duplicate_titles(
     ordered_items: list[dict[str, Any]],
     existing_by_id: dict[str, str],
@@ -1163,51 +1224,75 @@ def reorder_tasks(
     # serialize on the same lock.
     inprogress_affected = False
     pre_rescope: list[dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
+    inprogress: dict[str, Any] | None = None
+    rejected = False
     with tasks.modify() as current:
-        # Snapshot the pre-rescope list so _compute_thread_changes can
-        # diff against it after the in-place slice-assign below (codex
-        # P2 #1696: comparing post-rescope to itself suppresses
-        # _on_changes notifications for thread tasks Opus completed/
-        # modified).
-        pre_rescope = [dict(t) for t in current]
-        inprogress = next(
-            (t for t in current if t.get("status") == TaskStatus.IN_PROGRESS), None
-        )
-        result = _apply_reorder(current, ordered_items, original_ids, intents=intents)
-        if inprogress is not None:
-            # The omission ⇒ completed branch is gone (#1357 case A): the
-            # rescope reducer now uses KeepTask for omitted snapshot tasks,
-            # so the in-progress task always survives the rescope at its
-            # current status.  Triggers for _on_inprogress_affected are
-            # explicit modifications by Opus that change the task's
-            # contract: title, description, or — under #1714 — the
-            # source-comment anchor.  Anchor change is structural (it re-
-            # targets the reply destination), so a worker turn that began
-            # under the old anchor must not finish under the new one.
-            inprogress_in_result = next(
-                (t for t in result if t["id"] == inprogress["id"]), None
+        # #1715: validate the batch atomically before applying any of it.
+        # If validation fails, every error is logged and the with block
+        # exits without slice-assigning — JsonFileStore.modify writes
+        # back the same content, so the durable list is unchanged.
+        # Partial commits aren't safe: they'd leave tasks.json in a
+        # state Opus didn't propose, breaking snapshot/replay reasoning.
+        validation_errors = _validate_rescope_batch(current, ordered_items)
+        if validation_errors:
+            rejected = True
+            for error in validation_errors:
+                log.warning("reorder_tasks: rejecting batch — %s", error)
+        else:
+            # Snapshot the pre-rescope list so _compute_thread_changes can
+            # diff against it after the in-place slice-assign below (codex
+            # P2 #1696: comparing post-rescope to itself suppresses
+            # _on_changes notifications for thread tasks Opus completed/
+            # modified).
+            pre_rescope = [dict(t) for t in current]
+            inprogress = next(
+                (t for t in current if t.get("status") == TaskStatus.IN_PROGRESS), None
             )
-            # Compare anchors via _task_source_comment_for_oracle so a
-            # legacy ``'42'`` string in tasks.json compares equal to the
-            # oracle-materialized ``42`` (codex on #1731): int(comment_id)
-            # normalization on both sides means spurious type-mismatch
-            # aborts can't fire.
-            if inprogress_in_result is not None and (
-                inprogress_in_result.get("title") != inprogress.get("title")
-                or inprogress_in_result.get("description")
-                != inprogress.get("description")
-                or _task_source_comment_for_oracle(inprogress_in_result)
-                != _task_source_comment_for_oracle(inprogress)
-            ):
-                inprogress_affected = True
-                inprogress_in_result["status"] = str(TaskStatus.PENDING)
-                log.info(
-                    "reorder_tasks: in-progress task modified by Opus — reset to pending: %s",
-                    inprogress_in_result.get("title", "")[:60],
+            result = _apply_reorder(
+                current, ordered_items, original_ids, intents=intents
+            )
+            if inprogress is not None:
+                # The omission ⇒ completed branch is gone (#1357 case A): the
+                # rescope reducer now uses KeepTask for omitted snapshot tasks,
+                # so the in-progress task always survives the rescope at its
+                # current status.  Triggers for _on_inprogress_affected are
+                # explicit modifications by Opus that change the task's
+                # contract: title, description, or — under #1714 — the
+                # source-comment anchor.  Anchor change is structural (it re-
+                # targets the reply destination), so a worker turn that began
+                # under the old anchor must not finish under the new one.
+                inprogress_in_result = next(
+                    (t for t in result if t["id"] == inprogress["id"]), None
                 )
-        # Slice-assign so JsonFileStore.modify writes the recomputed
-        # list back (it persists the same dict/list object it yielded).
-        current[:] = result
+                # Compare anchors via _task_source_comment_for_oracle so a
+                # legacy ``'42'`` string in tasks.json compares equal to the
+                # oracle-materialized ``42`` (codex on #1731): int(comment_id)
+                # normalization on both sides means spurious type-mismatch
+                # aborts can't fire.
+                if inprogress_in_result is not None and (
+                    inprogress_in_result.get("title") != inprogress.get("title")
+                    or inprogress_in_result.get("description")
+                    != inprogress.get("description")
+                    or _task_source_comment_for_oracle(inprogress_in_result)
+                    != _task_source_comment_for_oracle(inprogress)
+                ):
+                    inprogress_affected = True
+                    inprogress_in_result["status"] = str(TaskStatus.PENDING)
+                    log.info(
+                        "reorder_tasks: in-progress task modified by Opus — reset to pending: %s",
+                        inprogress_in_result.get("title", "")[:60],
+                    )
+            # Slice-assign so JsonFileStore.modify writes the recomputed
+            # list back (it persists the same dict/list object it yielded).
+            current[:] = result
+
+    if rejected:
+        # _on_done's contract is "post-successful reorder" — production wires
+        # it to sync_tasks (git push) and _rewrite_pr_description (GitHub API
+        # write).  Neither makes sense after a rejection: nothing committed,
+        # nothing to sync.  Skip every post-commit callback (codex on #1733).
+        return
 
     if _on_changes is not None:
         # Always call with the (possibly empty) list — the production
