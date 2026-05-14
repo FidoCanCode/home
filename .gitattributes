@@ -1,0 +1,5 @@
+# Rocq-extracted Python and source maps are regenerated from models/*.v by
+# `./fido make-rocq` — collapse them in PR diffs so reviewers see the
+# handwritten model change, not the cascading mechanical edits below it.
+src/fido/rocq/** linguist-generated
+*.pymap linguist-generated

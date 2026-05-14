@@ -167,6 +167,42 @@ def _review_thread_contains_comment(
     return False
 
 
+def _normalize_title(title: str) -> str:
+    """Collapse all whitespace runs in a task title to single spaces.
+
+    Multiline / tabbed / multi-space input would break PR-body
+    round-tripping (one task per markdown checkbox line, parsed by
+    ``seed_tasks_from_pr_body``) and produce ugly work-queue rendering.
+    """
+    return " ".join(title.split())
+
+
+def _existing_titles_by_id(current: list[dict[str, Any]]) -> dict[str, str]:
+    return {t["id"]: t.get("title", "") for t in current if "id" in t}
+
+
+def _effective_title(item: dict[str, Any], existing_by_id: dict[str, str]) -> str:
+    """Compute the title that this rescope item will land as on disk.
+
+    For an item targeting an existing task id, falls back to the existing
+    title when the proposed value is missing, blank, or non-string — Opus
+    didn't supply a rename, preserve identity.  For a null/unknown id (a
+    new task), returns the normalized proposed title or empty string.
+
+    Both the duplicate-title nudge check and the apply-time reducer must
+    use this single function so they can't drift: a value that the nudge
+    accepted as unique must persist as that same string, and vice versa.
+    """
+    proposed = item.get("title")
+    normalized = _normalize_title(proposed) if isinstance(proposed, str) else ""
+    if normalized:
+        return normalized
+    item_id = item.get("id")
+    if item_id is not None and item_id in existing_by_id:
+        return existing_by_id[item_id]
+    return ""
+
+
 def _thread_lineage_comment_ids(thread: dict[str, Any] | None) -> list[int]:
     if not thread:
         return []
@@ -310,6 +346,7 @@ def _rescope_releases_for_oracle(
     for item in ordered_items:
         if item.get("id") and item["id"] not in ordered_by_id:
             ordered_by_id[item["id"]] = item
+    existing_by_id = _existing_titles_by_id(current)
     releases: list[rescope_oracle.RescopeRelease] = []
     for task in current:
         task_id = task["id"]
@@ -326,16 +363,19 @@ def _rescope_releases_for_oracle(
             # explicit-completion path; omission here just means Opus didn't
             # speak for this task on this iteration.
             decision: rescope_oracle.RescopeOp = rescope_oracle.KeepTask(oracle_id)
-        elif "description" in item and item["description"] != task.get(
-            "description", ""
-        ):
-            decision = rescope_oracle.RewriteTask(
-                oracle_id,
-                task.get("title", ""),
-                item["description"],
-            )
         else:
-            decision = rescope_oracle.KeepTask(oracle_id)
+            existing_title = task.get("title", "")
+            existing_description = task.get("description", "")
+            new_title = _effective_title(item, existing_by_id)
+            new_description = (
+                item["description"] if "description" in item else existing_description
+            )
+            if new_title != existing_title or new_description != existing_description:
+                decision = rescope_oracle.RewriteTask(
+                    oracle_id, new_title, new_description
+                )
+            else:
+                decision = rescope_oracle.KeepTask(oracle_id)
         releases.append(
             rescope_oracle.RescopeRelease(rescope_oracle.ReleaseACT(), decision)
         )
@@ -741,7 +781,11 @@ def _make_new_tasks_from_opus(
     for item in ordered_items:
         if "id" in item and item["id"] is not None:
             continue  # has an id — handled by oracle or ignored as unknown
-        title = (item.get("title") or "").strip()
+        # Null-id (new task) items have no existing title to fall back to;
+        # _effective_title with an empty existing-by-id map normalizes the
+        # proposed value or returns "" for non-strings / blanks.  Same
+        # normalization Tasks.add applies, so PR-body round-tripping holds.
+        title = _effective_title(item, {})
         if not title:
             continue
         if skipped < covered_intents:
@@ -764,16 +808,26 @@ def _make_new_tasks_from_opus(
     return new_tasks
 
 
-def _find_duplicate_titles(ordered_items: list[dict[str, Any]]) -> list[str]:
-    """Return non-empty titles that appear more than once in *ordered_items*.
+def _find_duplicate_titles(
+    ordered_items: list[dict[str, Any]],
+    existing_by_id: dict[str, str],
+) -> list[str]:
+    """Return non-empty effective titles that appear more than once.
 
-    Each duplicated title is listed exactly once in the result, in the order
-    of its first repeated occurrence.
+    The dedup runs on the same effective title each item will land as on
+    disk — what _effective_title returns after normalization and after
+    the existing-title fallback for blank/non-string proposals.  Without
+    that, ``"A\\nB"`` and ``"A B"`` slip past the nudge as distinct then
+    both persist as ``"A B"``; ``{title:""}`` and ``{title:"Alpha"}`` slip
+    past then both end up ``"Alpha"`` (codex on #1729).
+
+    Each duplicated title is listed exactly once in the result, in the
+    order of its first repeated occurrence.
     """
     seen: set[str] = set()
     duplicates: list[str] = []
     for item in ordered_items:
-        title = item.get("title") or ""
+        title = _effective_title(item, existing_by_id)
         if not title:
             continue
         if title in seen and title not in duplicates:
@@ -801,8 +855,10 @@ def _apply_reorder(
     - Tasks added after the original snapshot (IDs not in the snapshot) are
       appended at the end so they are never silently dropped.
     - Completed tasks are always preserved at the end in their original order.
-    - Description is updated from Opus's output; title and thread anchor are
-      immutable task identity and are preserved.
+    - Title and description are updated from Opus's output for an existing
+      task id (#1713 made title mutable); thread anchor is still preserved
+      (#1714 will lift that).
+    - Task identity is the durable task id, not title text or thread anchor.
     - Opus-returned IDs outside the snapshot or duplicated are ignored.
     - Opus-returned items with a null or absent id are treated as new tasks
       and inserted after existing pending tasks (before completed tasks).
@@ -961,13 +1017,23 @@ def reorder_tasks(
         log.warning("reorder_tasks: could not parse Opus response — skipping")
         return
 
+    # Snapshot existing titles for the dedup check.  The check runs on
+    # *effective* titles (post-normalization, post-existing-title fallback)
+    # so what the nudge accepts as unique matches what the apply path will
+    # land on disk.  This snapshot can be stale by apply time if a new task
+    # arrives concurrently, but dedup here is best-effort anyway — apply
+    # re-derives the effective titles under flock.
+    pre_nudge_existing = _existing_titles_by_id(tasks.list())
+
     # Nudge Opus up to _RESCOPE_MAX_NUDGES times if it proposed duplicate
     # titles.  Each turn runs in the same conversation so the model sees its
-    # prior responses and the remaining-attempt count in each nudge.
-    # If duplicates remain after all nudges, _apply_reorder still preserves
-    # immutable task titles while applying any description/order changes.
+    # prior responses and the remaining-attempt count in each nudge.  If
+    # duplicates remain after all nudges, the proposed titles are still
+    # applied (#1713 made title mutable).  Uniqueness during rewrites is
+    # best-effort via the nudge — the durable invariant is on enqueueing
+    # new tasks (find_pending_title_duplicate in the oracle), not on edits.
     for nudge_attempt in range(_RESCOPE_MAX_NUDGES):
-        duplicates = _find_duplicate_titles(ordered_items)
+        duplicates = _find_duplicate_titles(ordered_items, pre_nudge_existing)
         if not duplicates:
             break
         attempts_remaining = _RESCOPE_MAX_NUDGES - nudge_attempt - 1
@@ -1216,7 +1282,7 @@ class Tasks(JsonFileStore):
             raise TypeError(
                 f"task_type must be TaskType, got {type(task_type).__name__}"
             )
-        title = " ".join(title.split())
+        title = _normalize_title(title)
         task: dict[str, Any] = {
             "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
             "title": title,
