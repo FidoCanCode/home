@@ -755,6 +755,45 @@ class OwnedSession:
         # consults this set under ``_fsm_cond`` and skips the normal
         # ``_fsm_release`` so the double-release does not raise.
         self._evicted_tids: set[int] = set()
+        # Per-prompt no-reply watchdog state (#1709).  Send arms the
+        # timer (sets :attr:`_outstanding_send_at` to now); receive
+        # disarms (clears to ``None``).  Multiple sends without a
+        # receive simply restart the clock — the latest send wins.
+        # The :class:`~fido.session_lock_watchdog.SessionLockWatchdog`
+        # polls :attr:`outstanding_send_at` and kills the session when
+        # it stays set for more than ``no_reply_seconds``.  ``None``
+        # means "no send awaiting reply" — idle sessions and sessions
+        # whose last send has been ack'd both look the same to the
+        # watchdog and are left alone forever.
+        self._outstanding_send_lock = threading.Lock()
+        self._outstanding_send_at: datetime | None = None
+
+    def _mark_send_outstanding(self) -> None:
+        """Arm (or restart) the no-reply watchdog clock.  Subclasses
+        call this every time they write a prompt to the provider
+        subprocess's stdin.  Multiple sends without an intervening
+        receive simply reset the clock — we only care about the most
+        recent unanswered send."""
+        with self._outstanding_send_lock:
+            self._outstanding_send_at = datetime.now(tz=timezone.utc)
+
+    def _mark_received(self) -> None:
+        """Disarm the no-reply watchdog clock.  Subclasses call this
+        from their receive loop on every line / message read from the
+        provider subprocess (sibling to bumping ``_received_count``).
+        Once any data arrives, the prior send is considered ACK'd and
+        the watchdog stops counting until the next send re-arms it
+        (closes #1709)."""
+        with self._outstanding_send_lock:
+            self._outstanding_send_at = None
+
+    @property
+    def outstanding_send_at(self) -> datetime | None:
+        """When the most recent unanswered send was issued, or ``None``
+        if nothing is awaiting a reply.  Read by
+        :class:`~fido.session_lock_watchdog.SessionLockWatchdog`."""
+        with self._outstanding_send_lock:
+            return self._outstanding_send_at
 
     def _bump_entry_depth(self) -> int:
         """Increment and return the new per-thread entry depth (1 at
@@ -902,6 +941,15 @@ class OwnedSession:
                     f"{type(ev).__name__} rejected in state "
                     f"{type(self._fsm_state).__name__}"
                 )
+            # Disarm the no-reply watchdog clock as part of releasing
+            # the lock.  Tying ``outstanding_send_at`` to the lock
+            # lifecycle means any release path — orderly exit, the
+            # exception path inside :meth:`prompt`, force_release after
+            # wedge — leaves the session "no-send-pending" so the
+            # watchdog can't evict a stale armed timestamp inherited
+            # from an aborted turn (#1710 codex P2).
+            with self._outstanding_send_lock:
+                self._outstanding_send_at = None
             if self._handler_queue:
                 # Hand ownership directly to the next waiting handler.
                 waiter = self._handler_queue.pop(0)
@@ -975,6 +1023,18 @@ class OwnedSession:
                     reason,
                 )
                 return False
+            # Disarm the no-reply watchdog clock as part of the
+            # eviction (#1710 codex round 2 P1).  The evicted holder's
+            # eventual ``__exit__`` returns early via the
+            # ``_evicted_tids`` guard in :meth:`_fsm_release` and so
+            # would skip the clear there — but a subsequent acquire
+            # could happen before that escape and inherit the stale
+            # armed timestamp, causing the watchdog to evict the new
+            # holder based on the prior turn's silence.  Clearing
+            # here, under the FSM lock, guarantees the clock is
+            # disarmed before any new holder can acquire.
+            with self._outstanding_send_lock:
+                self._outstanding_send_at = None
             # Capture the evicted holder's identity before mutating any
             # state.  ``_repo_name`` may be None on test stubs; in that
             # case there is no global talker to consult and we fall back
