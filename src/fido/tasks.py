@@ -167,6 +167,29 @@ def _review_thread_contains_comment(
     return False
 
 
+def _normalize_title(title: str) -> str:
+    """Collapse all whitespace runs in a task title to single spaces.
+
+    Multiline / tabbed / multi-space input would break PR-body
+    round-tripping (one task per markdown checkbox line, parsed by
+    ``seed_tasks_from_pr_body``) and produce ugly work-queue rendering.
+    """
+    return " ".join(title.split())
+
+
+def _normalize_rescope_title(proposed: object, existing: str) -> str:
+    """Rescope-side title guard.
+
+    Returns ``existing`` unless ``proposed`` is a string that normalizes
+    to a non-empty value.  Non-strings (number, object, null, list) and
+    blank/whitespace-only strings preserve the existing title — they are
+    treated as "Opus didn't supply a rename" rather than as a real rename.
+    """
+    if not isinstance(proposed, str):
+        return existing
+    return _normalize_title(proposed) or existing
+
+
 def _thread_lineage_comment_ids(thread: dict[str, Any] | None) -> list[int]:
     if not thread:
         return []
@@ -330,18 +353,14 @@ def _rescope_releases_for_oracle(
             existing_title = task.get("title", "")
             existing_description = task.get("description", "")
             # #1713: title is mutable metadata for an existing task id.  Opus's
-            # title flows through the reducer when it is a non-empty string.
-            # Anything else — empty string, missing key, or a non-string JSON
-            # value (number, object, null) — preserves the existing title.
-            # The string check is a system-boundary guard: persisting a
-            # non-string into tasks.json would crash later code paths that
-            # call .upper() / .startswith() on the title.
-            proposed_title = item.get("title")
-            new_title = (
-                proposed_title
-                if isinstance(proposed_title, str) and proposed_title
-                else existing_title
-            )
+            # title flows through the reducer when it is a non-empty string
+            # (after the same whitespace normalization Tasks.add applies).
+            # Anything else — non-string, blank/whitespace-only, or missing
+            # key — preserves the existing title.  Persisting a non-string
+            # would crash later .upper()/.startswith() calls; persisting raw
+            # multiline text would break PR-body round-tripping (one task per
+            # markdown checkbox line, parsed by seed_tasks_from_pr_body).
+            new_title = _normalize_rescope_title(item.get("title"), existing_title)
             new_description = (
                 item["description"] if "description" in item else existing_description
             )
@@ -1235,7 +1254,7 @@ class Tasks(JsonFileStore):
             raise TypeError(
                 f"task_type must be TaskType, got {type(task_type).__name__}"
             )
-        title = " ".join(title.split())
+        title = _normalize_title(title)
         task: dict[str, Any] = {
             "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
             "title": title,

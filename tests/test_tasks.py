@@ -874,6 +874,29 @@ class TestApplyReorder:
                 f"non-string title {bad_title!r} should not overwrite"
             )
 
+    def test_preserves_title_when_opus_returns_whitespace_only(self) -> None:
+        # Whitespace-only titles ("   ", "\t", "\n") normalize to empty
+        # and so preserve the existing title — same semantic as a missing
+        # rename.  Without this guard, Opus could blank out a task title.
+        current = [self._t("1", "Original title")]
+        for blank in ("   ", "\t\t", "\n", " \n\t "):
+            items = [self._item("1", blank)]
+            result = _apply_reorder(current, items)
+            assert result[0]["title"] == "Original title", (
+                f"whitespace title {blank!r} should not overwrite"
+            )
+
+    def test_normalizes_multiline_title_rewrite(self) -> None:
+        # Opus can return a multiline title (containing \n) which would
+        # break PR-body round-tripping (one task per markdown checkbox
+        # line, parsed by seed_tasks_from_pr_body).  Rewrites go through
+        # the same whitespace normalization as Tasks.add — all whitespace
+        # runs collapse to single spaces.
+        current = [self._t("1", "Original title")]
+        items = [self._item("1", "First line\n  second line\twith\ttabs")]
+        result = _apply_reorder(current, items)
+        assert result[0]["title"] == "First line second line with tabs"
+
     def test_updates_description_from_opus(self) -> None:
         current = [self._t("1", "Task", description="old desc")]
         items = [self._item("1", "Task", description="new desc")]
