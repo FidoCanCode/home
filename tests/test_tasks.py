@@ -1269,19 +1269,21 @@ class TestMakeNewTasksFromOpus:
 
 class TestFindDuplicateTitles:
     def _item(self, title: str) -> dict:
-        return {"id": "x", "title": title}
+        # Null-id items (new tasks) — no existing-title fallback applies, so
+        # the effective title is just the normalized proposed value.
+        return {"id": None, "title": title}
 
     def test_returns_empty_when_all_unique(self) -> None:
         items = [self._item("A"), self._item("B"), self._item("C")]
-        assert _find_duplicate_titles(items) == []
+        assert _find_duplicate_titles(items, {}) == []
 
     def test_returns_duplicate_title(self) -> None:
         items = [self._item("Same"), self._item("Other"), self._item("Same")]
-        assert _find_duplicate_titles(items) == ["Same"]
+        assert _find_duplicate_titles(items, {}) == ["Same"]
 
     def test_each_duplicate_listed_once(self) -> None:
         items = [self._item("X"), self._item("X"), self._item("X")]
-        assert _find_duplicate_titles(items) == ["X"]
+        assert _find_duplicate_titles(items, {}) == ["X"]
 
     def test_multiple_distinct_duplicates(self) -> None:
         items = [
@@ -1290,18 +1292,34 @@ class TestFindDuplicateTitles:
             self._item("A"),
             self._item("B"),
         ]
-        assert _find_duplicate_titles(items) == ["A", "B"]
+        assert _find_duplicate_titles(items, {}) == ["A", "B"]
 
     def test_ignores_empty_titles(self) -> None:
-        items = [{"id": "1", "title": ""}, {"id": "2", "title": ""}]
-        assert _find_duplicate_titles(items) == []
+        items = [{"id": None, "title": ""}, {"id": None, "title": ""}]
+        assert _find_duplicate_titles(items, {}) == []
 
     def test_ignores_missing_title_key(self) -> None:
-        items = [{"id": "1"}, {"id": "2"}]
-        assert _find_duplicate_titles(items) == []
+        items = [{"id": None}, {"id": None}]
+        assert _find_duplicate_titles(items, {}) == []
 
     def test_returns_empty_list_when_no_items(self) -> None:
-        assert _find_duplicate_titles([]) == []
+        assert _find_duplicate_titles([], {}) == []
+
+    def test_dedups_on_normalized_form_not_raw(self) -> None:
+        # codex on #1729: "A\nB" and "A B" both collapse to "A B" at apply
+        # time; the dedup check has to see the same normalized value or
+        # they slip through the nudge as distinct and then collide on disk.
+        items = [self._item("A\nB"), self._item("A B")]
+        assert _find_duplicate_titles(items, {}) == ["A B"]
+
+    def test_dedups_on_existing_title_fallback_for_existing_ids(self) -> None:
+        # codex on #1729: {id:1,title:""} and {id:2,title:"Alpha"} pass the
+        # raw nudge as distinct, then both land as "Alpha" once the blank
+        # falls back to the existing title for id 1.  Effective-title dedup
+        # catches the collision before the nudge accepts the response.
+        existing_by_id = {"1": "Alpha", "2": "Beta"}
+        items = [{"id": "1", "title": ""}, {"id": "2", "title": "Alpha"}]
+        assert _find_duplicate_titles(items, existing_by_id) == ["Alpha"]
 
 
 # ── reorder_tasks ─────────────────────────────────────────────────────────────

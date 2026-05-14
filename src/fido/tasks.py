@@ -177,17 +177,30 @@ def _normalize_title(title: str) -> str:
     return " ".join(title.split())
 
 
-def _normalize_rescope_title(proposed: object, existing: str) -> str:
-    """Rescope-side title guard.
+def _existing_titles_by_id(current: list[dict[str, Any]]) -> dict[str, str]:
+    return {t["id"]: t.get("title", "") for t in current if "id" in t}
 
-    Returns ``existing`` unless ``proposed`` is a string that normalizes
-    to a non-empty value.  Non-strings (number, object, null, list) and
-    blank/whitespace-only strings preserve the existing title — they are
-    treated as "Opus didn't supply a rename" rather than as a real rename.
+
+def _effective_title(item: dict[str, Any], existing_by_id: dict[str, str]) -> str:
+    """Compute the title that this rescope item will land as on disk.
+
+    For an item targeting an existing task id, falls back to the existing
+    title when the proposed value is missing, blank, or non-string — Opus
+    didn't supply a rename, preserve identity.  For a null/unknown id (a
+    new task), returns the normalized proposed title or empty string.
+
+    Both the duplicate-title nudge check and the apply-time reducer must
+    use this single function so they can't drift: a value that the nudge
+    accepted as unique must persist as that same string, and vice versa.
     """
-    if not isinstance(proposed, str):
-        return existing
-    return _normalize_title(proposed) or existing
+    proposed = item.get("title")
+    normalized = _normalize_title(proposed) if isinstance(proposed, str) else ""
+    if normalized:
+        return normalized
+    item_id = item.get("id")
+    if item_id is not None and item_id in existing_by_id:
+        return existing_by_id[item_id]
+    return ""
 
 
 def _thread_lineage_comment_ids(thread: dict[str, Any] | None) -> list[int]:
@@ -333,6 +346,7 @@ def _rescope_releases_for_oracle(
     for item in ordered_items:
         if item.get("id") and item["id"] not in ordered_by_id:
             ordered_by_id[item["id"]] = item
+    existing_by_id = _existing_titles_by_id(current)
     releases: list[rescope_oracle.RescopeRelease] = []
     for task in current:
         task_id = task["id"]
@@ -352,15 +366,7 @@ def _rescope_releases_for_oracle(
         else:
             existing_title = task.get("title", "")
             existing_description = task.get("description", "")
-            # #1713: title is mutable metadata for an existing task id.  Opus's
-            # title flows through the reducer when it is a non-empty string
-            # (after the same whitespace normalization Tasks.add applies).
-            # Anything else — non-string, blank/whitespace-only, or missing
-            # key — preserves the existing title.  Persisting a non-string
-            # would crash later .upper()/.startswith() calls; persisting raw
-            # multiline text would break PR-body round-tripping (one task per
-            # markdown checkbox line, parsed by seed_tasks_from_pr_body).
-            new_title = _normalize_rescope_title(item.get("title"), existing_title)
+            new_title = _effective_title(item, existing_by_id)
             new_description = (
                 item["description"] if "description" in item else existing_description
             )
@@ -775,7 +781,11 @@ def _make_new_tasks_from_opus(
     for item in ordered_items:
         if "id" in item and item["id"] is not None:
             continue  # has an id — handled by oracle or ignored as unknown
-        title = (item.get("title") or "").strip()
+        # Null-id (new task) items have no existing title to fall back to;
+        # _effective_title with an empty existing-by-id map normalizes the
+        # proposed value or returns "" for non-strings / blanks.  Same
+        # normalization Tasks.add applies, so PR-body round-tripping holds.
+        title = _effective_title(item, {})
         if not title:
             continue
         if skipped < covered_intents:
@@ -798,16 +808,26 @@ def _make_new_tasks_from_opus(
     return new_tasks
 
 
-def _find_duplicate_titles(ordered_items: list[dict[str, Any]]) -> list[str]:
-    """Return non-empty titles that appear more than once in *ordered_items*.
+def _find_duplicate_titles(
+    ordered_items: list[dict[str, Any]],
+    existing_by_id: dict[str, str],
+) -> list[str]:
+    """Return non-empty effective titles that appear more than once.
 
-    Each duplicated title is listed exactly once in the result, in the order
-    of its first repeated occurrence.
+    The dedup runs on the same effective title each item will land as on
+    disk — what _effective_title returns after normalization and after
+    the existing-title fallback for blank/non-string proposals.  Without
+    that, ``"A\\nB"`` and ``"A B"`` slip past the nudge as distinct then
+    both persist as ``"A B"``; ``{title:""}`` and ``{title:"Alpha"}`` slip
+    past then both end up ``"Alpha"`` (codex on #1729).
+
+    Each duplicated title is listed exactly once in the result, in the
+    order of its first repeated occurrence.
     """
     seen: set[str] = set()
     duplicates: list[str] = []
     for item in ordered_items:
-        title = item.get("title") or ""
+        title = _effective_title(item, existing_by_id)
         if not title:
             continue
         if title in seen and title not in duplicates:
@@ -997,6 +1017,14 @@ def reorder_tasks(
         log.warning("reorder_tasks: could not parse Opus response — skipping")
         return
 
+    # Snapshot existing titles for the dedup check.  The check runs on
+    # *effective* titles (post-normalization, post-existing-title fallback)
+    # so what the nudge accepts as unique matches what the apply path will
+    # land on disk.  This snapshot can be stale by apply time if a new task
+    # arrives concurrently, but dedup here is best-effort anyway — apply
+    # re-derives the effective titles under flock.
+    pre_nudge_existing = _existing_titles_by_id(tasks.list())
+
     # Nudge Opus up to _RESCOPE_MAX_NUDGES times if it proposed duplicate
     # titles.  Each turn runs in the same conversation so the model sees its
     # prior responses and the remaining-attempt count in each nudge.  If
@@ -1005,7 +1033,7 @@ def reorder_tasks(
     # best-effort via the nudge — the durable invariant is on enqueueing
     # new tasks (find_pending_title_duplicate in the oracle), not on edits.
     for nudge_attempt in range(_RESCOPE_MAX_NUDGES):
-        duplicates = _find_duplicate_titles(ordered_items)
+        duplicates = _find_duplicate_titles(ordered_items, pre_nudge_existing)
         if not duplicates:
             break
         attempts_remaining = _RESCOPE_MAX_NUDGES - nudge_attempt - 1
