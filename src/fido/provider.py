@@ -474,7 +474,7 @@ class SessionTalker:
 
     repo_name: str
     thread_id: int
-    kind: Literal["worker", "webhook"]
+    kind: Literal["worker", "webhook", "background"]
     description: str
     subprocess_pid: int | None
     started_at: datetime
@@ -537,15 +537,23 @@ def current_repo() -> str | None:
     return getattr(_thread_local, "repo_name", None)
 
 
-def set_thread_kind(kind: Literal["worker", "webhook"] | None) -> None:
+def set_thread_kind(kind: Literal["worker", "webhook", "background"] | None) -> None:
     """Set (or clear, with ``None``) the caller kind for this thread.
 
-    Workers call this with ``"worker"`` at :meth:`WorkerThread.run` entry; the
-    webhook handler calls it with ``"webhook"`` at ``_process_action`` entry.
-    :meth:`ClaudeSession.prompt` and :meth:`CopilotCLISession.__enter__`
-    consult it to decide whether their preempt signal should fire —
-    webhooks preempt workers; workers and webhooks never preempt a running
-    webhook (fix for #637).
+    Three kinds:
+
+    * ``"worker"`` — the per-repo :class:`~fido.worker.WorkerThread` set by
+      :meth:`WorkerThread.run` entry.
+    * ``"webhook"`` — a real, user-initiated webhook handler (set by
+      :meth:`WebhookHandler._process_action`).  Webhook callers may
+      preempt a running worker turn (fix for #637).
+    * ``"background"`` — an internal system trigger such as the
+      background rescope thread in :mod:`fido.events` (#1711).
+      Background callers identify as non-worker for OTHER threads'
+      preempt decisions (so real webhooks don't try to cancel a
+      rescope thinking it's the worker), but they themselves never
+      preempt a running worker — that would livelock long worker turns
+      against bursty rescope iterations.
     """
     if kind is None:
         if hasattr(_thread_local, "kind"):
@@ -554,7 +562,7 @@ def set_thread_kind(kind: Literal["worker", "webhook"] | None) -> None:
         _thread_local.kind = kind
 
 
-def current_thread_kind() -> Literal["worker", "webhook"]:
+def current_thread_kind() -> Literal["worker", "webhook", "background"]:
     """Return the caller kind for this thread.  Defaults to ``"worker"``
     when not set (non-entry code paths and tests)."""
     return getattr(_thread_local, "kind", "worker")
@@ -562,8 +570,8 @@ def current_thread_kind() -> Literal["worker", "webhook"]:
 
 def try_preempt_worker(
     repo_name: str | None, cancel_fn: Callable[[], None]
-) -> tuple[bool, Literal["worker", "webhook"] | None]:
-    """Invoke *cancel_fn* iff the calling thread is a webhook AND the
+) -> tuple[bool, Literal["worker", "webhook", "background"] | None]:
+    """Invoke *cancel_fn* iff the calling thread is a real webhook AND the
     session's current lock holder is a worker.  Otherwise do nothing.
 
     Returns ``(preempted, current_kind)`` — *preempted* is ``True`` only when
@@ -576,7 +584,10 @@ def try_preempt_worker(
     for claude, ACP ``cancel(session_id)`` for copilot), but the *decision*
     is identical and lives here.  Worker callers never preempt anyone;
     webhooks queue behind other webhooks (FIFO on the session lock) instead
-    of cancelling each other.
+    of cancelling each other.  ``"background"`` callers (e.g. the rescope
+    thread, #1711) also never preempt — that's the whole point of the
+    third kind: they're system-internal, not user-facing, so they have
+    no priority claim on interrupting in-flight worker turns.
     """
     caller_kind = current_thread_kind()
     current = get_talker(repo_name) if repo_name is not None else None

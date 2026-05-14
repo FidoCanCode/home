@@ -5121,12 +5121,16 @@ class TestReorderTasksBackground:
             self._run_thread(started)
         assert current_repo() is None
 
-    def test_sets_thread_kind_webhook_during_reorder(self, tmp_path: Path) -> None:
-        """Thread kind is set to 'webhook' while the reorder loop runs (#955).
+    def test_sets_thread_kind_background_during_reorder(self, tmp_path: Path) -> None:
+        """Thread kind is set to 'background' while the reorder loop runs (#1711).
 
-        The reorder thread must not register as 'worker' in the session talker —
-        real webhooks would fire the cancel mechanism against it thinking it is
-        the actual worker."""
+        Was 'webhook' originally (#955) — that protected the rescope thread
+        from being identified as the worker by OTHER webhooks, but it also
+        caused the rescope thread itself to preempt the worker on every
+        iteration, livelocking long worker turns.  The third kind
+        'background' preserves the #955 protection (kind != 'worker' still
+        means OTHER webhooks won't preempt this thread) without granting
+        preemption rights to the rescope thread itself."""
         from fido.provider import current_thread_kind
 
         started: list = []
@@ -5147,7 +5151,7 @@ class TestReorderTasksBackground:
             repo_cfg=RepoConfig(name="owner/repo", work_dir=tmp_path),
         )
         self._run_thread(started)
-        assert seen == ["webhook"]
+        assert seen == ["background"]
 
     def test_clears_thread_kind_after_reorder(self, tmp_path: Path) -> None:
         """Thread kind is cleared in the finally block after the reorder loop."""
