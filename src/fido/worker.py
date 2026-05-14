@@ -1049,6 +1049,7 @@ def _write_pr_description(
     *,
     agent: ProviderAgent | None = None,
     pre_baked_description: str = "",
+    _pr_body_lock_fn: Callable[..., Any] | None = None,
 ) -> None:
     """Write or rewrite the PR description.
 
@@ -1152,7 +1153,8 @@ def _write_pr_description(
     new_body = f"{new_desc.strip()}{divider}{rest}"
     # Hold sync.lock during the PATCH so concurrent sync_tasks calls (which
     # also acquire this lock) cannot interleave and overwrite each other.
-    with tasks.pr_body_lock(work_dir):
+    _lock = _pr_body_lock_fn if _pr_body_lock_fn is not None else tasks.pr_body_lock
+    with _lock(work_dir):
         gh.edit_pr_body(repo, pr_number, new_body)
     log.info("_write_pr_description: PR #%s description written", pr_number)
 

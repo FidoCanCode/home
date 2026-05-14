@@ -33,14 +33,14 @@ from fido.store import (
     ReplyPromiseRecord,
     append_reply_promise_markers,
 )
-from fido.synthesis import Insight
+from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import (
     SynthesisExhaustedError,
     call_failure_explanation,
     call_synthesis,
 )
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
-from fido.tasks import Tasks, thread_comment_author_for_auto_resolve_oracle
+from fido.tasks import Tasks, sync_tasks, thread_comment_author_for_auto_resolve_oracle
 from fido.types import ActiveIssue, ActivePR, RescopeIntent, TaskType
 from fido.worker import ActivityReporter
 
@@ -73,6 +73,8 @@ class _BackgroundRescopeTrigger:
         registry: ActivityReporter,
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
+        *,
+        _reorder_fn: Callable[..., None] | None = None,
     ) -> None:
         self._work_dir = work_dir
         self._config = config
@@ -81,6 +83,7 @@ class _BackgroundRescopeTrigger:
         self._registry = registry
         self._agent = agent
         self._prompts = prompts
+        self._reorder_fn = _reorder_fn
 
     def trigger_rescope(self, intent: RescopeIntent) -> None:
         """Trigger :func:`_reorder_tasks_background` with the given rescope intent.
@@ -96,7 +99,12 @@ class _BackgroundRescopeTrigger:
             intent.comment_id,
             intent.change_request[:80],
         )
-        _reorder_tasks_background(
+        reorder = (
+            self._reorder_fn
+            if self._reorder_fn is not None
+            else _reorder_tasks_background
+        )
+        reorder(
             self._work_dir,
             intent.change_request,
             self._config,
@@ -294,10 +302,13 @@ class WebhookIngressOracle:
         return new_state
 
 
-def _configured_agent(config: Config, repo_cfg: RepoConfig) -> ProviderAgent:
-    return DefaultProviderFactory(
-        session_system_file=config.sub_dir / "persona.md"
-    ).create_agent(
+def _configured_agent(
+    config: Config,
+    repo_cfg: RepoConfig,
+    *,
+    _factory_cls: type[DefaultProviderFactory] = DefaultProviderFactory,
+) -> ProviderAgent:
+    return _factory_cls(session_system_file=config.sub_dir / "persona.md").create_agent(
         repo_cfg,
         work_dir=repo_cfg.work_dir,
         repo_name=repo_cfg.name,
@@ -881,6 +892,8 @@ def _apply_reply_result(
     thread: dict[str, Any] | None,
     registry: ActivityReporter,
     dispatcher: "Dispatcher",
+    *,
+    _create_task_fn: Callable[..., object] | None = None,
 ) -> None:
     """Apply task side effects from a recovered reply."""
     queue_reply_tasks(
@@ -892,6 +905,7 @@ def _apply_reply_result(
         thread=thread,
         registry=registry,
         dispatcher=dispatcher,
+        create_task_fn=_create_task_fn,
     )
 
 
@@ -918,6 +932,9 @@ def recover_reply_promises(
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
+    _reply_to_comment_fn: Callable[..., tuple[str, list[str]]] | None = None,
+    _reply_to_issue_comment_fn: Callable[..., tuple[str, list[str]]] | None = None,
+    _create_task_fn: Callable[..., object] | None = None,
 ) -> bool:
     """Recover queued webhook replies for the current PR from SQLite promises."""
     store = FidoStore(repo_cfg.work_dir)
@@ -999,8 +1016,13 @@ def recover_reply_promises(
             "reply_promise_id": group[0][0],
             "reply_promise_ids": [promise_id for promise_id, _ in group],
         }
+        _reply_issue_fn = (
+            _reply_to_issue_comment_fn
+            if _reply_to_issue_comment_fn is not None
+            else reply_to_issue_comment
+        )
         try:
-            category, titles = reply_to_issue_comment(
+            category, titles = _reply_issue_fn(
                 action,
                 config,
                 repo_cfg,
@@ -1021,6 +1043,7 @@ def recover_reply_promises(
             action.thread,
             registry,
             dispatcher,
+            _create_task_fn=_create_task_fn,
         )
         _ack_promises(store, (promise_id for promise_id, _ in group))
         processed_any = True
@@ -1066,8 +1089,13 @@ def recover_reply_promises(
             "reply_promise_id": promise.promise_id,
             "reply_promise_ids": [group_promise_id for group_promise_id, _ in group],
         }
+        _reply_fn = (
+            _reply_to_comment_fn
+            if _reply_to_comment_fn is not None
+            else reply_to_comment
+        )
         try:
-            category, titles = reply_to_comment(
+            category, titles = _reply_fn(
                 action,
                 config,
                 repo_cfg,
@@ -1090,6 +1118,7 @@ def recover_reply_promises(
             thread=action.reply_to,
             registry=registry,
             dispatcher=dispatcher,
+            _create_task_fn=_create_task_fn,
         )
         _ack_promises(store, (group_promise_id for group_promise_id, _ in group))
         processed_any = True
@@ -1123,10 +1152,20 @@ class Dispatcher:
     ``GitHub`` instance, so there is no production case where ``gh`` is absent.
     """
 
-    def __init__(self, config: Config, repo_cfg: RepoConfig, gh: GitHub) -> None:
+    def __init__(
+        self,
+        config: Config,
+        repo_cfg: RepoConfig,
+        gh: GitHub,
+        *,
+        _task_creator: Callable[..., object] | None = None,
+        _sync_launcher: Callable[[], None] | None = None,
+    ) -> None:
         self._config = config
         self._repo_cfg = repo_cfg
         self._gh = gh
+        self._task_creator = _task_creator
+        self._sync_launcher = _sync_launcher
 
     def dispatch(
         self,
@@ -1430,7 +1469,10 @@ class Dispatcher:
                 f"PR top-level comment on #{pr_number} by {user} "
                 f"({'bot' if is_bot else 'human/owner'}):\n\n{body}"
             )
-            create_task(
+            task_fn = (
+                self._task_creator if self._task_creator is not None else create_task
+            )
+            task_fn(
                 prompt, self._config, repo_cfg, self._gh, thread=thread, dispatcher=self
             )
         log.info("backfill: PR #%s — inspected %d comments", pr_number, len(comments))
@@ -1438,9 +1480,12 @@ class Dispatcher:
 
     def launch_sync(self) -> None:
         """Sync tasks.json → PR body in a background thread."""
-        from fido.tasks import sync_tasks_background
+        if self._sync_launcher is not None:
+            self._sync_launcher()
+        else:
+            from fido.tasks import sync_tasks_background
 
-        sync_tasks_background(self._repo_cfg.work_dir, self._gh)
+            sync_tasks_background(self._repo_cfg.work_dir, self._gh)
         log.info("sync-tasks launched")
 
 
@@ -1461,6 +1506,8 @@ def reply_to_comment(
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
+    _call_synthesis: Callable[..., CommentResponse] | None = None,
+    _call_failure_explanation: Callable[..., CommentResponse] | None = None,
 ) -> tuple[str, list[str]]:
     """Handle a review comment via the synthesis LLM call, post reply.
 
@@ -1566,13 +1613,19 @@ def reply_to_comment(
             comment_type="pulls",
         )
 
+    _synthesis_fn = _call_synthesis if _call_synthesis is not None else call_synthesis
+    _failure_fn = (
+        _call_failure_explanation
+        if _call_failure_explanation is not None
+        else call_failure_explanation
+    )
     log.info(
         "synthesis: calling for PR #%s comment %s",
         info["pr"],
         info["comment_id"],
     )
     try:
-        synthesis_response = call_synthesis(
+        synthesis_response = _synthesis_fn(
             comment,
             is_bot=action.is_bot,
             context=context or None,
@@ -1588,9 +1641,7 @@ def reply_to_comment(
             info.get("comment_id"),
         )
         try:
-            synthesis_response = call_failure_explanation(
-                comment, agent=agent, prompts=prompts
-            )
+            synthesis_response = _failure_fn(comment, agent=agent, prompts=prompts)
         except SynthesisExhaustedError:
             # Even the fallback explanation exhausted retries.  Best-effort
             # clear the eyes reaction so it does not sit forever as a false
@@ -1778,6 +1829,9 @@ def reply_to_issue_comment(
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
+    _call_synthesis: Callable[..., CommentResponse] | None = None,
+    _call_failure_explanation: Callable[..., CommentResponse] | None = None,
+    _factory_cls: type[DefaultProviderFactory] = DefaultProviderFactory,
 ) -> tuple[str, list[str]]:
     """Handle a top-level PR comment via the synthesis LLM call, post reply.
 
@@ -1788,7 +1842,7 @@ def reply_to_issue_comment(
     Raises on reply-post failure so callers fail closed.
     """
     if agent is None:
-        agent = _configured_agent(config, repo_cfg)
+        agent = _configured_agent(config, repo_cfg, _factory_cls=_factory_cls)
     if prompts is None:
         prompts = Prompts(_load_persona(config))
     comment = action.comment_body or ""
@@ -1870,9 +1924,10 @@ def reply_to_issue_comment(
             comment_type="issues",
         )
 
+    _synthesis_fn = _call_synthesis if _call_synthesis is not None else call_synthesis
     log.info("synthesis: calling for issue comment on PR #%s", number)
     try:
-        synthesis_response = call_synthesis(
+        synthesis_response = _synthesis_fn(
             comment,
             is_bot=action.is_bot,
             context=context or None,
@@ -1888,10 +1943,13 @@ def reply_to_issue_comment(
             _cid,
             number,
         )
+        _failure_fn = (
+            _call_failure_explanation
+            if _call_failure_explanation is not None
+            else call_failure_explanation
+        )
         try:
-            synthesis_response = call_failure_explanation(
-                comment, agent=agent, prompts=prompts
-            )
+            synthesis_response = _failure_fn(comment, agent=agent, prompts=prompts)
         except SynthesisExhaustedError:
             # Even the fallback explanation exhausted retries.  Best-effort
             # clear the eyes reaction so it does not sit forever as a false
@@ -2010,7 +2068,11 @@ def _maybe_abort_for_new_task(
         registry.abort_task(repo_cfg.name, task_id=current_task_id)
 
 
-def _get_commit_summary(work_dir: Path) -> str:
+def _get_commit_summary(
+    work_dir: Path,
+    *,
+    _runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> str:
     """Return a short ``git log --oneline`` summary of recent commits.
 
     Used to give Opus context about what has already been implemented when it
@@ -2018,7 +2080,8 @@ def _get_commit_summary(work_dir: Path) -> str:
     exit so callers see real failures rather than silently receiving an empty
     string.
     """
-    result = subprocess.run(
+    run = _runner if _runner is not None else subprocess.run
+    result = run(
         ["git", "log", "--oneline", "-20"],
         cwd=work_dir,
         capture_output=True,
@@ -2036,6 +2099,7 @@ def _notify_thread_change(
     *,
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
+    _factory_cls: type[DefaultProviderFactory] = DefaultProviderFactory,
 ) -> None:
     """Post a brief comment notifying a commenter that their task was rescoped.
 
@@ -2071,7 +2135,9 @@ def _notify_thread_change(
 
     if agent is None:
         agent = _configured_agent(
-            config, config.repos[change["task"]["thread"]["repo"]]
+            config,
+            config.repos[change["task"]["thread"]["repo"]],
+            _factory_cls=_factory_cls,
         )
     if prompts is None:
         prompts = Prompts(_load_persona(config))
@@ -2134,6 +2200,9 @@ def _rewrite_pr_description(
     _state: State | None = None,
     _tasks: Tasks | None = None,
     _max_retries: int = 3,
+    _write_fn: Callable[..., None] | None = None,
+    _state_factory: Callable[[Path], State] | None = None,
+    _pr_body_lock_fn: Callable[..., Any] | None = None,
 ) -> None:
     """Rewrite the PR description summary after a successful rescope.
 
@@ -2149,18 +2218,25 @@ def _rewrite_pr_description(
     the state of the task list at the moment Opus returned.  The PR body is
     re-fetched on each retry so the work-queue section stays current.
     """
-    from fido.worker import (
-        _write_pr_description,  # pyright: ignore[reportPrivateUsage]
-    )
+    _using_default_write = _write_fn is None
+    if _write_fn is None:
+        from fido.worker import (
+            _write_pr_description as _default_write,  # pyright: ignore[reportPrivateUsage]
+        )
 
-    if _state is None or _tasks is None:
-        from fido.state import State as StateStore
+        _write_fn = _default_write
+
+    if _state is None:
+        if _state_factory is not None:
+            _state = _state_factory(work_dir / ".git" / "fido")
+        else:
+            from fido.state import State as StateStore
+
+            _state = StateStore(work_dir / ".git" / "fido")
+    if _tasks is None:
         from fido.tasks import Tasks as TaskStore
 
-        if _state is None:
-            _state = StateStore(work_dir / ".git" / "fido")
-        if _tasks is None:
-            _tasks = TaskStore(work_dir)
+        _tasks = TaskStore(work_dir)
 
     state = _state.load()
     issue = state.get("issue")
@@ -2183,7 +2259,12 @@ def _rewrite_pr_description(
         snapshot_before = _task_snapshot(task_list)
 
         body = gh.get_pr_body(repo, pr_number)
-        _write_pr_description(
+        lock_kwargs: dict[str, Any] = (
+            {"_pr_body_lock_fn": _pr_body_lock_fn}
+            if _using_default_write and _pr_body_lock_fn is not None
+            else {}
+        )
+        _write_fn(
             work_dir,
             gh,
             repo,
@@ -2192,6 +2273,7 @@ def _rewrite_pr_description(
             task_list,
             body,
             agent=agent,
+            **lock_kwargs,
         )
 
         snapshot_after = _task_snapshot(_tasks.list())
@@ -2261,18 +2343,20 @@ def _make_reorder_kwargs(
     prompts: Prompts,
     rewrite_fn: Callable[..., None],
     sync_fn: Callable[[Path, Any], None] | None = None,
+    notify_fn: Callable[..., None] | None = None,
+    sync_tasks_fn: Callable[[Path, Any], None] | None = None,
 ) -> dict[str, Any]:
     """Build the kwargs dict for a :func:`~fido.tasks.reorder_tasks` call."""
+    _notify_fn = notify_fn if notify_fn is not None else _notify_thread_change
+    _default_sync = sync_tasks_fn if sync_tasks_fn is not None else sync_tasks
 
     def on_changes(changes: list[dict[str, Any]]) -> None:
         for change in changes:
-            _notify_thread_change(change, config, gh, agent=None, prompts=None)
+            _notify_fn(change, config, gh, agent=None, prompts=None)
 
     def on_done() -> None:
         if sync_fn is None:
-            from fido.tasks import sync_tasks
-
-            sync_tasks(work_dir, gh)
+            _default_sync(work_dir, gh)
         else:
             sync_fn(work_dir, gh)
         rewrite_fn(
@@ -2322,6 +2406,8 @@ def _reorder_tasks_background(
     _sync_fn: Callable[[Path, Any], None] | None = None,
     _coalesce_state: dict[str, Any] | None = None,
     _release_untriaged_on_finish: bool = False,
+    _notify_fn: Callable[..., None] | None = None,
+    _sync_tasks_fn: Callable[[Path, Any], None] | None = None,
 ) -> None:
     """Run :func:`~fido.tasks.reorder_tasks` in a daemon background thread.
 
@@ -2362,7 +2448,17 @@ def _reorder_tasks_background(
 
     key = str(work_dir)
     kwargs = _make_reorder_kwargs(
-        work_dir, config, repo_cfg, registry, gh, agent, prompts, rewrite_fn, _sync_fn
+        work_dir,
+        config,
+        repo_cfg,
+        registry,
+        gh,
+        agent,
+        prompts,
+        rewrite_fn,
+        _sync_fn,
+        _notify_fn,
+        _sync_tasks_fn,
     )
 
     with _reorder_coalesce_lock:
