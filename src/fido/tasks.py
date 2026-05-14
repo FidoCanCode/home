@@ -181,6 +181,29 @@ def _existing_titles_by_id(current: list[dict[str, Any]]) -> dict[str, str]:
     return {t["id"]: t.get("title", "") for t in current if "id" in t}
 
 
+def _merge_source_oracle_ids(
+    item: dict[str, Any],
+    ids_by_task_id: dict[str, int],
+) -> list[int]:
+    """Map a rescope item's ``merge_sources`` task-id list to oracle ids.
+
+    The adapter's contract for #1717: ``item["merge_sources"]`` is a list
+    of OTHER task ids whose lineage and primary anchor should fold into
+    this item's task.  Empty list = no merge.  Garbage (non-list, target
+    referencing itself, unknown id) is ignored — the validator already
+    rejects malformed payloads atomically (#1715), so reaching here with
+    invalid sources means we've been called under tests that bypass the
+    validator; fall back to "no merge" rather than emitting a bogus op.
+    """
+    raw = item.get("merge_sources")
+    if not isinstance(raw, list) or not raw:
+        return []
+    # _validate_rescope_batch already rejects unknown ids, self-targeting,
+    # non-string entries, and duplicates atomically before this runs in
+    # production; trust the validator and just look up oracle ids.
+    return [ids_by_task_id[src] for src in raw if src in ids_by_task_id]
+
+
 def _is_valid_anchor_id(value: object) -> bool:
     """A GitHub comment id is a positive 64-bit int.
 
@@ -387,14 +410,19 @@ def _rescope_releases_for_oracle(
             new_description = (
                 item["description"] if "description" in item else existing_description
             )
+            merge_sources = _merge_source_oracle_ids(item, ids_by_task_id)
             # Op precedence (most structural first):
             #   1. Explicit completion (#1716): item.status == "completed".
             #      Removes the task — strictly more structural than any
             #      metadata change, so it preempts the others.  Omission
             #      still means keep-as-is (#1357), not delete.
-            #   2. Anchor rewrite (#1714): re-targets the reply destination.
-            #   3. Text rewrite (#1713): title/description.
-            #   4. KeepTask: nothing changed.
+            #   2. Merge (#1717): folds source lineages into target +
+            #      rewrites target text.  The model only mutates the
+            #      target row; source rows are closed by their own
+            #      CompleteTask items in the same batch.
+            #   3. Anchor rewrite (#1714): re-targets the reply destination.
+            #   4. Text rewrite (#1713): title/description.
+            #   5. KeepTask: nothing changed.
             #
             # The model carries one op per task per batch, so a combined
             # request rides multiple rescope iterations — the highest-
@@ -402,6 +430,10 @@ def _rescope_releases_for_oracle(
             if item.get("status") == str(TaskStatus.COMPLETED):
                 decision: rescope_oracle.RescopeOp = rescope_oracle.CompleteTask(
                     oracle_id
+                )
+            elif merge_sources:
+                decision = rescope_oracle.MergeTasks(
+                    oracle_id, merge_sources, new_title, new_description
                 )
             elif (
                 isinstance(task.get("thread"), dict)
@@ -468,6 +500,22 @@ def _materialize_rescope_oracle_result(
             and new_anchor != _task_source_comment_for_oracle(task)
         ):
             task["thread"] = _reanchored_thread(existing_thread, new_anchor)
+        # #1717: when a MergeTasks op folded source lineages into this
+        # row, sync the larger lineage back to thread.lineage_comment_ids
+        # so reply-back paths see every contributing commenter.  Only
+        # mutate when the model row's lineage_comments differs from what
+        # the existing thread already canonicalises to — otherwise a
+        # no-op rescope (e.g. a task with comment_id=42 and no explicit
+        # lineage_comment_ids) would synthesise a lineage_comment_ids
+        # field on every pass.
+        existing_thread = task.get("thread")
+        if isinstance(existing_thread, dict):
+            merged_lineage = list(row.lineage_comments)
+            existing_lineage = _thread_lineage_comment_ids(existing_thread)
+            if merged_lineage != existing_lineage:
+                thread = dict(task["thread"])
+                thread["lineage_comment_ids"] = merged_lineage
+                task["thread"] = thread
         materialized.append(task)
     return materialized
 
@@ -499,9 +547,10 @@ def _reanchored_thread(
         if key not in _STALE_AFTER_REANCHOR
     }
     refreshed["comment_id"] = new_anchor
-    refreshed["lineage_comment_ids"] = list(
-        dict.fromkeys([*_thread_lineage_comment_ids(existing_thread), new_anchor])
-    )
+    # lineage_comment_ids is owned by the model row's lineage_comments
+    # field (#1717): the RewriteAnchor reducer extends it with the new
+    # anchor, and the materializer below syncs the row back to thread.
+    # Don't double-write here.
     return refreshed
 
 
@@ -941,14 +990,22 @@ def _validate_rescope_batch(
     own validation lives in :func:`_make_new_tasks_from_opus` (blank-title
     skip, etc.) — they are not rejected here.
 
-    Forward-looking: when #1716/1717/1718 add explicit delete/merge/split
-    operations to the rescope vocabulary, this is where their lineage-
-    preservation rules will live (e.g. merge into target T must keep
-    every source's source_comment in T's lineage_comment_ids).
+    #1717 adds the merge-specific rules: ``item["merge_sources"]`` (when
+    present) must be a list of strings naming OTHER existing task ids,
+    each of which appears in the same batch as a separately-completed
+    item.  The rocq reducer can fold any sources' lineage into the
+    target row, but the per-task coverage invariant
+    (``rescope_ops_cover_snapshot``) still requires every source to have
+    its own ``CompleteTask`` op — so the source items in the batch must
+    carry ``status="completed"``.
+
+    Forward-looking: split (#1718) will add its own validation rules.
     """
     errors: list[str] = []
     known_ids = {t["id"] for t in current if "id" in t}
     seen_ids: set[str] = set()
+    explicitly_completed_ids: set[str] = set()
+    merge_targets: list[tuple[int, str, list[str]]] = []
 
     for index, item in enumerate(ordered_items):
         if not isinstance(item, dict):
@@ -972,6 +1029,50 @@ def _validate_rescope_batch(
                 f"item[{index}].id={item_id!r}: duplicate (already appears earlier)"
             )
         seen_ids.add(item_id)
+        if item.get("status") == str(TaskStatus.COMPLETED):
+            explicitly_completed_ids.add(item_id)
+        merge_sources = item.get("merge_sources")
+        if merge_sources is not None:
+            if not isinstance(merge_sources, list):
+                errors.append(
+                    f"item[{index}].merge_sources: must be a list, "
+                    f"got {type(merge_sources).__name__}"
+                )
+            else:
+                source_strs: list[str] = []
+                for source_index, source in enumerate(merge_sources):
+                    if not isinstance(source, str) or not source:
+                        errors.append(
+                            f"item[{index}].merge_sources[{source_index}]: "
+                            f"must be non-empty string, got {source!r}"
+                        )
+                        continue
+                    if source == item_id:
+                        errors.append(
+                            f"item[{index}].merge_sources[{source_index}]={source!r}: "
+                            "cannot merge a task into itself"
+                        )
+                        continue
+                    if source not in known_ids:
+                        errors.append(
+                            f"item[{index}].merge_sources[{source_index}]={source!r}: "
+                            "unknown source id"
+                        )
+                        continue
+                    source_strs.append(source)
+                merge_targets.append((index, item_id, source_strs))
+
+    # Every source named in a merge_sources list must also appear in the
+    # batch with status="completed" so the model's per-task coverage
+    # invariant still holds (each source needs its own CompleteTask op).
+    for index, _target_id, sources in merge_targets:
+        for source in sources:
+            if source not in explicitly_completed_ids:
+                errors.append(
+                    f"item[{index}].merge_sources={source!r}: "
+                    "source must also appear in the batch with "
+                    'status="completed" so the rescope reducer closes it'
+                )
 
     return errors
 

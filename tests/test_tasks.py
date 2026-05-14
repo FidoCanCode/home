@@ -1193,6 +1193,89 @@ class TestApplyReorder:
         # Thread metadata stays put — no anchor change happened.
         assert result[0]["thread"] == thread
 
+    def test_merge_folds_source_lineage_into_target(self) -> None:
+        # #1717: MergeTasks(target, sources, new_title, new_description)
+        # folds every source's lineage_comments + source_comment into
+        # target's lineage_comments — no origin lost.  Sources are closed
+        # by their own CompleteTask items in the same batch.
+        thread_a = {"repo": "r/r", "pr": 1, "comment_id": 100}
+        thread_b = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 200,
+            "lineage_comment_ids": [50, 200],
+        }
+        thread_c = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 300,
+            "lineage_comment_ids": [300, 250],
+        }
+        a = self._t("a", "Task A", task_type="thread")
+        a["thread"] = thread_a
+        b = self._t("b", "Task B", task_type="thread")
+        b["thread"] = thread_b
+        c = self._t("c", "Task C", task_type="thread")
+        c["thread"] = thread_c
+        items = [
+            {
+                "id": "a",
+                "title": "Merged title",
+                "description": "merged scope",
+                "merge_sources": ["b", "c"],
+            },
+            {"id": "b", "title": "Task B", "status": "completed"},
+            {"id": "c", "title": "Task C", "status": "completed"},
+        ]
+        result = _apply_reorder([a, b, c], items)
+        target = next(t for t in result if t["id"] == "a")
+        # Target keeps its own anchor and pending status; gets merged
+        # title/desc from the explicit payload; absorbs sources' lineage.
+        assert target["status"] == str(TaskStatus.PENDING)
+        assert target["thread"]["comment_id"] == 100
+        assert target["title"] == "Merged title"
+        assert target["description"] == "merged scope"
+        # Ordered union: a's [100] (default), then b's [50, 200], then
+        # c's [300, 250] (b/c lineage_comment_ids fields explicitly).
+        assert target["thread"]["lineage_comment_ids"] == [100, 50, 200, 300, 250]
+        # Sources are closed by their own CompleteTask items.
+        for src_id in ("b", "c"):
+            src = next(t for t in result if t["id"] == src_id)
+            assert src["status"] == str(TaskStatus.COMPLETED)
+
+    def test_merge_uses_oracle_predicate_to_prove_no_lineage_lost(self) -> None:
+        # The Rocq model's merge_preserves_source_lineage predicate is
+        # extracted to Python; check it returns True after a real merge.
+        from fido.rocq import task_queue_rescope as oracle
+
+        a_row = oracle.TaskRow(
+            title="A",
+            description="",
+            kind=oracle.TaskThread(),
+            status=oracle.StatusPending(),
+            source_comment=100,
+            lineage_comments=[100],
+        )
+        b_row = oracle.TaskRow(
+            title="B",
+            description="",
+            kind=oracle.TaskThread(),
+            status=oracle.StatusPending(),
+            source_comment=200,
+            lineage_comments=[50, 200],
+        )
+        rows_before = {1: a_row, 2: b_row}
+        merge_op = oracle.MergeTasks(1, [2], "Merged", "")
+        # Extracted return shape is the Coq triple ((rows, pending), completed).
+        ((rows_after, _), _) = oracle.apply_rescope_op(
+            merge_op, 1, a_row, rows_before, [], []
+        )
+        target_after = rows_after[1]
+        # Predicate confirms sources' lineage + anchor are present in target.
+        assert oracle.merge_preserves_source_lineage([2], rows_before, target_after)
+        # Sanity: the merged lineage matches what we expect.
+        assert target_after.lineage_comments == [100, 50, 200]
+
     def test_explicit_completion_marks_task_completed(self) -> None:
         # #1716: an item with status="completed" emits CompleteTask, which
         # the reducer applies as a status flip to COMPLETED.  This is the
@@ -1639,6 +1722,64 @@ class TestValidateRescopeBatch:
         assert len(errors) == 2
         assert any("999" in e and "unknown" in e for e in errors)
         assert any("duplicate" in e for e in errors)
+
+    def test_valid_merge_batch_is_accepted(self) -> None:
+        # #1717: a target with merge_sources is valid when every source
+        # is a known id AND appears in the same batch with status=completed.
+        current = [self._t("a"), self._t("b"), self._t("c")]
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b", "c"]},
+            {"id": "b", "title": "B", "status": "completed"},
+            {"id": "c", "title": "C", "status": "completed"},
+        ]
+        assert _validate_rescope_batch(current, items) == []
+
+    def test_merge_with_unknown_source_is_rejected(self) -> None:
+        current = [self._t("a"), self._t("b")]
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b", "ghost"]},
+            {"id": "b", "title": "B", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any("ghost" in e and "unknown" in e for e in errors)
+
+    def test_merge_into_self_is_rejected(self) -> None:
+        current = [self._t("a"), self._t("b")]
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["a", "b"]},
+            {"id": "b", "title": "B", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any("merge a task into itself" in e for e in errors)
+
+    def test_merge_source_without_completion_is_rejected(self) -> None:
+        # If the source isn't marked completed in the batch, the per-task
+        # coverage invariant breaks: the source has no op of its own.
+        current = [self._t("a"), self._t("b")]
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b"]},
+            {"id": "b", "title": "B"},  # missing status="completed"
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any(
+            'must also appear in the batch with status="completed"' in e for e in errors
+        )
+
+    def test_merge_sources_must_be_list(self) -> None:
+        current = [self._t("a")]
+        items = [{"id": "a", "title": "x", "merge_sources": "b"}]
+        errors = _validate_rescope_batch(current, items)
+        assert any("must be a list" in e for e in errors)
+
+    def test_merge_source_must_be_non_empty_string(self) -> None:
+        current = [self._t("a"), self._t("b")]
+        items = [
+            {"id": "a", "title": "Merged", "merge_sources": ["b", 42, ""]},
+            {"id": "b", "title": "B", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any("must be non-empty string" in e and "42" in e for e in errors)
+        assert any("must be non-empty string" in e and "''" in e for e in errors)
 
 
 # ── reorder_tasks ─────────────────────────────────────────────────────────────
