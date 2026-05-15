@@ -3141,6 +3141,63 @@ class TestReorderTasks:
         )
         assert received == []
 
+    def test_intent_dispositions_callback_fires_with_classification(
+        self, tmp_path: Path
+    ) -> None:
+        # #1723: when intents are provided, the on_intent_dispositions
+        # callback fires with the per-intent material/aggregation/
+        # unhandled classification so #1724 can route notifications.
+        t1 = self._add(tmp_path, "Original")
+        intents = [
+            RescopeIntent(
+                change_request="rename it",
+                comment_id=101,
+                timestamp="2024-01-15T10:00:00+00:00",
+            )
+        ]
+        # Op rewrites the task and attributes it to the intent.
+        raw = json.dumps(
+            {
+                "operations": [
+                    {
+                        "op": "rewrite",
+                        "id": t1["id"],
+                        "title": "Renamed",
+                        "description": "",
+                        "contributing_intents": [101],
+                    }
+                ]
+            }
+        )
+        captured: list[dict] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            intents=intents,
+            _on_intent_dispositions=lambda d: captured.append(d),
+        )
+        assert len(captured) == 1
+        assert 101 in captured[0]
+        assert captured[0][101].kind == "material"
+
+    def test_intent_dispositions_callback_skipped_without_intents(
+        self, tmp_path: Path
+    ) -> None:
+        # When no intents are provided (e.g. a CI-triggered rescope
+        # with no fresh comment intents), the dispositions callback
+        # doesn't fire — there's nothing to classify.
+        self._add(tmp_path, "Task")
+        raw = json.dumps({"operations": []})
+        called: list[int] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_intent_dispositions=lambda _d: called.append(1),
+        )
+        assert called == []
+
     def test_validator_rejection_after_parse_success_drops_batch(
         self, tmp_path: Path
     ) -> None:
@@ -4126,6 +4183,187 @@ class TestComputeThreadChanges:
         kinds = {c["kind"] for c in changes}
         assert "completed" in kinds
         assert "modified" in kinds
+
+
+class TestClassifyRescopeIntents:
+    """Per-intent material vs aggregation classifier (#1723)."""
+
+    def _intent(self, comment_id: int) -> RescopeIntent:
+        return RescopeIntent(
+            change_request="ask",
+            comment_id=comment_id,
+            timestamp="2024-01-15T10:00:00+00:00",
+        )
+
+    def _t(
+        self,
+        task_id: str,
+        title: str,
+        description: str = "",
+        status: str = "pending",
+        thread: dict | None = None,
+        contributing_intents: list[int] | None = None,
+    ) -> dict:
+        t: dict = {
+            "id": task_id,
+            "title": title,
+            "type": "thread" if thread else "spec",
+            "status": status,
+            "description": description,
+        }
+        if thread:
+            t["thread"] = thread
+        if contributing_intents is not None:
+            t["contributing_intents"] = contributing_intents
+        return t
+
+    def test_unattributed_intent_is_unhandled(self) -> None:
+        # Intent doesn't appear in any post-rescope task's
+        # contributing_intents → Opus didn't act on it this batch.
+        from fido.tasks import _classify_rescope_intents
+
+        original = [self._t("1", "A")]
+        result = [self._t("1", "A")]
+        out = _classify_rescope_intents(original, result, [self._intent(101)])
+        assert out[101].kind == "unhandled"
+        assert out[101].affected_task_ids == []
+
+    def test_intent_absorbed_without_change_is_aggregation(self) -> None:
+        # Intent attributed to a task that didn't change in any
+        # material way — pure aggregation (don't ping the commenter).
+        from fido.tasks import _classify_rescope_intents
+
+        original = [self._t("1", "A")]
+        result = [self._t("1", "A", contributing_intents=[101])]
+        out = _classify_rescope_intents(original, result, [self._intent(101)])
+        assert out[101].kind == "aggregation"
+        assert out[101].affected_task_ids == ["1"]
+
+    def test_title_rewrite_is_material(self) -> None:
+        from fido.tasks import _classify_rescope_intents
+
+        original = [self._t("1", "Old")]
+        result = [self._t("1", "New", contributing_intents=[101])]
+        out = _classify_rescope_intents(original, result, [self._intent(101)])
+        assert out[101].kind == "material"
+        assert "title rewritten" in out[101].reason
+
+    def test_description_rewrite_is_material(self) -> None:
+        # The acceptance criteria call out "task wording/scope changes"
+        # — description counts even though the legacy
+        # _compute_thread_changes auto-notification ignores it (#1388
+        # was about chat noise, not classification semantics).
+        from fido.tasks import _classify_rescope_intents
+
+        original = [self._t("1", "Same", description="old scope")]
+        result = [
+            self._t("1", "Same", description="new scope", contributing_intents=[101])
+        ]
+        out = _classify_rescope_intents(original, result, [self._intent(101)])
+        assert out[101].kind == "material"
+        assert "description rewritten" in out[101].reason
+
+    def test_completion_is_material(self) -> None:
+        from fido.tasks import _classify_rescope_intents
+
+        original = [self._t("1", "A")]
+        result = [self._t("1", "A", status="completed", contributing_intents=[101])]
+        out = _classify_rescope_intents(original, result, [self._intent(101)])
+        assert out[101].kind == "material"
+        assert "task closed" in out[101].reason
+
+    def test_anchor_retarget_is_material(self) -> None:
+        from fido.tasks import _classify_rescope_intents
+
+        old_thread = {"repo": "r/r", "pr": 1, "comment_id": 50}
+        new_thread = {"repo": "r/r", "pr": 1, "comment_id": 99}
+        original = [self._t("1", "A", thread=old_thread)]
+        result = [self._t("1", "A", thread=new_thread, contributing_intents=[101])]
+        out = _classify_rescope_intents(original, result, [self._intent(101)])
+        assert out[101].kind == "material"
+        assert "anchor re-targeted" in out[101].reason
+
+    def test_brand_new_task_is_material(self) -> None:
+        # No original counterpart for the intent's task — by
+        # construction, the rescope created a new task to honor it.
+        from fido.tasks import _classify_rescope_intents
+
+        original: list[dict] = []
+        result = [self._t("new-1", "Brand new", contributing_intents=[101])]
+        out = _classify_rescope_intents(original, result, [self._intent(101)])
+        assert out[101].kind == "material"
+        assert "new task created" in out[101].reason
+        assert out[101].affected_task_ids == ["new-1"]
+
+    def test_merge_into_differently_scoped_target_is_material(self) -> None:
+        # Source's intent contributes to a merged target whose title
+        # changed (the merge introduced a different scope to absorb
+        # multiple intents).  Material per the issue's literal spec.
+        from fido.tasks import _classify_rescope_intents
+
+        original = [
+            self._t("a", "Task A"),
+            self._t("b", "Task B"),
+        ]
+        # After merge: target 'a' now titled "Combined" with both
+        # source intents on it (b closed, intent_b folded onto a).
+        result = [
+            self._t("a", "Combined", contributing_intents=[101, 202]),
+            self._t("b", "Task B", status="completed", contributing_intents=[202]),
+        ]
+        out = _classify_rescope_intents(
+            original, result, [self._intent(101), self._intent(202)]
+        )
+        # Both intents see the target's title change → material.
+        assert out[101].kind == "material"
+        assert out[202].kind == "material"
+
+    def test_split_into_multiple_children_is_material(self) -> None:
+        # Source's intent appears on multiple split children — each
+        # child has a different title from the original.  Material.
+        from fido.tasks import _classify_rescope_intents
+
+        original = [self._t("src", "Big task")]
+        result = [
+            self._t("src", "Big task", status="completed", contributing_intents=[101]),
+            self._t("child-A", "Half A", contributing_intents=[101]),
+            self._t("child-B", "Half B", contributing_intents=[101]),
+        ]
+        out = _classify_rescope_intents(original, result, [self._intent(101)])
+        assert out[101].kind == "material"
+        # All three tasks list the intent.
+        assert set(out[101].affected_task_ids) == {"src", "child-A", "child-B"}
+
+    def test_classifier_keys_on_comment_id_not_task_id(self) -> None:
+        # One intent contributing to two distinct tasks aggregates a
+        # single disposition keyed on the comment_id — not two
+        # records per task.
+        from fido.tasks import _classify_rescope_intents
+
+        original = [self._t("1", "A"), self._t("2", "B")]
+        result = [
+            self._t("1", "A new", contributing_intents=[55]),
+            self._t("2", "B", contributing_intents=[55]),
+        ]
+        out = _classify_rescope_intents(original, result, [self._intent(55)])
+        assert list(out.keys()) == [55]
+        assert out[55].kind == "material"
+        assert out[55].affected_task_ids == ["1", "2"]
+
+    def test_aggregation_when_only_unrelated_tasks_changed(self) -> None:
+        # Intent's task is unchanged, but other tasks in the result
+        # changed — aggregation because the classifier looks at the
+        # tasks the intent contributed to, nothing else.
+        from fido.tasks import _classify_rescope_intents
+
+        original = [self._t("1", "A"), self._t("2", "B")]
+        result = [
+            self._t("1", "A", contributing_intents=[101]),  # unchanged
+            self._t("2", "B rewritten"),  # different intent's change
+        ]
+        out = _classify_rescope_intents(original, result, [self._intent(101)])
+        assert out[101].kind == "aggregation"
+        assert out[101].affected_task_ids == ["1"]
 
 
 class TestTasks:
