@@ -372,34 +372,35 @@ class Prompts:
         prior_attempts: list[ClosedPR] | None = None,
         intents: list[RescopeIntent] | None = None,
     ) -> str:
-        """Build an Opus prompt for full task-list synthesis from old tasks + intents.
+        """Build an Opus prompt for explicit-operations rescope (#1719).
 
-        Presents the full task list and a summary of commits already made, then
-        asks Opus to synthesize a complete new task list that reflects the current
-        codebase state and all accumulated change requests.
+        Presents the full task list and a summary of commits already made,
+        then asks Opus to reply with a typed list of operations over the
+        snapshot — every snapped task id is claimed by exactly one
+        operation; new tasks are explicit ``new`` ops.  No "infer
+        mutation from omission" guessing.
 
-        Unlike a simple reorder, Opus may add entirely new tasks, merge, split,
-        rescope, delete, or wipe existing tasks — any transformation needed to
-        produce a coherent task list that describes how to reach the desired new
-        state.  Accumulated intents are listed in chronological order; newer ones
-        override older ones where they conflict.
+        Operation schema (one per item in ``operations``):
 
-        When *issue* is provided, the rendered active-context block (issue,
-        optional PR, prior attempts, task list) is prepended so Opus has full
-        context about what is being worked on.
+        * ``{"op": "keep", "id": "..."}`` — leave the task unchanged.
+        * ``{"op": "rewrite", "id": "...", "title": "...", "description": "..."}``
+          — replace title/description on an existing task id.
+        * ``{"op": "rewrite_anchor", "id": "...", "anchor_comment_id": 12345}``
+          — re-target the source-comment anchor (reply destination).
+        * ``{"op": "remove", "id": "..."}`` — close the task.
+        * ``{"op": "merge", "target_id": "...", "sources": ["..."],
+              "title": "...", "description": "..."}`` — fold each source's
+          lineage into target; sources close.
+        * ``{"op": "split", "id": "...",
+              "children": [{"title": "...", "description": "..."}]}`` —
+          close source and spawn N children inheriting its lineage.
+        * ``{"op": "new", "title": "...", "description": "...", "type": "spec"}``
+          — create a fresh task.
 
-        When *intents* is provided (comment-triggered rescope), the originating
-        comment IDs, timestamps, and change request texts are shown so Opus can
-        synthesize a coherent picture from all accumulated requests.
-
-        Rules enforced in the prompt:
-        - CI tasks (type "ci") must come first.
-        - Existing task IDs must be preserved when kept or modified.
-        - New tasks (not in the current list) must have a null or absent id.
-        - Completed tasks are excluded from the output.
-        - Tasks already covered by a commit should be omitted.
-
-        The caller is responsible for parsing the returned JSON and applying it.
+        The caller parses the returned JSON via
+        :func:`fido.tasks._parse_rescope_operations`, which collects every
+        malformation in one pass and feeds them back via
+        :meth:`rescope_parse_nudge` for retries.
         """
         pending = [t for t in task_list if t.get("status") != "completed"]
         completed = [t for t in task_list if t.get("status") == "completed"]
@@ -458,32 +459,88 @@ class Prompts:
             f"{intents_block}"
             "Pending tasks (current order):\n"
             f"{pending_json}\n\n"
-            "Synthesize a complete new task list from the pending tasks above and "
-            "the accumulated change requests.  The result replaces the entire "
-            "pending task list.\n\n"
-            "Any transformation is valid — keep tasks unchanged, modify their scope, "
-            "merge multiple tasks into one, split one into several, delete tasks no "
-            "longer needed, add entirely new tasks, or wipe and start fresh.  "
-            "Integrate all change requests into a coherent picture: newer requests "
-            "override older ones where they conflict.\n\n"
-            "The task list must break down how to get from the current codebase "
-            "state to the desired new state.\n\n"
-            "Rules:\n"
-            '1. Tasks with type "ci" must come first.\n'
-            "2. For existing tasks you keep or modify, preserve the exact task ID.\n"
-            "3. For entirely new tasks (not in the current pending list), set "
-            '"id" to null or omit it — a fresh ID will be assigned.\n'
-            "4. If a task is already covered by a recent commit, omit it from the "
-            "output — it will be marked done.\n"
-            "5. Include only pending and in_progress tasks in the output — omit "
-            "completed.\n"
-            "6. If a pending task already exists for one of the change requests "
-            "above (matched by content or by its thread metadata), KEEP that "
-            "task and use its exact ID — do NOT emit a second entry with a "
-            'null "id" for the same change request, even if you are rewriting '
-            "its description.  One change request → one task (#1337).\n\n"
-            'Reply with ONLY a JSON object in the form {"tasks": [...]}.\n'
-            'Each element: {"id": "..." or null, "title": "...", "description": "..."}.\n'
+            "Reply with a typed list of OPERATIONS over this snapshot.  Every "
+            "pending task id MUST appear in exactly one operation; new tasks "
+            'use "new" ops.\n\n'
+            "Operation schema (each entry of the operations array):\n"
+            '  {"op": "keep", "id": "<existing-id>"}\n'
+            "      — leave the task unchanged\n"
+            '  {"op": "rewrite", "id": "<existing-id>", '
+            '"title": "...", "description": "..."}\n'
+            "      — replace the title and/or description\n"
+            '  {"op": "rewrite_anchor", "id": "<existing-id>", '
+            '"anchor_comment_id": <int>}\n'
+            "      — re-target the source-comment anchor (reply destination)\n"
+            '  {"op": "remove", "id": "<existing-id>"}\n'
+            "      — close the task (covered by recent commit, no longer needed)\n"
+            '  {"op": "merge", "target_id": "<existing-id>", '
+            '"sources": ["<existing-id>", ...], '
+            '"title": "...", "description": "..."}\n'
+            "      — fold each source's lineage into the target; sources close\n"
+            '  {"op": "split", "id": "<existing-id>", "children": '
+            '[{"title": "...", "description": "..."}, ...]}\n'
+            "      — close the source and spawn N children inheriting its lineage\n"
+            '  {"op": "new", "title": "...", "description": "...", '
+            '"type": "spec"}\n'
+            "      — create a brand-new task (fresh id assigned by the runtime)\n"
+            "\n"
+            "Constraints:\n"
+            '1. Tasks of type "ci" must come first in the operations array.\n'
+            "2. Each pending snapshot id may appear in at most one operation "
+            "(no rewrite + remove on the same id).\n"
+            "3. Each existing task id you reference must be in the pending "
+            "snapshot above — no inventing ids.\n"
+            "4. A source id may appear in at most one merge or split (lineage "
+            "duplication is rejected).\n"
+            "5. ASK:/DEFER:/CI FAILURE: tasks cannot be split (kind is "
+            'title-prefix driven; use "remove" + "new" if you want to '
+            "convert one into actionable work).\n"
+            "6. If a pending task already covers an intent above (by content "
+            'or thread metadata), use "keep" or "rewrite" on its id — do '
+            'NOT emit "new" for the same intent (#1337).\n\n'
+            'Reply with ONLY a JSON object in the form {"operations": [...]}.\n'
+            "No other text before or after the JSON."
+        )
+
+    def rescope_parse_nudge(self, errors: list[str], *, attempts_remaining: int) -> str:
+        """Build a follow-up nudge when the rescope response failed to parse.
+
+        Hands Opus the full error list so it can correct every defect at
+        once — fail-fast on the first error would force more round trips
+        than necessary.  The schema is reiterated so the model has the
+        full reference inline (rather than relying on memory of the
+        original rescope_prompt several turns back).
+        """
+        if attempts_remaining == 0:
+            attempt_line = (
+                "This is your final attempt — if the response still fails to "
+                "parse, the rescope batch will be dropped."
+            )
+        else:
+            attempt_line = (
+                f"You have {attempts_remaining} attempt(s) remaining after this one."
+            )
+        bulleted = "\n".join(f"- {e}" for e in errors)
+        return (
+            "Your previous rescope response had the following problems:\n\n"
+            f"{bulleted}\n\n"
+            "Resubmit the full operations array, fixing every problem above. "
+            f"{attempt_line}\n\n"
+            "Operation schema (recap):\n"
+            '  {"op": "keep", "id": "<existing-id>"}\n'
+            '  {"op": "rewrite", "id": "<existing-id>", '
+            '"title": "...", "description": "..."}\n'
+            '  {"op": "rewrite_anchor", "id": "<existing-id>", '
+            '"anchor_comment_id": <int>}\n'
+            '  {"op": "remove", "id": "<existing-id>"}\n'
+            '  {"op": "merge", "target_id": "<existing-id>", '
+            '"sources": ["<existing-id>", ...], '
+            '"title": "...", "description": "..."}\n'
+            '  {"op": "split", "id": "<existing-id>", "children": '
+            '[{"title": "...", "description": "..."}, ...]}\n'
+            '  {"op": "new", "title": "...", "description": "...", '
+            '"type": "spec"}\n\n'
+            'Reply with ONLY a JSON object in the form {"operations": [...]}.\n'
             "No other text before or after the JSON."
         )
 
@@ -514,10 +571,10 @@ class Prompts:
             f"Your previous response proposed the same title for multiple different "
             f"tasks: {quoted}.\n\n"
             "Task titles must be unique — each task needs a distinct title that "
-            "clearly describes what that specific task does. Resubmit the full task "
-            f"list with a unique title for every task. {attempt_line}\n\n"
-            'Reply with ONLY a JSON object in the form {"tasks": [...]}.\n'
-            'Each element: {"id": "...", "title": "...", "description": "..."}.\n'
+            "clearly describes what that specific task does. Resubmit the full "
+            "operations array using unique titles for every task. "
+            f"{attempt_line}\n\n"
+            'Reply with ONLY a JSON object in the form {"operations": [...]}.\n'
             "No other text before or after the JSON."
         )
 

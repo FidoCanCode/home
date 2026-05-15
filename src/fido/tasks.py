@@ -9,6 +9,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -1154,32 +1155,469 @@ def sync_tasks(
         sync_lock_fd.close()
 
 
-def _parse_reorder_response(raw: str) -> list[dict[str, Any]] | None:
-    """Parse the Opus rescope response into a list of task items.
+# ── Explicit rescope operation schema (#1719) ─────────────────────────────────
+#
+# The rescope output is a typed sum of operations over the snapped task
+# queue.  Each operation says exactly what it does — no "infer mutation
+# from omission" guessing.  The parser below decodes a strict
+# {"operations": [...]} envelope into this dataclass union and collects
+# every malformation in one pass so a follow-up nudge can hand Opus the
+# full complaint list (rather than fail-on-first).
+#
+# The translator below converts the typed operations back into the
+# existing item-dict shape that the validator/reducer/materializer
+# pipeline already consumes — so this leaf only redesigns the I/O
+# contract with Opus, not the downstream apply path.
 
-    Uses a :class:`json.JSONDecoder` consume loop — scans *raw* for ``{``,
-    attempts :meth:`~json.JSONDecoder.raw_decode` from that position, and
-    advances past the decoded span on success or skips the character on
-    failure.  Returns the first ``"tasks"`` list found in any decoded object,
-    or ``None`` if no valid response is found.
+
+@dataclass(frozen=True)
+class _RescopeOpKeep:
+    """Keep an existing task unchanged."""
+
+    id: str
+
+
+@dataclass(frozen=True)
+class _RescopeOpRewrite:
+    """Rewrite an existing task's title and/or description."""
+
+    id: str
+    title: str
+    description: str
+
+
+@dataclass(frozen=True)
+class _RescopeOpRewriteAnchor:
+    """Re-target an existing task's source-comment anchor (#1714)."""
+
+    id: str
+    anchor_comment_id: int
+
+
+@dataclass(frozen=True)
+class _RescopeOpRemove:
+    """Close an existing task (rocq CompleteTask)."""
+
+    id: str
+
+
+@dataclass(frozen=True)
+class _RescopeOpMerge:
+    """Fold sources' lineage into target (rocq MergeTasks).  Sources close."""
+
+    target_id: str
+    sources: list[str]
+    title: str
+    description: str
+
+
+@dataclass(frozen=True)
+class _RescopeOpSplitChild:
+    title: str
+    description: str
+
+
+@dataclass(frozen=True)
+class _RescopeOpSplit:
+    """Close source and spawn N children inheriting its lineage (rocq SplitTask)."""
+
+    id: str
+    children: list[_RescopeOpSplitChild]
+
+
+@dataclass(frozen=True)
+class _RescopeOpNew:
+    """Create a brand-new task with a fresh id."""
+
+    title: str
+    description: str
+    type: str  # noqa: A003 — schema field name
+
+
+_RescopeOp = (
+    _RescopeOpKeep
+    | _RescopeOpRewrite
+    | _RescopeOpRewriteAnchor
+    | _RescopeOpRemove
+    | _RescopeOpMerge
+    | _RescopeOpSplit
+    | _RescopeOpNew
+)
+
+
+def _parse_rescope_operations(
+    raw: str,
+) -> tuple[list[_RescopeOp], list[str]]:
+    """Parse the explicit rescope-operation envelope, collecting every error.
+
+    The strict schema is::
+
+        {"operations": [
+          {"op": "keep", "id": "..."},
+          {"op": "rewrite", "id": "...", "title": "...", "description": "..."},
+          {"op": "rewrite_anchor", "id": "...", "anchor_comment_id": 12345},
+          {"op": "remove", "id": "..."},
+          {"op": "merge", "target_id": "...", "sources": ["..."],
+                          "title": "...", "description": "..."},
+          {"op": "split", "id": "...",
+                          "children": [{"title": "...", "description": "..."}]},
+          {"op": "new", "title": "...", "description": "...", "type": "spec"}
+        ]}
+
+    Every malformation found is appended to the returned error list so
+    one parse pass produces the full complaint set the retry nudge
+    sends back to Opus (Rob: "useful retries that detail what was
+    wrong, as many things as we can find at once").  When errors are
+    non-empty the returned op list is also empty — callers must reject
+    the whole batch rather than partially apply.
+    """
+    errors: list[str] = []
+    envelope = _decode_first_json_object(raw)
+    if envelope is None:
+        return [], ["response: no JSON object found"]
+    if "operations" not in envelope:
+        return [], ['response: missing top-level "operations" array']
+    raw_ops = envelope["operations"]
+    if not isinstance(raw_ops, list):
+        return [], [
+            f"response.operations: must be a list, got {type(raw_ops).__name__}"
+        ]
+    operations: list[_RescopeOp] = []
+    for index, raw_op in enumerate(raw_ops):
+        path = f"operations[{index}]"
+        if not isinstance(raw_op, dict):
+            errors.append(f"{path}: must be a dict, got {type(raw_op).__name__}")
+            continue
+        op_name = raw_op.get("op")
+        if not isinstance(op_name, str):
+            errors.append(f"{path}.op: must be a string, got {op_name!r}")
+            continue
+        parser = _OP_PARSERS.get(op_name)
+        if parser is None:
+            errors.append(
+                f"{path}.op: unknown operation {op_name!r} (expected one of "
+                "keep, rewrite, rewrite_anchor, remove, merge, split, new)"
+            )
+            continue
+        op_or_none, op_errors = parser(raw_op, path)
+        errors.extend(op_errors)
+        if op_or_none is not None:
+            operations.append(op_or_none)
+    if errors:
+        return [], errors
+    return operations, []
+
+
+def _decode_first_json_object(raw: str) -> dict[str, Any] | None:
+    """Find and decode the first top-level JSON object in *raw*.
+
+    Same scan loop the legacy parser used; left here so the caller can
+    distinguish "no JSON at all" (parser-error nudge fires) from
+    "decoded JSON but the schema is wrong" (per-op errors fire).
     """
     decoder = json.JSONDecoder()
     pos = 0
-    while pos < len(raw):
+    while True:
         brace = raw.find("{", pos)
         if brace == -1:
-            break
+            return None
         try:
-            obj, end = decoder.raw_decode(raw, brace)
+            obj, _end = decoder.raw_decode(raw, brace)
         except json.JSONDecodeError:
             pos = brace + 1
             continue
-        if isinstance(obj, dict):
-            tasks = obj.get("tasks")
-            if isinstance(tasks, list):
-                return tasks
-        pos = end
-    return None
+        # raw_decode starting at '{' always yields a dict (JSON object);
+        # the only non-error outcome is a parsed object.
+        return obj
+
+
+def _require_string_field(
+    raw_op: dict[str, Any], field: str, path: str, errors: list[str]
+) -> str | None:
+    value = raw_op.get(field)
+    if not isinstance(value, str) or not value:
+        errors.append(f"{path}.{field}: must be a non-empty string, got {value!r}")
+        return None
+    return value
+
+
+def _require_string_field_allow_empty(
+    raw_op: dict[str, Any], field: str, path: str, errors: list[str]
+) -> str | None:
+    value = raw_op.get(field)
+    if not isinstance(value, str):
+        errors.append(f"{path}.{field}: must be a string, got {value!r}")
+        return None
+    return value
+
+
+def _parse_op_keep(
+    raw_op: dict[str, Any], path: str
+) -> tuple[_RescopeOp | None, list[str]]:
+    errors: list[str] = []
+    task_id = _require_string_field(raw_op, "id", path, errors)
+    if task_id is None:
+        return None, errors
+    return _RescopeOpKeep(id=task_id), errors
+
+
+def _parse_op_rewrite(
+    raw_op: dict[str, Any], path: str
+) -> tuple[_RescopeOp | None, list[str]]:
+    errors: list[str] = []
+    task_id = _require_string_field(raw_op, "id", path, errors)
+    title = _require_string_field(raw_op, "title", path, errors)
+    description = _require_string_field_allow_empty(raw_op, "description", path, errors)
+    if task_id is None or title is None or description is None:
+        return None, errors
+    return (
+        _RescopeOpRewrite(id=task_id, title=title, description=description),
+        errors,
+    )
+
+
+def _parse_op_rewrite_anchor(
+    raw_op: dict[str, Any], path: str
+) -> tuple[_RescopeOp | None, list[str]]:
+    errors: list[str] = []
+    task_id = _require_string_field(raw_op, "id", path, errors)
+    anchor = raw_op.get("anchor_comment_id")
+    if not _is_valid_anchor_id(anchor):
+        errors.append(
+            f"{path}.anchor_comment_id: must be a positive int "
+            f"(GitHub comment id), got {anchor!r}"
+        )
+        anchor = None
+    if task_id is None or anchor is None:
+        return None, errors
+    return _RescopeOpRewriteAnchor(id=task_id, anchor_comment_id=anchor), errors
+
+
+def _parse_op_remove(
+    raw_op: dict[str, Any], path: str
+) -> tuple[_RescopeOp | None, list[str]]:
+    errors: list[str] = []
+    task_id = _require_string_field(raw_op, "id", path, errors)
+    if task_id is None:
+        return None, errors
+    return _RescopeOpRemove(id=task_id), errors
+
+
+def _parse_op_merge(
+    raw_op: dict[str, Any], path: str
+) -> tuple[_RescopeOp | None, list[str]]:
+    errors: list[str] = []
+    target = _require_string_field(raw_op, "target_id", path, errors)
+    title = _require_string_field(raw_op, "title", path, errors)
+    description = _require_string_field_allow_empty(raw_op, "description", path, errors)
+    raw_sources = raw_op.get("sources")
+    sources: list[str] = []
+    if not isinstance(raw_sources, list) or not raw_sources:
+        errors.append(
+            f"{path}.sources: must be a non-empty list of task ids, got {raw_sources!r}"
+        )
+    else:
+        for src_index, source in enumerate(raw_sources):
+            if not isinstance(source, str) or not source:
+                errors.append(
+                    f"{path}.sources[{src_index}]: must be a non-empty string, "
+                    f"got {source!r}"
+                )
+                continue
+            sources.append(source)
+        if not sources:
+            errors.append(
+                f"{path}.sources: every entry was malformed; merge needs at "
+                "least one valid source id"
+            )
+    if target is None or title is None or description is None or not sources:
+        return None, errors
+    return (
+        _RescopeOpMerge(
+            target_id=target,
+            sources=sources,
+            title=title,
+            description=description,
+        ),
+        errors,
+    )
+
+
+def _parse_op_split(
+    raw_op: dict[str, Any], path: str
+) -> tuple[_RescopeOp | None, list[str]]:
+    errors: list[str] = []
+    task_id = _require_string_field(raw_op, "id", path, errors)
+    raw_children = raw_op.get("children")
+    children: list[_RescopeOpSplitChild] = []
+    if not isinstance(raw_children, list) or not raw_children:
+        errors.append(
+            f"{path}.children: must be a non-empty list of "
+            f'{{"title": ..., "description": ...}} dicts, got {raw_children!r}'
+        )
+    else:
+        for child_index, raw_child in enumerate(raw_children):
+            child_path = f"{path}.children[{child_index}]"
+            if not isinstance(raw_child, dict):
+                errors.append(
+                    f"{child_path}: must be a dict, got {type(raw_child).__name__}"
+                )
+                continue
+            child_title = _require_string_field(raw_child, "title", child_path, errors)
+            child_description = _require_string_field_allow_empty(
+                raw_child, "description", child_path, errors
+            )
+            if child_title is not None and child_description is not None:
+                children.append(
+                    _RescopeOpSplitChild(
+                        title=child_title, description=child_description
+                    )
+                )
+        if not children:
+            errors.append(
+                f"{path}.children: every child was malformed; split needs at "
+                "least one valid child"
+            )
+    if task_id is None or not children:
+        return None, errors
+    return _RescopeOpSplit(id=task_id, children=children), errors
+
+
+def _parse_op_new(
+    raw_op: dict[str, Any], path: str
+) -> tuple[_RescopeOp | None, list[str]]:
+    errors: list[str] = []
+    title = _require_string_field(raw_op, "title", path, errors)
+    description = _require_string_field_allow_empty(raw_op, "description", path, errors)
+    task_type = _require_string_field(raw_op, "type", path, errors)
+    if title is None or description is None or task_type is None:
+        return None, errors
+    return (
+        _RescopeOpNew(title=title, description=description, type=task_type),
+        errors,
+    )
+
+
+_OP_PARSERS: dict[
+    str, Callable[[dict[str, Any], str], tuple[_RescopeOp | None, list[str]]]
+] = {
+    "keep": _parse_op_keep,
+    "rewrite": _parse_op_rewrite,
+    "rewrite_anchor": _parse_op_rewrite_anchor,
+    "remove": _parse_op_remove,
+    "merge": _parse_op_merge,
+    "split": _parse_op_split,
+    "new": _parse_op_new,
+}
+
+
+def _find_cross_op_errors(
+    operations: list[_RescopeOp], snapshot_ids: frozenset[str]
+) -> list[str]:
+    """Pre-reducer cross-op invariants from #1719's acceptance criteria.
+
+    - Every existing-task op references an id in the current snapshot
+      (unknown ids would silently no-op or error in the reducer).
+    - No two ops claim the same snapshot id (per-task coverage; ambiguity
+      between e.g. rewrite + remove on the same id).
+    - No source id appears in more than one merge or split op (lineage
+      duplication; the rocq invariants reject this too at the reducer).
+    """
+    errors: list[str] = []
+    claim_count: dict[str, int] = {}
+
+    def _claim(claimed_id: str, op_index: int) -> None:
+        if claimed_id not in snapshot_ids:
+            errors.append(
+                f"operations[{op_index}]: id {claimed_id!r} is not in the "
+                "pending snapshot (unknown task id — it may have been "
+                "completed concurrently or never existed)"
+            )
+        claim_count[claimed_id] = claim_count.get(claimed_id, 0) + 1
+
+    for index, op in enumerate(operations):
+        match op:
+            case _RescopeOpKeep(id=tid) | _RescopeOpRewrite(id=tid):
+                _claim(tid, index)
+            case _RescopeOpRewriteAnchor(id=tid):
+                _claim(tid, index)
+            case _RescopeOpRemove(id=tid):
+                _claim(tid, index)
+            case _RescopeOpMerge(target_id=tid, sources=sources):
+                _claim(tid, index)
+                for src in sources:
+                    _claim(src, index)
+            case _RescopeOpSplit(id=tid):
+                _claim(tid, index)
+            case _RescopeOpNew():
+                pass
+
+    for tid, count in claim_count.items():
+        if count > 1:
+            errors.append(
+                f"id {tid!r}: claimed by {count} operations; each snapshot "
+                "task may appear in at most one operation"
+            )
+    return errors
+
+
+def _operations_to_items(operations: list[_RescopeOp]) -> list[dict[str, Any]]:
+    """Convert typed operations into the item-dict shape the apply path uses.
+
+    Lets the existing ``_validate_rescope_batch`` / ``_apply_reorder``
+    pipeline keep working unchanged: each operation lowers to one or
+    more items in the legacy schema (a merge expands into one target
+    item plus N source-completion items, since the reducer's per-task
+    coverage invariant requires every source to carry its own
+    ``CompleteTask``).
+    """
+    items: list[dict[str, Any]] = []
+    for op in operations:
+        match op:
+            case _RescopeOpKeep(id=tid):
+                items.append({"id": tid})
+            case _RescopeOpRewrite(id=tid, title=title, description=desc):
+                items.append({"id": tid, "title": title, "description": desc})
+            case _RescopeOpRewriteAnchor(id=tid, anchor_comment_id=anchor):
+                items.append({"id": tid, "anchor_comment_id": anchor})
+            case _RescopeOpRemove(id=tid):
+                items.append({"id": tid, "status": str(TaskStatus.COMPLETED)})
+            case _RescopeOpMerge(
+                target_id=target,
+                sources=sources,
+                title=title,
+                description=desc,
+            ):
+                items.append(
+                    {
+                        "id": target,
+                        "title": title,
+                        "description": desc,
+                        "merge_sources": list(sources),
+                    }
+                )
+                for src in sources:
+                    items.append({"id": src, "status": str(TaskStatus.COMPLETED)})
+            case _RescopeOpSplit(id=tid, children=children):
+                items.append(
+                    {
+                        "id": tid,
+                        "split_targets": [
+                            {"title": c.title, "description": c.description}
+                            for c in children
+                        ],
+                    }
+                )
+            case _RescopeOpNew(title=title, description=desc, type=task_type):
+                items.append(
+                    {
+                        "id": None,
+                        "title": title,
+                        "description": desc,
+                        "type": task_type,
+                    }
+                )
+    return items
 
 
 def _make_new_tasks_from_opus(
@@ -1863,10 +2301,59 @@ def reorder_tasks(
         log.warning("reorder_tasks: Opus returned empty response — skipping")
         return
 
-    ordered_items = _parse_reorder_response(raw)
-    if ordered_items is None:
-        log.warning("reorder_tasks: could not parse Opus response — skipping")
+    # Parse + cross-op-validate; on errors, nudge Opus with the FULL
+    # complaint list (not just the first defect) so it can fix
+    # everything at once (#1719).  Budget shared with the duplicate-
+    # title nudge below.
+    snapshot_ids = frozenset(
+        t["id"]
+        for t in task_list
+        if t.get("status") != TaskStatus.COMPLETED and "id" in t
+    )
+    operations: list[_RescopeOp] = []
+    parse_errors: list[str] = ["initial parse"]
+    for nudge_attempt in range(_RESCOPE_MAX_NUDGES + 1):
+        operations, parse_errors = _parse_rescope_operations(raw)
+        if not parse_errors:
+            cross_errors = _find_cross_op_errors(operations, snapshot_ids)
+            if not cross_errors:
+                break
+            parse_errors = cross_errors
+        attempts_remaining = _RESCOPE_MAX_NUDGES - nudge_attempt
+        if attempts_remaining <= 0:
+            log.warning(
+                "reorder_tasks: rescope batch dropped after %d parse-error "
+                "nudges; final errors: %s",
+                _RESCOPE_MAX_NUDGES,
+                "; ".join(parse_errors),
+            )
+            return
+        log.warning(
+            "reorder_tasks: Opus rescope response had %d problem(s) — "
+            "nudging (attempt %d/%d, %d remaining)",
+            len(parse_errors),
+            nudge_attempt + 1,
+            _RESCOPE_MAX_NUDGES,
+            attempts_remaining - 1,
+        )
+        nudge = prompts.rescope_parse_nudge(
+            parse_errors, attempts_remaining=attempts_remaining - 1
+        )
+        nudge_raw = agent.run_turn(
+            nudge,
+            model=agent.voice_model,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+        )
+        if not nudge_raw:
+            log.warning(
+                "reorder_tasks: empty response after parse-error nudge — dropping batch"
+            )
+            return
+        raw = nudge_raw
+    else:  # pragma: no cover — loop body always returns or breaks
         return
+
+    ordered_items = _operations_to_items(operations)
 
     # Snapshot existing titles for the dedup check.  The check runs on
     # *effective* titles (post-normalization, post-existing-title fallback)
@@ -1910,14 +2397,15 @@ def reorder_tasks(
                 "proceeding with fallback"
             )
             break
-        nudge_items = _parse_reorder_response(nudge_raw)
-        if nudge_items is None:
+        nudge_ops, nudge_errors = _parse_rescope_operations(nudge_raw)
+        if nudge_errors:
             log.warning(
                 "reorder_tasks: unparseable response after duplicate nudge — "
-                "proceeding with fallback"
+                "proceeding with fallback (errors: %s)",
+                "; ".join(nudge_errors),
             )
             break
-        ordered_items = nudge_items
+        ordered_items = _operations_to_items(nudge_ops)
 
     # Route the write through Tasks's public modify() — its on_mutate
     # hook (e.g. the SCADA snapshot publisher) fires automatically on
