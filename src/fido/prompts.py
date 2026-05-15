@@ -470,8 +470,9 @@ class Prompts:
             f"{intents_block}"
             "Pending tasks (current order):\n"
             f"{pending_json}\n\n"
-            "Reply with a typed list of OPERATIONS over this snapshot.  Every "
-            "pending task id MUST appear in exactly one operation; new tasks "
+            "Reply with a typed list of OPERATIONS over this snapshot.  Each "
+            "pending task id may appear in at most one operation; ids you "
+            "don't mention are kept unchanged (rule 7 below).  New tasks "
             'use "new" ops.\n\n'
             "Operation schema (each entry of the operations array):\n"
             '  {"op": "keep", "id": "<existing-id>"}\n'

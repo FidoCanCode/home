@@ -596,10 +596,15 @@ class TestRescopePrompt:
         tasks = [self._task("Do thing", task_id="1")]
         result = Prompts("").rescope_prompt(tasks, "")
         # New schema replaces "synthesize a task list" with "reply with
-        # a typed list of operations" — explicit, no inference from
-        # omission (#1719).
+        # a typed list of operations" (#1719).  Each pending id may
+        # appear in at most one operation; omission means keep (#1721).
+        # Codex on PR #1744 caught the contradiction between the
+        # original "MUST appear in exactly one operation" framing and
+        # rule 7's "omitted ids are kept" — assert the resolved wording
+        # so the contradiction can't silently come back.
         assert "operations" in result.lower()
-        assert "exactly one operation" in result
+        assert "at most one operation" in result
+        assert "kept unchanged" in result
 
     def test_every_op_kind_documented(self) -> None:
         tasks = [self._task("Do thing", task_id="1")]
