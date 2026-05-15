@@ -437,13 +437,16 @@ class TestRescopePrompt:
     def test_json_output_format_instructed(self) -> None:
         tasks = [self._task("Do something", task_id="1")]
         result = Prompts("").rescope_prompt(tasks, "")
-        assert '{"tasks": [...]}' in result
+        assert '{"operations": [...]}' in result
 
     def test_preserve_ids_rule_stated(self) -> None:
         tasks = [self._task("Task A", task_id="abc-123")]
         result = Prompts("").rescope_prompt(tasks, "")
-        assert "ID" in result or "id" in result
-        assert "preserve" in result.lower() or "never change" in result.lower()
+        # New schema requires every existing id to appear in exactly one
+        # operation — the preservation rule is "id must be in the
+        # snapshot" and "no inventing ids".
+        assert "must be in the pending snapshot" in result
+        assert "no inventing ids" in result
 
     def test_remove_covered_tasks_rule_stated(self) -> None:
         tasks = [self._task("Task A", task_id="1")]
@@ -545,28 +548,37 @@ class TestRescopePrompt:
         assert "Add logging" in result
         assert "Refactor tests" in result
 
-    def test_synthesize_framing_present(self) -> None:
+    def test_explicit_operations_framing_present(self) -> None:
         tasks = [self._task("Do thing", task_id="1")]
         result = Prompts("").rescope_prompt(tasks, "")
-        assert "synthesize" in result.lower() or "synthesis" in result.lower()
+        # New schema replaces "synthesize a task list" with "reply with
+        # a typed list of operations" — explicit, no inference from
+        # omission (#1719).
+        assert "operations" in result.lower()
+        assert "exactly one operation" in result
 
-    def test_new_task_null_id_instruction_present(self) -> None:
+    def test_every_op_kind_documented(self) -> None:
         tasks = [self._task("Do thing", task_id="1")]
         result = Prompts("").rescope_prompt(tasks, "")
-        assert "null" in result.lower()
+        # The schema reference must list every operation Opus can emit
+        # so it has the full vocabulary inline.
+        for op_name in (
+            "keep",
+            "rewrite",
+            "rewrite_anchor",
+            "remove",
+            "merge",
+            "split",
+            "new",
+        ):
+            assert f'"op": "{op_name}"' in result, f"missing op {op_name}"
 
-    def test_all_transformations_mentioned(self) -> None:
+    def test_new_op_documented_for_brand_new_tasks(self) -> None:
         tasks = [self._task("Do thing", task_id="1")]
         result = Prompts("").rescope_prompt(tasks, "")
-        # prompt should mention the full set of valid transformations
-        assert "merge" in result.lower() or "split" in result.lower()
-        assert "delete" in result.lower() or "omit" in result.lower()
-        assert "add" in result.lower() or "new tasks" in result.lower()
-
-    def test_newer_overrides_older_instruction_present(self) -> None:
-        tasks = [self._task("Do thing", task_id="1")]
-        result = Prompts("").rescope_prompt(tasks, "")
-        assert "newer" in result.lower() or "override" in result.lower()
+        # Brand-new tasks come from "new" ops, no null-id mechanism
+        # in the new schema.
+        assert '{"op": "new"' in result
 
 
 # ── Prompts.rescope_duplicate_nudge ──────────────────────────────────────────
@@ -592,7 +604,7 @@ class TestRescopeDuplicateNudge:
 
     def test_includes_json_format_instruction(self) -> None:
         result = Prompts("").rescope_duplicate_nudge(["Dup"], attempts_remaining=0)
-        assert '{"tasks": [...]}' in result
+        assert '{"operations": [...]}' in result
 
     def test_no_other_text_instruction_present(self) -> None:
         result = Prompts("").rescope_duplicate_nudge(["Dup"], attempts_remaining=0)

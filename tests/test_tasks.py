@@ -15,10 +15,12 @@ from fido.tasks import (
     _assert_rescope_matches_oracle,
     _build_task_list_snapshot,
     _compute_thread_changes,
+    _find_cross_op_errors,
     _find_duplicate_titles,
     _format_work_queue,
     _make_new_tasks_from_opus,
-    _parse_reorder_response,
+    _operations_to_items,
+    _parse_rescope_operations,
     _rescope_releases_for_oracle,
     _rescope_snapshot_order_for_oracle,
     _rescope_state_for_oracle,
@@ -770,50 +772,293 @@ class TestBuildTaskListSnapshot:
         assert snap.task_total == 0
 
 
-# ── _parse_reorder_response ───────────────────────────────────────────────────
+# ── _parse_rescope_operations (#1719) ─────────────────────────────────────────
 
 
-class TestParseReorderResponse:
-    def test_parses_valid_json(self) -> None:
-        raw = '{"tasks": [{"id": "1", "title": "Task A", "description": ""}]}'
-        result = _parse_reorder_response(raw)
-        assert result == [{"id": "1", "title": "Task A", "description": ""}]
+class TestParseRescopeOperations:
+    def test_parses_keep(self) -> None:
+        raw = '{"operations": [{"op": "keep", "id": "abc"}]}'
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert _operations_to_items(ops) == [{"id": "abc"}]
+
+    def test_parses_rewrite(self) -> None:
+        raw = (
+            '{"operations": [{"op": "rewrite", "id": "abc", '
+            '"title": "New", "description": "scope"}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert _operations_to_items(ops) == [
+            {"id": "abc", "title": "New", "description": "scope"}
+        ]
+
+    def test_parses_rewrite_anchor(self) -> None:
+        raw = (
+            '{"operations": [{"op": "rewrite_anchor", "id": "abc", '
+            '"anchor_comment_id": 12345}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert _operations_to_items(ops) == [{"id": "abc", "anchor_comment_id": 12345}]
+
+    def test_parses_remove(self) -> None:
+        raw = '{"operations": [{"op": "remove", "id": "abc"}]}'
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert _operations_to_items(ops) == [{"id": "abc", "status": "completed"}]
+
+    def test_parses_merge_with_source_completion_expansion(self) -> None:
+        # A single merge op lowers to one target item (with merge_sources)
+        # plus N source-completion items so the rocq per-task coverage
+        # invariant still holds.
+        raw = (
+            '{"operations": [{"op": "merge", "target_id": "a", '
+            '"sources": ["b", "c"], "title": "Merged", '
+            '"description": "scope"}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert _operations_to_items(ops) == [
+            {
+                "id": "a",
+                "title": "Merged",
+                "description": "scope",
+                "merge_sources": ["b", "c"],
+            },
+            {"id": "b", "status": "completed"},
+            {"id": "c", "status": "completed"},
+        ]
+
+    def test_parses_split(self) -> None:
+        raw = (
+            '{"operations": [{"op": "split", "id": "src", '
+            '"children": [{"title": "A", "description": "first"}, '
+            '{"title": "B", "description": "second"}]}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert _operations_to_items(ops) == [
+            {
+                "id": "src",
+                "split_targets": [
+                    {"title": "A", "description": "first"},
+                    {"title": "B", "description": "second"},
+                ],
+            }
+        ]
+
+    def test_parses_new(self) -> None:
+        raw = (
+            '{"operations": [{"op": "new", "title": "T", '
+            '"description": "d", "type": "spec"}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert _operations_to_items(ops) == [
+            {"id": None, "title": "T", "description": "d", "type": "spec"}
+        ]
 
     def test_parses_json_with_preamble(self) -> None:
-        raw = 'Here are the reordered tasks:\n\n{"tasks": [{"id": "1", "title": "Task A", "description": ""}]}'
-        result = _parse_reorder_response(raw)
-        assert result is not None
-        assert result[0]["id"] == "1"
+        raw = 'Reordered:\n{"operations": [{"op": "keep", "id": "1"}]}'
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert len(ops) == 1
 
-    def test_returns_none_for_invalid_json(self) -> None:
-        assert _parse_reorder_response("not json at all") is None
+    def test_no_json_at_all_yields_one_error(self) -> None:
+        ops, errors = _parse_rescope_operations("not json at all")
+        assert ops == []
+        assert errors == ["response: no JSON object found"]
 
-    def test_skips_invalid_brace_and_continues(self) -> None:
-        # First ``{`` cannot be parsed as JSON — exercises the
-        # JSONDecodeError-skip-and-advance branch — but a later ``{``
-        # contains the real response and is returned.
-        raw = '{ this is { junk } before {"tasks": [{"id": "1"}]}'
-        assert _parse_reorder_response(raw) == [{"id": "1"}]
+    def test_missing_operations_key(self) -> None:
+        ops, errors = _parse_rescope_operations('{"tasks": []}')
+        assert ops == []
+        assert errors == ['response: missing top-level "operations" array']
 
-    def test_returns_none_when_no_tasks_key(self) -> None:
-        assert _parse_reorder_response('{"other": []}') is None
+    def test_operations_must_be_list(self) -> None:
+        ops, errors = _parse_rescope_operations('{"operations": "nope"}')
+        assert ops == []
+        assert any("must be a list" in e for e in errors)
 
-    def test_returns_none_when_tasks_not_list(self) -> None:
-        assert _parse_reorder_response('{"tasks": "not a list"}') is None
+    def test_unknown_op_name(self) -> None:
+        raw = '{"operations": [{"op": "bogus", "id": "x"}]}'
+        ops, errors = _parse_rescope_operations(raw)
+        assert ops == []
+        assert any("unknown operation 'bogus'" in e for e in errors)
 
-    def test_returns_none_for_json_non_dict(self) -> None:
-        # raw_decode on a bare "null" finds no "{", so returns None
-        assert _parse_reorder_response("null") is None
+    def test_collects_every_error_in_one_pass(self) -> None:
+        # Rob's directive: useful retries that detail what was wrong,
+        # as many things as we can find at once.  This batch combines
+        # five distinct defects across five operations — the parser
+        # must report them all, not bail on the first.
+        raw = (
+            '{"operations": ['
+            '{"op": "keep"},'  # missing id
+            '{"op": "rewrite", "id": "x", "title": ""},'  # blank title, missing description
+            '{"op": "rewrite_anchor", "id": "y", "anchor_comment_id": -1},'  # bad anchor
+            '{"op": "merge", "target_id": "z", "sources": [], '
+            '"title": "T", "description": "d"},'  # empty sources
+            '{"op": "split", "id": "s", "children": [{"title": ""}]}'  # bad child
+            "]}"
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert ops == []
+        # Each defect produces at least one error message; assert the
+        # full set without pinning exact wording.
+        joined = " | ".join(errors)
+        assert "operations[0].id" in joined
+        assert "operations[1].title" in joined
+        assert "operations[2].anchor_comment_id" in joined
+        assert "operations[3].sources" in joined
+        assert "operations[4].children" in joined
 
-    def test_returns_empty_list_when_tasks_is_empty(self) -> None:
-        result = _parse_reorder_response('{"tasks": []}')
-        assert result == []
+    def test_op_must_be_string(self) -> None:
+        raw = '{"operations": [{"op": 42}]}'
+        ops, errors = _parse_rescope_operations(raw)
+        assert ops == []
+        assert any("operations[0].op" in e and "must be a string" in e for e in errors)
 
-    def test_parses_multiple_tasks(self) -> None:
-        raw = '{"tasks": [{"id": "1", "title": "A", "description": ""}, {"id": "2", "title": "B", "description": ""}]}'
-        result = _parse_reorder_response(raw)
-        assert result is not None
-        assert len(result) == 2
+    def test_op_must_be_dict(self) -> None:
+        raw = '{"operations": ["not a dict"]}'
+        ops, errors = _parse_rescope_operations(raw)
+        assert ops == []
+        assert any("operations[0]: must be a dict" in e for e in errors)
+
+    def test_empty_operations_list_is_valid(self) -> None:
+        ops, errors = _parse_rescope_operations('{"operations": []}')
+        assert ops == []
+        assert errors == []
+
+    def test_skips_junk_brace_and_decodes_real_envelope(self) -> None:
+        raw = '{ this is { junk } before {"operations": [{"op": "keep", "id": "1"}]}'
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert _operations_to_items(ops) == [{"id": "1"}]
+
+    def test_remove_missing_id(self) -> None:
+        ops, errors = _parse_rescope_operations('{"operations": [{"op": "remove"}]}')
+        assert ops == []
+        assert any("operations[0].id" in e for e in errors)
+
+    def test_new_missing_title_description_type(self) -> None:
+        ops, errors = _parse_rescope_operations('{"operations": [{"op": "new"}]}')
+        assert ops == []
+        joined = " | ".join(errors)
+        assert "operations[0].title" in joined
+        assert "operations[0].description" in joined
+        assert "operations[0].type" in joined
+
+    def test_merge_with_non_string_source_entries(self) -> None:
+        # The error-collecting parser flags every bad entry in the
+        # sources list — not just the first.
+        raw = (
+            '{"operations": [{"op": "merge", "target_id": "a", '
+            '"sources": ["b", 42, ""], "title": "M", "description": ""}]}'
+        )
+        _ops, errors = _parse_rescope_operations(raw)
+        assert any("operations[0].sources[1]" in e for e in errors)
+        assert any("operations[0].sources[2]" in e for e in errors)
+
+    def test_merge_with_all_invalid_sources(self) -> None:
+        # Empty after filtering bad entries — distinct error from the
+        # "list is structurally empty" branch above.
+        raw = (
+            '{"operations": [{"op": "merge", "target_id": "a", '
+            '"sources": ["", 0], "title": "M", "description": ""}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert ops == []
+        assert any("every entry was malformed" in e for e in errors)
+
+    def test_split_with_empty_children_list(self) -> None:
+        raw = '{"operations": [{"op": "split", "id": "src", "children": []}]}'
+        ops, errors = _parse_rescope_operations(raw)
+        assert ops == []
+        assert any(
+            "operations[0].children" in e and "non-empty list" in e for e in errors
+        )
+
+    def test_split_with_non_dict_child(self) -> None:
+        raw = (
+            '{"operations": [{"op": "split", "id": "src", "children": ["not a dict"]}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert ops == []
+        assert any(
+            "operations[0].children[0]" in e and "must be a dict" in e for e in errors
+        )
+
+    def test_decode_skips_non_dict_first_value(self) -> None:
+        # First decodable JSON value at the first ``{`` could be a
+        # nested non-dict shape; the decoder advances past it and
+        # finds the real envelope.  Two sibling objects in a row
+        # exercise the ``pos = end`` continue-and-keep-scanning path.
+        raw = '{"unrelated": []} {"operations": [{"op": "keep", "id": "1"}]}'
+        ops, errors = _parse_rescope_operations(raw)
+        assert ops == []  # first decoded object lacks "operations" key
+        assert errors == ['response: missing top-level "operations" array']
+
+
+class TestFindCrossOpErrors:
+    def test_unknown_id_rejected(self) -> None:
+        from fido.tasks import _RescopeOpKeep
+
+        errors = _find_cross_op_errors([_RescopeOpKeep(id="ghost")], frozenset({"a"}))
+        assert any(
+            "'ghost'" in e and "not in the pending snapshot" in e for e in errors
+        )
+
+    def test_duplicate_id_across_ops_rejected(self) -> None:
+        from fido.tasks import _RescopeOpKeep, _RescopeOpRemove
+
+        ops = [_RescopeOpKeep(id="a"), _RescopeOpRemove(id="a")]
+        errors = _find_cross_op_errors(ops, frozenset({"a"}))
+        assert any("claimed by 2 operations" in e for e in errors)
+
+    def test_overlapping_merge_sources_rejected(self) -> None:
+        # Source 'b' folded into TWO different targets — lineage would
+        # land in both, contradicting "each source merges into at most
+        # one target".  cross-op layer catches it the same way the
+        # validator does (#1738 codex Medium).
+        from fido.tasks import _RescopeOpMerge
+
+        ops = [
+            _RescopeOpMerge(target_id="a", sources=["b"], title="A", description=""),
+            _RescopeOpMerge(target_id="c", sources=["b"], title="C", description=""),
+        ]
+        errors = _find_cross_op_errors(ops, frozenset({"a", "b", "c"}))
+        assert any("'b'" in e and "claimed by 2 operations" in e for e in errors)
+
+    def test_merge_source_id_validated(self) -> None:
+        from fido.tasks import _RescopeOpMerge
+
+        ops = [
+            _RescopeOpMerge(target_id="a", sources=["ghost"], title="A", description="")
+        ]
+        errors = _find_cross_op_errors(ops, frozenset({"a"}))
+        assert any(
+            "'ghost'" in e and "not in the pending snapshot" in e for e in errors
+        )
+
+    def test_new_op_does_not_claim_any_id(self) -> None:
+        # `new` ops mint fresh ids at apply time — they don't reference
+        # the snapshot, so the cross-op claim count must skip them.
+        from fido.tasks import _RescopeOpNew
+
+        ops = [_RescopeOpNew(title="A", description="", type="spec")]
+        assert _find_cross_op_errors(ops, frozenset()) == []
+
+    def test_split_op_claims_source_id(self) -> None:
+        from fido.tasks import _RescopeOpSplit, _RescopeOpSplitChild
+
+        ops = [
+            _RescopeOpSplit(
+                id="src", children=[_RescopeOpSplitChild(title="C", description="")]
+            )
+        ]
+        # Unknown source id.
+        errors = _find_cross_op_errors(ops, frozenset())
+        assert any("'src'" in e and "not in the pending snapshot" in e for e in errors)
 
 
 # ── _apply_reorder ────────────────────────────────────────────────────────────
@@ -2493,7 +2738,91 @@ class TestReorderTasks:
         return Tasks(tmp_path).add(title=title, task_type=task_type)
 
     def _response(self, items: list[dict]) -> str:
-        return json.dumps({"tasks": items})
+        """Translate legacy-shape item dicts into the new operations envelope.
+
+        Lets the existing TestReorderTasks suite keep passing the
+        familiar item dicts while the rescope I/O contract upgrades to
+        explicit ``{"operations": [...]}`` (#1719).  Mapping:
+
+        * ``{"id": x, "status": "completed"}``   → ``remove``
+        * ``{"id": x, "merge_sources": [...]}``  → ``merge``
+        * ``{"id": x, "split_targets": [...]}``  → ``split``
+        * ``{"id": x, "anchor_comment_id": n}``  → ``rewrite_anchor``
+        * ``{"id": x, "title": ..., "description": ...}`` → ``rewrite``
+        * ``{"id": x}`` (id only)                → ``keep``
+        * ``{"id": null, ...}``                  → ``new``
+
+        Per-source ``{"id": src, "status": "completed"}`` items that
+        accompany a ``merge`` are dropped here because the new ``merge``
+        op auto-expands its source closures (the rocq per-task coverage
+        invariant runs in the translator below, not in the test
+        fixture).
+        """
+        merge_source_ids: set[str] = set()
+        for item in items:
+            if isinstance(item.get("merge_sources"), list):
+                for src in item["merge_sources"]:
+                    if isinstance(src, str):
+                        merge_source_ids.add(src)
+        operations: list[dict] = []
+        for item in items:
+            if item.get("status") == "completed" and item.get("id") in merge_source_ids:
+                continue
+            item_id = item.get("id")
+            if item_id is None or item_id == "":
+                operations.append(
+                    {
+                        "op": "new",
+                        "title": item.get("title", ""),
+                        "description": item.get("description", ""),
+                        "type": item.get("type", "spec"),
+                    }
+                )
+                continue
+            if item.get("status") == "completed":
+                operations.append({"op": "remove", "id": item_id})
+                continue
+            if isinstance(item.get("merge_sources"), list) and item["merge_sources"]:
+                operations.append(
+                    {
+                        "op": "merge",
+                        "target_id": item_id,
+                        "sources": list(item["merge_sources"]),
+                        "title": item.get("title", ""),
+                        "description": item.get("description", ""),
+                    }
+                )
+                continue
+            if isinstance(item.get("split_targets"), list) and item["split_targets"]:
+                operations.append(
+                    {
+                        "op": "split",
+                        "id": item_id,
+                        "children": list(item["split_targets"]),
+                    }
+                )
+                continue
+            if "anchor_comment_id" in item:
+                operations.append(
+                    {
+                        "op": "rewrite_anchor",
+                        "id": item_id,
+                        "anchor_comment_id": item["anchor_comment_id"],
+                    }
+                )
+                continue
+            if "title" in item or "description" in item:
+                operations.append(
+                    {
+                        "op": "rewrite",
+                        "id": item_id,
+                        "title": item.get("title", ""),
+                        "description": item.get("description", ""),
+                    }
+                )
+                continue
+            operations.append({"op": "keep", "id": item_id})
+        return json.dumps({"operations": operations})
 
     def test_skips_when_no_tasks(self, tmp_path: Path) -> None:
         client = _client("")
@@ -2578,6 +2907,62 @@ class TestReorderTasks:
             _on_changes=lambda changes: received.extend(changes),
         )
         assert received == []
+
+    def test_validator_rejection_after_parse_success_drops_batch(
+        self, tmp_path: Path
+    ) -> None:
+        # Parse + cross-op succeed, but the disk-aware validator
+        # rejects (ASK source can't be split — kind is title-prefix
+        # driven, splitting would silently reclassify children).  This
+        # exercises the validator-rejection logging path and the
+        # post-rejection early-return that skips _on_done / _on_changes.
+        ask = Tasks(tmp_path).add(title="ASK: how do I X?", task_type=TaskType.SPEC)
+        before = Tasks(tmp_path).list()
+        # Build the operations envelope by hand so we can emit the
+        # split shape that the legacy-shape translator wouldn't produce.
+        raw = json.dumps(
+            {
+                "operations": [
+                    {
+                        "op": "split",
+                        "id": ask["id"],
+                        "children": [{"title": "Do X", "description": ""}],
+                    }
+                ]
+            }
+        )
+        done_calls: list[int] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_done=lambda: done_calls.append(1),
+        )
+        # Durable list unchanged; _on_done not fired.
+        assert Tasks(tmp_path).list() == before
+        assert done_calls == []
+
+    def test_parse_error_nudge_with_empty_response_drops_batch(
+        self, tmp_path: Path
+    ) -> None:
+        # Initial response has parse errors → nudge fires → empty
+        # response from Opus on the nudge → batch dropped.  Exercises
+        # the empty-after-parse-error-nudge log + early-return.
+        from unittest.mock import MagicMock
+
+        Tasks(tmp_path).add(title="Original", task_type=TaskType.SPEC)
+        before = Tasks(tmp_path).list()
+        bad_raw = json.dumps({"operations": [{"op": "bogus", "id": "x"}]})
+        client = MagicMock(spec=ClaudeClient)
+        client.voice_model = "claude-opus-4-6"
+        client.work_model = "claude-sonnet-4-6"
+        client.brief_model = "claude-haiku-4-5"
+        # First call returns the unparseable response; nudge call
+        # returns empty so the loop drops the batch.
+        client.run_turn.side_effect = [bad_raw, ""]
+        reorder_tasks(Tasks(tmp_path), "", agent=client)
+        assert Tasks(tmp_path).list() == before
+        assert client.run_turn.call_count == 2
 
     def test_preserves_snapshot_order_for_non_ci_tasks(self, tmp_path: Path) -> None:
         t1 = self._add(tmp_path, "First")
