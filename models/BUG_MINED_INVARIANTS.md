@@ -252,16 +252,20 @@ intentional capability under **#1713** (title flows through the
 reducer as mutable metadata for an existing id). The thread anchor
 joins the mutable-metadata camp under **#1714** (RewriteAnchor in the
 reducer; lineage preservation in the Python adapter). Explicit
-removal lands under **#1716** (status="completed" → CompleteTask) and
+removal lands under **#1716** (status="completed" → CompleteTask),
 explicit merge under **#1717** (MergeTasks folds source lineages into
 the target row; lineage_comments is now a TaskRow field; the Rocq
 predicate `merge_preserves_source_lineage` proves no source comment id
-is lost).
+is lost), and explicit split under **#1718** (SplitTask closes the
+source and spawns N children that inherit `lineage_comments` and
+`source_comment` verbatim; the Rocq predicate
+`split_preserves_source_lineage` proves no child loses the inherited
+origin metadata, mirrored at runtime by `_assert_split_lineage_preserved`).
 
 **Status.** Modeled in **D11 (#749) — model rescope confluence**.
 The original "title is immutable" framing has been reshaped by epic
 **#1340**: identity is the id, not the text. See #1665, #1713, #1714,
-#1666, #1667 for the per-leaf invariants.
+#1716, #1717, #1718, #1666, #1667 for the per-leaf invariants.
 
 **E1 flip point.** D11 currently runs as a runtime oracle around
 `reorder_tasks`: Python translates Opus's omission-based result into explicit

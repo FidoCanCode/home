@@ -3,10 +3,10 @@
 import fcntl
 import json
 import logging
-import random
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -411,17 +411,147 @@ def _rescope_snapshot_order_for_oracle(
     ]
 
 
+def _split_target_specs(item: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Return the validated list of split-target dicts on ``item``, or None.
+
+    Empty list is treated as "no split" (matches ``merge_sources=[]`` —
+    accepted as a no-op).  Returns ``None`` when ``split_targets`` is
+    absent, not a list, or empty so the call site can short-circuit
+    without re-parsing the shape.  The validator (run before this) has
+    already rejected malformed shapes; this helper only filters the
+    no-split case.
+    """
+    targets = item.get("split_targets")
+    if not isinstance(targets, list) or not targets:
+        return None
+    return targets
+
+
+def _allocate_split_child_ids(
+    ordered_items: list[dict[str, Any]],
+) -> dict[str, list[tuple[str, str]]]:
+    """Pre-allocate a fresh ``(id, created_at)`` per declared split child.
+
+    ``_apply_reorder`` runs the rescope plan twice — once via
+    ``_apply_reorder_with_oracle`` to compute the result, once via
+    ``_assert_rescope_matches_oracle`` to verify oracle/runtime
+    agreement.  Both calls re-derive ops from the same ``ordered_items``,
+    so the divergence assertion can only hold if the **id and the
+    timestamp** are identical across the two passes.  Wall-clock reads
+    in the materializer would make the verifier raise on any batch
+    that crosses a second boundary; allocating both fields once at the
+    top removes the race surface entirely.
+
+    Ids come from :func:`uuid.uuid7`: a 48-bit ms timestamp prefix +
+    74 bits of entropy per millisecond, so collisions with on-disk
+    ids or with new ids minted by ``_make_new_tasks_from_opus`` in
+    the same batch are statistically impossible — no shared
+    used-set bookkeeping needed.
+    """
+    created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    out: dict[str, list[tuple[str, str]]] = {}
+    for item in ordered_items:
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            continue
+        targets = _split_target_specs(item)
+        if targets is None:
+            continue
+        out[item_id] = [(str(uuid.uuid7()), created_at) for _ in targets]
+    return out
+
+
+def _split_source_ids(ordered_items: list[dict[str, Any]]) -> set[str]:
+    """Items whose ``split_targets`` decomposes them — same suppression as merge.
+
+    Mirror of :func:`_merge_source_ids`: a SplitTask flips the source's
+    status to completed (per-task coverage invariant), but the original
+    ask is still being honored — just decomposed across the children.
+    A split isn't a scope change from the commenter's perspective, so
+    the auto "covered by recent commits" notification doesn't apply.
+    Per-source reply decisions belong to the reply-back filter epic
+    (#1256) — its material-vs-aggregation classifier (#1723) explicitly
+    treats split as one of the material cases, and per-intent
+    notification (#1724) routes the chosen replies.
+    """
+    # The validator (run before reorder_tasks calls this) rejects
+    # split_targets on null/missing/non-string ids, so every
+    # split-bearing item here has a valid string id by contract.
+    return {
+        item["id"] for item in ordered_items if _split_target_specs(item) is not None
+    }
+
+
+def _split_child_synthetic_task(
+    source_task: dict[str, Any],
+    child_id: str,
+    child_title: str,
+    child_description: str,
+    created_at: str,
+) -> dict[str, Any]:
+    """Build the synthetic original task dict for a split child.
+
+    ``_materialize_rescope_oracle_result`` reads ``tasks_by_oracle_id``
+    to assemble the persisted task: it copies this dict, then overwrites
+    title/description/status/lineage from the oracle row.  Children
+    inherit ``thread`` and ``type`` from the source so reply paths still
+    reach the original commenter (the SplitTask reducer also folds the
+    source's ``lineage_comments`` into each child via
+    ``add_split_kids``, and the materializer syncs that back into
+    ``thread.lineage_comment_ids`` whenever the lineage differs).
+
+    ``created_at`` is supplied by the caller (computed once per
+    ``_apply_reorder`` and shared across the apply/verify passes); a
+    wall-clock read here would make the divergence verifier raise on
+    any batch that straddles a second boundary (codex P1).
+
+    The thread is shallow-copied per child: every ``lineage_comment_ids``
+    write in this codebase rebuilds the list and re-assigns the slot
+    rather than mutating in place, so the inherited list reference is
+    safe to share — but the dict itself does get re-keyed on writes, so
+    each child needs its own dict.
+    """
+    child: dict[str, Any] = {
+        "id": child_id,
+        "title": child_title,
+        "type": source_task.get("type") or "spec",
+        "description": child_description,
+        "status": str(TaskStatus.PENDING),
+        "created_at": created_at,
+    }
+    source_thread = source_task.get("thread")
+    if isinstance(source_thread, dict):
+        child["thread"] = dict(source_thread)
+    return child
+
+
 def _rescope_releases_for_oracle(
     current: list[dict[str, Any]],
     ordered_items: list[dict[str, Any]],
     snapshot_ids: frozenset[str],
     ids_by_task_id: dict[str, int],
+    *,
+    split_child_ids: dict[str, list[tuple[str, str]]],
+    tasks_by_oracle_id: dict[int, dict[str, Any]],
 ) -> list[rescope_oracle.RescopeRelease]:
+    """Translate Opus's rescope items into typed Rocq ops.
+
+    ``split_child_ids`` is a pre-allocated mapping of ``source_id ->
+    [(child_string_id, created_at), ...]`` (one fresh tuple per
+    declared child), computed once by ``_allocate_split_child_ids`` so
+    the apply and assert paths share the same ids AND timestamps and
+    don't trip the divergence check.  For every emitted ``SplitTask``
+    op this function also registers a synthetic original task dict
+    per child in ``tasks_by_oracle_id`` so
+    ``_materialize_rescope_oracle_result`` can read the inherited
+    ``thread`` / ``type`` fields when assembling the persisted child.
+    """
     ordered_by_id: dict[str, dict[str, Any]] = {}
     for item in ordered_items:
         if item.get("id") and item["id"] not in ordered_by_id:
             ordered_by_id[item["id"]] = item
     existing_by_id = _existing_titles_by_id(current)
+    next_oracle_id = max(ids_by_task_id.values(), default=0) + 1
     releases: list[rescope_oracle.RescopeRelease] = []
     for task in current:
         task_id = task["id"]
@@ -447,6 +577,7 @@ def _rescope_releases_for_oracle(
                 item["description"] if "description" in item else existing_description
             )
             merge_sources = _merge_source_oracle_ids(item, ids_by_task_id)
+            split_targets = _split_target_specs(item)
             # Op precedence (most structural first):
             #   1. Explicit completion (#1716): item.status == "completed".
             #      Removes the task — strictly more structural than any
@@ -456,9 +587,13 @@ def _rescope_releases_for_oracle(
             #      rewrites target text.  The model only mutates the
             #      target row; source rows are closed by their own
             #      CompleteTask items in the same batch.
-            #   3. Anchor rewrite (#1714): re-targets the reply destination.
-            #   4. Text rewrite (#1713): title/description.
-            #   5. KeepTask: nothing changed.
+            #   3. Split (#1718): closes the source and spawns N children
+            #      that inherit the source's lineage_comments and
+            #      source_comment.  Mutually exclusive with merge / explicit
+            #      completion (validator rejects co-occurrence).
+            #   4. Anchor rewrite (#1714): re-targets the reply destination.
+            #   5. Text rewrite (#1713): title/description.
+            #   6. KeepTask: nothing changed.
             #
             # The model carries one op per task per batch, so a combined
             # request rides multiple rescope iterations — the highest-
@@ -471,6 +606,34 @@ def _rescope_releases_for_oracle(
                 decision = rescope_oracle.MergeTasks(
                     oracle_id, merge_sources, new_title, new_description
                 )
+            elif split_targets:
+                # Allocator and validator both iterate the same
+                # ``split_targets`` list, so the pre-allocated child
+                # string ids and the targets agree on length by
+                # construction; index access fails fast on any drift.
+                child_allocations = split_child_ids[task_id]
+                children_specs: list[rescope_oracle.SplitChild] = []
+                for child_index, target in enumerate(split_targets):
+                    child_string_id, child_created_at = child_allocations[child_index]
+                    child_oracle_id = next_oracle_id
+                    next_oracle_id += 1
+                    child_title = _normalize_title(str(target.get("title") or ""))
+                    child_description = str(target.get("description") or "")
+                    tasks_by_oracle_id[child_oracle_id] = _split_child_synthetic_task(
+                        task,
+                        child_string_id,
+                        child_title,
+                        child_description,
+                        child_created_at,
+                    )
+                    children_specs.append(
+                        rescope_oracle.SplitChild(
+                            child_task=child_oracle_id,
+                            child_title=child_title,
+                            child_description=child_description,
+                        )
+                    )
+                decision = rescope_oracle.SplitTask(oracle_id, children_specs)
             elif (
                 isinstance(task.get("thread"), dict)
                 and _is_valid_anchor_id(item.get("anchor_comment_id"))
@@ -600,6 +763,7 @@ def _assert_rescope_matches_oracle(
     ordered_items: list[dict[str, Any]],
     snapshot_ids: frozenset[str],
     result: list[dict[str, Any]],
+    split_child_ids: dict[str, list[tuple[str, str]]] | None = None,
 ) -> None:
     ids_by_task_id, tasks_by_oracle_id, current_order, rows = _rescope_state_for_oracle(
         current
@@ -608,7 +772,14 @@ def _assert_rescope_matches_oracle(
         current, snapshot_ids, ids_by_task_id
     )
     releases = _rescope_releases_for_oracle(
-        current, ordered_items, snapshot_ids, ids_by_task_id
+        current,
+        ordered_items,
+        snapshot_ids,
+        ids_by_task_id,
+        split_child_ids=split_child_ids
+        if split_child_ids is not None
+        else _allocate_split_child_ids(ordered_items),
+        tasks_by_oracle_id=tasks_by_oracle_id,
     )
     oracle_order, oracle_rows = rescope_oracle.apply_batched_rescope(
         snapshot_order, current_order, rows, releases
@@ -624,6 +795,7 @@ def _apply_reorder_with_oracle(
     current: list[dict[str, Any]],
     ordered_items: list[dict[str, Any]],
     snapshot_ids: frozenset[str],
+    split_child_ids: dict[str, list[tuple[str, str]]] | None = None,
 ) -> list[dict[str, Any]]:
     ids_by_task_id, tasks_by_oracle_id, current_order, rows = _rescope_state_for_oracle(
         current
@@ -632,12 +804,20 @@ def _apply_reorder_with_oracle(
         current, snapshot_ids, ids_by_task_id
     )
     releases = _rescope_releases_for_oracle(
-        current, ordered_items, snapshot_ids, ids_by_task_id
+        current,
+        ordered_items,
+        snapshot_ids,
+        ids_by_task_id,
+        split_child_ids=split_child_ids
+        if split_child_ids is not None
+        else _allocate_split_child_ids(ordered_items),
+        tasks_by_oracle_id=tasks_by_oracle_id,
     )
     oracle_order, oracle_rows = rescope_oracle.apply_batched_rescope(
         snapshot_order, current_order, rows, releases
     )
     _assert_merge_lineage_preserved(releases, rows, oracle_rows)
+    _assert_split_lineage_preserved(releases, rows, oracle_rows)
     return _materialize_rescope_oracle_result(
         oracle_order, oracle_rows, tasks_by_oracle_id
     )
@@ -674,6 +854,41 @@ def _assert_merge_lineage_preserved(
             raise AssertionError(
                 f"merge into task {op.task} dropped source lineage "
                 f"(sources={op.sources!r}); merge_preserves_source_lineage "
+                "returned False"
+            )
+
+
+def _assert_split_lineage_preserved(
+    releases: list[rescope_oracle.RescopeRelease],
+    rows_before: dict[int, rescope_oracle.TaskRow],
+    rows_after: dict[int, rescope_oracle.TaskRow],
+) -> None:
+    """Per-split runtime assertion of the Rocq lineage-preservation predicate.
+
+    Mirror of :func:`_assert_merge_lineage_preserved` for the SplitTask
+    op.  ``split_preserves_source_lineage`` proves "every child carries
+    the source's lineage_comments verbatim and the same source_comment
+    anchor"; we evaluate it for every emitted SplitTask op as a
+    fail-closed runtime check (issue #1718 acceptance criteria
+    "Rocq proves no source lineage comment id is lost for split;
+    runtime oracle agrees with Python").
+    """
+    for release in releases:
+        op = release.release_decision
+        if not isinstance(op, rescope_oracle.SplitTask):
+            continue
+        source_before = rows_before.get(op.task)
+        if source_before is None:
+            raise AssertionError(
+                f"split source {op.task} missing from rescope input rows"
+            )
+        child_ids = [c.child_task for c in op.children]
+        if not rescope_oracle.split_preserves_source_lineage(
+            child_ids, source_before, rows_after
+        ):
+            raise AssertionError(
+                f"split of task {op.task} dropped child lineage "
+                f"(children={child_ids!r}); split_preserves_source_lineage "
                 "returned False"
             )
 
@@ -980,8 +1195,8 @@ def _make_new_tasks_from_opus(
     unrecognised string ids (unchanged behaviour).  Only items where the
     ``"id"`` key is absent or explicitly ``null`` are promoted to new tasks.
 
-    Each new task receives a fresh timestamp-random ID, ``status: "pending"``,
-    and ``type: "spec"`` unless Opus specified a different type.  Items with
+    Each new task receives a UUIDv7 id, ``status: "pending"``, and
+    ``type: "spec"`` unless Opus specified a different type.  Items with
     blank titles are silently skipped.
 
     Dedup against post-snapshot thread tasks (#1337): when *current* and
@@ -1025,7 +1240,7 @@ def _make_new_tasks_from_opus(
             skipped += 1
             continue
         task: dict[str, Any] = {
-            "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
+            "id": str(uuid.uuid7()),
             "title": title,
             "type": item.get("type") or "spec",
             "description": item.get("description") or "",
@@ -1104,6 +1319,22 @@ def _validate_rescope_batch(
         t["id"]
         for t in current
         if "id" in t and t.get("status") == str(TaskStatus.BLOCKED)
+    }
+    # Kind classification is title-prefix driven (ASK:/DEFER:/CI FAILURE:),
+    # so a split that copies child titles literally would silently
+    # reclassify an ASK/DEFER source's children to executable spec
+    # tasks (codex P1).  CI failure rows are atomic events that don't
+    # decompose meaningfully.  Reject splits on any of these source
+    # kinds; Opus has CompleteTask + new-task creation if it really
+    # wants to convert one of these into actionable work.
+    non_splittable_source_ids = {
+        t["id"]
+        for t in current
+        if "id" in t
+        and isinstance(
+            _rescope_task_kind_for_oracle(t),
+            rescope_oracle.TaskAsk | rescope_oracle.TaskDefer | rescope_oracle.TaskCI,
+        )
     }
     seen_ids: set[str] = set()
     explicitly_completed_ids: set[str] = set()
@@ -1246,6 +1477,7 @@ def _validate_rescope_batch(
     for _index, target_id, sources in merge_targets:
         for source in sources:
             source_to_targets.setdefault(source, []).append(target_id)
+    merge_source_set: set[str] = set(source_to_targets)
     for index, target_id, sources in merge_targets:
         target_has_thread = target_id in thread_bearing_ids
         for source in sources:
@@ -1268,6 +1500,113 @@ def _validate_rescope_batch(
                     f"merged into {other_targets!r}; each source may merge "
                     "into at most one target (split/rebuild semantics belong "
                     "to a later leaf, not this one)"
+                )
+
+    # #1718 split validation.  A SplitTask op closes the source row and
+    # spawns N fresh children, each inheriting the source's
+    # ``lineage_comments`` and ``source_comment`` so reply paths still
+    # reach the original commenter.  Reject every shape that would leave
+    # the source vanished without children running:
+    #
+    # * null/missing id — there is no source row to decompose.
+    # * non-list / empty ``split_targets`` — no children means the
+    #   source closes for nothing (the empty-list sentinel ``[]`` IS a
+    #   no-op like ``merge_sources=[]``, but a present-but-broken value
+    #   has to fail closed).
+    # * any child not a dict with a non-empty string title.
+    # * combined with ``status="completed"``, a non-empty
+    #   ``merge_sources``, or appearing as another item's merge source —
+    #   structural ops are mutually exclusive (split closes the source
+    #   itself; merging would duplicate lineage).
+    # * source already completed/blocked on disk — same shape as the
+    #   merge guards above (reducer skips completed snapshot tasks; the
+    #   picker skips blocked tasks, so children would never run).
+    for index, item in enumerate(ordered_items):
+        if not isinstance(item, dict):
+            continue
+        if "split_targets" not in item:
+            continue
+        targets = item["split_targets"]
+        if not isinstance(targets, list):
+            errors.append(
+                f"item[{index}].split_targets: must be a list, "
+                f"got {type(targets).__name__}"
+            )
+            continue
+        if not targets:
+            # ``split_targets: []`` is the documented "no split" sentinel
+            # (matches ``merge_sources=[]`` semantics) — accepted, no op.
+            continue
+        item_id = item.get("id")
+        if item_id is None:
+            errors.append(
+                f"item[{index}].split_targets on a null/missing id: "
+                "split needs an existing source task to decompose "
+                "(splitting into a not-yet-created task isn't supported)"
+            )
+            continue
+        if not isinstance(item_id, str) or not item_id or item_id not in known_ids:
+            # Already reported above by the id-shape / id-existence
+            # checks; skip here to avoid duplicate messages.
+            continue
+        if item.get("status") == str(TaskStatus.COMPLETED):
+            errors.append(
+                f"item[{index}].split_targets on {item_id!r}: target "
+                'also marked status="completed"; structural ops are '
+                "mutually exclusive (SplitTask itself closes the source)"
+            )
+        if item_id in currently_completed_ids:
+            errors.append(
+                f"item[{index}].split_targets on {item_id!r}: target "
+                "is already completed on disk; SplitTask wouldn't fire "
+                "(the reducer skips completed snapshot tasks) and the "
+                "children would never be spawned"
+            )
+        if item_id in currently_blocked_ids:
+            errors.append(
+                f"item[{index}].split_targets on {item_id!r}: target "
+                "is blocked; the SplitTask op would close it but blocked-"
+                "target semantics for split aren't defined yet (#1247 "
+                "territory)"
+            )
+        if item_id in non_splittable_source_ids:
+            # Kind classification is title-prefix driven, so a split
+            # whose children carry plain titles silently reclassifies
+            # an ASK/DEFER source's children to executable spec tasks
+            # (codex P1).  CI-failure rows are atomic and don't
+            # decompose either.
+            errors.append(
+                f"item[{index}].split_targets on {item_id!r}: source "
+                "is an ASK/DEFER/CI task; splitting these would "
+                "silently reclassify children (kind is title-prefix "
+                'driven).  Use status="completed" + new tasks if you '
+                "really want to convert it into actionable work."
+            )
+        if "merge_sources" in item and item["merge_sources"] != []:
+            errors.append(
+                f"item[{index}].split_targets on {item_id!r}: combined "
+                "with merge_sources; structural ops are mutually "
+                "exclusive (would duplicate lineage)"
+            )
+        if item_id in merge_source_set:
+            errors.append(
+                f"item[{index}].split_targets on {item_id!r}: source "
+                "also appears in another item's merge_sources; would "
+                "duplicate lineage (folded into merge target AND "
+                "inherited by children)"
+            )
+        for child_index, child in enumerate(targets):
+            if not isinstance(child, dict):
+                errors.append(
+                    f"item[{index}].split_targets[{child_index}]: must "
+                    f"be a dict, got {type(child).__name__}"
+                )
+                continue
+            title = child.get("title")
+            if not isinstance(title, str) or not _normalize_title(title):
+                errors.append(
+                    f"item[{index}].split_targets[{child_index}].title: "
+                    f"must be a non-empty string, got {title!r}"
                 )
 
     return errors
@@ -1331,8 +1670,19 @@ def _apply_reorder(
     snapshot_ids = original_ids or frozenset(
         t["id"] for t in current if t.get("status") != TaskStatus.COMPLETED
     )
-    oracle_result = _apply_reorder_with_oracle(current, ordered_items, snapshot_ids)
-    _assert_rescope_matches_oracle(current, ordered_items, snapshot_ids, oracle_result)
+    # Pre-allocate split children's ``(id, created_at)`` tuples once
+    # so the apply and verify passes mint identical metadata even
+    # across a wall-clock second boundary.  Ids come from
+    # ``uuid.uuid7()`` so collisions across split children, new
+    # tasks, and existing on-disk rows are statistically impossible
+    # without any shared bookkeeping.
+    split_child_ids = _allocate_split_child_ids(ordered_items)
+    oracle_result = _apply_reorder_with_oracle(
+        current, ordered_items, snapshot_ids, split_child_ids
+    )
+    _assert_rescope_matches_oracle(
+        current, ordered_items, snapshot_ids, oracle_result, split_child_ids
+    )
 
     new_tasks = _make_new_tasks_from_opus(
         ordered_items, snapshot_ids, current=current, intents=intents
@@ -1359,10 +1709,15 @@ def _merge_source_ids(ordered_items: list[dict[str, Any]]) -> set[str]:
     """Collect the set of task ids that appear as merge-sources in this batch.
 
     A merged source's status flips to COMPLETED (its own CompleteTask op),
-    but the work isn't really done — it's been folded into another
-    still-pending task.  ``_compute_thread_changes`` uses this set to
-    suppress the "covered by recent commits" notification that would
-    otherwise mislead the original commenter (codex on #1738).
+    but the original ask is still being honored — just folded into a
+    larger pending task.  Merging isn't a scope change from the
+    commenter's perspective, so the auto "covered by recent commits"
+    notification doesn't apply.  Whether any source comment was
+    *materially* affected by the consolidation is an Opus judgment call,
+    handled by the reply-back filter epic (#1256) — specifically the
+    material-vs-aggregation classifier (#1723) and per-intent
+    notification (#1724).  This deterministic layer's job is just to
+    suppress the auto-reply.
     """
     merged: set[str] = set()
     for item in ordered_items:
@@ -1379,16 +1734,19 @@ def _compute_thread_changes(
     original: list[dict[str, Any]],
     result: list[dict[str, Any]],
     original_ids: frozenset[str],
-    merge_source_ids: set[str] | None = None,
+    consumed_source_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return change records for thread tasks that were completed or materially modified.
 
     Only tasks in *original_ids* (those Opus knew about) with a ``thread``
     attachment are reported.  Already-completed tasks are excluded.
-    Tasks listed in *merge_source_ids* are also excluded — their
+    Tasks listed in *consumed_source_ids* are also excluded — their
     completion is bookkeeping for the rescope reducer's per-task
-    coverage invariant, not "Fido finished your work."  The merged
-    target will fire its own change record when it eventually completes.
+    coverage invariant, not "Fido finished your work."  This covers
+    both ``MergeTasks`` source rows (folded into a still-pending
+    target) and ``SplitTask`` source rows (work moved into the
+    children); in both cases the inheriting row(s) will fire their own
+    change records when they eventually complete (#1717, #1718).
 
     Each record is one of:
     - ``{"task": ..., "kind": "completed"}`` — Opus omitted or marked it done
@@ -1409,13 +1767,13 @@ def _compute_thread_changes(
     the task dict set by ``_apply_reorder``) so the reply body distinguishes
     "done" from "cancelled".
     """
-    merged_sources = merge_source_ids or set()
+    consumed_sources = consumed_source_ids or set()
     result_by_id = {t["id"]: t for t in result}
     changes: list[dict[str, Any]] = []
     for t in original:
         if t["id"] not in original_ids:
             continue
-        if t["id"] in merged_sources:
+        if t["id"] in consumed_sources:
             continue
         if not t.get("thread"):
             continue
@@ -1637,12 +1995,18 @@ def reorder_tasks(
                     if completed_by_rescope or text_or_anchor_changed:
                         inprogress_affected = True
                         if completed_by_rescope:
-                            # #1716: explicit completion — the task is done;
-                            # the worker just needs to abort its now-stale
-                            # turn.  Don't reset to pending.
+                            # The in-progress row's status flipped to completed
+                            # via #1716 (explicit completion), #1717 (merged
+                            # into a different target), or #1718 (split into
+                            # children) — each closes the row but represents
+                            # a different decision.  In every case the worker
+                            # just needs to abort its now-stale turn so the
+                            # picker can advance to the new next task; no
+                            # reset to pending.
                             log.info(
-                                "reorder_tasks: in-progress task explicitly "
-                                "completed by Opus — aborting turn: %s",
+                                "reorder_tasks: in-progress task closed by "
+                                "rescope (completed/merged/split) — aborting "
+                                "turn: %s",
                                 inprogress_in_result.get("title", "")[:60],
                             )
                         else:
@@ -1676,7 +2040,8 @@ def reorder_tasks(
                 pre_rescope,
                 result,
                 original_ids,
-                merge_source_ids=_merge_source_ids(ordered_items),
+                consumed_source_ids=_merge_source_ids(ordered_items)
+                | _split_source_ids(ordered_items),
             )
         )
 
@@ -1845,7 +2210,7 @@ class Tasks(JsonFileStore):
             )
         title = _normalize_title(title)
         task: dict[str, Any] = {
-            "id": f"{int(time.time() * 1000)}-{random.randint(0, 9999):04d}",
+            "id": str(uuid.uuid7()),
             "title": title,
             "type": str(task_type),
             "description": description,

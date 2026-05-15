@@ -92,13 +92,28 @@ Record ExecutionLease : Type := {
     coverage invariant ([rescope_ops_cover_snapshot]) still holds.
     [merge_preserves_source_lineage] proves: after this op, every
     source's [lineage_comments] and [source_comment] are present in
-    [target]'s [lineage_comments] — no origin is lost. *)
+    [target]'s [lineage_comments] — no origin is lost.
+
+    [SplitTask source children] (#1718) closes [source] and inserts each
+    [SplitChild] as a fresh pending row that inherits the source's
+    [source_comment] anchor and [lineage_comments].  The children's
+    [task] ids are pre-allocated by the Python adapter (timestamp-
+    random, like all new tasks).  [split_preserves_source_lineage]
+    proves every child carries the source's lineage_comments + anchor
+    — no origin is lost on the inverse operation either. *)
+Record SplitChild : Type := {
+  child_task : positive;
+  child_title : string;
+  child_description : string
+}.
+
 Inductive RescopeOp : Type :=
 | KeepTask (task : positive) : RescopeOp
 | RewriteTask (task : positive) (new_title : string) (new_description : string) : RescopeOp
 | RewriteAnchor (task : positive) (new_anchor : option positive) : RescopeOp
 | MergeTasks (task : positive) (sources : list positive)
     (new_title : string) (new_description : string) : RescopeOp
+| SplitTask (task : positive) (children : list SplitChild) : RescopeOp
 | CompleteTask (task : positive) : RescopeOp.
 
 (** [RescopeReleaseKind] distinguishes the accumulated worker releases that
@@ -378,6 +393,7 @@ Definition rescope_task_id (op : RescopeOp) : positive :=
   | RewriteTask task _ _ => task
   | RewriteAnchor task _ => task
   | MergeTasks task _ _ _ => task
+  | SplitTask task _ => task
   | CompleteTask task => task
   end.
 
@@ -473,6 +489,38 @@ Fixpoint collect_source_lineages
         (fold_source_lineage_into rows src acc)
   end.
 
+(** [split_child_row] builds the row for one [SplitChild]: inherits the
+    source row's anchor, lineage, and kind; carries the child's title
+    and description; status is StatusPending so split children are
+    immediately visible to the worker picker. *)
+Definition split_child_row
+    (source_row : TaskRow) (spec : SplitChild) : TaskRow := {|
+  title := child_title spec;
+  description := child_description spec;
+  kind := kind source_row;
+  status := StatusPending;
+  source_comment := source_comment source_row;
+  lineage_comments := lineage_comments source_row
+|}.
+
+(** [add_split_kids] folds every [SplitChild] into [rows] /
+    [pending_ids].  Each child row inherits the source's anchor and
+    lineage by construction (see [split_child_row]). *)
+Fixpoint add_split_kids
+    (children : list SplitChild)
+    (source_row : TaskRow)
+    (rows : PositiveMap.t TaskRow)
+    (pending_ids : list positive)
+    : PositiveMap.t TaskRow * list positive :=
+  match children with
+  | [] => (rows, pending_ids)
+  | spec :: rest =>
+      let child_row := split_child_row source_row spec in
+      let rows' := PositiveMap.add (child_task spec) child_row rows in
+      let pending' := List.app pending_ids [child_task spec] in
+      add_split_kids rest source_row rows' pending'
+  end.
+
 Definition apply_rescope_op
     (op : RescopeOp)
     (task : positive)
@@ -528,6 +576,19 @@ Definition apply_rescope_op
         (PositiveMap.add task row' rows,
           List.app pending_ids [task],
           completed_ids)
+    | SplitTask _ children =>
+        let closed := {|
+          title := title row;
+          description := description row;
+          kind := kind row;
+          status := StatusCompleted;
+          source_comment := source_comment row;
+          lineage_comments := lineage_comments row
+        |} in
+        let rows_with_source := PositiveMap.add task closed rows in
+        let '(rows', pending') :=
+          add_split_kids children row rows_with_source pending_ids in
+        (rows', pending', List.app completed_ids [task])
     | CompleteTask _ =>
         let row' := {|
           title := title row;
@@ -711,6 +772,61 @@ Fixpoint merge_preserves_source_lineage
       | Some src_row =>
           if merge_target_lineage_includes_source target_row_after src_row
           then merge_preserves_source_lineage rest rows_before target_row_after
+          else false
+      end
+  end.
+
+(** [optional_anchors_match] — true iff two optional source-comment
+    anchors are both [None] or both [Some] with the same id.  Spelled
+    as nested single-option matches (rather than a dual-pattern
+    [match a, b with ... end]) so the python.ml extractor produces
+    flat if/return code instead of the nested-lambda form that PLC3002
+    rejects (#1737 tracks the proper extractor fix). *)
+Definition optional_anchors_match (a b : option positive) : bool :=
+  match a with
+  | None =>
+      match b with
+      | None => true
+      | Some _ => false
+      end
+  | Some x =>
+      match b with
+      | None => false
+      | Some y => Pos.eqb x y
+      end
+  end.
+
+(** [split_child_inherits_source] says whether one [child_row] (after a
+    [SplitTask]) carries the source row's [lineage_comments] verbatim
+    and the same primary [source_comment].  The reducer constructs
+    children via [split_child_row] which inherits both fields by
+    construction, so this predicate is true for every well-formed
+    split output and serves as the runtime oracle the Python adapter
+    asserts on every emitted SplitTask (#1718).  The intermediate [let]
+    bindings keep extracted Python lines under the ruff length limit
+    (#1737 tracks the proper extractor-side fix). *)
+Definition split_child_inherits_source
+    (source_row child_row : TaskRow) : bool :=
+  let src_lineage := lineage_comments source_row in
+  let child_lineage := lineage_comments child_row in
+  let lineage_ok := list_subset src_lineage child_lineage in
+  let src_anchor := source_comment source_row in
+  let child_anchor := source_comment child_row in
+  let anchor_ok := optional_anchors_match src_anchor child_anchor in
+  andb lineage_ok anchor_ok.
+
+Fixpoint split_preserves_source_lineage
+    (children : list positive)
+    (source_row : TaskRow)
+    (rows_after : PositiveMap.t TaskRow) : bool :=
+  match children with
+  | [] => true
+  | child :: rest =>
+      match PositiveMap.find child rows_after with
+      | None => false
+      | Some child_row =>
+          if split_child_inherits_source source_row child_row
+          then split_preserves_source_lineage rest source_row rows_after
           else false
       end
   end.
@@ -926,4 +1042,4 @@ Definition task_still_pending
   end.
 
 Python File Extraction task_queue_rescope
-  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot normalize_rescope_batch apply_rescope apply_batched_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes task_changes_materially_significant batched_rescope_materially_significant remove_from_order cleanup_aborted_task task_still_pending merge_preserves_source_lineage merge_target_lineage_includes_source".
+  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot normalize_rescope_batch apply_rescope apply_batched_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes task_changes_materially_significant batched_rescope_materially_significant remove_from_order cleanup_aborted_task task_still_pending merge_preserves_source_lineage merge_target_lineage_includes_source split_preserves_source_lineage split_child_inherits_source".
