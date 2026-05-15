@@ -2043,26 +2043,40 @@ def _notify_intent_outcome(
     repo_cfg: RepoConfig,
     gh: GitHub,
     *,
+    batch_intents: list[RescopeIntent],
+    batch_dispositions: dict[int, IntentDisposition],
+    result: list[dict[str, Any]],
     agent: ProviderAgent | None = None,
     prompts: Prompts | None = None,
 ) -> None:
-    """Post a per-intent reply when rescope materially changed the ask (#1724).
+    """Post a per-intent reply per the reply-back filter (#1724).
 
     The reply-back filter epic (#1256) consumes the per-intent
-    classifier output (#1723) and emits an Opus-voice note to the
-    originating commenter ONLY when the rescope materially affected
-    their request.  Aggregation (intent absorbed without change) and
-    unhandled (intent not acted on) silently produce no reply.
+    classifier output (#1723).  Material and unhandled both emit a
+    notification — material describes the outcome of the rescope on
+    this ask; unhandled explains why no operation was attributed to
+    it (typically because a later sibling intent superseded it, or
+    Opus judged the ask already covered).  Aggregation (intent
+    absorbed without material change) stays silent.
 
-    The reply text is generated per-call by Opus (per the
-    voice-text-not-templated convention) and instructed to describe
-    the OUTCOME of the rescope on this specific intent — without
-    implying the work is done when the rescope only replanned it.
+    The Opus instruction asks the model to TELL THE STORY of how the
+    rescope handled this commenter's ask, grounding the explanation
+    in:
+
+    * For material: every co-contributing intent in the batch that
+      shaped any of the same affected tasks.  Opus can then say
+      "your ask was rewritten because @rhencke's later comment...".
+    * For unhandled: every sibling intent in the batch with its
+      disposition.  Opus can then say "we acted on @bob's later
+      comment instead / your ask was already covered by..."
+
+    Reply text is generated per-call by Opus (voice-text-not-
+    templated convention) and instructed never to imply the work is
+    done — the rescope only replanned.
     """
-    # Defense-in-depth: callers (build_on_intent_dispositions) are
-    # supposed to filter to material before invoking us, but the
-    # branch is cheap and lets us be the single source of truth.
-    if disposition.kind != "material":
+    # Aggregation = pure absorption with no material effect — no
+    # narrative to tell, stay silent (acceptance criteria #1723).
+    if disposition.kind == "aggregation":
         return
 
     if agent is None:
@@ -2070,17 +2084,95 @@ def _notify_intent_outcome(
     if prompts is None:
         prompts = Prompts(_load_persona(config))
 
-    instruction = (
-        "A change request from a PR comment was rescoped — the work has "
-        "been REPLANNED, not completed.  Tell the commenter what happened "
-        "to their ask without implying the work is done.\n\n"
-        f"Their original change request: {intent.change_request}\n"
-        f"Affected task id(s): {', '.join(disposition.affected_task_ids)}\n"
-        f"What changed: {disposition.reason}\n\n"
-        "Write a very brief reply.  Be specific about which tasks were "
-        "rewritten / merged / split / closed.  Do NOT say the work is "
-        "done — the rescope only restructured the plan."
-    )
+    intents_by_cid = {i.comment_id: i for i in batch_intents}
+    tasks_by_id = {t["id"]: t for t in result}
+
+    # Co-contributing intents: other commenters whose intents shaped
+    # the same tasks this intent's ask landed on.  Insertion-ordered
+    # (first task's contributors first), de-duplicated by comment_id.
+    seen_cids: set[int] = set()
+    co_contributing: list[RescopeIntent] = []
+    for task_id in disposition.affected_task_ids:
+        task = tasks_by_id.get(task_id)
+        if task is None:
+            continue
+        for other_cid in task.get("contributing_intents") or []:
+            if other_cid == intent.comment_id or other_cid in seen_cids:
+                continue
+            other = intents_by_cid.get(other_cid)
+            if other is None:
+                continue
+            seen_cids.add(other_cid)
+            co_contributing.append(other)
+
+    # Sibling intents: every other intent in this batch with its
+    # disposition.  Used by the unhandled branch to explain why this
+    # commenter's ask was passed over (likely a later sibling
+    # superseded it, or it was already covered).
+    siblings: list[tuple[RescopeIntent, IntentDisposition]] = []
+    for other in batch_intents:
+        if other.comment_id == intent.comment_id:
+            continue
+        other_disposition = batch_dispositions.get(other.comment_id)
+        if other_disposition is not None:
+            siblings.append((other, other_disposition))
+
+    if disposition.kind == "material":
+        framing = (
+            "A change request from a PR comment was rescoped — the work "
+            "has been REPLANNED, not completed.  Tell this commenter the "
+            "STORY of how their ask landed: which task(s) absorbed it, "
+            "what changed, and where other commenters' input shaped the "
+            "same task(s).  Be specific about which tasks were rewritten "
+            "/ merged / split / closed.  Do NOT say the work is done — "
+            "the rescope only restructured the plan."
+        )
+    else:  # unhandled
+        framing = (
+            "A change request from a PR comment was NOT acted on this "
+            "rescope batch — Opus attributed no operation to it.  Tell "
+            "this commenter the STORY of why their ask is sitting in "
+            "this round: did a later sibling intent supersede it?  Was "
+            "the ask already covered by an existing pending task?  Use "
+            "the sibling intents below to ground the explanation; don't "
+            "apologize, just narrate what happened."
+        )
+
+    instruction_parts = [
+        framing,
+        "",
+        f"This commenter's change request: {intent.change_request}",
+        f"Their comment id: {intent.comment_id} ({intent.timestamp})",
+        f"Disposition: {disposition.kind}",
+        f"What changed: {disposition.reason}",
+        f"Affected task id(s): {', '.join(disposition.affected_task_ids) or '(none)'}",
+    ]
+    if co_contributing:
+        instruction_parts.append("")
+        instruction_parts.append(
+            "Other commenters who contributed to the SAME affected task(s) "
+            "(chronological):"
+        )
+        for other in co_contributing:
+            instruction_parts.append(
+                f"- comment #{other.comment_id} ({other.timestamp}): "
+                f"{other.change_request}"
+            )
+    if siblings and disposition.kind == "unhandled":
+        instruction_parts.append("")
+        instruction_parts.append(
+            "Other intents processed in this same rescope batch "
+            "(chronological, with their dispositions):"
+        )
+        for other, other_disposition in siblings:
+            instruction_parts.append(
+                f"- comment #{other.comment_id} "
+                f"({other.timestamp}, {other_disposition.kind}): "
+                f"{other.change_request}"
+            )
+    instruction_parts.append("")
+    instruction_parts.append("Write a very brief reply.")
+    instruction = "\n".join(instruction_parts)
 
     body = safe_voice_turn(
         agent,
@@ -2092,7 +2184,11 @@ def _notify_intent_outcome(
     )
     try:
         gh.reply_to_review_comment(repo, pr, body, intent.comment_id)
-        log.info("notified intent comment %s (material rescope)", intent.comment_id)
+        log.info(
+            "notified intent comment %s (%s rescope)",
+            intent.comment_id,
+            disposition.kind,
+        )
     except Exception:
         log.exception("failed to notify intent comment %s", intent.comment_id)
 
@@ -2416,16 +2512,19 @@ def _build_on_intent_dispositions(
 
     def on_intent_dispositions(
         dispositions: dict[int, IntentDisposition],
-        _result: list[dict[str, Any]],
+        result: list[dict[str, Any]],
     ) -> None:
         if pr_ctx is None:
             return
         # Dispositions dict iteration order is intent-timestamp
-        # ascending (the classifier sorts).  Iterate in order and
-        # fire material notifications only.
+        # ascending (the classifier sorts) — we fire notifications in
+        # the same order so the chronological story reads top to
+        # bottom on the reviewer's thread.  Both material AND
+        # unhandled trigger replies (the notifier branches on kind);
+        # aggregation is silent.
         for cid, disposition in dispositions.items():
             intent = intents_by_cid.get(cid)
-            if intent is None or disposition.kind != "material":
+            if intent is None or disposition.kind == "aggregation":
                 continue
             _notify_intent_outcome(
                 intent,
@@ -2435,6 +2534,9 @@ def _build_on_intent_dispositions(
                 config=config,
                 repo_cfg=repo_cfg,
                 gh=gh,
+                batch_intents=intents,
+                batch_dispositions=dispositions,
+                result=result,
                 agent=agent,
                 prompts=prompts,
             )
