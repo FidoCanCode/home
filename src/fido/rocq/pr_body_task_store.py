@@ -88,6 +88,14 @@ class TaskRow:
     lineage_comments: list[int]
 
 
+@final
+@dataclass(frozen=True)
+class SplitChild:
+    child_task: int
+    child_title: str
+    child_description: str
+
+
 class RescopeOp:
     pass
 
@@ -124,11 +132,20 @@ class MergeTasks(RescopeOp):
 
 @final
 @dataclass(frozen=True)
+class SplitTask(RescopeOp):
+    task: int
+    children: list[SplitChild]
+
+
+@final
+@dataclass(frozen=True)
 class CompleteTask(RescopeOp):
     task: int
 
 
-RescopeOpT = KeepTask | RewriteTask | RewriteAnchor | MergeTasks | CompleteTask
+RescopeOpT = (
+    KeepTask | RewriteTask | RewriteAnchor | MergeTasks | SplitTask | CompleteTask
+)
 
 
 def find_comment_duplicate(
@@ -257,6 +274,8 @@ def rescope_task_id(op: RescopeOp) -> int:
             return task
         case MergeTasks(task, sources, new_title, new_description):
             return task
+        case SplitTask(task, children):
+            return task
         case CompleteTask(task):
             return task
         case __impossible:
@@ -319,6 +338,40 @@ def collect_source_lineages(
         )
         continue
     return acc
+
+
+def split_child_row(
+    source_row: TaskRow,
+    spec: SplitChild,
+) -> TaskRow:
+    return replace(
+        source_row,
+        title=spec.child_title,
+        description=spec.child_description,
+        status=StatusPending(),
+    )
+
+
+def add_split_kids(
+    children: list[SplitChild],
+    source_row: TaskRow,
+    rows: dict[int, TaskRow],
+    pending_ids: list[int],
+) -> tuple[dict[int, TaskRow], list[int]]:
+    for spec in children:
+        child_row = split_child_row(source_row, spec)
+        rows_ = _rocq_map_add(
+            _rocq_positive_key(spec.child_task),
+            child_row,
+            rows,
+        )
+        pending_ = pending_ids + [spec.child_task]
+        rows, pending_ids = rows_, pending_
+        continue
+    return (
+        rows,
+        pending_ids,
+    )
 
 
 def apply_rescope_op(
@@ -396,6 +449,26 @@ def apply_rescope_op(
                         pending_ids + [task],
                     ),
                     completed_ids,
+                )
+            case SplitTask(task0, children):
+                closed = replace(
+                    row,
+                    status=StatusCompleted(),
+                )
+                rows_with_source = _rocq_map_add(
+                    _rocq_positive_key(task),
+                    closed,
+                    rows,
+                )
+                __pair = add_split_kids(children, row, rows_with_source, pending_ids)
+                rows_ = __pair[0]
+                pending_ = __pair[1]
+                return (
+                    (
+                        rows_,
+                        pending_,
+                    ),
+                    completed_ids + [task],
                 )
             case CompleteTask(task0):
                 row_ = replace(

@@ -269,7 +269,7 @@ class TestRescopeOracleAdapter:
                 "type": "ci",
             },
         ]
-        ids_by_task_id, _tasks_by_oracle_id, _order, _rows = _rescope_state_for_oracle(
+        ids_by_task_id, tasks_by_oracle_id, _order, _rows = _rescope_state_for_oracle(
             current
         )
         releases = _rescope_releases_for_oracle(
@@ -280,6 +280,8 @@ class TestRescopeOracleAdapter:
             ],
             frozenset({"a", "b", "c"}),
             ids_by_task_id,
+            split_child_ids={},
+            tasks_by_oracle_id=tasks_by_oracle_id,
         )
 
         assert [type(release.release_decision).__name__ for release in releases] == [
@@ -1426,6 +1428,182 @@ class TestApplyReorder:
         # Sanity: the merged lineage matches what we expect.
         assert target_after.lineage_comments == [100, 50, 200]
 
+    def test_split_closes_source_and_spawns_children_inheriting_lineage(self) -> None:
+        # #1718: SplitTask(source, [SplitChild(...)]) closes the source
+        # row and spawns N children that inherit the source's
+        # lineage_comments + source_comment verbatim — reply paths still
+        # reach every original commenter via the children's threads.
+        from fido.tasks import _apply_reorder as apply_reorder
+
+        thread_src = {
+            "repo": "r/r",
+            "pr": 1,
+            "comment_id": 100,
+            "comment_type": "pulls",
+            "url": "https://example/100",
+            "lineage_comment_ids": [100, 50],
+        }
+        src = self._t("src", "Original task", task_type="thread")
+        src["thread"] = thread_src
+        items = [
+            {
+                "id": "src",
+                "title": "Original task",
+                "split_targets": [
+                    {"title": "Child A", "description": "first half"},
+                    {"title": "Child B", "description": "second half"},
+                ],
+            }
+        ]
+        result = apply_reorder([src], items)
+        # Source closed; two new pending children inherit thread metadata.
+        source_after = next(t for t in result if t["id"] == "src")
+        assert source_after["status"] == str(TaskStatus.COMPLETED)
+        children = [t for t in result if t["id"] != "src"]
+        assert len(children) == 2
+        titles = [c["title"] for c in children]
+        assert titles == ["Child A", "Child B"]
+        for child, expected_desc in zip(children, ["first half", "second half"]):
+            assert child["status"] == str(TaskStatus.PENDING)
+            assert child["description"] == expected_desc
+            assert child["type"] == "thread"
+            assert child["thread"]["comment_id"] == 100
+            assert child["thread"]["comment_type"] == "pulls"
+            # Lineage comments inherited verbatim — every original
+            # commenter is still reachable from each child's thread.
+            assert child["thread"]["lineage_comment_ids"] == [100, 50]
+
+    def test_split_lineage_assertion_raises_on_missing_child(self) -> None:
+        # Mirror of test_merge_lineage_assertion_raises_on_missing_target:
+        # if a SplitTask op's children aren't materialised in rows_after,
+        # fail closed instead of silently producing an incomplete split.
+        from fido.rocq import task_queue_rescope as oracle
+        from fido.tasks import _assert_split_lineage_preserved
+
+        src_row = oracle.TaskRow(
+            title="src",
+            description="",
+            kind=oracle.TaskThread(),
+            status=oracle.StatusPending(),
+            source_comment=100,
+            lineage_comments=[100, 50],
+        )
+        rows_before = {1: src_row}
+        # rows_after deliberately missing the child row keyed at 2.
+        rows_after: dict[int, oracle.TaskRow] = {1: src_row}
+        split_release = oracle.RescopeRelease(
+            oracle.ReleaseACT(),
+            oracle.SplitTask(
+                1,
+                [
+                    oracle.SplitChild(
+                        child_task=2, child_title="A", child_description=""
+                    )
+                ],
+            ),
+        )
+        with pytest.raises(AssertionError, match="dropped child lineage"):
+            _assert_split_lineage_preserved([split_release], rows_before, rows_after)
+
+    def test_split_lineage_assertion_raises_on_missing_source(self) -> None:
+        # Mirror of merge missing-target: if the SplitTask source row
+        # vanished from rows_before, the predicate has no template to
+        # compare children against — fail fast.
+        from fido.rocq import task_queue_rescope as oracle
+        from fido.tasks import _assert_split_lineage_preserved
+
+        rows_before: dict[int, oracle.TaskRow] = {}
+        rows_after: dict[int, oracle.TaskRow] = {}
+        split_release = oracle.RescopeRelease(
+            oracle.ReleaseACT(),
+            oracle.SplitTask(
+                1,
+                [
+                    oracle.SplitChild(
+                        child_task=2, child_title="A", child_description=""
+                    )
+                ],
+            ),
+        )
+        with pytest.raises(AssertionError, match="missing from rescope input"):
+            _assert_split_lineage_preserved([split_release], rows_before, rows_after)
+
+    def test_split_uses_oracle_predicate_to_prove_no_lineage_lost(self) -> None:
+        # The Rocq model's split_preserves_source_lineage predicate is
+        # extracted to Python; check it returns True after a real split.
+        from fido.rocq import task_queue_rescope as oracle
+
+        src_row = oracle.TaskRow(
+            title="src",
+            description="",
+            kind=oracle.TaskThread(),
+            status=oracle.StatusPending(),
+            source_comment=100,
+            lineage_comments=[100, 50],
+        )
+        rows_before = {1: src_row}
+        split_op = oracle.SplitTask(
+            1,
+            [
+                oracle.SplitChild(child_task=2, child_title="A", child_description=""),
+                oracle.SplitChild(child_task=3, child_title="B", child_description=""),
+            ],
+        )
+        ((rows_after, _), _) = oracle.apply_rescope_op(
+            split_op, 1, src_row, rows_before, [], []
+        )
+        # Predicate confirms every child carries source's lineage + anchor.
+        assert oracle.split_preserves_source_lineage([2, 3], src_row, rows_after)
+        # Sanity: the children's lineage matches the source verbatim.
+        assert rows_after[2].lineage_comments == [100, 50]
+        assert rows_after[2].source_comment == 100
+        assert rows_after[3].lineage_comments == [100, 50]
+
+    def test_split_source_completion_notification_is_suppressed(self) -> None:
+        # Mirror of the merge-source suppression: a split source's
+        # status flips to COMPLETED but the work moved into the
+        # children, not "Fido finished your work" — the auto reply
+        # would mislead the original commenter.  Per-source decisions
+        # are owned by the reply-back filter epic (#1256 / #1723 / #1724).
+        from fido.tasks import _split_source_ids
+
+        items = [
+            {
+                "id": "src",
+                "split_targets": [
+                    {"title": "Child A"},
+                    {"title": "Child B"},
+                ],
+            },
+            # Sources without split_targets aren't suppressed.
+            {"id": "other", "title": "unrelated"},
+        ]
+        assert _split_source_ids(items) == {"src"}
+
+    def test_split_with_post_snapshot_child_ids_distinct_from_existing(self) -> None:
+        # Newly-allocated child task ids must not collide with the
+        # source's id or any other task id in the queue.  Allocation is
+        # timestamp-random per call.
+        from fido.tasks import _apply_reorder as apply_reorder
+
+        src = self._t("src", "Original")
+        other = self._t("other-1234567890-0001", "Sibling")
+        items = [
+            {
+                "id": "src",
+                "split_targets": [{"title": "Child"}],
+            },
+        ]
+        result = apply_reorder([src, other], items)
+        ids = [t["id"] for t in result]
+        # Source kept its id (now closed); sibling preserved; child
+        # received a fresh id distinct from both.
+        assert "src" in ids
+        assert "other-1234567890-0001" in ids
+        child_ids = [i for i in ids if i not in {"src", "other-1234567890-0001"}]
+        assert len(child_ids) == 1
+        assert child_ids[0] not in {"src", "other-1234567890-0001"}
+
     def test_explicit_completion_marks_task_completed(self) -> None:
         # #1716: an item with status="completed" emits CompleteTask, which
         # the reducer applies as a status flip to COMPLETED.  This is the
@@ -2095,6 +2273,147 @@ class TestValidateRescopeBatch:
             {"id": "b", "title": "B", "status": "completed"},
         ]
         assert _validate_rescope_batch(current, items) == []
+
+    # ── split validation (#1718) ──────────────────────────────────────────
+
+    def test_split_targets_must_be_a_list(self) -> None:
+        current = [self._t("src")]
+        items = [{"id": "src", "title": "S", "split_targets": "Child A"}]
+        errors = _validate_rescope_batch(current, items)
+        assert any("split_targets" in e and "must be a list" in e for e in errors)
+
+    def test_empty_split_targets_is_accepted_as_no_op(self) -> None:
+        # Mirror of the empty merge_sources sentinel: ``[]`` documents
+        # "no split", not "broken split" — accept silently.
+        current = [self._t("src")]
+        items = [{"id": "src", "title": "S", "split_targets": []}]
+        assert _validate_rescope_batch(current, items) == []
+
+    def test_split_on_null_id_is_rejected(self) -> None:
+        current = [self._t("src")]
+        items = [{"id": None, "title": "x", "split_targets": [{"title": "A"}]}]
+        errors = _validate_rescope_batch(current, items)
+        assert any("split_targets" in e and "null/missing id" in e for e in errors)
+
+    def test_split_child_must_be_dict_with_non_empty_title(self) -> None:
+        current = [self._t("src")]
+        items = [
+            {
+                "id": "src",
+                "title": "S",
+                "split_targets": [
+                    "not a dict",
+                    {"title": ""},
+                    {"title": 42},
+                    {},
+                ],
+            }
+        ]
+        errors = _validate_rescope_batch(current, items)
+        # First entry rejected for shape; rest rejected for title.
+        assert any("[0]" in e and "must be a dict" in e for e in errors)
+        assert any("[1].title" in e for e in errors)
+        assert any("[2].title" in e for e in errors)
+        assert any("[3].title" in e for e in errors)
+
+    def test_split_combined_with_status_completed_is_rejected(self) -> None:
+        current = [self._t("src")]
+        items = [
+            {
+                "id": "src",
+                "status": "completed",
+                "split_targets": [{"title": "A"}],
+            }
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any(
+            "split_targets" in e and "structural ops are mutually exclusive" in e
+            for e in errors
+        )
+
+    def test_split_combined_with_merge_sources_is_rejected(self) -> None:
+        current = [self._t("src"), self._t("other")]
+        items = [
+            {
+                "id": "src",
+                "title": "S",
+                "merge_sources": ["other"],
+                "split_targets": [{"title": "A"}],
+            },
+            {"id": "other", "title": "O", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any("combined with merge_sources" in e for e in errors)
+
+    def test_split_on_source_thats_also_a_merge_source_is_rejected(self) -> None:
+        # Lineage duplication: source folds into merge target AND is
+        # decomposed into children — the lineage lands in two places.
+        current = [self._t("src"), self._t("merger")]
+        items = [
+            {"id": "merger", "title": "M", "merge_sources": ["src"]},
+            {
+                "id": "src",
+                "title": "S",
+                "split_targets": [{"title": "A"}],
+            },
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any(
+            "split_targets" in e and "appears in another item's merge_sources" in e
+            for e in errors
+        )
+
+    def test_split_on_completed_target_on_disk_is_rejected(self) -> None:
+        src = self._t("src")
+        src["status"] = "completed"
+        items = [
+            {"id": "src", "title": "S", "split_targets": [{"title": "A"}]},
+        ]
+        errors = _validate_rescope_batch([src], items)
+        assert any(
+            "split_targets" in e and "already completed on disk" in e for e in errors
+        )
+
+    def test_split_on_blocked_target_on_disk_is_rejected(self) -> None:
+        src = self._t("src")
+        src["status"] = "blocked"
+        items = [
+            {"id": "src", "title": "S", "split_targets": [{"title": "A"}]},
+        ]
+        errors = _validate_rescope_batch([src], items)
+        assert any("split_targets" in e and "is blocked" in e for e in errors)
+
+    def test_valid_split_passes_validation(self) -> None:
+        current = [self._t("src")]
+        items = [
+            {
+                "id": "src",
+                "title": "S",
+                "split_targets": [
+                    {"title": "Child A"},
+                    {"title": "Child B", "description": "scope"},
+                ],
+            }
+        ]
+        assert _validate_rescope_batch(current, items) == []
+
+    def test_split_on_unknown_id_skips_split_specific_checks(self) -> None:
+        # When the item carries an id Opus invented (not in known_ids),
+        # the upstream id-existence check already records "unknown
+        # source id" — the split block then early-skips its own checks
+        # rather than spamming duplicate error messages on a target
+        # that doesn't exist.
+        current = [self._t("real")]
+        items = [
+            {
+                "id": "ghost",
+                "split_targets": [{"title": "Child"}],
+            }
+        ]
+        errors = _validate_rescope_batch(current, items)
+        assert any("unknown source id" in e for e in errors)
+        # No split-specific error piles on top of the unknown-id error.
+        assert not any("split_targets on 'ghost'" in e for e in errors)
 
 
 # ── reorder_tasks ─────────────────────────────────────────────────────────────

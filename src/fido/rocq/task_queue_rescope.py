@@ -96,6 +96,14 @@ def lease_task(e: ExecutionLease) -> int:
     return lease_task0
 
 
+@final
+@dataclass(frozen=True)
+class SplitChild:
+    child_task: int
+    child_title: str
+    child_description: str
+
+
 class RescopeOp:
     pass
 
@@ -132,11 +140,20 @@ class MergeTasks(RescopeOp):
 
 @final
 @dataclass(frozen=True)
+class SplitTask(RescopeOp):
+    task: int
+    children: list[SplitChild]
+
+
+@final
+@dataclass(frozen=True)
 class CompleteTask(RescopeOp):
     task: int
 
 
-RescopeOpT = KeepTask | RewriteTask | RewriteAnchor | MergeTasks | CompleteTask
+RescopeOpT = (
+    KeepTask | RewriteTask | RewriteAnchor | MergeTasks | SplitTask | CompleteTask
+)
 
 
 class RescopeReleaseKind:
@@ -522,6 +539,8 @@ def rescope_task_id(op: RescopeOp) -> int:
             return task
         case MergeTasks(task, sources, new_title, new_description):
             return task
+        case SplitTask(task, children):
+            return task
         case CompleteTask(task):
             return task
         case __impossible:
@@ -636,6 +655,40 @@ def collect_source_lineages(
     return acc
 
 
+def split_child_row(
+    source_row: TaskRow,
+    spec: SplitChild,
+) -> TaskRow:
+    return replace(
+        source_row,
+        title=spec.child_title,
+        description=spec.child_description,
+        status=StatusPending(),
+    )
+
+
+def add_split_kids(
+    children: list[SplitChild],
+    source_row: TaskRow,
+    rows: dict[int, TaskRow],
+    pending_ids: list[int],
+) -> tuple[dict[int, TaskRow], list[int]]:
+    for spec in children:
+        child_row = split_child_row(source_row, spec)
+        rows_ = _rocq_map_add(
+            _rocq_positive_key(spec.child_task),
+            child_row,
+            rows,
+        )
+        pending_ = pending_ids + [spec.child_task]
+        rows, pending_ids = rows_, pending_
+        continue
+    return (
+        rows,
+        pending_ids,
+    )
+
+
 def apply_rescope_op(
     op: RescopeOp,
     task: int,
@@ -711,6 +764,26 @@ def apply_rescope_op(
                         pending_ids + [task],
                     ),
                     completed_ids,
+                )
+            case SplitTask(task0, children):
+                closed = replace(
+                    row,
+                    status=StatusCompleted(),
+                )
+                rows_with_source = _rocq_map_add(
+                    _rocq_positive_key(task),
+                    closed,
+                    rows,
+                )
+                __pair = add_split_kids(children, row, rows_with_source, pending_ids)
+                rows_ = __pair[0]
+                pending_ = __pair[1]
+                return (
+                    (
+                        rows_,
+                        pending_,
+                    ),
+                    completed_ids + [task],
                 )
             case CompleteTask(task0):
                 row_ = replace(
@@ -986,6 +1059,54 @@ def merge_preserves_source_lineage(
             continue
         src_row = __option
         if merge_target_lineage_includes_source(target_row_after, src_row):
+            continue
+        return False
+    return True
+
+
+def optional_anchors_match(
+    a: int | None,
+    b: int | None,
+) -> bool:
+    __option = a
+    if __option is None:
+        __option = b
+        if __option is None:
+            return True
+        p = __option
+        return False
+    x = __option
+    __option = b
+    if __option is None:
+        return False
+    y = __option
+    return x == y
+
+
+def split_child_inherits_source(
+    source_row: TaskRow,
+    child_row: TaskRow,
+) -> bool:
+    src_lineage = source_row.lineage_comments
+    child_lineage = child_row.lineage_comments
+    lineage_ok = list_subset(src_lineage, child_lineage)
+    src_anchor = source_row.source_comment
+    child_anchor = child_row.source_comment
+    anchor_ok = optional_anchors_match(src_anchor, child_anchor)
+    return lineage_ok and anchor_ok
+
+
+def split_preserves_source_lineage(
+    children: list[int],
+    source_row: TaskRow,
+    rows_after: dict[int, TaskRow],
+) -> bool:
+    for child in children:
+        __option = rows_after.get(_rocq_positive_key(child))
+        if __option is None:
+            return False
+        child_row = __option
+        if split_child_inherits_source(source_row, child_row):
             continue
         return False
     return True
