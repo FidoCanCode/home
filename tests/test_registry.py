@@ -2240,3 +2240,47 @@ class TestRegistryFsmOracle:
             reg._registry_fsm_states.get("org/b"),
             registry_fsm.Active,  # pyright: ignore[reportPrivateUsage]
         )
+
+
+class TestCommentCacheRegistry:
+    """Per-(repo, item) CommentCache tracking (#1754)."""
+
+    def _reg(self) -> WorkerRegistry:
+        _, updater = create_atomic(
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
+        )
+        return WorkerRegistry(MagicMock(), updater)
+
+    def test_get_comment_cache_lazy_creates_per_key(self) -> None:
+        reg = self._reg()
+        gh = MagicMock()
+        c1 = reg.get_comment_cache("foo/bar", 7, gh)
+        c2 = reg.get_comment_cache("foo/bar", 7, gh)
+        assert c1 is c2  # same key → same instance
+
+    def test_distinct_items_in_same_repo_get_distinct_caches(self) -> None:
+        reg = self._reg()
+        gh = MagicMock()
+        c7 = reg.get_comment_cache("foo/bar", 7, gh)
+        c8 = reg.get_comment_cache("foo/bar", 8, gh)
+        assert c7 is not c8
+
+    def test_distinct_repos_with_same_item_get_distinct_caches(self) -> None:
+        reg = self._reg()
+        gh = MagicMock()
+        a = reg.get_comment_cache("org/a", 1, gh)
+        b = reg.get_comment_cache("org/b", 1, gh)
+        assert a is not b
+
+    def test_all_comment_caches_lists_created_instances(self) -> None:
+        reg = self._reg()
+        gh = MagicMock()
+        reg.get_comment_cache("foo/bar", 7, gh)
+        reg.get_comment_cache("foo/bar", 8, gh)
+        reg.get_comment_cache("baz/qux", 1, gh)
+        all_caches = reg.all_comment_caches()
+        assert len(all_caches) == 3

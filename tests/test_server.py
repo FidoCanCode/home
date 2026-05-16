@@ -194,7 +194,7 @@ def _sign(body: bytes, secret: bytes) -> str:
 @pytest.fixture(autouse=True)
 def _restore_handler_fns() -> object:
     saved = {
-        "gh": WebhookHandler.gh,
+        "_gh": WebhookHandler._gh,
         "dispatchers": WebhookHandler.dispatchers,
         "_fn_reply_to_comment": WebhookHandler._fn_reply_to_comment,
         "_fn_reply_to_review": WebhookHandler._fn_reply_to_review,
@@ -233,6 +233,7 @@ def server(tmp_path: Path) -> object:
     WebhookHandler.config = cfg
     WebhookHandler.registry = MagicMock()
     WebhookHandler.state_reader = MagicMock()
+    WebhookHandler._gh = MagicMock()
     WebhookHandler.dispatchers = {"owner/repo": Dispatcher(cfg, repo_cfg, MagicMock())}
     WebhookHandler._fn_spawn_bg = staticmethod(_capturing_spawn_bg)  # type: ignore[assignment]
     srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
@@ -800,6 +801,160 @@ class TestPatchIssueCache:
         assert status == 200
 
 
+class TestPatchCommentCache:
+    """Webhook → per-(repo, item) CommentCache routing (#1754)."""
+
+    def test_pr_top_level_issue_comment_routes_by_pr_number(
+        self, server: tuple
+    ) -> None:
+        # Top-level PR comments arrive as ``issue_comment`` events with
+        # ``issue.pull_request`` set — that's what makes the issue a PR.
+        url, cfg = server
+        cache = MagicMock()
+        WebhookHandler.registry.get_comment_cache.return_value = cache
+        payload = {
+            **_payload(),
+            "action": "created",
+            "issue": {
+                "number": 42,
+                "pull_request": {"url": "https://example/p/42"},
+            },
+            "comment": {
+                "id": 100,
+                "body": "hi",
+                "user": {"login": "alice"},
+                "updated_at": "2024-01-15T10:00:00Z",
+            },
+        }
+        status = _post_webhook(url, cfg, "issue_comment", payload)
+        assert status == 200
+        WebhookHandler.registry.get_comment_cache.assert_called_with(
+            "owner/repo", 42, WebhookHandler._gh
+        )
+        cache.apply_event.assert_called_once()
+        assert cache.apply_event.call_args.args[0] == "issue_comment"
+
+    def test_plain_issue_comment_does_not_create_cache(self, server: tuple) -> None:
+        # ``issue_comment`` events fire for plain issues too (issues
+        # without a ``pull_request`` field).  Fido's Dispatcher ignores
+        # those, and we ignore them here too so the registry doesn't
+        # accumulate caches for items Fido doesn't work on (codex P2
+        # on #1751).
+        url, cfg = server
+        WebhookHandler.registry.reset_mock()
+        payload = {
+            **_payload(),
+            "action": "created",
+            "issue": {"number": 42},  # no pull_request field
+            "comment": {
+                "id": 100,
+                "body": "hi",
+                "user": {"login": "alice"},
+                "updated_at": "2024-01-15T10:00:00Z",
+            },
+        }
+        status = _post_webhook(url, cfg, "issue_comment", payload)
+        assert status == 200
+        WebhookHandler.registry.get_comment_cache.assert_not_called()
+
+    def test_pull_request_review_comment_routes_by_pr_number(
+        self, server: tuple
+    ) -> None:
+        url, cfg = server
+        cache = MagicMock()
+        WebhookHandler.registry.get_comment_cache.return_value = cache
+        payload = {
+            **_payload(),
+            "action": "created",
+            "pull_request": {"number": 7},
+            "comment": {
+                "id": 100,
+                "body": "review",
+                "user": {"login": "alice"},
+                "path": "foo.py",
+                "updated_at": "2024-01-15T10:00:00Z",
+            },
+        }
+        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
+        assert status == 200
+        WebhookHandler.registry.get_comment_cache.assert_called_with(
+            "owner/repo", 7, WebhookHandler._gh
+        )
+
+    def test_pull_request_review_routes_by_pr_number(self, server: tuple) -> None:
+        url, cfg = server
+        cache = MagicMock()
+        WebhookHandler.registry.get_comment_cache.return_value = cache
+        payload = {
+            **_payload(),
+            "action": "submitted",
+            "pull_request": {"number": 7},
+            "review": {
+                "id": 1000,
+                "state": "APPROVED",
+                "body": "lgtm",
+                "user": {"login": "alice"},
+                "submitted_at": "2024-01-15T10:00:00Z",
+            },
+        }
+        status = _post_webhook(url, cfg, "pull_request_review", payload)
+        assert status == 200
+        WebhookHandler.registry.get_comment_cache.assert_called_with(
+            "owner/repo", 7, WebhookHandler._gh
+        )
+
+    def test_unrelated_event_does_not_touch_cache(self, server: tuple) -> None:
+        url, cfg = server
+        WebhookHandler.registry.reset_mock()
+        payload = {**_payload(), "action": "synchronize", "pull_request": {"number": 7}}
+        status = _post_webhook(url, cfg, "pull_request", payload)
+        assert status == 200
+        WebhookHandler.registry.get_comment_cache.assert_not_called()
+
+    def test_malformed_payloads_do_not_route(self, tmp_path: Path) -> None:
+        # Unit-level: exercise the _patch_comment_cache defensive
+        # branches without going through the webhook dispatcher
+        # (which chokes on missing keys before our patch fires and
+        # would mask whether these branches drop cleanly).
+        cfg = _config(tmp_path)
+        repo_cfg = cfg.repos["owner/repo"]
+        handler = MagicMock(spec=WebhookHandler)
+        handler.registry = MagicMock()
+        handler.gh = MagicMock()
+        patch = WebhookHandler._patch_comment_cache.__get__(handler, WebhookHandler)
+        # No "issue" key.
+        patch("issue_comment", {"action": "created"}, repo_cfg)
+        # Parent not a dict.
+        patch("issue_comment", {"issue": "not-a-dict"}, repo_cfg)
+        # Parent missing "number".
+        patch("issue_comment", {"issue": {}}, repo_cfg)
+        # "number" not int.
+        patch("issue_comment", {"issue": {"number": "x"}}, repo_cfg)
+        handler.registry.get_comment_cache.assert_not_called()
+
+    def test_cache_apply_failure_does_not_500(self, server: tuple) -> None:
+        url, cfg = server
+        cache = MagicMock()
+        cache.apply_event.side_effect = RuntimeError("boom")
+        WebhookHandler.registry.get_comment_cache.return_value = cache
+        payload = {
+            **_payload(),
+            "action": "created",
+            "issue": {
+                "number": 42,
+                "pull_request": {"url": "https://example/p/42"},
+            },
+            "comment": {
+                "id": 100,
+                "body": "hi",
+                "user": {"login": "alice"},
+                "updated_at": "2024-01-15T10:00:00Z",
+            },
+        }
+        status = _post_webhook(url, cfg, "issue_comment", payload)
+        assert status == 200
+
+
 class TestProcessAction:
     """Tests for _process_action — the background thread that dispatches actions."""
 
@@ -996,7 +1151,7 @@ class TestProcessAction:
             "action": "closed",
             "pull_request": {"number": 99, "merged": True},
         }
-        WebhookHandler.gh = MagicMock()
+        WebhookHandler._gh = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock(
             side_effect=provider.SessionLeakError("leaked")
         )
@@ -1012,7 +1167,7 @@ class TestProcessAction:
             "action": "closed",
             "pull_request": {"number": 13, "merged": True},
         }
-        WebhookHandler.gh = MagicMock()
+        WebhookHandler._gh = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock(side_effect=Exception("explode"))
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
@@ -1029,7 +1184,7 @@ class TestProcessAction:
             "pull_request": {"number": 22, "merged": True},
         }
         mock_gh = MagicMock()
-        WebhookHandler.gh = mock_gh
+        WebhookHandler._gh = mock_gh
         WebhookHandler._fn_launch_worker = MagicMock(side_effect=RuntimeError("boom"))
         _post_webhook(url, cfg, "pull_request", payload)
         mock_gh.add_reaction.assert_not_called()
@@ -1051,7 +1206,7 @@ class TestProcessAction:
             "pull_request": {"number": 24},
         }
         mock_gh = MagicMock()
-        WebhookHandler.gh = mock_gh
+        WebhookHandler._gh = mock_gh
         WebhookHandler._fn_reply_to_review = MagicMock(side_effect=RuntimeError("boom"))
         WebhookHandler._fn_launch_worker = MagicMock()
         _post_webhook(url, cfg, "pull_request_review", payload)
@@ -1066,7 +1221,7 @@ class TestProcessAction:
         url, cfg = server
         handler = WebhookHandler.__new__(WebhookHandler)
         mock_gh = MagicMock()
-        handler.gh = mock_gh
+        type(handler)._gh = mock_gh
         action = Action(
             prompt="test",
             thread={"repo": "owner/repo", "pr": 1},
@@ -1092,7 +1247,7 @@ class TestProcessAction:
         )
         handler.registry = WorkerRegistry(MagicMock(), updater)
         handler.registry.start(cfg.repos["owner/repo"])
-        handler.gh = MagicMock()
+        type(handler)._gh = MagicMock()
         handler.dispatchers = {"owner/repo": _FakeDispatcher()}
         phases: list[str] = []
 
@@ -1226,7 +1381,7 @@ class TestProcessAction:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        WebhookHandler.gh = MagicMock()
+        WebhookHandler._gh = MagicMock()
         WebhookHandler._fn_reply_to_issue_comment = MagicMock(
             return_value=("ANSWER", [])
         )
@@ -1357,7 +1512,7 @@ class TestProcessAction:
         reg = WorkerRegistry(MagicMock(return_value=thread_mock), updater)
         reg.start(cfg.repos["owner/repo"])
         handler.registry = reg
-        handler.gh = MagicMock()
+        type(handler)._gh = MagicMock()
         handler.dispatchers = {"owner/repo": _FakeDispatcher()}
 
         # Install the spy AFTER start() so start()'s own publish isn't counted.
@@ -1466,7 +1621,7 @@ class TestProcessAction:
         reg = WorkerRegistry(MagicMock(return_value=thread_mock), updater)
         reg.start(cfg.repos["owner/repo"])
         handler.registry = reg
-        handler.gh = MagicMock()
+        type(handler)._gh = MagicMock()
         handler.dispatchers = {"owner/repo": _FakeDispatcher()}
 
         captured_snapshots: list[ProviderSnapshot | None] = []
@@ -1571,7 +1726,7 @@ class TestProcessActionInner:
     def _handler(self, cfg: Config) -> WebhookHandler:
         handler = object.__new__(WebhookHandler)
         handler.config = cfg
-        handler.gh = MagicMock()
+        type(handler)._gh = MagicMock()
         handler.registry = MagicMock()
         handler.dispatchers = {"owner/repo": _FakeDispatcher()}
         return handler

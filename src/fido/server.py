@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from types import TracebackType
-from typing import IO, Any, cast
+from typing import IO, Any
 from urllib.parse import urlparse
 
 import requests
@@ -80,6 +80,16 @@ _PULL_BACKOFF_DELAYS: tuple[int, ...] = (10, 30, 60)
 _PULL_BUDGET_SECONDS: float = 600.0
 _RESTART_EXIT_CODE = 75
 _REQUEST_TIMEOUT_SECONDS = 10.0
+
+# Comment webhook event → the payload key carrying the item number that
+# scopes the cache.  ``pull_request_review`` events nest their entry
+# under ``payload["review"]`` (vs ``payload["comment"]`` for the other
+# two), but the item-number lookup uses the parent regardless.
+_COMMENT_EVENT_PARENT_KEYS: dict[str, str] = {
+    "issue_comment": "issue",
+    "pull_request_review_comment": "pull_request",
+    "pull_request_review": "pull_request",
+}
 
 
 class PreflightError(RuntimeError):
@@ -350,8 +360,21 @@ class WebhookHandler(BaseHTTPRequestHandler):
     state_reader: AtomicReader[FidoState]
     provider_factory: DefaultProviderFactory | None = None
     # Injectable collaborators — set as class attributes so HTTP-driven tests
-    # can replace them without patching module-level names.
-    gh: GitHub | None = None
+    # can replace them without patching module-level names.  ``gh`` is
+    # accessed through the property below so callers see ``GitHub`` rather
+    # than ``GitHub | None``; ``serve()`` sets ``_gh`` before any handler
+    # runs, so by the time the property fires it's guaranteed non-None.
+    _gh: GitHub | None = None
+
+    @property
+    def gh(self) -> GitHub:
+        gh = type(self)._gh
+        if gh is None:
+            raise RuntimeError(
+                "FidoHTTPHandler.gh accessed before serve() initialised it"
+            )
+        return gh
+
     dispatchers: dict[str, Dispatcher] = {}
     # Infrastructure ports — set by server.run() composition root.
     infra: Infra = real_infra()
@@ -519,6 +542,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 repo_name,
             )
 
+        # Patch the per-(repo, item) comment cache for comment / review
+        # events (#1754).  Same failure tolerance as the issue cache —
+        # log, continue, the eventual reconcile (#1759) will heal.
+        try:
+            self._patch_comment_cache(event, payload, repo_cfg)
+        except Exception:
+            log.exception(
+                "comment-cache patch failed for %s — next list fetch will heal",
+                repo_name,
+            )
+
         # Acknowledge only after dispatch succeeds.
         self._respond(200, "ok")
 
@@ -615,6 +649,40 @@ class WebhookHandler(BaseHTTPRequestHandler):
         )
         cache = self.registry.get_issue_cache(repo_cfg.name)
         cache.apply_event(cache_event_type, cache_payload)
+
+    def _patch_comment_cache(
+        self, event: str, payload: dict[str, Any], repo_cfg: RepoConfig
+    ) -> None:
+        """Route a comment / review webhook to the per-(repo, item) cache.
+
+        Extracts the item (issue or PR) number from the payload, looks
+        up the right :class:`~fido.comment_cache.CommentCache` via the
+        registry, and hands the event to ``apply_event``.  Unrelated
+        event types are silently ignored (every webhook hits this
+        method; only comment/review events have a cache target).
+
+        ``issue_comment`` events fire for plain-issue comments AND PR
+        top-level comments (PRs are issues for that endpoint).  Fido's
+        dispatcher (``events.py``) ignores plain-issue comments, so
+        we mirror that filter here — otherwise busy repos with lots of
+        issue traffic accumulate caches we'll never use (codex P2 on
+        #1751).  Proper lifecycle binding (cache created only when
+        Fido has work on the item) lands in #1757.
+        """
+        parent_key = _COMMENT_EVENT_PARENT_KEYS.get(event)
+        if parent_key is None:
+            return
+        parent = payload.get(parent_key)
+        if not isinstance(parent, dict):
+            return
+        item_number = parent.get("number")
+        if not isinstance(item_number, int):
+            return
+        if event == "issue_comment" and not parent.get("pull_request"):
+            # Plain-issue comment — Dispatcher ignores these too.
+            return
+        cache = self.registry.get_comment_cache(repo_cfg.name, item_number, self.gh)
+        cache.apply_event(event, payload)
 
     def _process_action(self, action: Action, repo_cfg: RepoConfig) -> None:
         description = self._describe_action(action)
@@ -776,7 +844,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # list (via :meth:`~fido.registry.WorkerRegistry.webhook_activity`).
         # Writing here would clobber the worker thread's own state, which is
         # what caused the old ``Doing: handling webhook action`` display bug.
-        gh = cast(GitHub, self.gh)  # always set by serve() before first request
+        gh = self.gh
         # Determine which comment (if any) will receive the eyes reaction.
         # Resolved before the try block so both the main path and the
         # recoverable-exception handler can reference _eyes_comment_info.
@@ -1012,8 +1080,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if not repo or not comment_id:
             return
         try:
-            if self.gh is not None:
-                self.gh.add_reaction(repo, comment_type, comment_id, "confused")
+            self.gh.add_reaction(repo, comment_type, comment_id, "confused")
         except Exception:
             log.exception("failed to post error reaction on comment %s", comment_id)
 
@@ -1263,7 +1330,9 @@ def run(
     _populate_memberships(config, gh)
 
     WebhookHandler.config = config
-    WebhookHandler.gh = gh
+    # Composition root sets the class-level lazy collaborator; the proper
+    # constructor-DI redo is tracked in #1762.
+    WebhookHandler._gh = gh  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
     dispatchers = {
         name: Dispatcher(config, repo_cfg, gh)
         for name, repo_cfg in config.repos.items()
