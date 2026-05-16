@@ -952,7 +952,21 @@ class WorkerRegistry:
                 self._comment_caches[key] = cache
                 snapshot_started_at = datetime.now(tz=timezone.utc)
         if snapshot_started_at is not None:
-            cache.hydrate(snapshot_started_at)
+            try:
+                cache.hydrate(snapshot_started_at)
+            except Exception:
+                # Hydration failed — roll back the registration so the
+                # next call retries from scratch (codex P1 on #1756:
+                # otherwise the half-built cache lingers, never gets
+                # ``inventory_loaded_at`` set, and queues webhook
+                # events into a buffer that never drains).
+                with self._comment_cache_lock:
+                    # Only remove the instance we put in, in case a
+                    # concurrent caller already installed a different
+                    # one (unlikely but cheap to guard).
+                    if self._comment_caches.get(key) is cache:
+                        del self._comment_caches[key]
+                raise
         return cache
 
     def all_comment_caches(self) -> list[CommentCache]:

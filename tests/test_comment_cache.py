@@ -483,6 +483,30 @@ class TestHydrate:
         assert cache.metrics().entries_cached == 1
         assert cache.get(KIND_ISSUES, 10) is not None
 
+    def test_404_on_reviews_only_keeps_pull_comments(self) -> None:
+        # Codex P2 on #1756: a 404 on one /pulls endpoint must not
+        # discard successful data from the other.
+        import requests
+
+        gh = _FakeGH()
+        gh.issue_comments = [_comment_payload(item=7, comment_id=10)]
+        gh.pull_comments = [
+            _comment_payload(item=7, comment_id=100, path="a.py", body="inline"),
+        ]
+
+        def reviews_404(repo: str, pr: int) -> list[dict[str, Any]]:
+            response = requests.Response()
+            response.status_code = 404
+            raise requests.HTTPError(response=response)
+
+        gh.get_pull_reviews = reviews_404  # type: ignore[method-assign]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        # Top-level + pull comments survived; only reviews are empty.
+        assert cache.get(KIND_ISSUES, 10) is not None
+        assert cache.get(KIND_PULLS, 100) is not None
+        assert cache.list_reviews() == []
+
     def test_non_404_pull_error_propagates(self) -> None:
         import requests
 
@@ -662,3 +686,40 @@ class TestListGetters:
         cache = CommentCache("owner/repo", _FakeGH(), 7)
         cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
         assert cache.thread(999) == []
+
+    def test_list_getters_return_in_id_order_after_mixed_updates(self) -> None:
+        # Codex P2 on #1756: documented contract is "in id order".
+        # Insertion-history order can diverge after mixed webhook /
+        # hydrate / refresh sequences — make sure the snapshot
+        # getters actually sort.
+        gh = _FakeGH()
+        gh.issue_comments = [_comment_payload(item=7, comment_id=30)]
+        cache = CommentCache("owner/repo", gh, 7)
+        cache.hydrate(datetime(2024, 6, 1, tzinfo=timezone.utc))
+        # Apply newer webhook for a SMALLER id — would land later in
+        # insertion order but should sort first.
+        cache.apply_event(
+            "issue_comment",
+            {
+                "action": "created",
+                "issue": {"number": 7},
+                "comment": _comment_payload(
+                    item=7,
+                    comment_id=10,
+                    updated_at="2024-07-01T00:00:00Z",
+                ),
+            },
+        )
+        cache.apply_event(
+            "issue_comment",
+            {
+                "action": "created",
+                "issue": {"number": 7},
+                "comment": _comment_payload(
+                    item=7,
+                    comment_id=20,
+                    updated_at="2024-07-01T00:00:00Z",
+                ),
+            },
+        )
+        assert [int(c["id"]) for c in cache.list_top_level()] == [10, 20, 30]

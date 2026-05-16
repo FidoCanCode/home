@@ -169,23 +169,7 @@ class CommentCache(WebhookCache[tuple[str, int], CommentNode, CacheMetrics]):
         hydrate only runs against PR items, but the empty-list
         fallback below keeps it correct either way.
         """
-        raw_top_level = self._gh.get_issue_comments(self._gh_repo, self._item)
-        try:
-            raw_review_comments = self._gh.get_pull_comments(self._gh_repo, self._item)
-            raw_reviews = self._gh.get_pull_reviews(self._gh_repo, self._item)
-        except requests.HTTPError as exc:
-            # /pulls/{n} 404s for plain issues; treat as no review data.
-            if exc.response is not None and exc.response.status_code == 404:
-                raw_review_comments = []
-                raw_reviews = []
-            else:
-                raise
-        inventory: list[dict[str, Any]] = [
-            {"_kind": KIND_ISSUES, **r} for r in raw_top_level
-        ]
-        inventory += [{"_kind": KIND_PULLS, **r} for r in raw_review_comments]
-        inventory += [{"_kind": KIND_REVIEWS, **r} for r in raw_reviews]
-        self.load_inventory(inventory, snapshot_started_at)
+        self.load_inventory(self._fetch_full_inventory(), snapshot_started_at)
 
     def refresh(self, snapshot_started_at: datetime) -> None:
         """Re-fetch the three lists and reconcile against the cache.
@@ -196,22 +180,40 @@ class CommentCache(WebhookCache[tuple[str, int], CommentNode, CacheMetrics]):
         from the fresh snapshot are evicted (closing the codex P2
         about evict-missing on list fetches).
         """
+        self.reconcile_with_inventory(self._fetch_full_inventory(), snapshot_started_at)
+
+    def _fetch_full_inventory(self) -> list[dict[str, Any]]:
+        """Fetch all three resource lists, tagging each item with its kind.
+
+        Each endpoint is 404-tolerant independently (codex P2 on
+        #1756): the ``/pulls/...`` endpoints 404 for plain issues,
+        but a 404 on one of them must not throw away successful
+        data from the other two.  Non-404 errors propagate.
+        """
         raw_top_level = self._gh.get_issue_comments(self._gh_repo, self._item)
-        try:
-            raw_review_comments = self._gh.get_pull_comments(self._gh_repo, self._item)
-            raw_reviews = self._gh.get_pull_reviews(self._gh_repo, self._item)
-        except requests.HTTPError as exc:
-            if exc.response is not None and exc.response.status_code == 404:
-                raw_review_comments = []
-                raw_reviews = []
-            else:
-                raise
+        raw_review_comments = self._fetch_or_empty_on_404(
+            lambda: self._gh.get_pull_comments(self._gh_repo, self._item)
+        )
+        raw_reviews = self._fetch_or_empty_on_404(
+            lambda: self._gh.get_pull_reviews(self._gh_repo, self._item)
+        )
         inventory: list[dict[str, Any]] = [
             {"_kind": KIND_ISSUES, **r} for r in raw_top_level
         ]
         inventory += [{"_kind": KIND_PULLS, **r} for r in raw_review_comments]
         inventory += [{"_kind": KIND_REVIEWS, **r} for r in raw_reviews]
-        self.reconcile_with_inventory(inventory, snapshot_started_at)
+        return inventory
+
+    @staticmethod
+    def _fetch_or_empty_on_404(
+        fetch: Callable[[], list[dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        try:
+            return fetch()
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return []
+            raise
 
     # ── public lookup API ────────────────────────────────────────────────
 
@@ -281,12 +283,17 @@ class CommentCache(WebhookCache[tuple[str, int], CommentNode, CacheMetrics]):
         )
 
     def _snapshot_kind(self, kind: str) -> list[Mapping[str, Any]]:
+        # Documented contract: callers see entries in id order.  Dict
+        # iteration order tracks insertion history, which can diverge
+        # from id ordering after reconciles or mixed webhook/inventory
+        # updates — so sort explicitly (codex P2 on #1756).
         with self._lock:
-            return [
+            entries = [
                 node.data
                 for (entry_kind, _), node in self._nodes.items()
                 if entry_kind == kind
             ]
+        return sorted(entries, key=lambda d: int(d["id"]))
 
     # ── WebhookCache hooks ───────────────────────────────────────────────
 
