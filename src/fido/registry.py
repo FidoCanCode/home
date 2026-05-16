@@ -932,14 +932,28 @@ class WorkerRegistry:
         pair.  Distinct items in the same repo get distinct caches —
         per-item isolation by construction.  Webhook router uses this
         to route events to the right cache.
+
+        New caches are hydrated synchronously (#1756) — three list
+        fetches from GitHub before this method returns.  That's
+        intentional for INV-2: the first webhook for an unseen item
+        pays the hydration cost so subsequent reads are warm.  INV-3
+        (#1757) moves hydration to startup / PR-open so the hot path
+        is never blocked.  Concurrent webhooks on other threads see
+        the cache registered in ``_comment_caches`` before hydrate
+        completes and queue their events in the pre-inventory buffer,
+        which drains in timestamp order at the tail of ``hydrate``.
         """
         key = (repo_name, item)
+        snapshot_started_at: datetime | None = None
         with self._comment_cache_lock:
             cache = self._comment_caches.get(key)
             if cache is None:
                 cache = CommentCache(repo_name, gh, item)
                 self._comment_caches[key] = cache
-            return cache
+                snapshot_started_at = datetime.now(tz=timezone.utc)
+        if snapshot_started_at is not None:
+            cache.hydrate(snapshot_started_at)
+        return cache
 
     def all_comment_caches(self) -> list[CommentCache]:
         """Snapshot list of every comment cache that has been created."""
