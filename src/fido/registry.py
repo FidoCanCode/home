@@ -25,6 +25,7 @@ from fido.appstate import (
     zero_repo_state,
 )
 from fido.atomic import AtomicUpdater
+from fido.comment_cache import CommentCache
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.issue_cache import CacheMetrics, IssueTreeCache
@@ -127,6 +128,12 @@ class WorkerRegistry:
         # that don't exercise the cache path don't pay setup cost.
         self._issue_caches: dict[str, IssueTreeCache] = {}
         self._issue_cache_lock = threading.Lock()
+        # Per-(repo, item) comment caches (closes #1754).  Lazily created
+        # on first lookup; each cache is bound to one issue/PR's
+        # comments + reviews.  INV-1 scope; lifecycle binding to "PR
+        # open by Fido" lands in #1757.
+        self._comment_caches: dict[tuple[str, int], CommentCache] = {}
+        self._comment_cache_lock = threading.Lock()
         # Per-repo FSM state from worker_registry_crash.v.  Only written by
         # start(), which is called sequentially during startup and from the
         # single watchdog daemon thread during crash recovery — no lock needed.
@@ -917,6 +924,27 @@ class WorkerRegistry:
         """
         with self._issue_cache_lock:
             return list(self._issue_caches.values())
+
+    def get_comment_cache(self, repo_name: str, item: int, gh: GitHub) -> CommentCache:
+        """Return (lazily creating) the per-(repo, item) comment cache (#1754).
+
+        One :class:`~fido.comment_cache.CommentCache` per ``(repo, item)``
+        pair.  Distinct items in the same repo get distinct caches —
+        per-item isolation by construction.  Webhook router uses this
+        to route events to the right cache.
+        """
+        key = (repo_name, item)
+        with self._comment_cache_lock:
+            cache = self._comment_caches.get(key)
+            if cache is None:
+                cache = CommentCache(repo_name, gh, item)
+                self._comment_caches[key] = cache
+            return cache
+
+    def all_comment_caches(self) -> list[CommentCache]:
+        """Snapshot list of every comment cache that has been created."""
+        with self._comment_cache_lock:
+            return list(self._comment_caches.values())
 
 
 def _make_thread(
