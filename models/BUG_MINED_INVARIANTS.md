@@ -262,10 +262,44 @@ source and spawns N children that inherit `lineage_comments` and
 `split_preserves_source_lineage` proves no child loses the inherited
 origin metadata, mirrored at runtime by `_assert_split_lineage_preserved`).
 
+The rescope I/O contract is explicit under epic **#1247**: the prompt
+and parser share a single typed-operation schema (#1719 —
+`{"operations": [{"op": ..., ...}, ...]}`); intents render in
+chronological order with an explicit conflict-resolution rule (#1720);
+empty/partial responses keep the queue (no implicit wipe — full
+rebuild is `remove` + `new` per #1721).
+
+The reply-back surface is filtered under epic **#1256**: every
+operation carries optional `contributing_intents` provenance
+(#1722); the per-originating-intent classifier (#1723) labels each
+intent material/aggregation/unhandled; the per-intent notifier
+(#1724) replies in `RescopeIntent.timestamp` order with Opus-voice
+narrative for material AND unhandled dispositions (aggregation stays
+silent), drawing on co-contributing and sibling intents in the same
+batch so the reply tells the *story* of how each commenter's ask
+landed.  The notifier explicitly never implies the work is done —
+the rescope only replanned it.  These layers live entirely in the
+Python adapter and outbox; the rocq model intentionally doesn't
+track contributing_intents because it carries no coordination
+semantics — only notification routing.
+
+**Known gap (tracked):** the reply-back path only sees intents
+present in the *current* rescope batch's `intents` parameter.
+Past-batch intents — whose `comment_id` lives on
+`task.contributing_intents` from a prior batch — silently skip
+classification because the `RescopeIntent` records have aged out.
+**#1748** (per-PR comment cache) and **#1749** (collapse
+`RescopeIntent` to a comment-id reference, fetch metadata via
+the cache) close this loop by making intents first-class durable
+references that the classifier/notifier can resolve uniformly
+across batches.
+
 **Status.** Modeled in **D11 (#749) — model rescope confluence**.
 The original "title is immutable" framing has been reshaped by epic
 **#1340**: identity is the id, not the text. See #1665, #1713, #1714,
-#1716, #1717, #1718, #1666, #1667 for the per-leaf invariants.
+#1716, #1717, #1718, #1666, #1667 (reducer); #1719, #1720, #1721,
+#1247 (prompt vocabulary); #1722, #1723, #1724, #1256 (reply-back
+filter) for the per-leaf invariants.
 
 **E1 flip point.** D11 currently runs as a runtime oracle around
 `reorder_tasks`: Python translates Opus's omission-based result into explicit
