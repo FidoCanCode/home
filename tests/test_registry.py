@@ -18,7 +18,7 @@ from fido.appstate import (
     ThreadSnapshot,
     WorkerCrash,
 )
-from fido.atomic import create_atomic
+from fido.atomic import AtomicReader, create_atomic
 from fido.config import RepoConfig as _RepoConfig
 from fido.provider import ProviderID
 from fido.registry import (
@@ -2245,39 +2245,47 @@ class TestRegistryFsmOracle:
 class TestCommentCacheRegistry:
     """Per-(repo, item) CommentCache tracking (#1754)."""
 
-    def _reg(self) -> WorkerRegistry:
-        _, updater = create_atomic(
+    def _reg(
+        self, *repo_names: str
+    ) -> tuple[WorkerRegistry, "AtomicReader[FidoState]"]:
+        # CommentCache publisher writes to repos[name].comment_cache,
+        # so the FidoState must be pre-populated with zero entries
+        # for any repos the test uses.  Returns both faces so tests
+        # can verify the published snapshot.
+        from fido.appstate import zero_repo_state
+
+        reader, updater = create_atomic(
             FidoState(
-                repos=frozendict(),
+                repos=frozendict({name: zero_repo_state(name) for name in repo_names}),
                 github_limits=_ZERO_GITHUB_LIMITS,
                 process_started_at=_EPOCH,
             )
         )
-        return WorkerRegistry(MagicMock(), updater)
+        return WorkerRegistry(MagicMock(), updater), reader
 
     def test_get_comment_cache_lazy_creates_per_key(self) -> None:
-        reg = self._reg()
+        reg, _ = self._reg("foo/bar")
         gh = MagicMock()
         c1 = reg.get_comment_cache("foo/bar", 7, gh)
         c2 = reg.get_comment_cache("foo/bar", 7, gh)
         assert c1 is c2  # same key → same instance
 
     def test_distinct_items_in_same_repo_get_distinct_caches(self) -> None:
-        reg = self._reg()
+        reg, _ = self._reg("foo/bar")
         gh = MagicMock()
         c7 = reg.get_comment_cache("foo/bar", 7, gh)
         c8 = reg.get_comment_cache("foo/bar", 8, gh)
         assert c7 is not c8
 
     def test_distinct_repos_with_same_item_get_distinct_caches(self) -> None:
-        reg = self._reg()
+        reg, _ = self._reg("org/a", "org/b")
         gh = MagicMock()
         a = reg.get_comment_cache("org/a", 1, gh)
         b = reg.get_comment_cache("org/b", 1, gh)
         assert a is not b
 
     def test_all_comment_caches_lists_created_instances(self) -> None:
-        reg = self._reg()
+        reg, _ = self._reg("foo/bar", "baz/qux")
         gh = MagicMock()
         reg.get_comment_cache("foo/bar", 7, gh)
         reg.get_comment_cache("foo/bar", 8, gh)
@@ -2300,7 +2308,7 @@ class TestCommentCacheRegistry:
         # retries hydration; queued events drain on success.
         import requests
 
-        reg = self._reg()
+        reg, _ = self._reg("foo/bar")
         gh = MagicMock()
         gh.get_issue_comments.side_effect = requests.RequestException("boom")
         cache = reg.get_comment_cache("foo/bar", 7, gh)
@@ -2324,7 +2332,7 @@ class TestCommentCacheRegistry:
         # successful hydration drains the queued event.
         import requests
 
-        reg = self._reg()
+        reg, _ = self._reg("foo/bar")
         gh = MagicMock()
         gh.get_issue_comments.side_effect = requests.RequestException("boom")
         cache = reg.get_comment_cache("foo/bar", 7, gh)
@@ -2351,19 +2359,69 @@ class TestCommentCacheRegistry:
         assert cache.get("issues", 42) is not None
 
     def test_destroy_comment_cache_removes_existing(self) -> None:
-        reg = self._reg()
+        reg, _ = self._reg("foo/bar")
         gh = MagicMock()
         reg.get_comment_cache("foo/bar", 7, gh)
         assert reg.destroy_comment_cache("foo/bar", 7) is True
         assert len(reg.all_comment_caches()) == 0
 
     def test_destroy_comment_cache_returns_false_when_missing(self) -> None:
-        reg = self._reg()
+        reg, _ = self._reg("foo/bar")
         assert reg.destroy_comment_cache("foo/bar", 7) is False
 
     def test_destroy_comment_cache_idempotent(self) -> None:
-        reg = self._reg()
+        reg, _ = self._reg("foo/bar")
         gh = MagicMock()
         reg.get_comment_cache("foo/bar", 7, gh)
         assert reg.destroy_comment_cache("foo/bar", 7) is True
         assert reg.destroy_comment_cache("foo/bar", 7) is False  # idempotent
+
+    def test_publisher_publishes_snapshot_on_cache_mutation(self) -> None:
+        """Comment cache mutations publish a CommentCacheSnapshot to
+        the per-repo SCADA leaf (#1758)."""
+        from fido.appstate import CommentCacheSnapshot
+
+        reg, reader = self._reg("foo/bar")
+        gh = MagicMock()
+        gh.get_issue_comments.return_value = []
+        gh.get_pull_comments.return_value = []
+        gh.get_pull_reviews.return_value = []
+        reg.get_comment_cache("foo/bar", 7, gh)
+        snap = reader.get().repos["foo/bar"].comment_cache
+        assert isinstance(snap, CommentCacheSnapshot)
+        assert snap.item == 7
+        assert snap.loaded is True
+        assert snap.entries_cached == 0
+
+    def test_destroy_clears_snapshot(self) -> None:
+        """``destroy_comment_cache`` clears the per-repo SCADA leaf
+        back to ``None`` so ``/status.json`` stops showing the dead
+        PR's cache (#1758)."""
+        reg, reader = self._reg("foo/bar")
+        gh = MagicMock()
+        gh.get_issue_comments.return_value = []
+        gh.get_pull_comments.return_value = []
+        gh.get_pull_reviews.return_value = []
+        reg.get_comment_cache("foo/bar", 7, gh)
+        assert reader.get().repos["foo/bar"].comment_cache is not None
+        reg.destroy_comment_cache("foo/bar", 7)
+        assert reader.get().repos["foo/bar"].comment_cache is None
+
+    def test_destroy_no_op_does_not_touch_snapshot(self) -> None:
+        """A destroy for a never-created cache must not touch
+        FidoState — otherwise it would falsely clear a sibling
+        cache's snapshot that the active cache had populated."""
+        reg, reader = self._reg("foo/bar")
+        gh = MagicMock()
+        gh.get_issue_comments.return_value = []
+        gh.get_pull_comments.return_value = []
+        gh.get_pull_reviews.return_value = []
+        # Populate the snapshot via a real cache.
+        reg.get_comment_cache("foo/bar", 99, gh)
+        before = reader.get().repos["foo/bar"].comment_cache
+        assert before is not None
+        # Destroy a DIFFERENT (never-created) item.  No-op.
+        assert reg.destroy_comment_cache("foo/bar", 12345) is False
+        # Snapshot for the surviving cache is unchanged.
+        after = reader.get().repos["foo/bar"].comment_cache
+        assert after is before

@@ -14,6 +14,7 @@ from fido.appstate import (
     _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     _ZERO_CRASH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     _ZERO_TALKER,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    CommentCacheSnapshot,
     FidoState,
     IssueCacheSnapshot,
     ProviderSnapshot,
@@ -25,6 +26,7 @@ from fido.appstate import (
     zero_repo_state,
 )
 from fido.atomic import AtomicUpdater
+from fido.comment_cache import CacheMetrics as CommentCacheMetrics
 from fido.comment_cache import CommentCache
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
@@ -965,7 +967,12 @@ class WorkerRegistry:
         with self._comment_cache_lock:
             cache = self._comment_caches.get(key)
             if cache is None:
-                cache = CommentCache(repo_name, gh, item)
+                cache = CommentCache(
+                    repo_name,
+                    gh,
+                    item,
+                    on_change=self._make_comment_cache_publisher(repo_name),
+                )
                 self._comment_caches[key] = cache
         if not cache.is_loaded:
             try:
@@ -991,10 +998,50 @@ class WorkerRegistry:
         Called when the PR closes/merges (#1757) — the cache is no
         longer useful and would otherwise leak per the codex P2 about
         unbounded growth.  Idempotent: calling twice is a no-op.
+
+        Also clears the per-repo SCADA snapshot (#1758) so
+        ``/status.json`` stops showing the dead PR's cache.  The
+        clear runs only when we actually removed something — a
+        no-op destroy doesn't touch FidoState.
         """
         key = (repo_name, item)
         with self._comment_cache_lock:
-            return self._comment_caches.pop(key, None) is not None
+            removed = self._comment_caches.pop(key, None) is not None
+        if removed:
+            self._state_updater.update(
+                lambda root: root.repos[repo_name].comment_cache, None
+            )
+        return removed
+
+    def _make_comment_cache_publisher(
+        self, repo_name: str
+    ) -> "Callable[[CommentCacheMetrics], None]":
+        """Return a per-repo on_change callback that publishes a fresh
+        :class:`CommentCacheSnapshot` into FidoState every time the
+        cache mutates (#1758).
+
+        Mirrors :meth:`_make_issue_cache_publisher`.  Closure binds
+        *repo_name* (not the loop variable) so each repo's caches
+        publish to their own SCADA leaf.
+        """
+
+        def publish(metrics: "CommentCacheMetrics") -> None:
+            snap = CommentCacheSnapshot(
+                item=metrics.item,
+                loaded=metrics.inventory_loaded_at is not None,
+                entries_cached=metrics.entries_cached,
+                events_applied=metrics.events_applied,
+                events_dropped_stale=metrics.events_dropped_stale,
+                events_dropped_queue_overflow=metrics.events_dropped_queue_overflow,
+                last_event_at=metrics.last_event_at or _EPOCH,
+                last_reconcile_at=metrics.last_reconcile_at or _EPOCH,
+                last_reconcile_drift=metrics.last_reconcile_drift,
+            )
+            self._state_updater.update(
+                lambda root: root.repos[repo_name].comment_cache, snap
+            )
+
+        return publish
 
 
 def _make_thread(
