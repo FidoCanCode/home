@@ -283,6 +283,17 @@ Python adapter and outbox; the rocq model intentionally doesn't
 track contributing_intents because it carries no coordination
 semantics — only notification routing.
 
+**Known gap (tracked):** the reply-back path only sees intents
+present in the *current* rescope batch's `intents` parameter.
+Past-batch intents — whose `comment_id` lives on
+`task.contributing_intents` from a prior batch — silently skip
+classification because the `RescopeIntent` records have aged out.
+**#1748** (per-PR comment cache) and **#1749** (collapse
+`RescopeIntent` to a comment-id reference, fetch metadata via
+the cache) close this loop by making intents first-class durable
+references that the classifier/notifier can resolve uniformly
+across batches.
+
 **Status.** Modeled in **D11 (#749) — model rescope confluence**.
 The original "title is immutable" framing has been reshaped by epic
 **#1340**: identity is the id, not the text. See #1665, #1713, #1714,

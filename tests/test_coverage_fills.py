@@ -2419,46 +2419,6 @@ class TestEventsThreadResolved:
         assert result is True
 
 
-class TestEventsNotifyThreadChange:
-    """Cover the ``modified`` branch of ``_notify_thread_change``
-    (events.py:2322-2333)."""
-
-    def test_modified_branch_uses_new_title_and_posts_reply(
-        self, tmp_path: Path
-    ) -> None:
-        from fido.events import _notify_thread_change
-
-        change = {
-            "task": {
-                "title": "Old title",
-                "thread": {
-                    "comment_id": 42,
-                    "repo": "test/repo",
-                    "pr": 1,
-                    "url": "https://example.com/c",
-                    "author": "alice",
-                    "comment_type": "pulls",  # required to skip early-return
-                },
-            },
-            "kind": "modified",
-            "new_title": "New title",
-        }
-        config = MagicMock()
-        gh = MagicMock()
-        agent = MagicMock()
-        agent.voice_model = "voice"
-        agent.generate_reply.return_value = "reply body"
-        prompts = MagicMock()
-        prompts.persona_wrap.return_value = "wrapped"
-        prompts.reply_system_prompt.return_value = "system"
-        _ = tmp_path  # quiet unused-arg warning
-        _notify_thread_change(change, config, gh, agent=agent, prompts=prompts)
-        gh.reply_to_review_comment.assert_called_once()
-        # The instruction should mention the new title.
-        wrap_arg = prompts.persona_wrap.call_args[0][0]
-        assert "New title" in wrap_arg
-
-
 class TestCodexJsonlIteration:
     """Cover _iter_jsonl small branches (codex.py:397-398, 401-402)."""
 

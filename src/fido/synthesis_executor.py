@@ -242,6 +242,7 @@ class SynthesisExecutor:
                 change_request=response.change_request,
                 comment_id=target.comment_id,
                 timestamp=datetime.now(timezone.utc).isoformat(),
+                comment_type=target.comment_type,
             )
             log.info(
                 "triggering rescope for comment %d: %s",

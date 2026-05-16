@@ -2079,6 +2079,19 @@ def _notify_intent_outcome(
     if disposition.kind == "aggregation":
         return
 
+    # Issue comments already received a triage reply from the
+    # webhook handler (same policy as _notify_thread_change).  A
+    # second top-level comment here would duplicate that reply
+    # without thread-nesting, so we skip — codex P2 on #1747 caught
+    # the original "always-review-thread" routing.
+    if intent.comment_type != "pulls":
+        log.info(
+            "skipping intent notification for issue comment %s "
+            "(webhook already replied)",
+            intent.comment_id,
+        )
+        return
+
     if agent is None:
         agent = _configured_agent(config, repo_cfg)
     if prompts is None:
@@ -2191,94 +2204,6 @@ def _notify_intent_outcome(
         )
     except Exception:
         log.exception("failed to notify intent comment %s", intent.comment_id)
-
-
-def _notify_thread_change(
-    change: dict[str, Any],
-    config: Config,
-    gh: GitHub,
-    *,
-    agent: ProviderAgent | None = None,
-    prompts: Prompts | None = None,
-) -> None:
-    """Post a brief comment notifying a commenter that their task was rescoped.
-
-    Called for each thread task that was dropped or modified during dependency
-    analysis.  Uses Opus (in Fido's voice) to generate the message.
-
-    Only fires for review comments (comment_type='pulls'), where it replies
-    in-thread via the pull review comment API.  Issue comments
-    (comment_type='issues') are skipped: the webhook handler already posted a
-    triage reply to the original comment, and a second notification here would
-    be a duplicate top-level issue comment.
-    """
-    task = change["task"]
-    thread = task.get("thread") or {}
-    comment_id = thread.get("comment_id")
-    repo = thread.get("repo", "")
-    pr = thread.get("pr")
-    url = thread.get("url", "")
-    author = thread.get("author", "")
-    comment_type = thread.get("comment_type", "issues")
-    if not (comment_id and repo and pr):
-        return
-
-    # Issue comments already received a triage reply from the webhook handler.
-    # Posting again here would produce a duplicate top-level PR comment.
-    if comment_type != "pulls":
-        log.info(
-            "skipping rescope notification for issue comment %s"
-            " (webhook already replied)",
-            comment_id,
-        )
-        return
-
-    if agent is None:
-        agent = _configured_agent(
-            config, config.repos[change["task"]["thread"]["repo"]]
-        )
-    if prompts is None:
-        prompts = Prompts(_load_persona(config))
-
-    kind = change["kind"]
-    original_title = task.get("title", "")
-
-    if kind == "completed":
-        instruction = (
-            f"A task originating from a PR comment has been marked done — it was "
-            f"covered by work already committed and is no longer in the active queue.\n\n"
-            f"Original task: {original_title}\n"
-            f"Comment author: {author or '(unknown)'}\n"
-            f"Comment: {url}\n\n"
-            "Write a very brief reply notifying the commenter that their task has been "
-            "marked done because it was covered by recent commits. Reference the comment URL."
-        )
-    else:
-        new_title = change.get("new_title", "")
-        instruction = (
-            f"The task you were planning from a PR comment has been updated to "
-            f"reflect new requirements.\n\n"
-            f"Original task: {original_title}\n"
-            f"Updated task: {new_title}\n"
-            f"Comment author: {author or '(unknown)'}\n"
-            f"Comment: {url}\n\n"
-            "Write a very brief reply notifying the commenter that their original task "
-            "has been updated. Reference the comment URL."
-        )
-
-    body = safe_voice_turn(
-        agent,
-        prompts.persona_wrap(instruction),
-        model=agent.voice_model,
-        allowed_tools=READ_ONLY_ALLOWED_TOOLS,
-        system_prompt=prompts.reply_system_prompt(),
-        log_prefix="_notify_thread_change",
-    )
-    try:
-        gh.reply_to_review_comment(repo, pr, body, comment_id)
-        log.info("notified thread %s (%s)", comment_id, kind)
-    except Exception:
-        log.exception("failed to notify thread %s", comment_id)
 
 
 def _task_snapshot(task_list: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
@@ -2428,10 +2353,6 @@ def _make_reorder_kwargs(
 ) -> dict[str, Any]:
     """Build the kwargs dict for a :func:`~fido.tasks.reorder_tasks` call."""
 
-    def on_changes(changes: list[dict[str, Any]]) -> None:
-        for change in changes:
-            _notify_thread_change(change, config, gh, agent=None, prompts=None)
-
     def on_done() -> None:
         if sync_fn is None:
             from fido.tasks import sync_tasks
@@ -2454,8 +2375,19 @@ def _make_reorder_kwargs(
         )
         registry.abort_task(repo_cfg.name, task_id=task_id)
 
+    # Note: _on_changes (per-task-change notifications via
+    # _notify_thread_change) was removed when the per-intent
+    # classifier-driven notifier landed (#1724 codex P2).  Keeping
+    # both produced duplicate replies for the same rescope event —
+    # one per affected task and one per material intent.  The
+    # per-intent path is now the canonical reply mechanism; for
+    # rewrites driven by intents in the current batch it covers
+    # everything the old path did, with richer "tell the story"
+    # context.  Past-batch-driven rewrites (intent not in current
+    # batch) silently skip — persisting pending intents across
+    # batches is a separate follow-up the #1256 epic doesn't
+    # require.
     kwargs: dict[str, Any] = {
-        "_on_changes": on_changes,
         "_on_done": on_done,
         "_on_inprogress_affected": on_inprogress_affected,
         "agent": agent,
@@ -2519,12 +2451,22 @@ def _build_on_intent_dispositions(
         # Dispositions dict iteration order is intent-timestamp
         # ascending (the classifier sorts) — we fire notifications in
         # the same order so the chronological story reads top to
-        # bottom on the reviewer's thread.  Both material AND
-        # unhandled trigger replies (the notifier branches on kind);
-        # aggregation is silent.
+        # bottom on the reviewer's thread.  Aggregation is silent;
+        # material always notifies; unhandled only notifies when an
+        # EARLIER-timestamp sibling was attributed (Rob's #1747
+        # directive — "if later say nothing because there is nothing
+        # to tell them, their original ask still honored").
         for cid, disposition in dispositions.items():
             intent = intents_by_cid.get(cid)
             if intent is None or disposition.kind == "aggregation":
+                continue
+            if disposition.kind == "unhandled" and not _has_earlier_attributed_sibling(
+                intent, intents, dispositions
+            ):
+                # Either no other intents touched anything, or every
+                # attributed sibling is strictly newer than this one.
+                # In both cases the original "got it" reply remains
+                # accurate — silent.
                 continue
             _notify_intent_outcome(
                 intent,
@@ -2542,6 +2484,35 @@ def _build_on_intent_dispositions(
             )
 
     return on_intent_dispositions
+
+
+def _has_earlier_attributed_sibling(
+    intent: RescopeIntent,
+    batch_intents: list[RescopeIntent],
+    dispositions: dict[int, IntentDisposition],
+) -> bool:
+    """True iff some other intent in the batch is older AND was acted on.
+
+    "Acted on" = its disposition is material or aggregation (i.e.,
+    Opus attributed at least one op to it).  Used to decide whether
+    an *unhandled* disposition is worth telling the commenter about
+    (Rob on #1747): if their ask was dropped because an EARLIER
+    intent already covered it, they should hear "your ask is covered
+    by that earlier task" — but if every acted-on sibling is NEWER
+    than them, the work continues under the later cover and the
+    original triage reply still stands, so we say nothing.
+    """
+    for other in batch_intents:
+        if other.comment_id == intent.comment_id:
+            continue
+        # Classifier produces a disposition for every batch intent —
+        # missing key here would be a bug; let it AttributeError loudly.
+        other_disposition = dispositions[other.comment_id]
+        if other_disposition.kind == "unhandled":
+            continue
+        if other.timestamp < intent.timestamp:
+            return True
+    return False
 
 
 def _reorder_tasks_background(

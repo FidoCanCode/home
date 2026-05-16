@@ -138,6 +138,12 @@ class RescopeIntent:
     change_request: str
     comment_id: int
     timestamp: str
+    comment_type: str = "pulls"
+    """GitHub comment namespace: ``"pulls"`` for review-thread comments
+    (the rescope reply path posts via ``reply_to_review_comment``);
+    ``"issues"`` for top-level PR/issue comments where the webhook
+    handler already posted a triage reply (rescope notifier silently
+    skips per #1724 codex P2 — same policy as ``_notify_thread_change``)."""
 
 
 @dataclass(frozen=True)
