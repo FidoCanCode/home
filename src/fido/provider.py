@@ -150,6 +150,32 @@ ReasoningEffort: TypeAlias = Literal["low", "medium", "high", "xhigh"]
 ReasoningEffortSpec: TypeAlias = ReasoningEffort | tuple[ReasoningEffort, ...] | None
 
 
+class PromptOutcome(str):
+    """Result of one :meth:`PromptSession.prompt` call.
+
+    A ``str`` subclass carrying the assistant text *plus* a ``cancelled``
+    bit captured atomically inside the session lock at the moment the
+    turn returned.  Carrying the cancellation by value closes the race
+    Rob flagged on PR #1793: reading ``session.last_turn_cancelled``
+    after ``prompt()`` returns is unsafe because another thread can
+    acquire the session and clear the sticky bit at prompt-entry
+    before the original caller observes it.
+
+    Subclassing ``str`` keeps every existing caller that treats the
+    result as text (``.strip()``, ``startswith``, ``==``, truthiness,
+    ``len()``) working without per-call-site changes; callers that need
+    preemption-aware behavior read ``.cancelled`` from the returned
+    value rather than the session.
+    """
+
+    cancelled: bool
+
+    def __new__(cls, text: str = "", *, cancelled: bool = False) -> "PromptOutcome":
+        instance = super().__new__(cls, text)
+        instance.cancelled = cancelled
+        return instance
+
+
 @dataclass(frozen=True, eq=False)
 class ProviderModel:
     """Explicit provider model selection, including reasoning effort when supported."""
@@ -396,8 +422,16 @@ class PromptSession(Protocol):
         model: ProviderModel | None = None,
         allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
         system_prompt: str | None = None,
-    ) -> str:
-        """Run a single prompt turn and return the final assistant text.
+    ) -> PromptOutcome:
+        """Run a single prompt turn and return its outcome.
+
+        Returns a :class:`PromptOutcome` carrying the assistant text and
+        the cancellation bit captured atomically inside the session lock
+        at the moment of return.  Callers that need preemption-aware
+        behavior must read ``result.cancelled`` rather than
+        ``session.last_turn_cancelled``: the latter is shared mutable
+        state that another thread can clear at prompt-entry before the
+        caller observes it (closes the race Rob flagged on PR #1793).
 
         ``allowed_tools`` defaults to :data:`READ_ONLY_ALLOWED_TOOLS` (closes
         #1413) — the safe shape for synthesis / rescope / setup / status /
@@ -418,6 +452,21 @@ class PromptSession(Protocol):
     @property
     def last_turn_cancelled(self) -> bool:
         """Report whether the most recent turn was cancelled by preemption."""
+        ...
+
+    def consume_pending_cancel(self) -> bool:
+        """Atomically read and clear the sticky cancel-observed bit.
+
+        Returns whether a cancel was observed since the last clear, and
+        clears the bit in the same critical section.  Used by the
+        exception path in
+        :meth:`~fido.session_agent.SessionBackedAgent._prompt_with_recovery`
+        to classify a ``prompt()`` failure as cancel-induced vs. a real
+        provider error without ever leaving the bit set for a later
+        attempt to misread as its own cancellation (closes codex P1
+        comments on PR #1793 about false-positive cancel classification
+        from stale bits).
+        """
         ...
 
     def switch_model(self, model: ProviderModel) -> None:

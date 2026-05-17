@@ -22,6 +22,7 @@ from fido.idle_timeout import IdleDeadline
 from fido.provider import (
     ContextOverflowError,
     OwnedSession,
+    PromptOutcome,
     PromptSession,
     Provider,
     ProviderAgent,
@@ -785,6 +786,16 @@ class CodexSession(OwnedSession):
         with self._state_lock:
             return self._last_turn_cancelled
 
+    def consume_pending_cancel(self) -> bool:
+        """Atomically read and clear the sticky cancel-observed bit.
+
+        See :meth:`fido.provider.PromptSession.consume_pending_cancel`.
+        """
+        with self._state_lock:
+            cancelled = self._last_turn_cancelled
+            self._last_turn_cancelled = False
+            return cancelled
+
     def prompt(
         self,
         content: str,
@@ -792,7 +803,7 @@ class CodexSession(OwnedSession):
         model: ProviderModel | None = None,
         allowed_tools: str | None = None,
         system_prompt: str | None = None,
-    ) -> str:
+    ) -> PromptOutcome:
         # ``allowed_tools`` is part of the ``PromptSession`` protocol (closes
         # #1413).  Codex has no per-tool primitive but it does have
         # per-turn sandbox modes — we translate the protocol's allowlist
@@ -801,14 +812,52 @@ class CodexSession(OwnedSession):
         # ``None`` is "worker phase" and keeps full implementation access
         # (#1672).
         sandbox_policy = _sandbox_acp_policy_for_phase(allowed_tools)
-        with self:
-            if model is not None:
-                self.switch_model(model)
-            self.send(
-                _combine_prompt(content, self._base_system_prompt, system_prompt),
+        try:
+            return self._prompt_inner(
+                content,
+                model=model,
+                system_prompt=system_prompt,
                 sandbox_policy=sandbox_policy,
             )
-            return self.consume_until_result()
+        except Exception as exc:
+            # ``__enter__`` failure (or any path that didn't reach the
+            # inner try/except that attaches ``cancel_observed``): no
+            # clear happened, so any True we might read would be a
+            # leftover from a previous turn (codex P1 on commit
+            # 3a9cd09).
+            if not hasattr(exc, "cancel_observed"):
+                exc.cancel_observed = False  # type: ignore[attr-defined]
+            raise
+
+    def _prompt_inner(
+        self,
+        content: str,
+        *,
+        model: ProviderModel | None,
+        system_prompt: str | None,
+        sandbox_policy: dict[str, str] | None,
+    ) -> PromptOutcome:
+        with self:
+            # Clear sticky cancel bit INSIDE the OwnedSession lock so a
+            # peer's clear cannot race with our snapshot (codex P1).
+            with self._state_lock:
+                self._last_turn_cancelled = False
+            if model is not None:
+                self.switch_model(model)
+            try:
+                self.send(
+                    _combine_prompt(content, self._base_system_prompt, system_prompt),
+                    sandbox_policy=sandbox_policy,
+                )
+                result = self.consume_until_result()
+            except Exception as exc:
+                with self._state_lock:
+                    cancelled = self._last_turn_cancelled
+                exc.cancel_observed = cancelled  # type: ignore[attr-defined]
+                raise
+            with self._state_lock:
+                cancelled = self._last_turn_cancelled
+            return PromptOutcome(result, cancelled=cancelled)
 
     def send(
         self,

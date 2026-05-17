@@ -250,9 +250,53 @@ class TestSessionBackedAgent:
     def test_prompt_with_recovery_recovers_after_dead_prompt_failure(self) -> None:
         session = MagicMock()
         session.prompt.side_effect = [BrokenPipeError("boom"), "done"]
+        session.last_turn_cancelled = False
         session.is_alive.return_value = False
         agent = _FakeAgent(session=session)
         assert agent.run_turn("hi", model=agent.voice_model) == "done"
+        session.recover.assert_called_once_with()
+
+    def test_prompt_with_recovery_returns_empty_on_cancel_induced_failure(
+        self,
+    ) -> None:
+        """Regression for #1792.
+
+        When the prompt fails because a peer thread fired a cancel
+        during the in-flight turn (claude exits -2 from the interrupt
+        signal), ``_prompt_with_recovery`` MUST NOT retry the *prompt*
+        on a respawned session — that would silently consume the
+        cancel intent and the caller would observe a normal return,
+        blocking the worker loop from yielding to
+        ``handle_queued_comments``.  Return empty so the caller's
+        ``last_turn_cancelled`` check fires.
+
+        Recovery of the dead session DOES happen before returning
+        (codex P1 follow-up on PR #1793) — otherwise a subsequent
+        prompt would hit the same dead-session + sticky-cancel state
+        and loop.
+
+        Locked in by the FSM oracle from
+        ``models/cancel_survives_respawn.v``: any path that observes
+        ``CancelFire`` cannot return ``RetNormal``."""
+        session = MagicMock()
+        # ``cancel_observed`` on the exception is the authoritative
+        # channel — real :meth:`PromptSession.prompt` impls capture
+        # the cancel bit INSIDE the lock at the moment of failure and
+        # attach it to the raised exception (codex P1 family on PR
+        # #1793).  The recovery loop reads it by value instead of
+        # racing with the next acquirer for ``last_turn_cancelled``.
+        boom = BrokenPipeError("claude exited with code -2")
+        boom.cancel_observed = True  # type: ignore[attr-defined]
+        session.prompt.side_effect = boom
+        session.last_turn_cancelled = True
+        session.is_alive.return_value = False
+        agent = _FakeAgent(session=session)
+        assert agent.run_turn("hi", model=agent.voice_model) == ""
+        # Prompt MUST NOT have been retried — that's the bug.
+        assert session.prompt.call_count == 1
+        # Session MUST have been recovered so the next caller has a
+        # live session waiting — defense in depth for the
+        # ``retry_on_preempt=True`` callers and the next worker turn.
         session.recover.assert_called_once_with()
 
     def test_prompt_with_recovery_raises_after_second_dead_empty_result(self) -> None:
