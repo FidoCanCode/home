@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import subprocess
@@ -2342,25 +2343,33 @@ class TestClaudeSessionLock:
         assert session.last_turn_cancelled is False
         session.stop()
 
-    def test_send_clears_sticky_cancel_bit(self, tmp_path: Path) -> None:
+    def test_prompt_clears_sticky_cancel_bit_before_pre_send_work(
+        self, tmp_path: Path
+    ) -> None:
         """Codex P1 follow-up on PR #1793.
 
-        The sticky bit is cleared by :meth:`send` (at the Idle → Sending
-        FSM transition), NOT by ``iter_events``.  If ``iter_events``
-        cleared it instead, a ``send()`` failure that hit before
-        ``iter_events`` ran would observe the *previous* turn's cancel
-        bit and misclassify the failure as a current-turn preemption —
-        ``_prompt_with_recovery`` would return ``""`` for a transient
-        ``BrokenPipeError`` instead of taking the normal dead-session
-        retry path."""
-        session = _make_session(tmp_path, _make_session_proc([]))
+        The sticky bit is cleared at the *entry* to :meth:`prompt`
+        (right after lock acquire), NOT inside :meth:`send`.  Clearing
+        at ``send()`` is too late: ``prompt()`` runs ``recover()``,
+        ``switch_model``, ``switch_tools`` *before* ``send()``, and
+        any of those can raise.  If the previous turn's cancel bit
+        leaks into a pre-send failure, ``_prompt_with_recovery``
+        misclassifies a transient setup failure as a current-turn
+        preemption — the real error is swallowed, the caller sees
+        ``""``, and the worker yields when it shouldn't.
+
+        Exercise the clear directly: latch the bit, drive
+        ``ClaudeSession.prompt`` (which acquires the lock and clears
+        the bit before any pre-send work), assert the bit cleared
+        before the turn machinery runs."""
+        events = [json.dumps({"type": "result", "result": "ok"}) + "\n"]
+        session = _make_session(tmp_path, _make_session_proc(events))
         # Latch a cancel from a prior turn.
         with session._stream_lock:  # noqa: SLF001
             session._last_turn_cancelled_sticky = True  # noqa: SLF001
         assert session.last_turn_cancelled is True
-        # send() commits the new turn — the bit must clear before any
-        # write to claude's stdin (so a write failure inherits a clean bit).
-        session.send("hi")
+        # Prompt clears the bit *before* any pre-send work runs.
+        session.prompt("hi")
         assert session.last_turn_cancelled is False
         session.stop()
 

@@ -923,13 +923,11 @@ class ClaudeSession(OwnedSession):
         return to ``Idle`` (acknowledging the cancellation), then fire
         ``Send`` to enter ``Sending`` for the new turn.
         """
-        # Acknowledge a prior cancelled turn: Cancelled → Idle.  Also
-        # clear the sticky cancel-observed bit here, under the same
-        # lock that gates FSM transitions: every new turn begins with
-        # ``last_turn_cancelled = False`` regardless of how the
-        # previous turn ended, so a ``send()`` failure cannot inherit
-        # the previous turn's cancel state (codex P1 follow-up on
-        # #1793).
+        # Acknowledge a prior cancelled turn: Cancelled → Idle.  The
+        # sticky cancel-observed bit is cleared by :meth:`prompt`
+        # right after lock acquire — clearing it here would be too
+        # late for pre-send failures (``recover()`` / ``switch_model``
+        # / ``switch_tools`` raising), see :attr:`last_turn_cancelled`.
         with self._stream_lock:
             if isinstance(self._stream_state, stream_fsm.Cancelled):
                 new_state = stream_fsm.transition(
@@ -937,7 +935,6 @@ class ClaudeSession(OwnedSession):
                 )
                 assert new_state is not None
                 self._stream_state = new_state
-            self._last_turn_cancelled_sticky = False
         # Idle → Sending.
         self._stream_transition(stream_fsm.Send())
         msg = json.dumps(
@@ -1198,6 +1195,18 @@ class ClaudeSession(OwnedSession):
                 tid,
                 time.monotonic() - t_start,
             )
+            # Clear the sticky cancel-observed bit at the very start of
+            # the new turn — *before* any pre-send work (``recover``,
+            # ``switch_model``, ``switch_tools``) that could raise.
+            # Without this, a previous turn's cancel bit would leak
+            # into the new prompt's exception path, and the recovery
+            # loop in ``session_agent._prompt_with_recovery`` would
+            # misclassify a pre-send failure as a current-turn
+            # preemption (codex P1 follow-up on #1793).  Held inside
+            # ``_stream_lock`` to match the read in
+            # :attr:`last_turn_cancelled`.
+            with self._stream_lock:
+                self._last_turn_cancelled_sticky = False
             # Defensive cleanup on acquire (#1670): if a prior turn left
             # the FSM in an in-flight state — ``Sending`` /
             # ``AwaitingReply`` / ``Draining`` — recover (respawn the
