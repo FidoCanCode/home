@@ -27,6 +27,7 @@
   webhook_ingress_dedupe
   self_restart
   handler_preemption
+  cancel_survives_respawn
   turn_outcome
   commit_result
   harness_commit_decision

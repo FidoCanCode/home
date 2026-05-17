@@ -610,10 +610,26 @@ class ClaudeSession(OwnedSession):
         early because another thread set the cancel event (preempted the
         turn via :meth:`prompt` or :meth:`interrupt`).
 
-        Backed by the stream FSM: a turn that observed ``CancelFire`` and
-        reached its ``TurnReturn`` ends in ``Cancelled``; a normal turn
-        ends in ``Idle``.  The next :meth:`send` consumes the ``Cancelled``
-        state by firing ``TurnReturn`` to return to ``Idle``.
+        Two ways the bit comes ``True``:
+
+        1. Clean preemption: the turn observed ``CancelFire`` and reached
+           its ``TurnReturn`` boundary, leaving the stream FSM in
+           ``Cancelled`` (consumed by the next :meth:`send` via
+           ``TurnReturn``).
+        2. Cancel-induced subprocess crash (#1792): the cancel event was
+           set during the turn but the subprocess exited (e.g. claude
+           exited with code -2 from the interrupt) before producing
+           ``type=result``.  ``_cancel.is_set()`` survives the crash —
+           it is only cleared at the start of the next turn (line ~1350) —
+           so this property reports cancellation faithfully even when
+           the stream FSM never reached ``Cancelled``.
+
+        Without case 2, the recovery loop in
+        ``session_agent._prompt_with_recovery`` would silently retry the
+        prompt on a respawned session, the new turn would complete
+        normally, and the worker would never observe the preemption it
+        requested.  See ``models/cancel_survives_respawn.v`` for the FSM
+        oracle that locks this in.
 
         Callers that want resumption semantics can check this after a turn
         and re-send the same content once the session lock is free again —
@@ -621,7 +637,9 @@ class ClaudeSession(OwnedSession):
         resume what it was doing'.
         """
         with self._stream_lock:
-            return isinstance(self._stream_state, stream_fsm.Cancelled)
+            if isinstance(self._stream_state, stream_fsm.Cancelled):
+                return True
+        return self._cancel.is_set()
 
     def _spawn(self) -> subprocess.Popen[str]:
         """Spawn the claude subprocess with bidirectional stream-json I/O.

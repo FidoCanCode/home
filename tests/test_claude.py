@@ -2296,6 +2296,29 @@ class TestClaudeSessionLock:
         assert session.last_turn_cancelled is False
         session.stop()
 
+    def test_last_turn_cancelled_true_when_cancel_event_set(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for #1792.
+
+        When the cancel event is set during a turn but the subprocess
+        dies (e.g. claude -2 from the interrupt signal) before the
+        stream FSM reaches its ``Cancelled`` state, the property must
+        still report cancellation — the cancel event survives the
+        crash (cleared only at the start of the next turn) and that
+        is exactly the signal the recovery loop checks before deciding
+        whether to retry the prompt.
+
+        Without this: ``session_agent._prompt_with_recovery`` sees
+        ``last_turn_cancelled = False`` after a cancel-induced crash,
+        respawns the session, retries the prompt cleanly, and the
+        worker never observes the preemption it requested."""
+        session = _make_session(tmp_path, _make_session_proc([]))
+        # Simulate "cancel was fired during a turn".
+        session._cancel.set()  # noqa: SLF001
+        assert session.last_turn_cancelled is True
+        session.stop()
+
     def test_prompt_routes_through_session(self, tmp_path: Path) -> None:
         """ClaudeSession.prompt cancels, takes the lock, sends, and returns result."""
         from fido.claude import ClaudeSession

@@ -250,10 +250,37 @@ class TestSessionBackedAgent:
     def test_prompt_with_recovery_recovers_after_dead_prompt_failure(self) -> None:
         session = MagicMock()
         session.prompt.side_effect = [BrokenPipeError("boom"), "done"]
+        session.last_turn_cancelled = False
         session.is_alive.return_value = False
         agent = _FakeAgent(session=session)
         assert agent.run_turn("hi", model=agent.voice_model) == "done"
         session.recover.assert_called_once_with()
+
+    def test_prompt_with_recovery_returns_empty_on_cancel_induced_failure(
+        self,
+    ) -> None:
+        """Regression for #1792.
+
+        When the prompt fails because a peer thread fired a cancel
+        during the in-flight turn (claude exits -2 from the interrupt
+        signal), ``_prompt_with_recovery`` MUST NOT retry on a respawned
+        session — that would silently consume the cancel intent and the
+        caller would observe a normal return, blocking the worker loop
+        from yielding to ``handle_queued_comments``.  Return empty so the
+        caller's ``last_turn_cancelled`` check fires.
+
+        Locked in by the FSM oracle from
+        ``models/cancel_survives_respawn.v``: any path that observes
+        ``CancelFire`` cannot return ``RetNormal``."""
+        session = MagicMock()
+        session.prompt.side_effect = BrokenPipeError("claude exited with code -2")
+        session.last_turn_cancelled = True  # cancel was fired during the turn
+        session.is_alive.return_value = False
+        agent = _FakeAgent(session=session)
+        assert agent.run_turn("hi", model=agent.voice_model) == ""
+        # Must NOT have recovered/retried — that's the bug.
+        session.recover.assert_not_called()
+        assert session.prompt.call_count == 1
 
     def test_prompt_with_recovery_raises_after_second_dead_empty_result(self) -> None:
         session = MagicMock()

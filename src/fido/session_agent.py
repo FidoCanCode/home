@@ -15,6 +15,7 @@ from fido.provider import (
     SnapshotPublisher,
     TurnSessionMode,
 )
+from fido.rocq import cancel_survives_respawn as cancel_fsm
 
 log = logging.getLogger(__name__)
 
@@ -347,6 +348,20 @@ class SessionBackedAgent(SnapshotPublisher):
         allowed_tools: str | None = READ_ONLY_ALLOWED_TOOLS,
         system_prompt: str | None,
     ) -> str:
+        # Cancel-survives-respawn FSM oracle (closes #1792).  Backed by the
+        # proof in ``models/cancel_survives_respawn.v``: once a cancel is
+        # observed in any cycle of this recovery loop, the function must
+        # return with the session reporting ``last_turn_cancelled = True``
+        # and must NOT retry the prompt on a fresh subprocess (the retry
+        # would silently consume the cancel intent and the caller would
+        # never see the preemption it requested).  Every transition below
+        # is fed through ``cancel_fsm.transition`` so a runtime divergence
+        # from the proved FSM crashes loudly instead of leaking a queued
+        # PR comment.
+        fsm_state = cancel_fsm.transition(cancel_fsm.initial_state, cancel_fsm.Prompt())
+        assert fsm_state is not None, (
+            "cancel_survives_respawn FSM rejected Prompt from Initial"
+        )
         recovered = False
         while True:
             try:
@@ -359,6 +374,36 @@ class SessionBackedAgent(SnapshotPublisher):
             except Exception as exc:
                 if self._prompt_failure_is_passthrough(exc):
                     raise
+                cancel_observed = getattr(session, "last_turn_cancelled", False) is True
+                if cancel_observed:
+                    fsm_state = cancel_fsm.transition(
+                        fsm_state, cancel_fsm.CancelFire()
+                    )
+                    assert fsm_state is not None
+                fsm_state = cancel_fsm.transition(
+                    fsm_state, cancel_fsm.SubprocessExit()
+                )
+                assert fsm_state is not None
+                if cancel_observed:
+                    # The prompt failed because a peer thread fired a cancel
+                    # during this turn (the subprocess crashed mid-drain).
+                    # Retrying would respawn the session in NoCancel state
+                    # and silently drop the preemption (codex P1 / #1792).
+                    # Return empty; ``provider_run`` translates this into
+                    # ``last_turn_cancelled = True`` and ``execute_task``
+                    # yields to the worker loop, where ``handle_queued_comments``
+                    # drains the durable PR-comment queue.
+                    fsm_state = cancel_fsm.transition(fsm_state, cancel_fsm.Return())
+                    assert fsm_state == cancel_fsm.returned_cancelled, (
+                        f"cancel_survives_respawn FSM: expected returned_cancelled, "
+                        f"got {fsm_state!r}"
+                    )
+                    log.info(
+                        "%s: prompt failed mid-cancel — returning empty so the "
+                        "caller observes cancellation (not retrying)",
+                        type(self).__name__,
+                    )
+                    return ""
                 should_retry = self._should_retry_prompt_failure(exc, session)
                 if (
                     recovered
@@ -366,20 +411,28 @@ class SessionBackedAgent(SnapshotPublisher):
                     or not self._recover_prompt_session(session)
                 ):
                     raise
+                fsm_state = cancel_fsm.transition(fsm_state, cancel_fsm.Recover())
+                assert fsm_state is not None
                 recovered = True
                 log_name = type(self).__name__
                 log.warning(
                     "%s: recovered session after prompt failure: %s", log_name, exc
                 )
                 continue
-            if (
-                result
-                or getattr(session, "last_turn_cancelled", False) is True
-                or not self._session_is_dead(session)
-            ):
+            cancel_observed = getattr(session, "last_turn_cancelled", False) is True
+            if cancel_observed:
+                fsm_state = cancel_fsm.transition(fsm_state, cancel_fsm.CancelFire())
+                assert fsm_state is not None
+            if result or cancel_observed or not self._session_is_dead(session):
+                fsm_state = cancel_fsm.transition(fsm_state, cancel_fsm.Return())
+                assert fsm_state is not None
                 return result
+            fsm_state = cancel_fsm.transition(fsm_state, cancel_fsm.SubprocessExit())
+            assert fsm_state is not None
             if recovered or not self._recover_prompt_session(session):
                 raise RuntimeError(self._dead_prompt_error_message())
+            fsm_state = cancel_fsm.transition(fsm_state, cancel_fsm.Recover())
+            assert fsm_state is not None
             recovered = True
             log.warning(
                 "%s: recovered session after empty dead prompt", type(self).__name__
