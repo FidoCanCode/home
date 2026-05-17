@@ -1104,6 +1104,15 @@ class CopilotCLISession(OwnedSession):
         # nothing to enforce.
         del allowed_tools
         with self:
+            # Clear the sticky cancel-observed bit at the very start of
+            # the new turn — *before* ``_prompt_locked`` runs.  Without
+            # this, a previous turn's cancel bit leaks into a
+            # ``runtime.prompt`` failure exception, and
+            # ``session_agent._prompt_with_recovery`` misclassifies it
+            # as a current-turn preemption (codex P1 follow-up on
+            # #1793, matches the same fix in ``ClaudeSession.prompt``
+            # and ``CodexSession.prompt``).
+            self._last_turn_cancelled = False
             return self._prompt_locked(
                 content, model=model, system_prompt=system_prompt
             )
