@@ -28,12 +28,6 @@ from fido.appstate import (
 )
 from fido.atomic import AtomicUpdater
 from fido.claude import ClaudeCode
-from fido.comment_cache import (
-    KIND_ISSUES,
-    KIND_PULLS,
-    CommentCache,
-    comment_via_cache_or_gh,
-)
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.harness_commit import HarnessCommitter
@@ -259,10 +253,6 @@ class ActivityReporter(Protocol):
     def tasks_for(self, repo_name: str) -> Tasks: ...
 
     def state_for(self, repo_name: str) -> State: ...
-
-    def get_comment_cache(
-        self, repo_name: str, item: int, gh: GitHub
-    ) -> CommentCache: ...
 
 
 class LockHeld(Exception):
@@ -1833,30 +1823,6 @@ class Worker:
             default,
         )
 
-    def _resolved_comment(
-        self, repo: str, item: int, kind: str, comment_id: int
-    ) -> Mapping[str, Any] | None:
-        """Cache-first single-comment lookup for ``(repo, item)``.
-
-        INV-7 of #1748: see :meth:`_resolved_top_level_comments`.
-        Falls back to ``gh.get_*_comment`` on cache miss / unhydrated
-        cache (handled inside :func:`comment_via_cache_or_gh`) or
-        when the worker was constructed without a registry.
-        """
-        if self._registry is None:
-            return (
-                self.gh.get_pull_comment(repo, comment_id)
-                if kind == KIND_PULLS
-                else self.gh.get_issue_comment(repo, comment_id)
-            )
-        return comment_via_cache_or_gh(
-            self._registry.get_comment_cache(repo, item, self.gh),
-            kind,
-            gh=self.gh,
-            repo=repo,
-            comment_id=comment_id,
-        )
-
     def _post_retry_acknowledgement(
         self,
         repo: str,
@@ -2567,9 +2533,7 @@ class Worker:
             promise = promise_by_anchor.get(first_db_id)
             if promise is None:
                 continue
-            comment = self._resolved_comment(
-                repo_ctx.repo, pr_number, KIND_PULLS, first_db_id
-            )
+            comment = self.gh.get_pull_comment(repo_ctx.repo, first_db_id)
             if comment is None:
                 log.info("skipping thread %s — root comment missing", first_db_id)
                 store.mark_failed(promise.promise_id)
@@ -2808,9 +2772,7 @@ class Worker:
     ) -> "Action | None":
         from fido import events
 
-        comment = self._resolved_comment(
-            repo, queued.pr_number, KIND_PULLS, queued.comment_id
-        )
+        comment = self.gh.get_pull_comment(repo, queued.comment_id)
         if comment is None:
             log.info("queued review comment %s is gone — completing", queued.comment_id)
             return None
@@ -2833,9 +2795,7 @@ class Worker:
     ) -> "Action | None":
         from fido import events
 
-        comment = self._resolved_comment(
-            repo, queued.pr_number, KIND_ISSUES, queued.comment_id
-        )
+        comment = self.gh.get_issue_comment(repo, queued.comment_id)
         if comment is None:
             log.info("queued issue comment %s is gone — completing", queued.comment_id)
             return None
