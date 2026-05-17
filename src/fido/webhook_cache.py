@@ -67,7 +67,6 @@ class WebhookCache(ABC, Generic[_K, _V, _M]):
         repo_name: str,
         *,
         on_change: "Callable[[_M], None] | None" = None,
-        pre_inventory_queue_limit: int | None = None,
     ) -> None:
         """Create an empty cache.
 
@@ -78,16 +77,10 @@ class WebhookCache(ABC, Generic[_K, _V, _M]):
         locks (e.g. the atomic FidoState cell) without lock-order
         inversion.
 
-        *pre_inventory_queue_limit*, when supplied, caps the depth
-        of the pre-inventory event queue.  Once the queue holds
-        this many events and another arrives, the OLDEST queued
-        event is dropped and ``events_dropped_queue_overflow`` is
-        bumped.  ``None`` (default) means unbounded — appropriate
-        for caches whose hydration is guaranteed to run at startup
-        (e.g. :class:`~fido.issue_cache.IssueCache`).  Caches
-        that can stay un-loaded across persistent failures (e.g.
-        :class:`~fido.comment_cache.CommentCache` on a permission
-        outage) supply a finite cap so memory growth is bounded.
+        The pre-inventory event queue is unbounded.  The only
+        surviving subclass (:class:`~fido.issue_cache.IssueCache`)
+        hydrates eagerly at startup and via the periodic reconcile
+        watchdog, so persistent un-loaded growth is not a concern.
         """
         self._repo = repo_name
         self._lock = threading.Lock()
@@ -100,7 +93,6 @@ class WebhookCache(ABC, Generic[_K, _V, _M]):
         self._last_reconcile_at: datetime | None = None
         self._last_reconcile_drift = 0
         self._pre_inventory_queue: list[tuple[datetime, str, dict[str, Any]]] = []
-        self._pre_inventory_queue_limit = pre_inventory_queue_limit
         self._on_change = on_change
 
     # ── subclass hooks ────────────────────────────────────────────────────
@@ -315,45 +307,13 @@ class WebhookCache(ABC, Generic[_K, _V, _M]):
         with self._lock:
             if self._inventory_loaded_at is None:
                 self._pre_inventory_queue.append((timestamp, event_type, payload))
-                # Cap depth (codex P1 follow-up on #1766): when
-                # hydration stays failed for a long time and webhook
-                # traffic keeps arriving, an unbounded queue would
-                # grow indefinitely.  Drop oldest by *timestamp*
-                # (not arrival order) when over the cap — the drain
-                # in :meth:`load_inventory` replays sorted by
-                # timestamp anyway (events can arrive out of order),
-                # so eviction has to match that ordering or it would
-                # discard a newer update while keeping older stale
-                # events (codex P2 follow-up on #1766).
-                if (
-                    self._pre_inventory_queue_limit is not None
-                    and len(self._pre_inventory_queue) > self._pre_inventory_queue_limit
-                ):
-                    oldest_idx = min(
-                        range(len(self._pre_inventory_queue)),
-                        key=lambda i: self._pre_inventory_queue[i][0],
-                    )
-                    dropped = self._pre_inventory_queue.pop(oldest_idx)
-                    self._events_dropped_queue_overflow += 1
-                    log.warning(
-                        "%s[%s]: pre-inventory queue at cap %d — "
-                        "dropped oldest-timestamp event %s @ %s "
-                        "(queue overflow=%d)",
-                        type(self).__name__,
-                        self._repo,
-                        self._pre_inventory_queue_limit,
-                        dropped[1],
-                        dropped[0].isoformat(),
-                        self._events_dropped_queue_overflow,
-                    )
-                else:
-                    log.info(
-                        "%s[%s]: queued %s pre-inventory (queue depth=%d)",
-                        type(self).__name__,
-                        self._repo,
-                        event_type,
-                        len(self._pre_inventory_queue),
-                    )
+                log.info(
+                    "%s[%s]: queued %s pre-inventory (queue depth=%d)",
+                    type(self).__name__,
+                    self._repo,
+                    event_type,
+                    len(self._pre_inventory_queue),
+                )
                 return False
             key = self._node_key_from_payload(payload)
             existing = self._nodes.get(key)

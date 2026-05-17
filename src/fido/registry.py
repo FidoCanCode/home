@@ -9,14 +9,11 @@ from dataclasses import replace as dc_replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from frozendict import frozendict
-
 from fido import provider as provider_module
 from fido.appstate import (
     _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     _ZERO_CRASH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     _ZERO_TALKER,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
-    CommentCacheSnapshot,
     FidoState,
     IssueCacheSnapshot,
     ProviderSnapshot,
@@ -28,8 +25,6 @@ from fido.appstate import (
     zero_repo_state,
 )
 from fido.atomic import AtomicUpdater
-from fido.comment_cache import CacheMetrics as CommentCacheMetrics
-from fido.comment_cache import CommentCache
 from fido.config import Config, RepoConfig
 from fido.github import GitHub
 from fido.issue_cache import CacheMetrics, IssueCache
@@ -53,27 +48,6 @@ log = logging.getLogger(__name__)
 def _utcnow() -> datetime:
     """Return the current UTC time as a timezone-aware datetime."""
     return datetime.now(tz=timezone.utc)
-
-
-def _comment_cache_snapshot(cache: CommentCache) -> CommentCacheSnapshot:
-    """Build a :class:`CommentCacheSnapshot` from a live cache's metrics.
-
-    Module-level helper (not a method) because it's a pure
-    projection — no collaborators, no behavior beyond the
-    field-by-field copy.
-    """
-    metrics = cache.metrics()
-    return CommentCacheSnapshot(
-        item=metrics.item,
-        loaded=metrics.inventory_loaded_at is not None,
-        entries_cached=metrics.entries_cached,
-        events_applied=metrics.events_applied,
-        events_dropped_stale=metrics.events_dropped_stale,
-        events_dropped_queue_overflow=metrics.events_dropped_queue_overflow,
-        last_event_at=metrics.last_event_at or _EPOCH,
-        last_reconcile_at=metrics.last_reconcile_at or _EPOCH,
-        last_reconcile_drift=metrics.last_reconcile_drift,
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,12 +127,6 @@ class WorkerRegistry:
         # that don't exercise the cache path don't pay setup cost.
         self._issue_caches: dict[str, IssueCache] = {}
         self._issue_cache_lock = threading.Lock()
-        # Per-(repo, item) comment caches (closes #1754).  Lazily created
-        # on first lookup; each cache is bound to one issue/PR's
-        # comments + reviews.  INV-1 scope; lifecycle binding to "PR
-        # open by Fido" lands in #1757.
-        self._comment_caches: dict[tuple[str, int], CommentCache] = {}
-        self._comment_cache_lock = threading.Lock()
         # Per-repo FSM state from worker_registry_crash.v.  Only written by
         # start(), which is called sequentially during startup and from the
         # single watchdog daemon thread during crash recovery — no lock needed.
@@ -344,13 +312,6 @@ class WorkerRegistry:
             existing_cache = self._issue_caches.get(repo_cfg.name)
         if existing_cache is not None:
             existing_cache._notify_change()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-        # Same crash-recovery republish for comment caches (codex P2
-        # follow-up on #1758): ``zero_repo_state`` above reset
-        # ``comment_caches`` to ``frozendict()``, but the live
-        # CommentCache instances in ``_comment_caches`` survive
-        # the restart.  Republish so /status.json reflects them
-        # without waiting for the next cache mutation.
-        self._publish_comment_caches(repo_cfg.name)
         thread.start()
         self._publish_thread_snapshot(repo_cfg.name)
         self._publish_provider_snapshot(repo_cfg.name)
@@ -957,152 +918,6 @@ class WorkerRegistry:
         with self._issue_cache_lock:
             return list(self._issue_caches.values())
 
-    def get_comment_cache(self, repo_name: str, item: int, gh: GitHub) -> CommentCache:
-        """Return (lazily creating) the per-(repo, item) comment cache (#1754).
-
-        One :class:`~fido.comment_cache.CommentCache` per ``(repo, item)``
-        pair.  Distinct items in the same repo get distinct caches —
-        per-item isolation by construction.  Webhook router uses this
-        to route events to the right cache.
-
-        New caches are hydrated synchronously (#1756) — three list
-        fetches from GitHub before this method returns.  That's
-        intentional for INV-2: the first webhook for an unseen item
-        pays the hydration cost so subsequent reads are warm.  INV-3
-        (#1757) moves hydration to startup / PR-open so the hot path
-        is never blocked.  Concurrent webhooks on other threads see
-        the cache registered in ``_comment_caches`` before hydrate
-        completes and queue their events in the pre-inventory buffer,
-        which drains in timestamp order at the tail of ``hydrate``.
-
-        Hydration failure handling (codex P1 follow-ups on #1756):
-
-        * The cache stays in ``_comment_caches`` with
-          ``is_loaded == False`` on hydration failure; any events
-          queued by concurrent webhooks remain in the pre-inventory
-          buffer and a later successful hydration drains them in
-          timestamp order.
-        * This method swallows-and-logs the hydration exception
-          instead of re-raising, so the caller (webhook handler)
-          can still call ``apply_event`` on the returned cache.
-          That queues the triggering event into the pre-inventory
-          buffer — otherwise the handler would return 200 to GitHub
-          (no retry) after silently losing the event that caused
-          cache creation.
-        * Next call to ``get_comment_cache`` for this key re-attempts
-          hydration; failures keep recurring until a real fix
-          arrives, with each attempt logged.
-        """
-        key = (repo_name, item)
-        with self._comment_cache_lock:
-            cache = self._comment_caches.get(key)
-            if cache is None:
-                cache = CommentCache(
-                    repo_name,
-                    gh,
-                    item,
-                    on_change=self._make_comment_cache_publisher(repo_name),
-                )
-                self._comment_caches[key] = cache
-        if not cache.is_loaded:
-            try:
-                cache.hydrate(datetime.now(tz=timezone.utc))
-            except Exception:
-                log.exception(
-                    "comment-cache hydration failed for %s#%d — "
-                    "events queue in the pre-inventory buffer; next "
-                    "get_comment_cache call retries",
-                    repo_name,
-                    item,
-                )
-                # Surface the un-loaded cache in SCADA (codex P2
-                # follow-up on #1758): otherwise the stuck cache
-                # with its queue-overflow / staleness counters is
-                # invisible during the very outage that makes it
-                # worth watching.  Successful hydrate fires
-                # on_change via load_inventory; the failure path
-                # has to publish manually.
-                self._publish_comment_caches(repo_name)
-        return cache
-
-    def all_comment_caches(self) -> list[CommentCache]:
-        """Snapshot list of every comment cache that has been created."""
-        with self._comment_cache_lock:
-            return list(self._comment_caches.values())
-
-    def destroy_comment_cache(self, repo_name: str, item: int) -> bool:
-        """Remove the cache for ``(repo_name, item)``; return whether it existed.
-
-        Called when the PR closes/merges (#1757) — the cache is no
-        longer useful and would otherwise leak per the codex P2 about
-        unbounded growth.  Idempotent: calling twice is a no-op.
-
-        On successful removal, republishes the per-repo SCADA dict
-        from the surviving caches (#1758).  Sibling caches in the
-        same repo retain their snapshots; the destroyed item is
-        dropped from the dict.
-        """
-        key = (repo_name, item)
-        with self._comment_cache_lock:
-            removed = self._comment_caches.pop(key, None) is not None
-        if removed:
-            self._publish_comment_caches(repo_name)
-        return removed
-
-    def _make_comment_cache_publisher(
-        self, repo_name: str
-    ) -> "Callable[[CommentCacheMetrics], None]":
-        """Return a per-repo on_change callback that republishes the
-        repo's full ``comment_caches`` dict on every cache mutation.
-
-        Closure binds *repo_name* so each repo's caches all route
-        through the same per-repo recompute path.  Per-item dict
-        means sibling caches survive any one cache's mutation
-        (codex P2 on #1758: the singleton field would have
-        clobbered them).  And the recompute reads from current
-        registry membership, so a destroyed cache's late firing
-        callback can't republish a snapshot for an unregistered
-        item (codex P2 on #1758: stale-handle republish race).
-        """
-
-        def publish(_metrics: "CommentCacheMetrics") -> None:
-            self._publish_comment_caches(repo_name)
-
-        return publish
-
-    def _publish_comment_caches(self, repo_name: str) -> None:
-        """Compute the per-item snapshot dict from currently-registered
-        caches for *repo_name* and publish it to FidoState.
-
-        Mirror of :meth:`_publish_webhook_activities`: the
-        authoritative state is the registry's ``_comment_caches``
-        map; this method serialises a snapshot and the state-updater
-        CAS together so concurrent membership changes can't have
-        their compute interleaved with someone else's publish
-        (codex P1 follow-up on #1758: a publisher that snapshotted
-        before a peer's ``destroy_comment_cache`` could otherwise
-        write a stale dict — including the destroyed item — after
-        the destroy's publish committed, resurrecting the dead
-        cache in /status.json).
-
-        Holds ``_comment_cache_lock`` through the
-        ``state_updater.update`` call.  The CAS is microseconds;
-        the lock-ordering rule "_comment_cache_lock before any
-        cache._lock (acquired by metrics()) before the atomic
-        cell's internal lock" is preserved throughout the registry.
-        """
-        with self._comment_cache_lock:
-            snaps = frozendict(
-                {
-                    item: _comment_cache_snapshot(cache)
-                    for (name, item), cache in self._comment_caches.items()
-                    if name == repo_name
-                }
-            )
-            self._state_updater.update(
-                lambda root: root.repos[repo_name].comment_caches, snaps
-            )
-
 
 def _make_thread(
     repo_cfg: RepoConfig,
@@ -1143,22 +958,16 @@ def make_registry(
     gh: GitHub,
     config: Config | None = None,
     *,
-    dispatcher_factory: "Callable[[RepoConfig, WorkerRegistry], Dispatcher]",
+    dispatchers: "dict[str, Dispatcher]",
     state_updater: "AtomicUpdater[FidoState]",
     _thread_factory: Callable[..., WorkerThread] = _make_thread,
-) -> "tuple[WorkerRegistry, dict[str, Dispatcher]]":
-    """Create a :class:`WorkerRegistry`, build per-repo dispatchers, start threads.
+) -> WorkerRegistry:
+    """Create a :class:`WorkerRegistry` and start threads for all repos.
 
-    Dispatchers are built *after* the registry exists so they can receive it
-    via constructor-DI (#1760 INV-6 — `Dispatcher.backfill_missed_pr_comments`
-    routes comment fetches through the per-(repo, item) `CommentCache`).  The
-    ``dispatcher_factory`` callback receives the registry and the per-repo
-    config and returns a fully-constructed :class:`Dispatcher` instance.
-
-    Returns ``(registry, dispatchers)``; the caller owns both for placement
-    onto :class:`~fido.server.WebhookHandler`.
+    The pre-built ``dispatchers`` dict is threaded into every worker
+    thread the registry spawns; the composition root constructs one
+    :class:`Dispatcher` per repo and hands them in.
     """
-    dispatchers: dict[str, Dispatcher] = {}
 
     def factory(
         cfg: RepoConfig,
@@ -1179,6 +988,5 @@ def make_registry(
 
     registry = WorkerRegistry(factory, state_updater)
     for repo_cfg in repos.values():
-        dispatchers[repo_cfg.name] = dispatcher_factory(repo_cfg, registry)
         registry.start(repo_cfg)
-    return registry, dispatchers
+    return registry

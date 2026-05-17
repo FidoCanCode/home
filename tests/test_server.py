@@ -234,9 +234,7 @@ def server(tmp_path: Path) -> object:
     WebhookHandler.registry = MagicMock()
     WebhookHandler.state_reader = MagicMock()
     WebhookHandler._gh = MagicMock()
-    WebhookHandler.dispatchers = {
-        "owner/repo": Dispatcher(cfg, repo_cfg, MagicMock(), MagicMock())
-    }
+    WebhookHandler.dispatchers = {"owner/repo": Dispatcher(cfg, repo_cfg, MagicMock())}
     WebhookHandler._fn_spawn_bg = staticmethod(_capturing_spawn_bg)  # type: ignore[assignment]
     srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
     port = srv.server_address[1]
@@ -800,160 +798,6 @@ class TestPatchIssueCache:
             "assignee": {"login": "fido"},
         }
         status = _post_webhook(url, cfg, "issues", payload)
-        assert status == 200
-
-
-class TestPatchCommentCache:
-    """Webhook → per-(repo, item) CommentCache routing (#1754)."""
-
-    def test_pr_top_level_issue_comment_routes_by_pr_number(
-        self, server: tuple
-    ) -> None:
-        # Top-level PR comments arrive as ``issue_comment`` events with
-        # ``issue.pull_request`` set — that's what makes the issue a PR.
-        url, cfg = server
-        cache = MagicMock()
-        WebhookHandler.registry.get_comment_cache.return_value = cache
-        payload = {
-            **_payload(),
-            "action": "created",
-            "issue": {
-                "number": 42,
-                "pull_request": {"url": "https://example/p/42"},
-            },
-            "comment": {
-                "id": 100,
-                "body": "hi",
-                "user": {"login": "alice"},
-                "updated_at": "2024-01-15T10:00:00Z",
-            },
-        }
-        status = _post_webhook(url, cfg, "issue_comment", payload)
-        assert status == 200
-        WebhookHandler.registry.get_comment_cache.assert_called_with(
-            "owner/repo", 42, WebhookHandler._gh
-        )
-        cache.apply_event.assert_called_once()
-        assert cache.apply_event.call_args.args[0] == "issue_comment"
-
-    def test_plain_issue_comment_does_not_create_cache(self, server: tuple) -> None:
-        # ``issue_comment`` events fire for plain issues too (issues
-        # without a ``pull_request`` field).  Fido's Dispatcher ignores
-        # those, and we ignore them here too so the registry doesn't
-        # accumulate caches for items Fido doesn't work on (codex P2
-        # on #1751).
-        url, cfg = server
-        WebhookHandler.registry.reset_mock()
-        payload = {
-            **_payload(),
-            "action": "created",
-            "issue": {"number": 42},  # no pull_request field
-            "comment": {
-                "id": 100,
-                "body": "hi",
-                "user": {"login": "alice"},
-                "updated_at": "2024-01-15T10:00:00Z",
-            },
-        }
-        status = _post_webhook(url, cfg, "issue_comment", payload)
-        assert status == 200
-        WebhookHandler.registry.get_comment_cache.assert_not_called()
-
-    def test_pull_request_review_comment_routes_by_pr_number(
-        self, server: tuple
-    ) -> None:
-        url, cfg = server
-        cache = MagicMock()
-        WebhookHandler.registry.get_comment_cache.return_value = cache
-        payload = {
-            **_payload(),
-            "action": "created",
-            "pull_request": {"number": 7},
-            "comment": {
-                "id": 100,
-                "body": "review",
-                "user": {"login": "alice"},
-                "path": "foo.py",
-                "updated_at": "2024-01-15T10:00:00Z",
-            },
-        }
-        status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
-        assert status == 200
-        WebhookHandler.registry.get_comment_cache.assert_called_with(
-            "owner/repo", 7, WebhookHandler._gh
-        )
-
-    def test_pull_request_review_routes_by_pr_number(self, server: tuple) -> None:
-        url, cfg = server
-        cache = MagicMock()
-        WebhookHandler.registry.get_comment_cache.return_value = cache
-        payload = {
-            **_payload(),
-            "action": "submitted",
-            "pull_request": {"number": 7},
-            "review": {
-                "id": 1000,
-                "state": "APPROVED",
-                "body": "lgtm",
-                "user": {"login": "alice"},
-                "submitted_at": "2024-01-15T10:00:00Z",
-            },
-        }
-        status = _post_webhook(url, cfg, "pull_request_review", payload)
-        assert status == 200
-        WebhookHandler.registry.get_comment_cache.assert_called_with(
-            "owner/repo", 7, WebhookHandler._gh
-        )
-
-    def test_unrelated_event_does_not_touch_cache(self, server: tuple) -> None:
-        url, cfg = server
-        WebhookHandler.registry.reset_mock()
-        payload = {**_payload(), "action": "synchronize", "pull_request": {"number": 7}}
-        status = _post_webhook(url, cfg, "pull_request", payload)
-        assert status == 200
-        WebhookHandler.registry.get_comment_cache.assert_not_called()
-
-    def test_malformed_payloads_do_not_route(self, tmp_path: Path) -> None:
-        # Unit-level: exercise the _patch_comment_cache defensive
-        # branches without going through the webhook dispatcher
-        # (which chokes on missing keys before our patch fires and
-        # would mask whether these branches drop cleanly).
-        cfg = _config(tmp_path)
-        repo_cfg = cfg.repos["owner/repo"]
-        handler = MagicMock(spec=WebhookHandler)
-        handler.registry = MagicMock()
-        handler.gh = MagicMock()
-        patch = WebhookHandler._patch_comment_cache.__get__(handler, WebhookHandler)
-        # No "issue" key.
-        patch("issue_comment", {"action": "created"}, repo_cfg)
-        # Parent not a dict.
-        patch("issue_comment", {"issue": "not-a-dict"}, repo_cfg)
-        # Parent missing "number".
-        patch("issue_comment", {"issue": {}}, repo_cfg)
-        # "number" not int.
-        patch("issue_comment", {"issue": {"number": "x"}}, repo_cfg)
-        handler.registry.get_comment_cache.assert_not_called()
-
-    def test_cache_apply_failure_does_not_500(self, server: tuple) -> None:
-        url, cfg = server
-        cache = MagicMock()
-        cache.apply_event.side_effect = RuntimeError("boom")
-        WebhookHandler.registry.get_comment_cache.return_value = cache
-        payload = {
-            **_payload(),
-            "action": "created",
-            "issue": {
-                "number": 42,
-                "pull_request": {"url": "https://example/p/42"},
-            },
-            "comment": {
-                "id": 100,
-                "body": "hi",
-                "user": {"login": "alice"},
-                "updated_at": "2024-01-15T10:00:00Z",
-            },
-        }
-        status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
 
 
@@ -2991,160 +2835,6 @@ class TestBootstrapIssueCaches:
         mock_registry.wake.assert_called_once_with("b/r2")
 
 
-class TestBootstrapCommentCaches:
-    """Tests for bootstrap_comment_caches() (#1757)."""
-
-    def _registry_with_state(self, repo_states: dict[str, dict[str, Any]]) -> MagicMock:
-        """Build a mock registry whose ``state_for(name).load()``
-        returns the canned state.json contents for that repo.  This
-        mirrors the real registry: ``state_for`` returns a ``State``
-        scoped to the canonical git dir, so the bootstrap path
-        works for linked worktrees / submodules where
-        ``work_dir/.git`` is a file pointer (codex P2 on #1757)."""
-        registry = MagicMock()
-
-        def state_for(name: str) -> MagicMock:
-            state = MagicMock()
-            state.load.return_value = repo_states.get(name, {})
-            return state
-
-        registry.state_for.side_effect = state_for
-        return registry
-
-    def test_creates_cache_when_state_has_pr_number(self, tmp_path: Path) -> None:
-        from fido.server import bootstrap_comment_caches
-
-        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
-        mock_gh = MagicMock()
-        mock_registry = self._registry_with_state(
-            {"owner/repo": {"issue": 100, "pr_number": 42}}
-        )
-        bootstrap_comment_caches(repos, mock_gh, mock_registry)
-        mock_registry.get_comment_cache.assert_called_once_with(
-            "owner/repo", 42, mock_gh
-        )
-
-    def test_skips_when_state_lacks_pr_number(self, tmp_path: Path) -> None:
-        from fido.server import bootstrap_comment_caches
-
-        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
-        mock_gh = MagicMock()
-        mock_registry = self._registry_with_state({"owner/repo": {"issue": 100}})
-        bootstrap_comment_caches(repos, mock_gh, mock_registry)
-        mock_registry.get_comment_cache.assert_not_called()
-
-    def test_skips_when_pr_number_is_zero(self, tmp_path: Path) -> None:
-        from fido.server import bootstrap_comment_caches
-
-        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
-        mock_gh = MagicMock()
-        mock_registry = self._registry_with_state(
-            {"owner/repo": {"issue": 100, "pr_number": 0}}
-        )
-        bootstrap_comment_caches(repos, mock_gh, mock_registry)
-        mock_registry.get_comment_cache.assert_not_called()
-
-    def test_skips_when_state_is_empty(self, tmp_path: Path) -> None:
-        from fido.server import bootstrap_comment_caches
-
-        # State.load() returns {} when state.json is absent.
-        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
-        mock_gh = MagicMock()
-        mock_registry = self._registry_with_state({})
-        bootstrap_comment_caches(repos, mock_gh, mock_registry)
-        mock_registry.get_comment_cache.assert_not_called()
-
-    def test_uses_registry_state_for_for_worktree_safety(self, tmp_path: Path) -> None:
-        """Bootstrap reads state via ``registry.state_for(name)`` —
-        not by hardcoding ``work_dir/.git/fido`` — so linked
-        worktrees and submodules (where ``work_dir/.git`` is a file
-        pointer) resolve to the real fido dir (codex P2 on #1757)."""
-        from fido.server import bootstrap_comment_caches
-
-        repos = {"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)}
-        mock_gh = MagicMock()
-        mock_registry = self._registry_with_state({"owner/repo": {"pr_number": 42}})
-        bootstrap_comment_caches(repos, mock_gh, mock_registry)
-        mock_registry.state_for.assert_called_with("owner/repo")
-
-    def test_per_repo_failure_is_swallowed(self, tmp_path: Path) -> None:
-        """A transient GH error on one repo must not stop other repos
-        from being bootstrapped — same shape as bootstrap_issue_caches."""
-        import requests
-
-        from fido.server import bootstrap_comment_caches
-
-        repos = {
-            "a/r1": RepoConfig(name="a/r1", work_dir=tmp_path),
-            "b/r2": RepoConfig(name="b/r2", work_dir=tmp_path),
-        }
-        mock_gh = MagicMock()
-        call_log: list[tuple[str, int]] = []
-        mock_registry = self._registry_with_state(
-            {
-                "a/r1": {"pr_number": 42},
-                "b/r2": {"pr_number": 99},
-            }
-        )
-
-        def get_or_fail(repo: str, item: int, _gh: object) -> MagicMock:
-            call_log.append((repo, item))
-            if repo == "a/r1":
-                raise requests.RequestException("API down")
-            return MagicMock()
-
-        mock_registry.get_comment_cache.side_effect = get_or_fail
-        bootstrap_comment_caches(repos, mock_gh, mock_registry)
-        # Second repo still bootstrapped.
-        assert ("b/r2", 99) in call_log
-
-
-class TestDestroyCommentCacheOnPRClose:
-    """Webhook PR-close events destroy the per-(repo, pr) cache (#1757)."""
-
-    def test_pr_closed_destroys_cache(self, server: tuple) -> None:
-        url, cfg = server
-        WebhookHandler.registry.reset_mock()
-        payload = {
-            **_payload(),
-            "action": "closed",
-            "pull_request": {"number": 7, "merged": False},
-        }
-        status = _post_webhook(url, cfg, "pull_request", payload)
-        assert status == 200
-        WebhookHandler.registry.destroy_comment_cache.assert_called_with(
-            "owner/repo", 7
-        )
-
-    def test_pr_merged_destroys_cache_too(self, server: tuple) -> None:
-        # Merged closes self-restart, but we still tidy the cache
-        # before the restart fires.
-        url, cfg = server
-        WebhookHandler.registry.reset_mock()
-        payload = {
-            **_payload(),
-            "action": "closed",
-            "pull_request": {"number": 7, "merged": True},
-        }
-        status = _post_webhook(url, cfg, "pull_request", payload)
-        assert status == 200
-        WebhookHandler.registry.destroy_comment_cache.assert_called_with(
-            "owner/repo", 7
-        )
-
-    def test_pr_opened_does_not_destroy(self, server: tuple) -> None:
-        url, cfg = server
-        WebhookHandler.registry.reset_mock()
-        payload = {
-            **_payload(),
-            "action": "opened",
-            "pull_request": {"number": 7},
-        }
-        status = _post_webhook(url, cfg, "pull_request", payload)
-        assert status == 200
-        WebhookHandler.registry.destroy_comment_cache.assert_not_called()
-
-
 class TestRun:
     """Tests for the run() entry point."""
 
@@ -3168,7 +2858,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -3215,7 +2905,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -3247,7 +2937,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -3279,7 +2969,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -3321,7 +3011,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
@@ -3353,7 +3043,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
@@ -3382,7 +3072,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _stderr=mock_stderr,
@@ -3426,7 +3116,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
@@ -3472,7 +3162,7 @@ class TestRun:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
@@ -3496,7 +3186,7 @@ class TestRun:
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
         mock_registry = MagicMock()
-        mock_make_registry = MagicMock(return_value=(mock_registry, {}))
+        mock_make_registry = MagicMock(return_value=mock_registry)
         mock_watchdog_cls = MagicMock()
 
         run(
@@ -3526,7 +3216,7 @@ class TestRun:
         fake_cfg = self._fake_cfg(tmp_path)
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
-        mock_make_registry = MagicMock(return_value=(MagicMock(), {}))
+        mock_make_registry = MagicMock(return_value=MagicMock())
         mock_rl_cls = MagicMock()
         mock_gh_instance = MagicMock()
 
@@ -3559,42 +3249,6 @@ class TestRun:
         assert rl_args[1] is mock_make_registry.call_args.kwargs["state_updater"]
         mock_rl_cls.return_value.start_thread.assert_called_once()
 
-    def test_run_dispatcher_factory_builds_dispatcher_with_registry(
-        self, tmp_path: Path
-    ) -> None:
-        """INV-6: ``run`` passes a ``dispatcher_factory`` to ``make_registry``;
-        invoking it must produce a :class:`Dispatcher` wired with the registry
-        so :meth:`Dispatcher.backfill_missed_pr_comments` can reach the
-        per-(repo, item) :class:`CommentCache`."""
-        from fido.events import Dispatcher
-        from fido.server import run
-
-        fake_cfg = self._fake_cfg(tmp_path)
-        mock_server = MagicMock()
-        mock_server.serve_forever.side_effect = KeyboardInterrupt
-        mock_make_registry = MagicMock(return_value=(MagicMock(), {}))
-
-        run(
-            _from_args=lambda: fake_cfg,
-            _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=mock_make_registry,
-            _path_home=lambda: tmp_path,
-            _basic_config=MagicMock(),
-            _populate_memberships=MagicMock(),
-            _preflight_repo_identity=MagicMock(),
-            _preflight_tools=MagicMock(),
-            _preflight_sub_dir=MagicMock(),
-            _preflight_gh_auth=MagicMock(),
-            _GitHub=MagicMock,
-            _ProviderPressureMonitor=MagicMock(),
-            _RateLimitMonitor=MagicMock(),
-        )
-
-        factory = mock_make_registry.call_args.kwargs["dispatcher_factory"]
-        repo_cfg = next(iter(fake_cfg.repos.values()))
-        produced = factory(repo_cfg, MagicMock())
-        assert isinstance(produced, Dispatcher)
-
     def test_run_starts_reconcile_watchdog_with_registry_repos_and_gh(
         self, tmp_path: Path
     ) -> None:
@@ -3604,7 +3258,7 @@ class TestRun:
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
         mock_registry = MagicMock()
-        mock_make_registry = MagicMock(return_value=(mock_registry, {}))
+        mock_make_registry = MagicMock(return_value=mock_registry)
         mock_reconcile_cls = MagicMock()
         mock_gh_instance = MagicMock()
 
@@ -3649,7 +3303,7 @@ class TestRun:
             run(
                 _from_args=lambda: fake_cfg,
                 _HTTPServer=lambda *a, **kw: mock_server,
-                _make_registry=MagicMock(return_value=(MagicMock(), {})),
+                _make_registry=MagicMock(),
                 _path_home=lambda: tmp_path,
                 _basic_config=MagicMock(),
                 _populate_memberships=MagicMock(),
@@ -3706,7 +3360,7 @@ class TestRun:
         mock_server = MagicMock()
         mock_server.serve_forever.side_effect = KeyboardInterrupt
         mock_registry = MagicMock()
-        mock_make_registry = MagicMock(return_value=(mock_registry, {}))
+        mock_make_registry = MagicMock(return_value=mock_registry)
         mock_bootstrap = MagicMock()
         mock_gh_instance = MagicMock()
 
@@ -3951,7 +3605,7 @@ class TestPreflightRepoIdentity:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -3984,7 +3638,7 @@ class TestPreflightRepoIdentity:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -4017,7 +3671,7 @@ class TestPreflightRepoIdentity:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -4050,7 +3704,7 @@ class TestPreflightRepoIdentity:
         run(
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(return_value=(MagicMock(), {})),
+            _make_registry=MagicMock(),
             _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
@@ -4082,7 +3736,7 @@ class TestPreflightRepoIdentity:
             run(
                 _from_args=lambda: fake_cfg,
                 _HTTPServer=lambda *a, **kw: mock_server,
-                _make_registry=MagicMock(return_value=(MagicMock(), {})),
+                _make_registry=MagicMock(),
                 _path_home=lambda: tmp_path,
                 _basic_config=MagicMock(),
                 _populate_memberships=MagicMock(),
@@ -4372,7 +4026,7 @@ class TestSelfRestart:
         WebhookHandler.config = cfg
         WebhookHandler.registry = mock_registry
         WebhookHandler.dispatchers = {
-            "owner/fido": Dispatcher(cfg, repo_cfg, MagicMock(), MagicMock())
+            "owner/fido": Dispatcher(cfg, repo_cfg, MagicMock())
         }
         srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
         port = srv.server_address[1]

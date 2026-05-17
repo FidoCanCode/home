@@ -66,7 +66,6 @@ from fido.store import FidoStore, ReplyPromiseRecord
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.tasks import Tasks
 from fido.watchdog import (
-    CommentReconcileWatchdog,
     IssueReconcileWatchdog,
     Watchdog,
 )
@@ -81,16 +80,6 @@ _PULL_BACKOFF_DELAYS: tuple[int, ...] = (10, 30, 60)
 _PULL_BUDGET_SECONDS: float = 600.0
 _RESTART_EXIT_CODE = 75
 _REQUEST_TIMEOUT_SECONDS = 10.0
-
-# Comment webhook event → the payload key carrying the item number that
-# scopes the cache.  ``pull_request_review`` events nest their entry
-# under ``payload["review"]`` (vs ``payload["comment"]`` for the other
-# two), but the item-number lookup uses the parent regardless.
-_COMMENT_EVENT_PARENT_KEYS: dict[str, str] = {
-    "issue_comment": "issue",
-    "pull_request_review_comment": "pull_request",
-    "pull_request_review": "pull_request",
-}
 
 
 class PreflightError(RuntimeError):
@@ -543,34 +532,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 repo_name,
             )
 
-        # Patch the per-(repo, item) comment cache for comment / review
-        # events (#1754).  Same failure tolerance as the issue cache —
-        # log, continue, the eventual reconcile (#1759) will heal.
-        try:
-            self._patch_comment_cache(event, payload, repo_cfg)
-        except Exception:
-            log.exception(
-                "comment-cache patch failed for %s — next list fetch will heal",
-                repo_name,
-            )
-
-        # Destroy the comment cache when the PR closes (merged or not).
-        # Bounds growth per the codex P2 about unbounded ``_comment_caches``
-        # (#1757).  Merged closes also trigger self-restart below which
-        # would drop the cache anyway, but tidying it here keeps the
-        # invariant (cache exists iff Fido has work on the item) holding
-        # in the pre-restart window too.  ``pull_request.number`` is
-        # validated by the dispatcher above, so a missing/non-int here
-        # would have already 500'd.
-        if event == "pull_request" and payload.get("action") == "closed":
-            self.registry.destroy_comment_cache(
-                repo_cfg.name, payload["pull_request"]["number"]
-            )
-            # The per-repo HTTP cache (see :meth:`GitHub.clear_repo_cache`)
-            # is wiped on the worker's next PR-transition hook rather than
-            # here — webhook-side wipe would need its own access to gh and
-            # the worker already covers it within a few seconds of the
-            # close on its next loop iteration.
+        # #1772: in-process per-(repo, item) ``CommentCache`` is gone.
+        # Comment / review webhooks no longer drive a cache patch; the
+        # transport-layer ETag cache on :class:`~fido.github.GitHub`
+        # revalidates on every read so freshness is server-authoritative.
+        # PR-close wipe of the per-repo HTTP cache happens on the worker's
+        # next PR-transition hook (see :meth:`GitHub.clear_repo_cache`).
 
         # Acknowledge only after dispatch succeeds.
         self._respond(200, "ok")
@@ -668,40 +635,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
         )
         cache = self.registry.get_issue_cache(repo_cfg.name)
         cache.apply_event(cache_event_type, cache_payload)
-
-    def _patch_comment_cache(
-        self, event: str, payload: dict[str, Any], repo_cfg: RepoConfig
-    ) -> None:
-        """Route a comment / review webhook to the per-(repo, item) cache.
-
-        Extracts the item (issue or PR) number from the payload, looks
-        up the right :class:`~fido.comment_cache.CommentCache` via the
-        registry, and hands the event to ``apply_event``.  Unrelated
-        event types are silently ignored (every webhook hits this
-        method; only comment/review events have a cache target).
-
-        ``issue_comment`` events fire for plain-issue comments AND PR
-        top-level comments (PRs are issues for that endpoint).  Fido's
-        dispatcher (``events.py``) ignores plain-issue comments, so
-        we mirror that filter here — otherwise busy repos with lots of
-        issue traffic accumulate caches we'll never use (codex P2 on
-        #1751).  Proper lifecycle binding (cache created only when
-        Fido has work on the item) lands in #1757.
-        """
-        parent_key = _COMMENT_EVENT_PARENT_KEYS.get(event)
-        if parent_key is None:
-            return
-        parent = payload.get(parent_key)
-        if not isinstance(parent, dict):
-            return
-        item_number = parent.get("number")
-        if not isinstance(item_number, int):
-            return
-        if event == "issue_comment" and not parent.get("pull_request"):
-            # Plain-issue comment — Dispatcher ignores these too.
-            return
-        cache = self.registry.get_comment_cache(repo_cfg.name, item_number, self.gh)
-        cache.apply_event(event, payload)
 
     def _process_action(self, action: Action, repo_cfg: RepoConfig) -> None:
         description = self._describe_action(action)
@@ -1231,61 +1164,6 @@ def populate_memberships(config: Config, gh: GitHub) -> None:
         )
 
 
-def bootstrap_comment_caches(
-    repos: dict[str, RepoConfig],
-    gh: GitHub,
-    registry: WorkerRegistry,
-) -> None:
-    """Bootstrap per-(repo, PR) :class:`~fido.comment_cache.CommentCache`
-    instances for repos whose worker is mid-PR at startup (#1757).
-
-    Called once in :func:`run` after the registry is created (so
-    :meth:`WorkerRegistry.state_for` is wired with the canonical git
-    dir — matters for linked worktrees and submodules where
-    ``work_dir/.git`` is a file pointer rather than the real
-    directory).  For each managed repo, reads ``state.json`` for the
-    active PR number (if any) and creates + hydrates a CommentCache
-    for that ``(repo, pr)`` pair.  Restart-safety mirror of
-    :func:`bootstrap_issue_caches`: avoids paying the three-list-
-    fetch cost on the first webhook arrival after restart.
-
-    Per-repo failures are swallowed (logged, not raised): a single
-    GitHub API hiccup must not block fido from starting.  The
-    registry rolls back the half-built cache on hydrate failure
-    (codex P1 on #1756), and the next webhook arrival for the PR
-    will lazy-create the cache as a safety net.
-    """
-    for name in repos:
-        # Reuse the registry's State — it was constructed against the
-        # canonical git dir (``git rev-parse --absolute-git-dir``), so
-        # worktrees and submodules where ``work_dir/.git`` is a file
-        # pointer resolve to the real fido dir.  Codex P2 on #1757:
-        # hardcoding ``work_dir/.git/fido`` silently misses pr_number
-        # in those configurations.
-        pr_number = registry.state_for(name).load().get("pr_number")
-        if not isinstance(pr_number, int) or pr_number <= 0:
-            continue
-        try:
-            log.info(
-                "startup: bootstrapping comment cache for %s PR #%d",
-                name,
-                pr_number,
-            )
-            registry.get_comment_cache(name, pr_number, gh)
-        except (
-            requests.RequestException,
-            GraphQLError,
-            subprocess.CalledProcessError,
-            subprocess.TimeoutExpired,
-        ):
-            log.exception(
-                "startup: failed to bootstrap comment cache for %s PR #%d — "
-                "next webhook arrival will lazy-create",
-                name,
-                pr_number,
-            )
-
-
 def bootstrap_issue_caches(
     repos: dict[str, RepoConfig],
     gh: GitHub,
@@ -1336,9 +1214,7 @@ def run(
     *,
     _from_args: Callable[..., Config] = Config.from_args,
     _HTTPServer: Callable[..., HTTPServer] = FidoHTTPServer,
-    _make_registry: Callable[..., tuple[WorkerRegistry, dict[str, Dispatcher]]] = (
-        make_registry
-    ),
+    _make_registry: Callable[..., WorkerRegistry] = make_registry,
     _path_home: Callable[[], Path] = Path.home,
     _basic_config: Callable[..., None] = logging.basicConfig,
     _stderr: IO[str] = sys.stderr,
@@ -1347,9 +1223,6 @@ def run(
     _kill_active_children: Callable[..., None] = kill_active_children,
     _Watchdog: type[Watchdog] = Watchdog,
     _IssueReconcileWatchdog: type[IssueReconcileWatchdog] = IssueReconcileWatchdog,
-    _CommentReconcileWatchdog: type[
-        CommentReconcileWatchdog
-    ] = CommentReconcileWatchdog,
     _SessionLockWatchdog: type[SessionLockWatchdog] = SessionLockWatchdog,
     _RateLimitMonitor: type[RateLimitMonitor] = RateLimitMonitor,
     _ProviderPressureMonitor: type[ProviderPressureMonitor] = ProviderPressureMonitor,
@@ -1359,7 +1232,6 @@ def run(
     _preflight_gh_auth: Callable[..., None] = preflight_gh_auth,
     _GitHub: type[GitHub] = GitHub,
     _bootstrap_issue_caches: Callable[..., None] = bootstrap_issue_caches,
-    _bootstrap_comment_caches: Callable[..., None] = bootstrap_comment_caches,
 ) -> None:
     config = _from_args()
 
@@ -1433,39 +1305,29 @@ def run(
         )
     )
 
-    # Dispatchers are constructed inside _make_registry so each one can
-    # receive the registry via constructor-DI — Dispatcher needs it for
-    # CommentCache routing (INV-6 of #1748).
-    def _build_dispatcher(repo_cfg: RepoConfig, reg: WorkerRegistry) -> Dispatcher:
-        return Dispatcher(config, repo_cfg, gh, reg)
-
-    registry, dispatchers = _make_registry(
+    dispatchers = {
+        name: Dispatcher(config, repo_cfg, gh)
+        for name, repo_cfg in config.repos.items()
+    }
+    WebhookHandler.dispatchers = dispatchers
+    registry = _make_registry(
         config.repos,
         gh,
         config,
-        dispatcher_factory=_build_dispatcher,
+        dispatchers=dispatchers,
         state_updater=state_updater,
     )
-    WebhookHandler.dispatchers = dispatchers
     WebhookHandler.registry = registry
     WebhookHandler.state_reader = state_reader
     # Bootstrap issue caches eagerly so the picker has populated data immediately —
     # even for repos whose worker resumes on an existing issue and never calls
     # find_next_issue during this run (closes #837).
     _bootstrap_issue_caches(config.repos, gh, registry)
-    # Bootstrap comment caches for repos that have an active PR in
-    # state.json (#1757) — restart safety so the first webhook
-    # arrival doesn't pay the three-list-fetch cost on the hot path.
-    _bootstrap_comment_caches(config.repos, gh, registry)
     # Route webhook-handler prompt calls through the per-repo persistent
     # ClaudeSession (closes #479 — "one claude per repo" invariant).
     provider.set_session_resolver(registry.get_session)
     _Watchdog(registry, config.repos).start_thread()
     _IssueReconcileWatchdog(registry, config.repos, gh).start_thread()
-    # Per-(repo, item) CommentCache reconcile (#1759) — analog to the
-    # IssueReconcileWatchdog.  Iterates every live CommentCache and
-    # calls ``refresh`` to heal drift from missed webhook deliveries.
-    _CommentReconcileWatchdog(registry).start_thread()
     # Session-lock watchdog evicts FSM lock holders that have parked past
     # the deadline — without it, a holder wedged inside
     # ``consume_until_result`` on a streaming-forever subprocess holds
