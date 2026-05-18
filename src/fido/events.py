@@ -46,7 +46,7 @@ from fido.tasks import (
     Tasks,
     thread_comment_author_for_auto_resolve_oracle,
 )
-from fido.types import ActiveIssue, ActivePR, RescopeIntent, TaskType
+from fido.types import ActiveIssue, ActivePR, IntentVerdict, RescopeIntent, TaskType
 from fido.worker import ActivityReporter
 
 log = logging.getLogger(__name__)
@@ -2482,7 +2482,14 @@ def _build_on_intent_dispositions(
     gh: GitHub,
     agent: ProviderAgent | None,
     prompts: Prompts | None,
-) -> Callable[[dict[int, IntentDisposition], list[dict[str, Any]]], None]:
+) -> Callable[
+    [
+        dict[int, IntentDisposition],
+        list[dict[str, Any]],
+        list[IntentVerdict],
+    ],
+    None,
+]:
     """Build the per-iteration intent-dispositions callback (#1724).
 
     Each rescope iteration may carry a different ``current_intents``
@@ -2499,9 +2506,11 @@ def _build_on_intent_dispositions(
     def on_intent_dispositions(
         dispositions: dict[int, IntentDisposition],
         result: list[dict[str, Any]],
+        verdicts: list[IntentVerdict],
     ) -> None:
         if pr_ctx is None:
             return
+        verdict_by_cid = {v.intent_comment_id: v for v in verdicts}
         # Dispositions dict iteration order is intent-timestamp
         # ascending (the classifier sorts) — we fire notifications in
         # the same order so the chronological story reads top to
@@ -2514,8 +2523,28 @@ def _build_on_intent_dispositions(
             intent = intents_by_cid.get(cid)
             if intent is None or disposition.kind == "aggregation":
                 continue
-            if disposition.kind == "unhandled" and not _has_earlier_attributed_sibling(
-                intent, intents, dispositions
+            verdict = verdict_by_cid.get(cid)
+            is_supersedence = (
+                verdict is not None and verdict.by_intent_comment_id is not None
+            )
+            if is_supersedence:
+                # INV-E (#1803): supersedence has its own reply policy
+                # — same author = silent (they already know what they
+                # meant), cross-author = always notify (the displaced
+                # reviewer must hear their ask was overridden).  This
+                # bypasses the older "unhandled-with-only-later-
+                # attributed silent" rule because supersedence is a
+                # different relationship than implicit cover.
+                assert verdict is not None  # narrowed by is_supersedence
+                if _is_self_supersedence(verdict, intent, intents_by_cid):
+                    log.info(
+                        "skipping reply-back for self-superseded intent %s (INV-E)",
+                        cid,
+                    )
+                    continue
+            elif (
+                disposition.kind == "unhandled"
+                and not _has_earlier_attributed_sibling(intent, intents, dispositions)
             ):
                 # Either no other intents touched anything, or every
                 # attributed sibling is strictly newer than this one.
@@ -2538,6 +2567,31 @@ def _build_on_intent_dispositions(
             )
 
     return on_intent_dispositions
+
+
+def _is_self_supersedence(
+    verdict: IntentVerdict,
+    intent: RescopeIntent,
+    intents_by_cid: dict[int, RescopeIntent],
+) -> bool:
+    """True iff *verdict* names a superseding intent with the same author.
+
+    INV-E (#1803): when one commenter says "red" then "green" in the
+    same batch and Opus marks the first verdict superseded by the
+    second, Fido must NOT post a reply explaining the supersedence —
+    the commenter already knows.  Cross-author supersedence still
+    warrants a reply so the displaced reviewer sees that their ask
+    was overridden by someone else's later comment.
+
+    Caller must have already established ``verdict.by_intent_comment_id
+    is not None``; ``intents_by_cid`` must contain the superseding
+    intent (the verdict parser validates batch membership).  Empty
+    ``intent.author`` returns ``False`` so unauthored intents (test
+    scaffolding) never accidentally match.
+    """
+    assert verdict.by_intent_comment_id is not None  # narrowed by caller
+    by_intent = intents_by_cid[verdict.by_intent_comment_id]
+    return bool(intent.author) and intent.author == by_intent.author
 
 
 def _has_earlier_attributed_sibling(

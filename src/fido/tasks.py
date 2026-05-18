@@ -2850,7 +2850,12 @@ def reorder_tasks(
     _on_changes: Callable[[list[dict[str, Any]]], None] | None = None,
     _on_inprogress_affected: Callable[[str], None] | None = None,
     _on_intent_dispositions: Callable[
-        [dict[int, IntentDisposition], list[dict[str, Any]]], None
+        [
+            dict[int, IntentDisposition],
+            list[dict[str, Any]],
+            list[IntentVerdict],
+        ],
+        None,
     ]
     | None = None,
     _on_done: Callable[[], None] | None = None,
@@ -2937,6 +2942,11 @@ def reorder_tasks(
     )
     operations: list[_RescopeOp] = []
     parse_errors: list[str] = ["initial parse"]
+    # Hoisted across nudge iterations so the final successful parse is
+    # available to the post-apply ``_on_intent_dispositions`` callback —
+    # INV-E (#1803) needs verdict.by_intent_comment_id + the superseding
+    # intent's author to decide reply-back suppression.
+    verdicts: list[IntentVerdict] = []
     for nudge_attempt in range(_RESCOPE_MAX_NUDGES + 1):
         if use_verdicts:
             verdicts, verdict_errors = _parse_rescope_verdicts(raw, intents or [])
@@ -3196,7 +3206,9 @@ def reorder_tasks(
         # the full disposition map even for batches that produced no
         # thread-change records.
         _on_intent_dispositions(
-            _classify_rescope_intents(pre_rescope, result, intents), result
+            _classify_rescope_intents(pre_rescope, result, intents),
+            result,
+            verdicts,
         )
 
     if inprogress_affected and _on_inprogress_affected is not None:

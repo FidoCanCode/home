@@ -50,7 +50,7 @@ from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import SynthesisExhaustedError
 from fido.synthesis_executor import CommentTarget
 from fido.tasks import IntentDisposition
-from fido.types import ActiveIssue, ActivePR, RescopeIntent
+from fido.types import ActiveIssue, ActivePR, IntentVerdict, RescopeIntent
 from fido.worker import ActivityReporter
 from tests.fakes import _FakeDispatcher
 
@@ -4592,11 +4592,12 @@ class TestBuildOnIntentDispositions:
             sub_dir=tmp_path / "sub",
         )
 
-    def _intent(self, comment_id: int, ts: str) -> RescopeIntent:
+    def _intent(self, comment_id: int, ts: str, author: str = "") -> RescopeIntent:
         return RescopeIntent(
             change_request=f"req {comment_id}",
             comment_id=comment_id,
             timestamp=ts,
+            author=author,
         )
 
     def _disposition(
@@ -4625,7 +4626,7 @@ class TestBuildOnIntentDispositions:
             agent=_client("nope"),
             prompts=Prompts("p"),
         )
-        cb({101: self._disposition()}, [])
+        cb({101: self._disposition()}, [], [])
         mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_aggregation_filtered_material_and_unhandled_fire(
@@ -4662,6 +4663,7 @@ class TestBuildOnIntentDispositions:
                 202: self._disposition(kind="material"),
                 303: self._disposition(kind="unhandled", affected=[]),
             },
+            [],
             [],
         )
         # 101 silent (aggregation); 202 + 303 both fire — in
@@ -4709,6 +4711,7 @@ class TestBuildOnIntentDispositions:
                 303: self._disposition(),
             },
             [],
+            [],
         )
         comment_ids = [
             c.args[3] for c in mock_gh.reply_to_review_comment.call_args_list
@@ -4737,7 +4740,7 @@ class TestBuildOnIntentDispositions:
             agent=_client("nope"),
             prompts=Prompts("p"),
         )
-        cb({101: self._disposition()}, [])
+        cb({101: self._disposition()}, [], [])
         mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_unhandled_with_only_later_attributed_silently_skips(
@@ -4773,6 +4776,7 @@ class TestBuildOnIntentDispositions:
                 101: self._disposition(kind="unhandled", affected=[]),
                 202: self._disposition(kind="material"),
             },
+            [],
             [],
         )
         # 101 silent (older unhandled, only later attributed); 202
@@ -4814,6 +4818,7 @@ class TestBuildOnIntentDispositions:
                 202: self._disposition(kind="unhandled", affected=[]),
             },
             [],
+            [],
         )
         comment_ids = [
             c.args[3] for c in mock_gh.reply_to_review_comment.call_args_list
@@ -4845,7 +4850,7 @@ class TestBuildOnIntentDispositions:
             agent=_client("text"),
             prompts=Prompts("p"),
         )
-        cb({101: self._disposition(kind="unhandled", affected=[])}, [])
+        cb({101: self._disposition(kind="unhandled", affected=[])}, [], [])
         mock_gh.reply_to_review_comment.assert_not_called()
 
     def test_unhandled_silent_when_only_unhandled_siblings(
@@ -4880,8 +4885,118 @@ class TestBuildOnIntentDispositions:
                 202: self._disposition(kind="unhandled", affected=[]),
             },
             [],
+            [],
         )
         mock_gh.reply_to_review_comment.assert_not_called()
+
+    def test_self_supersedence_suppresses_reply_back(self, tmp_path: Path) -> None:
+        # INV-E (#1803): when the same commenter says "red" then
+        # "green" in the same batch and Opus marks the first verdict
+        # superseded by the second, NO reply-back fires — they
+        # already know.  The "green" verdict itself still reports
+        # normally via its own disposition.
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        pr = ActivePR(
+            number=42,
+            title="t",
+            url="https://github.com/owner/repo/pull/42",
+            body="",
+        )
+        red = self._intent(101, "2024-01-15T10:00:00+00:00", author="rhencke")
+        green = self._intent(202, "2024-01-15T10:01:00+00:00", author="rhencke")
+        cb = _build_on_intent_dispositions(
+            intents=[red, green],
+            repo="owner/repo",
+            pr_ctx=pr,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=mock_gh,
+            agent=_client("Reply text"),
+            prompts=Prompts("p"),
+        )
+        cb(
+            {
+                101: self._disposition(kind="unhandled", affected=[]),
+                202: self._disposition(kind="material"),
+            },
+            [],
+            [
+                IntentVerdict(
+                    intent_comment_id=101,
+                    outcome="superseded",
+                    by_intent_comment_id=202,
+                    narrative="overridden by the commenter's own later ask",
+                ),
+                IntentVerdict(
+                    intent_comment_id=202,
+                    outcome="reshaped",
+                    ops=({"op": "rewrite", "id": "t1", "title": "do green"},),
+                    affected_task_ids=("t1",),
+                    narrative="acted on the later ask",
+                ),
+            ],
+        )
+        # Only the superseding (green) verdict notifies; the
+        # self-superseded one (red) is silent.
+        comment_ids = [
+            c.args[3] for c in mock_gh.reply_to_review_comment.call_args_list
+        ]
+        assert comment_ids == [202]
+
+    def test_cross_author_supersedence_still_replies(self, tmp_path: Path) -> None:
+        # INV-E (#1803) inverse: when the superseding intent comes
+        # from a DIFFERENT author, the original commenter must still
+        # hear that their ask got overridden — they don't know
+        # what the other reviewer said.
+        cfg = self._cfg(tmp_path)
+        mock_gh = MagicMock()
+        pr = ActivePR(
+            number=42,
+            title="t",
+            url="https://github.com/owner/repo/pull/42",
+            body="",
+        )
+        alice = self._intent(101, "2024-01-15T10:00:00+00:00", author="alice")
+        bob = self._intent(202, "2024-01-15T10:01:00+00:00", author="bob")
+        cb = _build_on_intent_dispositions(
+            intents=[alice, bob],
+            repo="owner/repo",
+            pr_ctx=pr,
+            config=cfg,
+            repo_cfg=cfg.repos["owner/repo"],
+            gh=mock_gh,
+            agent=_client("Reply text"),
+            prompts=Prompts("p"),
+        )
+        cb(
+            {
+                101: self._disposition(kind="unhandled", affected=[]),
+                202: self._disposition(kind="material"),
+            },
+            [],
+            [
+                IntentVerdict(
+                    intent_comment_id=101,
+                    outcome="superseded",
+                    by_intent_comment_id=202,
+                    narrative="overridden by bob's later ask",
+                ),
+                IntentVerdict(
+                    intent_comment_id=202,
+                    outcome="reshaped",
+                    ops=({"op": "rewrite", "id": "t1", "title": "bob's ask"},),
+                    affected_task_ids=("t1",),
+                    narrative="acted on bob's ask",
+                ),
+            ],
+        )
+        # Both fire: alice hears she was overridden by bob; bob
+        # hears his ask landed.
+        comment_ids = [
+            c.args[3] for c in mock_gh.reply_to_review_comment.call_args_list
+        ]
+        assert comment_ids == [101, 202]
 
 
 class TestBackfillMissedPrComments:

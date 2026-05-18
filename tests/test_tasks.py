@@ -3451,7 +3451,7 @@ class TestReorderTasks:
             "",
             agent=_client(raw),
             intents=intents,
-            _on_intent_dispositions=lambda d, r: captured.append((d, r)),
+            _on_intent_dispositions=lambda d, r, _v: captured.append((d, r)),
         )
         assert len(captured) == 1
         dispositions, result_tasks = captured[0]
@@ -3472,7 +3472,7 @@ class TestReorderTasks:
             Tasks(tmp_path),
             "",
             agent=_client(raw),
-            _on_intent_dispositions=lambda _d, _r: called.append(1),
+            _on_intent_dispositions=lambda _d, _r, _v: called.append(1),
         )
         assert called == []
 
@@ -4508,7 +4508,7 @@ class TestReorderTasksVerdictWiring:
             "",
             agent=_client(raw),
             intents=intents,
-            _on_intent_dispositions=lambda d, r: captured.append((d, r)),
+            _on_intent_dispositions=lambda d, r, _v: captured.append((d, r)),
         )
         # Disposition for intent 42 should be material (rewrite is a
         # material change per the classifier).
@@ -4571,7 +4571,7 @@ class TestReorderTasksVerdictWiring:
             "",
             agent=_client(raw),
             intents=intents,
-            _on_intent_dispositions=lambda d, r: captured.append((d, r)),
+            _on_intent_dispositions=lambda d, r, _v: captured.append((d, r)),
         )
         dispositions, _ = captured[0]
         # Both intents attributed to the rewrite via the union.
