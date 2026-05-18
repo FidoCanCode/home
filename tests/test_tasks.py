@@ -1293,8 +1293,7 @@ class TestParseRescopeVerdicts:
         # mapping reaches IntentVerdict's __post_init__ which
         # rejects ``isinstance(ops, Mapping)``.
         raw = (
-            '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored", '
-            '"ops": {}}]}'
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored", "ops": {}}]}'
         )
         _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
         assert any("sequence of op mappings" in e for e in errors)
