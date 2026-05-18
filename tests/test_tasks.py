@@ -21,6 +21,7 @@ from fido.tasks import (
     _make_new_tasks_from_opus,
     _operations_to_items,
     _parse_rescope_operations,
+    _parse_rescope_verdicts,
     _rescope_releases_for_oracle,
     _rescope_snapshot_order_for_oracle,
     _rescope_state_for_oracle,
@@ -1100,6 +1101,208 @@ class TestParseRescopeOperations:
         ops, errors = _parse_rescope_operations(raw)
         assert ops == []  # first decoded object lacks "operations" key
         assert errors == ['response: missing top-level "operations" array']
+
+
+def _intent(
+    cid: int,
+    text: str = "do thing",
+    *,
+    timestamp: str = "2024-01-15T10:00:00+00:00",
+    author: str = "alice",
+) -> RescopeIntent:
+    return RescopeIntent(
+        change_request=text,
+        comment_id=cid,
+        timestamp=timestamp,
+        author=author,
+    )
+
+
+class TestParseRescopeVerdicts:
+    def test_minimal_honored_verdict(self) -> None:
+        raw = (
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored"}]}'
+        )
+        verdicts, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert errors == []
+        assert len(verdicts) == 1
+        assert verdicts[0].outcome == "honored"
+
+    def test_full_verdict_with_all_fields(self) -> None:
+        raw = (
+            '{"verdicts": [{'
+            '"intent_comment_id": 1, '
+            '"outcome": "reshaped", '
+            '"ops": [{"op": "rewrite", "id": "T1", "title": "x"}], '
+            '"affected_task_ids": ["T1"], '
+            '"by_intent_comment_id": null, '
+            '"narrative": "folded into existing task"'
+            "}]}"
+        )
+        verdicts, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert errors == []
+        assert verdicts[0].outcome == "reshaped"
+        assert verdicts[0].affected_task_ids == ("T1",)
+        assert verdicts[0].narrative == "folded into existing task"
+
+    def test_supersedence_in_batch(self) -> None:
+        # "red" → "no, green" — red's verdict points at green.
+        raw = (
+            '{"verdicts": ['
+            '{"intent_comment_id": 1, "outcome": "superseded", '
+            '"by_intent_comment_id": 2, '
+            '"narrative": "color overridden"},'
+            '{"intent_comment_id": 2, "outcome": "honored"}'
+            "]}"
+        )
+        verdicts, errors = _parse_rescope_verdicts(
+            raw, [_intent(1), _intent(2)]
+        )
+        assert errors == []
+        assert verdicts[0].by_intent_comment_id == 2
+
+    def test_no_json_object(self) -> None:
+        _, errors = _parse_rescope_verdicts("not even json", [_intent(1)])
+        assert errors == ["response: no JSON object found"]
+
+    def test_missing_verdicts_key(self) -> None:
+        _, errors = _parse_rescope_verdicts('{"foo": []}', [_intent(1)])
+        assert errors == ['response: missing top-level "verdicts" array']
+
+    def test_verdicts_not_a_list(self) -> None:
+        _, errors = _parse_rescope_verdicts(
+            '{"verdicts": {}}', [_intent(1)]
+        )
+        assert errors == ["response.verdicts: must be a list, got dict"]
+
+    def test_verdict_not_a_dict(self) -> None:
+        _, errors = _parse_rescope_verdicts(
+            '{"verdicts": ["nope"]}', [_intent(1)]
+        )
+        # Plus the missing-verdict error for intent 1 since we couldn't parse it.
+        assert "verdicts[0]: must be a dict" in errors[0]
+
+    def test_missing_intent_comment_id(self) -> None:
+        raw = '{"verdicts": [{"outcome": "honored"}]}'
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert any("missing required field 'intent_comment_id'" in e for e in errors)
+
+    def test_missing_outcome(self) -> None:
+        raw = '{"verdicts": [{"intent_comment_id": 1}]}'
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert any("missing required field 'outcome'" in e for e in errors)
+
+    def test_unknown_intent_comment_id(self) -> None:
+        raw = '{"verdicts": [{"intent_comment_id": 999, "outcome": "honored"}]}'
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert any("999 not in batch" in e for e in errors)
+
+    def test_duplicate_intent_comment_id_in_verdicts(self) -> None:
+        raw = (
+            '{"verdicts": ['
+            '{"intent_comment_id": 1, "outcome": "honored"},'
+            '{"intent_comment_id": 1, "outcome": "no_op"}'
+            "]}"
+        )
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert any("already covered by an earlier verdict" in e for e in errors)
+
+    def test_missing_verdict_for_intent(self) -> None:
+        # Intent 2 is in the batch but has no verdict → error.
+        raw = '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored"}]}'
+        _, errors = _parse_rescope_verdicts(
+            raw, [_intent(1), _intent(2)]
+        )
+        assert any("missing verdict for intent_comment_id 2" in e for e in errors)
+
+    def test_multiple_missing_verdicts_all_reported(self) -> None:
+        # All-errors-at-once contract — both missing ids listed.
+        raw = '{"verdicts": []}'
+        _, errors = _parse_rescope_verdicts(
+            raw, [_intent(1), _intent(2)]
+        )
+        assert any("missing verdict for intent_comment_id 1" in e for e in errors)
+        assert any("missing verdict for intent_comment_id 2" in e for e in errors)
+
+    def test_by_intent_comment_id_outside_batch(self) -> None:
+        raw = (
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "superseded", '
+            '"by_intent_comment_id": 999, "narrative": "x"}]}'
+        )
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert any("by_intent_comment_id: 999 not in batch" in e for e in errors)
+
+    def test_intent_verdict_construction_error_captured(self) -> None:
+        # Outcome typo → IntentVerdict ctor raises ValueError → captured as parse error.
+        raw = (
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "supersede"}]}'
+        )
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        assert any("outcome must be one of" in e for e in errors)
+
+    def test_self_supersedence_captured_via_ctor(self) -> None:
+        raw = (
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "superseded", '
+            '"by_intent_comment_id": 1, "narrative": "x"}]}'
+        )
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
+        # ctor rejects self-supersedence with "must not reference"
+        assert any("must not reference" in e for e in errors)
+
+    def test_supersedence_cycle_detected(self) -> None:
+        # 1 ← superseded by 2; 2 ← superseded by 1 — cycle.
+        raw = (
+            '{"verdicts": ['
+            '{"intent_comment_id": 1, "outcome": "superseded", '
+            ' "by_intent_comment_id": 2, "narrative": "x"},'
+            '{"intent_comment_id": 2, "outcome": "superseded", '
+            ' "by_intent_comment_id": 1, "narrative": "y"}'
+            "]}"
+        )
+        _, errors = _parse_rescope_verdicts(
+            raw, [_intent(1), _intent(2)]
+        )
+        assert any("supersedence graph has a cycle" in e for e in errors)
+
+    def test_longer_supersedence_cycle_detected(self) -> None:
+        # 1 → 2 → 3 → 1
+        raw = (
+            '{"verdicts": ['
+            '{"intent_comment_id": 1, "outcome": "superseded", '
+            ' "by_intent_comment_id": 2, "narrative": "x"},'
+            '{"intent_comment_id": 2, "outcome": "superseded", '
+            ' "by_intent_comment_id": 3, "narrative": "y"},'
+            '{"intent_comment_id": 3, "outcome": "superseded", '
+            ' "by_intent_comment_id": 1, "narrative": "z"}'
+            "]}"
+        )
+        _, errors = _parse_rescope_verdicts(
+            raw, [_intent(1), _intent(2), _intent(3)]
+        )
+        assert any("supersedence graph has a cycle" in e for e in errors)
+
+    def test_long_chain_no_cycle_ok(self) -> None:
+        # 1 → 2 → 3 (no cycle)
+        raw = (
+            '{"verdicts": ['
+            '{"intent_comment_id": 1, "outcome": "superseded", '
+            ' "by_intent_comment_id": 2, "narrative": "x"},'
+            '{"intent_comment_id": 2, "outcome": "superseded", '
+            ' "by_intent_comment_id": 3, "narrative": "y"},'
+            '{"intent_comment_id": 3, "outcome": "honored"}'
+            "]}"
+        )
+        verdicts, errors = _parse_rescope_verdicts(
+            raw, [_intent(1), _intent(2), _intent(3)]
+        )
+        assert errors == []
+        assert len(verdicts) == 3
+
+    def test_empty_intents_and_empty_verdicts(self) -> None:
+        # Degenerate: no intents, no verdicts → ok.
+        verdicts, errors = _parse_rescope_verdicts('{"verdicts": []}', [])
+        assert errors == []
+        assert verdicts == []
 
 
 class TestFindCrossOpErrors:
