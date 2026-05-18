@@ -1,6 +1,6 @@
 """Shared type definitions for fido."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -191,10 +191,37 @@ class IntentVerdict:
 
     intent_comment_id: int
     outcome: IntentOutcome
-    ops: list[dict[str, Any]] = field(default_factory=list)
-    affected_task_ids: list[str] = field(default_factory=list)
+    ops: tuple[dict[str, Any], ...] = ()
+    affected_task_ids: tuple[str, ...] = ()
     by_intent_comment_id: int | None = None
     narrative: str | None = None
+
+    def __post_init__(self) -> None:
+        # codex P1 follow-up on #1802: enforce supersedence + outcome
+        # invariants at construction so a malformed verdict crashes at
+        # the boundary instead of leaking into the reply-back
+        # classifier (INV-E #1803) or future graph traversals.
+        if self.by_intent_comment_id == self.intent_comment_id:
+            raise ValueError(
+                f"IntentVerdict.by_intent_comment_id ({self.by_intent_comment_id}) "
+                "must not reference the verdict's own intent (self-supersedence "
+                "is meaningless); full-batch acyclicity is verified at apply time"
+            )
+        if self.outcome == "superseded" and self.by_intent_comment_id is None:
+            raise ValueError(
+                "IntentVerdict outcome='superseded' requires by_intent_comment_id "
+                "to name the superseding intent (INV-E #1803 cannot determine "
+                "self-vs-cross-author supersedence without it)"
+            )
+        if (
+            self.outcome in ("reshaped", "superseded")
+            and not (self.narrative or "").strip()
+        ):
+            raise ValueError(
+                f"IntentVerdict outcome={self.outcome!r} requires non-empty "
+                "narrative — reply-back posts narrative verbatim per "
+                "the voice-text-opus-not-templated convention"
+            )
 
 
 @dataclass(frozen=True)
