@@ -1000,3 +1000,251 @@ def test_create_task_dedup_and_abort_decision_integration() -> None:
     )
     order, rows, created_ci2 = _enqueue(11, ci_row2, order, rows)
     assert oracle.should_abort_for_new_task(11, ci_lease, rows) is False
+
+
+# --- INV-F (#1804 / epic #1798): reply-back precedence in Rocq ---
+
+
+def _intent_row(comment_id: int, author: int = 1, index: int = 0) -> object:
+    return oracle.IntentRow(
+        intent_comment_id=comment_id,
+        intent_author=author,
+        intent_index=index,
+    )
+
+
+def _verdict_row(
+    intent_id: int,
+    outcome: object,
+    *,
+    by_intent: int | None = None,
+    affected: list[int] | None = None,
+) -> object:
+    return oracle.VerdictRow(
+        verdict_intent_id=intent_id,
+        verdict_outcome=outcome,
+        verdict_by_intent=by_intent,
+        verdict_affected_tasks=affected or [],
+    )
+
+
+def _task_w_intents(task_id: int, row: object, contributing: list[int]) -> object:
+    return oracle.TaskWithIntents(
+        twi_id=task_id,
+        twi_row=row,
+        twi_contributing=contributing,
+    )
+
+
+def _disp(kind: object, affected: list[int] | None = None) -> object:
+    return oracle.IntentDisposition(disp_kind=kind, disp_affected=affected or [])
+
+
+def test_task_material_changed_new_task_counts_as_material() -> None:
+    new_row = oracle.TaskRow(
+        title="t",
+        description="d",
+        kind=oracle.TaskSpec(),
+        status=oracle.StatusPending(),
+        source_comment=None,
+        lineage_comments=[],
+    )
+    assert oracle.task_material_changed(None, new_row) is True
+
+
+def test_task_material_changed_unchanged_row_is_not_material() -> None:
+    row = oracle.TaskRow(
+        title="t",
+        description="d",
+        kind=oracle.TaskSpec(),
+        status=oracle.StatusPending(),
+        source_comment=None,
+        lineage_comments=[],
+    )
+    assert oracle.task_material_changed(row, row) is False
+
+
+def test_task_material_changed_completion_flip_is_material() -> None:
+    orig = oracle.TaskRow("t", "d", oracle.TaskSpec(), oracle.StatusPending(), None, [])
+    result = oracle.TaskRow(
+        "t", "d", oracle.TaskSpec(), oracle.StatusCompleted(), None, []
+    )
+    assert oracle.task_material_changed(orig, result) is True
+
+
+def test_task_material_changed_title_rewrite_is_material() -> None:
+    orig = oracle.TaskRow("t", "d", oracle.TaskSpec(), oracle.StatusPending(), None, [])
+    result = oracle.TaskRow(
+        "t-new", "d", oracle.TaskSpec(), oracle.StatusPending(), None, []
+    )
+    assert oracle.task_material_changed(orig, result) is True
+
+
+def test_task_material_changed_anchor_retarget_is_material() -> None:
+    orig = oracle.TaskRow("t", "d", oracle.TaskSpec(), oracle.StatusPending(), 42, [])
+    result = oracle.TaskRow("t", "d", oracle.TaskSpec(), oracle.StatusPending(), 99, [])
+    assert oracle.task_material_changed(orig, result) is True
+
+
+def test_classify_rescope_intents_material_aggregation_unhandled() -> None:
+    intents = [
+        _intent_row(101),
+        _intent_row(202, author=2, index=1),
+        _intent_row(303, index=2),
+    ]
+    orig_row = oracle.TaskRow(
+        "t", "d", oracle.TaskSpec(), oracle.StatusPending(), None, []
+    )
+    rewritten_row = oracle.TaskRow(
+        "t-new", "d", oracle.TaskSpec(), oracle.StatusPending(), None, []
+    )
+    # Task 1: contributors [101], title was rewritten → material for 101.
+    # Task 2: contributors [202], unchanged → aggregation for 202.
+    # 303 not in any task's contributors → unhandled.
+    result_tasks = [
+        _task_w_intents(1, rewritten_row, [101]),
+        _task_w_intents(2, orig_row, [202]),
+    ]
+    orig_rows = {1: orig_row, 2: orig_row}
+    dispositions = oracle.classify_rescope_intents(intents, result_tasks, orig_rows)
+    by_cid = dict(dispositions)
+    assert isinstance(by_cid[101].disp_kind, oracle.DispMaterial)
+    assert isinstance(by_cid[202].disp_kind, oracle.DispAggregation)
+    assert isinstance(by_cid[303].disp_kind, oracle.DispUnhandled)
+
+
+def test_intent_notify_decision_self_supersedence_silent() -> None:
+    # INV-E (#1803): same author = silent.
+    red = _intent_row(101, author=1, index=0)
+    green = _intent_row(202, author=1, index=1)
+    verdict = _verdict_row(101, oracle.OutcomeSuperseded(), by_intent=202)
+    decision = oracle.notify_decision_for(
+        red,
+        _disp(oracle.DispUnhandled()),
+        verdict,
+        [red, green],
+        [(101, _disp(oracle.DispUnhandled())), (202, _disp(oracle.DispMaterial()))],
+    )
+    assert isinstance(decision, oracle.NotifySilent)
+
+
+def test_intent_notify_decision_cross_author_supersedence_overridden() -> None:
+    # Cross-author supersedence ALWAYS notifies (codex precedence fix on #1818).
+    alice = _intent_row(101, author=1, index=0)
+    bob = _intent_row(202, author=2, index=1)
+    verdict = _verdict_row(101, oracle.OutcomeSuperseded(), by_intent=202)
+    # Even if disposition is aggregation, supersedence wins.
+    decision = oracle.notify_decision_for(
+        alice,
+        _disp(oracle.DispAggregation()),
+        verdict,
+        [alice, bob],
+        [(101, _disp(oracle.DispAggregation())), (202, _disp(oracle.DispMaterial()))],
+    )
+    assert isinstance(decision, oracle.NotifyOverridden)
+
+
+def test_intent_notify_decision_material_notifies() -> None:
+    intent = _intent_row(101)
+    decision = oracle.notify_decision_for(
+        intent,
+        _disp(oracle.DispMaterial()),
+        None,
+        [intent],
+        [(101, _disp(oracle.DispMaterial()))],
+    )
+    assert isinstance(decision, oracle.NotifyMaterial)
+
+
+def test_intent_notify_decision_aggregation_silent() -> None:
+    intent = _intent_row(101)
+    decision = oracle.notify_decision_for(
+        intent,
+        _disp(oracle.DispAggregation()),
+        _verdict_row(101, oracle.OutcomeHonored()),
+        [intent],
+        [(101, _disp(oracle.DispAggregation()))],
+    )
+    assert isinstance(decision, oracle.NotifySilent)
+
+
+def test_intent_notify_decision_unhandled_with_earlier_attributed_notifies() -> None:
+    earlier = _intent_row(101, index=0)
+    later = _intent_row(202, index=1)
+    decision = oracle.notify_decision_for(
+        later,
+        _disp(oracle.DispUnhandled()),
+        None,
+        [earlier, later],
+        [(101, _disp(oracle.DispMaterial())), (202, _disp(oracle.DispUnhandled()))],
+    )
+    assert isinstance(decision, oracle.NotifyUnhandled)
+
+
+def test_intent_notify_decision_unhandled_solo_silent() -> None:
+    # No earlier attributed sibling = silent (Rob's #1747 directive).
+    earlier_unhandled = _intent_row(101, index=0)
+    later_material = _intent_row(202, index=1)
+    decision = oracle.notify_decision_for(
+        earlier_unhandled,
+        _disp(oracle.DispUnhandled()),
+        None,
+        [earlier_unhandled, later_material],
+        [
+            (101, _disp(oracle.DispUnhandled())),
+            (202, _disp(oracle.DispMaterial())),
+        ],
+    )
+    assert isinstance(decision, oracle.NotifySilent)
+
+
+def test_reply_back_intents_skips_silent_and_preserves_arrival_order() -> None:
+    # Carol (index 0) is unhandled with NO earlier attributed sibling → silent.
+    # Alice (index 1) is aggregation → silent.
+    # Bob (index 2) is material → NotifyMaterial fires.
+    carol = _intent_row(303, author=3, index=0)
+    alice = _intent_row(101, author=1, index=1)
+    bob = _intent_row(202, author=2, index=2)
+    intents = [carol, alice, bob]
+    verdicts = [
+        _verdict_row(303, oracle.OutcomeNoOp()),
+        _verdict_row(101, oracle.OutcomeHonored()),
+        _verdict_row(202, oracle.OutcomeReshaped()),
+    ]
+    dispositions = [
+        (303, _disp(oracle.DispUnhandled())),
+        (101, _disp(oracle.DispAggregation())),
+        (202, _disp(oracle.DispMaterial())),
+    ]
+    entries = oracle.reply_back_intents(intents, verdicts, dispositions)
+    assert [cid for cid, _ in entries] == [202]
+
+
+def test_reply_back_intents_self_supersedence_silent_cross_author_overridden() -> None:
+    # Combined fixture: alice self-supersedes (silent), bob superseded by
+    # carol cross-author (overridden), carol material (notify).
+    alice1 = _intent_row(101, author=1, index=0)
+    alice2 = _intent_row(102, author=1, index=1)
+    bob = _intent_row(202, author=2, index=2)
+    carol = _intent_row(303, author=3, index=3)
+    intents = [alice1, alice2, bob, carol]
+    verdicts = [
+        _verdict_row(101, oracle.OutcomeSuperseded(), by_intent=102),  # self
+        _verdict_row(102, oracle.OutcomeHonored(), affected=[1]),
+        _verdict_row(202, oracle.OutcomeSuperseded(), by_intent=303),  # cross
+        _verdict_row(303, oracle.OutcomeReshaped(), affected=[1]),
+    ]
+    dispositions = [
+        (101, _disp(oracle.DispUnhandled())),
+        (102, _disp(oracle.DispMaterial(), [1])),
+        (202, _disp(oracle.DispAggregation(), [1])),
+        (303, _disp(oracle.DispMaterial(), [1])),
+    ]
+    entries = oracle.reply_back_intents(intents, verdicts, dispositions)
+    decisions_by_cid = dict(entries)
+    assert 101 not in decisions_by_cid  # self-supersedence silent
+    assert isinstance(decisions_by_cid[102], oracle.NotifyMaterial)
+    assert isinstance(decisions_by_cid[202], oracle.NotifyOverridden)
+    assert isinstance(decisions_by_cid[303], oracle.NotifyMaterial)
+    # Arrival-order preserved.
+    assert [cid for cid, _ in entries] == [102, 202, 303]

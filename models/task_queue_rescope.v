@@ -1041,5 +1041,384 @@ Definition task_still_pending
   | None => false
   end.
 
+(** ** Intents, verdicts, and reply-back precedence (#1804 / INV-F)
+
+    Epic #1798 routes PR-comment intent through rescope rather than
+    materializing comments as tasks before rescope sees them.  Opus consumes
+    a batch of [IntentRow] entries (raw text + author + arrival index) and
+    emits a list of [VerdictRow] entries plus the [AttributedOp] sequence
+    that produced the new task list.
+
+    This block ports the existing reply-back precedence rules from Python
+    into the model so the model owns the decision and the extracted Python
+    replaces the handwritten if/elif tower in [_build_on_intent_dispositions]
+    + the diff-based [_classify_rescope_intents] heuristic in [tasks.py].
+
+    Rules ported (each one had at least one bug-fix iteration in main):
+
+    - [_intent_material_reasons]: an intent's contributing task counts as a
+      material change iff the result task is new, flipped to completed, or
+      had its title / description / source-comment anchor rewritten.
+    - [_classify_rescope_intents]: per-intent disposition is
+      [DispMaterial] when any attributed task materially changed,
+      [DispAggregation] when attributed but unchanged, and
+      [DispUnhandled] when no result task carries this intent in its
+      [contributing_intents].
+    - [_has_earlier_attributed_sibling]: an unhandled intent is worth
+      replying to only when an *earlier* (smaller [intent_index]) sibling
+      was attributed — otherwise the original "got it" reply still stands.
+    - INV-E (#1803 / PR #1818): supersedence has its own reply policy.
+      Same author = silent (the commenter already knows what they meant).
+      Cross-author = always notify (the displaced reviewer must hear).
+      This rule runs *before* the aggregation/unhandled short-circuits so
+      a cross-author supersedence whose attributed task happens to
+      classify as aggregation still produces a reply (the precedence bug
+      codex caught on PR #1818).
+
+    [notify_decision_for] returns one of four kinds so the Python
+    adapter can pick the appropriate prose framing.  [reply_back_intents]
+    walks the batch in arrival order and yields the intents that warrant
+    a reply, in the order the displaced commenters should hear back. *)
+
+Inductive IntentOutcome : Type :=
+| OutcomeHonored
+| OutcomeReshaped
+| OutcomeSuperseded
+| OutcomeNoOp.
+
+Record IntentRow : Type := {
+  intent_comment_id : positive;
+  intent_author : positive;
+  intent_index : nat
+}.
+
+Record VerdictRow : Type := {
+  verdict_intent_id : positive;
+  verdict_outcome : IntentOutcome;
+  verdict_by_intent : option positive;
+  verdict_affected_tasks : list positive
+}.
+
+(** [TaskWithIntents] pairs a result-list [TaskRow] with its
+    [contributing_intents] field — the intent comment ids attributed to
+    this task by [_apply_reorder].  Kept separate from [TaskRow] so the
+    existing rescope reducer doesn't grow a field it never reads. *)
+Record TaskWithIntents : Type := {
+  twi_id : positive;
+  twi_row : TaskRow;
+  twi_contributing : list positive
+}.
+
+Inductive DispositionKind : Type :=
+| DispMaterial
+| DispAggregation
+| DispUnhandled.
+
+Record IntentDisposition : Type := {
+  disp_kind : DispositionKind;
+  disp_affected : list positive
+}.
+
+Inductive NotifyDecision : Type :=
+| NotifySilent
+| NotifyMaterial
+| NotifyUnhandled
+| NotifyOverridden.
+
+(** [task_material_changed] mirrors [_intent_material_reasons]: an intent's
+    contributing task is material iff the result task is new (no original
+    counterpart), flipped to completed, or had its title / description /
+    source-comment anchor rewritten. *)
+Definition status_is_completed (s : TaskStatus) : bool :=
+  match s with
+  | StatusCompleted => true
+  | _ => false
+  end.
+
+Definition optional_anchor_changed (a b : option positive) : bool :=
+  match a, b with
+  | None, None => false
+  | Some x, Some y => negb (Pos.eqb x y)
+  | _, _ => true
+  end.
+
+Definition status_flipped_to_completed (orig result : TaskRow) : bool :=
+  if status_is_completed (status result)
+  then negb (status_is_completed (status orig))
+  else false.
+
+Definition row_material_changed (orig result : TaskRow) : bool :=
+  if status_flipped_to_completed orig result then true
+  else if negb (String.eqb (title orig) (title result)) then true
+  else if negb (String.eqb (description orig) (description result)) then true
+  else optional_anchor_changed (source_comment orig) (source_comment result).
+
+Definition task_material_changed
+    (orig : option TaskRow) (result : TaskRow) : bool :=
+  match orig with
+  | None => true (* new task created for this intent *)
+  | Some o => row_material_changed o result
+  end.
+
+Fixpoint find_task_with_intents
+    (task : positive) (tasks : list TaskWithIntents) : option TaskWithIntents :=
+  match tasks with
+  | [] => None
+  | t :: rest =>
+      if Pos.eqb (twi_id t) task then Some t
+      else find_task_with_intents task rest
+  end.
+
+(** [intent_attributed_tasks_in] returns the result tasks that list [intent]
+    in their [contributing_intents], preserving result-list order. *)
+Fixpoint intent_attributed_tasks_in
+    (intent : positive)
+    (tasks : list TaskWithIntents) : list TaskWithIntents :=
+  match tasks with
+  | [] => []
+  | t :: rest =>
+      if positive_mem intent (twi_contributing t)
+      then t :: intent_attributed_tasks_in intent rest
+      else intent_attributed_tasks_in intent rest
+  end.
+
+Fixpoint any_attributed_material
+    (orig_rows : PositiveMap.t TaskRow)
+    (attributed : list TaskWithIntents) : bool :=
+  match attributed with
+  | [] => false
+  | t :: rest =>
+      let orig := PositiveMap.find (twi_id t) orig_rows in
+      if task_material_changed orig (twi_row t)
+      then true
+      else any_attributed_material orig_rows rest
+  end.
+
+Fixpoint task_ids_of (ts : list TaskWithIntents) : list positive :=
+  match ts with
+  | [] => []
+  | t :: rest => twi_id t :: task_ids_of rest
+  end.
+
+(** [classify_intent] returns the per-intent disposition: [DispUnhandled]
+    when no result task carries this intent, [DispMaterial] when at least
+    one attributed task changed materially, [DispAggregation] otherwise. *)
+Definition classify_intent
+    (intent : positive)
+    (result_tasks : list TaskWithIntents)
+    (orig_rows : PositiveMap.t TaskRow) : IntentDisposition :=
+  let attributed := intent_attributed_tasks_in intent result_tasks in
+  match attributed with
+  | [] => {| disp_kind := DispUnhandled; disp_affected := [] |}
+  | _ =>
+      if any_attributed_material orig_rows attributed
+      then {| disp_kind := DispMaterial;
+              disp_affected := task_ids_of attributed |}
+      else {| disp_kind := DispAggregation;
+              disp_affected := task_ids_of attributed |}
+  end.
+
+(** [find_disposition] looks up a disposition by intent id in a
+    [(intent_id, disposition)] association list.  Production callers
+    consume the output of [classify_rescope_intents] which produces one
+    entry per intent in arrival order. *)
+Fixpoint find_disposition
+    (intent : positive)
+    (entries : list (positive * IntentDisposition)) : option IntentDisposition :=
+  match entries with
+  | [] => None
+  | (cid, disp) :: rest =>
+      if Pos.eqb cid intent then Some disp
+      else find_disposition intent rest
+  end.
+
+Fixpoint classify_rescope_intents
+    (intents : list IntentRow)
+    (result_tasks : list TaskWithIntents)
+    (orig_rows : PositiveMap.t TaskRow)
+    : list (positive * IntentDisposition) :=
+  match intents with
+  | [] => []
+  | r :: rest =>
+      let rest' := classify_rescope_intents rest result_tasks orig_rows in
+      let cid := intent_comment_id r in
+      (cid, classify_intent cid result_tasks orig_rows) :: rest'
+  end.
+
+Fixpoint find_intent_row
+    (intent : positive) (intents : list IntentRow) : option IntentRow :=
+  match intents with
+  | [] => None
+  | r :: rest =>
+      if Pos.eqb (intent_comment_id r) intent then Some r
+      else find_intent_row intent rest
+  end.
+
+Fixpoint find_intent_verdict
+    (intent : positive) (verdicts : list VerdictRow) : option VerdictRow :=
+  match verdicts with
+  | [] => None
+  | v :: rest =>
+      if Pos.eqb (verdict_intent_id v) intent then Some v
+      else find_intent_verdict intent rest
+  end.
+
+(** [has_earlier_attributed_sibling] mirrors the Python rule: an unhandled
+    intent is worth replying to only when an *earlier* sibling (strictly
+    smaller [intent_index]) was attributed (its disposition is not
+    [DispUnhandled]).  Otherwise the original "got it" reply still
+    accurately describes the plan. *)
+Fixpoint has_earlier_attributed_sibling
+    (intent : IntentRow)
+    (intents : list IntentRow)
+    (dispositions : list (positive * IntentDisposition)) : bool :=
+  match intents with
+  | [] => false
+  | other :: rest =>
+      if Pos.eqb (intent_comment_id other) (intent_comment_id intent)
+      then has_earlier_attributed_sibling intent rest dispositions
+      else
+        match find_disposition (intent_comment_id other) dispositions with
+        | Some d =>
+            match disp_kind d with
+            | DispUnhandled =>
+                has_earlier_attributed_sibling intent rest dispositions
+            | _ =>
+                if Nat.ltb (intent_index other) (intent_index intent)
+                then true
+                else has_earlier_attributed_sibling intent rest dispositions
+            end
+        | None => has_earlier_attributed_sibling intent rest dispositions
+        end
+  end.
+
+(** [is_self_supersedence] is true iff [verdict] names a superseding intent
+    that shares an author with [intent].  INV-E (#1803): same author =
+    commenter already knows the supersedence; cross-author = displaced
+    reviewer must hear about the override. *)
+Definition is_self_supersedence
+    (verdict : VerdictRow)
+    (intent : IntentRow)
+    (intents : list IntentRow) : bool :=
+  match verdict_by_intent verdict with
+  | None => false
+  | Some target =>
+      match find_intent_row target intents with
+      | None => false
+      | Some by_intent =>
+          Pos.eqb (intent_author intent) (intent_author by_intent)
+      end
+  end.
+
+Definition verdict_is_superseded (verdict : VerdictRow) : bool :=
+  match verdict_outcome verdict with
+  | OutcomeSuperseded => true
+  | _ => false
+  end.
+
+(** [notify_decision_for] is the single source of truth for which
+    notification (if any) a single intent's verdict produces.  The
+    precedence is:
+
+    1. [OutcomeSuperseded] with same-author target → [NotifySilent] (INV-E).
+    2. [OutcomeSuperseded] with cross-author target → [NotifyOverridden]
+       — even if the contributing task's disposition is aggregation, the
+       displaced reviewer hears about the override (codex precedence fix).
+    3. [DispAggregation] → [NotifySilent].
+    4. [DispMaterial] → [NotifyMaterial].
+    5. [DispUnhandled] with an earlier attributed sibling → [NotifyUnhandled].
+    6. [DispUnhandled] otherwise → [NotifySilent].
+
+    The Python adapter consumes the decision to pick the prose framing
+    (material / unhandled / overridden) and posts the reply through the
+    existing voice-text generator. *)
+Definition notify_decision_for
+    (r : IntentRow)
+    (disposition : IntentDisposition)
+    (verdict : option VerdictRow)
+    (intents : list IntentRow)
+    (dispositions : list (positive * IntentDisposition)) : NotifyDecision :=
+  match verdict with
+  | Some v =>
+      if verdict_is_superseded v then
+        if is_self_supersedence v r intents
+        then NotifySilent
+        else NotifyOverridden
+      else
+        match disp_kind disposition with
+        | DispAggregation => NotifySilent
+        | DispMaterial => NotifyMaterial
+        | DispUnhandled =>
+            if has_earlier_attributed_sibling r intents dispositions
+            then NotifyUnhandled
+            else NotifySilent
+        end
+  | None =>
+      match disp_kind disposition with
+      | DispAggregation => NotifySilent
+      | DispMaterial => NotifyMaterial
+      | DispUnhandled =>
+          if has_earlier_attributed_sibling r intents dispositions
+          then NotifyUnhandled
+          else NotifySilent
+      end
+  end.
+
+Definition notify_decision_is_silent (d : NotifyDecision) : bool :=
+  match d with
+  | NotifySilent => true
+  | _ => false
+  end.
+
+Definition disposition_or_unhandled
+    (intent : positive)
+    (dispositions : list (positive * IntentDisposition)) : IntentDisposition :=
+  match find_disposition intent dispositions with
+  | Some d => d
+  | None => {| disp_kind := DispUnhandled; disp_affected := [] |}
+  end.
+
+Definition reply_back_entry
+    (intent : IntentRow)
+    (verdicts : list VerdictRow)
+    (intents : list IntentRow)
+    (dispositions : list (positive * IntentDisposition))
+    : option (positive * NotifyDecision) :=
+  let cid := intent_comment_id intent in
+  let decision :=
+    notify_decision_for
+      intent
+      (disposition_or_unhandled cid dispositions)
+      (find_intent_verdict cid verdicts)
+      intents dispositions in
+  if notify_decision_is_silent decision then None
+  else Some (cid, decision).
+
+(** [reply_back_intents] returns the list of (intent_id, decision) pairs
+    that warrant a reply, in arrival order (the order [intents] is given
+    in).  Silent decisions are omitted; the Python adapter posts one
+    reply per returned entry. *)
+Fixpoint reply_back_intents_in
+    (cursor intents : list IntentRow)
+    (verdicts : list VerdictRow)
+    (dispositions : list (positive * IntentDisposition))
+    : list (positive * NotifyDecision) :=
+  match cursor with
+  | [] => []
+  | r :: rest =>
+      let rest' := reply_back_intents_in rest intents verdicts dispositions in
+      match reply_back_entry r verdicts intents dispositions with
+      | None => rest'
+      | Some entry => entry :: rest'
+      end
+  end.
+
+Definition reply_back_intents
+    (intents : list IntentRow)
+    (verdicts : list VerdictRow)
+    (dispositions : list (positive * IntentDisposition))
+    : list (positive * NotifyDecision) :=
+  reply_back_intents_in intents intents verdicts dispositions.
+
 Python File Extraction task_queue_rescope
-  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot normalize_rescope_batch apply_rescope apply_batched_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes task_changes_materially_significant batched_rescope_materially_significant remove_from_order cleanup_aborted_task task_still_pending merge_preserves_source_lineage merge_target_lineage_includes_source split_preserves_source_lineage split_child_inherits_source".
+  "task_executable task_row_executable enqueue_task pick_next_task begin_task complete_task abort_task unblock_tasks rescope_ops_cover_snapshot normalize_rescope_batch apply_rescope apply_batched_rescope rescope_affects_active_task should_abort_for_new_task complete_task_visible task_change compute_task_changes task_changes_materially_significant batched_rescope_materially_significant remove_from_order cleanup_aborted_task task_still_pending merge_preserves_source_lineage merge_target_lineage_includes_source split_preserves_source_lineage split_child_inherits_source task_material_changed classify_intent classify_rescope_intents has_earlier_attributed_sibling is_self_supersedence notify_decision_for reply_back_intents".

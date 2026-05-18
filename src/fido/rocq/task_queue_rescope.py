@@ -1401,3 +1401,438 @@ def task_still_pending(
         return False
     row = __option
     return isinstance(row.status, StatusPending)
+
+
+class IntentOutcome:
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class OutcomeHonored(IntentOutcome):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class OutcomeReshaped(IntentOutcome):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class OutcomeSuperseded(IntentOutcome):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class OutcomeNoOp(IntentOutcome):
+    pass
+
+
+IntentOutcomeT = OutcomeHonored | OutcomeReshaped | OutcomeSuperseded | OutcomeNoOp
+
+
+@final
+@dataclass(frozen=True)
+class IntentRow:
+    intent_comment_id: int
+    intent_author: int
+    intent_index: int
+
+
+@final
+@dataclass(frozen=True)
+class VerdictRow:
+    verdict_intent_id: int
+    verdict_outcome: IntentOutcome
+    verdict_by_intent: int | None
+    verdict_affected_tasks: list[int]
+
+    def is_superseded(self) -> bool:
+        verdict = self
+        return isinstance(verdict.verdict_outcome, OutcomeSuperseded)
+
+
+@final
+@dataclass(frozen=True)
+class TaskWithIntents:
+    twi_id: int
+    twi_row: TaskRow
+    twi_contributing: list[int]
+
+
+class DispositionKind:
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class DispMaterial(DispositionKind):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class DispAggregation(DispositionKind):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class DispUnhandled(DispositionKind):
+    pass
+
+
+DispositionKindT = DispMaterial | DispAggregation | DispUnhandled
+
+
+@final
+@dataclass(frozen=True)
+class IntentDisposition:
+    disp_kind: DispositionKind
+    disp_affected: list[int]
+
+
+class NotifyDecision:
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class NotifySilent(NotifyDecision):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class NotifyMaterial(NotifyDecision):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class NotifyUnhandled(NotifyDecision):
+    pass
+
+
+@final
+@dataclass(frozen=True)
+class NotifyOverridden(NotifyDecision):
+    pass
+
+
+NotifyDecisionT = NotifySilent | NotifyMaterial | NotifyUnhandled | NotifyOverridden
+
+
+def optional_anchor_changed(
+    a: int | None,
+    b: int | None,
+) -> bool:
+    return a != b
+
+
+def status_flipped_to_completed(
+    orig: TaskRow,
+    result: TaskRow,
+) -> bool:
+    if isinstance(result.status, StatusCompleted):
+        return not isinstance(orig.status, StatusCompleted)
+    return False
+
+
+def row_material_changed(
+    orig: TaskRow,
+    result: TaskRow,
+) -> bool:
+    if status_flipped_to_completed(orig, result):
+        return True
+    if orig.title != result.title:
+        return True
+    if orig.description != result.description:
+        return True
+    return optional_anchor_changed(orig.source_comment, result.source_comment)
+
+
+def task_material_changed(
+    orig: TaskRow | None,
+    result: TaskRow,
+) -> bool:
+    __option = orig
+    if __option is None:
+        return True
+    o = __option
+    return row_material_changed(o, result)
+
+
+def intent_attributed_tasks_in(
+    intent: int,
+    tasks: list[TaskWithIntents],
+) -> list[TaskWithIntents]:
+    while True:
+        __list = tasks
+        if __list == []:
+            return []
+        t0 = __list[0]
+        rest = __list[1:]
+        if intent in t0.twi_contributing:
+            return [t0] + intent_attributed_tasks_in(intent, rest)
+        intent, tasks = intent, rest
+        continue
+
+
+def any_attributed_material(
+    orig_rows: dict[int, TaskRow],
+    attributed: list[TaskWithIntents],
+) -> bool:
+    for t0 in attributed:
+        orig = orig_rows.get(_rocq_positive_key(t0.twi_id))
+        if task_material_changed(orig, t0.twi_row):
+            return True
+        continue
+    return False
+
+
+def task_ids_of(ts: list[TaskWithIntents]) -> list[int]:
+    __list = ts
+    if __list == []:
+        return []
+    t0 = __list[0]
+    rest = __list[1:]
+    return [t0.twi_id] + task_ids_of(rest)
+
+
+def classify_intent(
+    intent: int,
+    result_tasks: list[TaskWithIntents],
+    orig_rows: dict[int, TaskRow],
+) -> IntentDisposition:
+    attributed = intent_attributed_tasks_in(intent, result_tasks)
+    __list = attributed
+    if __list == []:
+        return IntentDisposition(
+            disp_kind=DispUnhandled(),
+            disp_affected=[],
+        )
+    t0 = __list[0]
+    l = __list[1:]
+    if any_attributed_material(orig_rows, attributed):
+        return IntentDisposition(
+            disp_kind=DispMaterial(),
+            disp_affected=task_ids_of(attributed),
+        )
+    return IntentDisposition(
+        disp_kind=DispAggregation(),
+        disp_affected=task_ids_of(attributed),
+    )
+
+
+def find_disposition(
+    intent: int,
+    entries: list[tuple[int, IntentDisposition]],
+) -> IntentDisposition | None:
+    for p in entries:
+        __pair = p
+        cid = __pair[0]
+        disp = __pair[1]
+        if cid == intent:
+            return disp
+        continue
+    return None
+
+
+def classify_rescope_intents(
+    intents: list[IntentRow],
+    result_tasks: list[TaskWithIntents],
+    orig_rows: dict[int, TaskRow],
+) -> list[tuple[int, IntentDisposition]]:
+    __list = intents
+    if __list == []:
+        return []
+    r = __list[0]
+    rest = __list[1:]
+    rest_ = classify_rescope_intents(
+        rest,
+        result_tasks,
+        orig_rows,
+    )
+    cid = r.intent_comment_id
+    return [(cid, classify_intent(cid, result_tasks, orig_rows))] + rest_
+
+
+def find_intent_row(
+    intent: int,
+    intents: list[IntentRow],
+) -> IntentRow | None:
+    for r in intents:
+        if r.intent_comment_id == intent:
+            return r
+        continue
+    return None
+
+
+def find_intent_verdict(
+    intent: int,
+    verdicts: list[VerdictRow],
+) -> VerdictRow | None:
+    for v in verdicts:
+        if v.verdict_intent_id == intent:
+            return v
+        continue
+    return None
+
+
+def has_earlier_attributed_sibling(
+    intent: IntentRow,
+    intents: list[IntentRow],
+    dispositions: list[tuple[int, IntentDisposition]],
+) -> bool:
+    for other in intents:
+        if other.intent_comment_id == intent.intent_comment_id:
+            continue
+        __option = find_disposition(other.intent_comment_id, dispositions)
+        if __option is None:
+            continue
+        d = __option
+        match d.disp_kind:
+            case DispMaterial():
+                if other.intent_index < intent.intent_index:
+                    return True
+                continue
+            case DispAggregation():
+                if other.intent_index < intent.intent_index:
+                    return True
+                continue
+            case DispUnhandled():
+                continue
+            case __impossible:
+                assert_never(__impossible)
+    return False
+
+
+def is_self_supersedence(
+    verdict: VerdictRow,
+    intent: IntentRow,
+    intents: list[IntentRow],
+) -> bool:
+    __option = verdict.verdict_by_intent
+    if __option is None:
+        return False
+    target = __option
+    __option = find_intent_row(target, intents)
+    if __option is None:
+        return False
+    by_intent = __option
+    return intent.intent_author == by_intent.intent_author
+
+
+def notify_decision_for(
+    r: IntentRow,
+    disposition: IntentDisposition,
+    verdict: VerdictRow | None,
+    intents: list[IntentRow],
+    dispositions: list[tuple[int, IntentDisposition]],
+) -> NotifyDecision:
+    __option = verdict
+    if __option is None:
+        match disposition.disp_kind:
+            case DispMaterial():
+                return NotifyMaterial()
+            case DispAggregation():
+                return NotifySilent()
+            case DispUnhandled():
+                if has_earlier_attributed_sibling(r, intents, dispositions):
+                    return NotifyUnhandled()
+                return NotifySilent()
+            case __impossible:
+                assert_never(__impossible)
+    v = __option
+    if v.is_superseded():
+        if is_self_supersedence(v, r, intents):
+            return NotifySilent()
+        return NotifyOverridden()
+    match disposition.disp_kind:
+        case DispMaterial():
+            return NotifyMaterial()
+        case DispAggregation():
+            return NotifySilent()
+        case DispUnhandled():
+            if has_earlier_attributed_sibling(r, intents, dispositions):
+                return NotifyUnhandled()
+            return NotifySilent()
+        case __impossible:
+            assert_never(__impossible)
+
+
+def disposition_or_unhandled(
+    intent: int,
+    dispositions: list[tuple[int, IntentDisposition]],
+) -> IntentDisposition:
+    __option = find_disposition(intent, dispositions)
+    if __option is None:
+        return IntentDisposition(
+            disp_kind=DispUnhandled(),
+            disp_affected=[],
+        )
+    d = __option
+    return d
+
+
+def reply_back_entry(
+    intent: IntentRow,
+    verdicts: list[VerdictRow],
+    intents: list[IntentRow],
+    dispositions: list[tuple[int, IntentDisposition]],
+) -> tuple[int, NotifyDecision] | None:
+    cid = intent.intent_comment_id
+    decision = notify_decision_for(
+        intent,
+        disposition_or_unhandled(cid, dispositions),
+        find_intent_verdict(cid, verdicts),
+        intents,
+        dispositions,
+    )
+    if isinstance(decision, NotifySilent):
+        return None
+    return (
+        cid,
+        decision,
+    )
+
+
+def reply_back_intents_in(
+    cursor: list[IntentRow],
+    intents: list[IntentRow],
+    verdicts: list[VerdictRow],
+    dispositions: list[tuple[int, IntentDisposition]],
+) -> list[tuple[int, NotifyDecision]]:
+    __list = cursor
+    if __list == []:
+        return []
+    r = __list[0]
+    rest = __list[1:]
+    rest_ = reply_back_intents_in(
+        rest,
+        intents,
+        verdicts,
+        dispositions,
+    )
+    __option = reply_back_entry(r, verdicts, intents, dispositions)
+    if __option is None:
+        return rest_
+    entry = __option
+    return [entry] + rest_
+
+
+def reply_back_intents(
+    intents: list[IntentRow],
+    verdicts: list[VerdictRow],
+    dispositions: list[tuple[int, IntentDisposition]],
+) -> list[tuple[int, NotifyDecision]]:
+    return reply_back_intents_in(
+        intents,
+        intents,
+        verdicts,
+        dispositions,
+    )
