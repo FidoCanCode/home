@@ -1385,7 +1385,7 @@ def _parse_rescope_operations(
     return operations, []
 
 
-def _parse_rescope_verdicts(  # pyright: ignore[reportUnusedFunction]
+def _parse_rescope_verdicts(
     raw: str,
     intents: list[RescopeIntent],
 ) -> tuple[list[IntentVerdict], list[str]]:
@@ -1582,6 +1582,65 @@ def _find_supersedence_cycle(
             seen.append(cursor)
             cursor = by_pointer.get(cursor)
     return None
+
+
+def _flatten_verdicts_to_ops(
+    verdicts: list[IntentVerdict],
+) -> list[dict[str, Any]]:
+    """Flatten per-verdict ops into the flat op list ``_apply_reorder`` consumes.
+
+    Each emitted op inherits its originating verdict's
+    ``intent_comment_id`` via the ``contributing_intents`` field (the
+    #1722 attribution convention; any pre-existing well-formed
+    ``contributing_intents`` on the op is unioned with the verdict's
+    own id so explicit per-op attribution from Opus is preserved
+    alongside the verdict-level one).
+
+    Malformed ``contributing_intents`` shapes are **passed through
+    untouched** so :func:`_parse_rescope_operations` raises the
+    schema error on the next step rather than this helper silently
+    coercing (codex P1/P2 on PR #1813: ``or []`` + set-union would
+    turn ``42`` / ``""`` / ``{...}`` / ``(...)`` / mixed lists into
+    a "valid" sorted int list, bypassing the fail-closed parse
+    boundary).  Only two shapes are touched here:
+
+    * field absent → set to ``[verdict.intent_comment_id]``
+    * existing list of int (rejecting ``bool``, an ``int`` subclass)
+      → union with verdict id, sorted
+
+    Anything else stays as-is for the op parser to reject.
+
+    Used by :func:`reorder_tasks` when ``intents`` is non-empty so the
+    verdict-shaped parser output can flow through the existing op
+    apply/validate machinery without duplicating op-level schema
+    checks (#1812 INV-D wiring).
+    """
+    flat: list[dict[str, Any]] = []
+    for verdict in verdicts:
+        for op_mapping in verdict.ops:
+            op = dict(op_mapping)
+            if "contributing_intents" not in op:
+                op["contributing_intents"] = [verdict.intent_comment_id]
+            else:
+                existing = op["contributing_intents"]
+                # ``IntentVerdict.__post_init__`` ran ``deep_freeze``
+                # which turned any list inside ``ops`` into a tuple,
+                # so the well-formed shape we see here is
+                # ``tuple[int, ...]`` (not ``list[int]``).  Accept
+                # both for resilience; reject ``bool`` explicitly
+                # (it's an ``int`` subclass and would otherwise sneak
+                # through as attribution).
+                if isinstance(existing, (list, tuple)) and all(
+                    isinstance(x, int) and not isinstance(x, bool)
+                    for x in existing  # pyright: ignore[reportUnknownVariableType]
+                ):
+                    op["contributing_intents"] = sorted(
+                        {*existing, verdict.intent_comment_id}
+                    )
+                # Else: leave malformed value untouched so
+                # _parse_rescope_operations rejects it at the next step.
+            flat.append(op)
+    return flat
 
 
 def _decode_first_json_object(raw: str) -> dict[str, Any] | None:
@@ -2833,14 +2892,31 @@ def reorder_tasks(
         prompts = Prompts("")
 
     original_ids = frozenset(t["id"] for t in task_list)
-    prompt = prompts.rescope_prompt(
-        task_list,
-        commit_summary,
-        issue=issue,
-        pr=pr,
-        prior_attempts=prior_attempts,
-        intents=intents,
-    )
+    # #1812 (INV-D wiring): when intents are present, drive Opus with
+    # the verdict-shaped envelope (#1810) and parse via
+    # ``_parse_rescope_verdicts`` (#1809).  The no-intent path
+    # (``rescope_before_pick``) keeps the legacy ops-shape prompt —
+    # there's nothing to attribute and the verdict envelope would be
+    # empty noise.
+    use_verdicts = bool(intents)
+    if use_verdicts:
+        prompt = prompts.rescope_prompt_verdicts(
+            task_list,
+            commit_summary,
+            intents=intents or [],
+            issue=issue,
+            pr=pr,
+            prior_attempts=prior_attempts,
+        )
+    else:
+        prompt = prompts.rescope_prompt(
+            task_list,
+            commit_summary,
+            issue=issue,
+            pr=pr,
+            prior_attempts=prior_attempts,
+            intents=intents,
+        )
     raw = agent.run_turn(
         prompt,
         model=agent.voice_model,
@@ -2862,7 +2938,23 @@ def reorder_tasks(
     operations: list[_RescopeOp] = []
     parse_errors: list[str] = ["initial parse"]
     for nudge_attempt in range(_RESCOPE_MAX_NUDGES + 1):
-        operations, parse_errors = _parse_rescope_operations(raw)
+        if use_verdicts:
+            verdicts, verdict_errors = _parse_rescope_verdicts(raw, intents or [])
+            if verdict_errors:
+                operations, parse_errors = [], verdict_errors
+            else:
+                # Flatten the per-verdict ops into the flat op list
+                # the existing ``_apply_reorder`` consumes.  Each op
+                # inherits its verdict's ``intent_comment_id`` via the
+                # ``contributing_intents`` field (#1722 attribution
+                # convention).  Re-parsing through
+                # ``_parse_rescope_operations`` reuses op-level shape
+                # validation rather than duplicating it.
+                flat_ops = _flatten_verdicts_to_ops(verdicts)
+                synthetic = json.dumps({"operations": flat_ops})
+                operations, parse_errors = _parse_rescope_operations(synthetic)
+        else:
+            operations, parse_errors = _parse_rescope_operations(raw)
         if not parse_errors:
             cross_errors = _find_cross_op_errors(operations, snapshot_ids)
             if not cross_errors:
@@ -2885,8 +2977,14 @@ def reorder_tasks(
             _RESCOPE_MAX_NUDGES,
             attempts_remaining - 1,
         )
-        nudge = prompts.rescope_parse_nudge(
-            parse_errors, attempts_remaining=attempts_remaining - 1
+        nudge = (
+            prompts.rescope_verdicts_parse_nudge(
+                parse_errors, attempts_remaining=attempts_remaining - 1
+            )
+            if use_verdicts
+            else prompts.rescope_parse_nudge(
+                parse_errors, attempts_remaining=attempts_remaining - 1
+            )
         )
         nudge_raw = agent.run_turn(
             nudge,
@@ -2919,7 +3017,15 @@ def reorder_tasks(
     # applied (#1713 made title mutable).  Uniqueness during rewrites is
     # best-effort via the nudge — the durable invariant is on enqueueing
     # new tasks (find_pending_title_duplicate in the oracle), not on edits.
-    for nudge_attempt in range(_RESCOPE_MAX_NUDGES):
+    #
+    # #1812: verdict-shape mode skips this nudge entirely — its nudge
+    # text asks Opus to "resubmit the full operations array," which
+    # would shift Opus mid-conversation from the verdict envelope
+    # back to ops.  The existing best-effort framing covers this: if
+    # duplicates survive, the apply path tolerates them.  A future
+    # leaf can add a verdict-shape duplicate nudge if practice shows
+    # it matters.
+    for nudge_attempt in range(0 if use_verdicts else _RESCOPE_MAX_NUDGES):
         duplicates = _find_duplicate_titles(ordered_items, pre_nudge_existing)
         if not duplicates:
             break
