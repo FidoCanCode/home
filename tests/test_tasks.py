@@ -1120,9 +1120,7 @@ def _intent(
 
 class TestParseRescopeVerdicts:
     def test_minimal_honored_verdict(self) -> None:
-        raw = (
-            '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored"}]}'
-        )
+        raw = '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored"}]}'
         verdicts, errors = _parse_rescope_verdicts(raw, [_intent(1)])
         assert errors == []
         assert len(verdicts) == 1
@@ -1155,9 +1153,7 @@ class TestParseRescopeVerdicts:
             '{"intent_comment_id": 2, "outcome": "honored"}'
             "]}"
         )
-        verdicts, errors = _parse_rescope_verdicts(
-            raw, [_intent(1), _intent(2)]
-        )
+        verdicts, errors = _parse_rescope_verdicts(raw, [_intent(1), _intent(2)])
         assert errors == []
         assert verdicts[0].by_intent_comment_id == 2
 
@@ -1170,15 +1166,11 @@ class TestParseRescopeVerdicts:
         assert errors == ['response: missing top-level "verdicts" array']
 
     def test_verdicts_not_a_list(self) -> None:
-        _, errors = _parse_rescope_verdicts(
-            '{"verdicts": {}}', [_intent(1)]
-        )
+        _, errors = _parse_rescope_verdicts('{"verdicts": {}}', [_intent(1)])
         assert errors == ["response.verdicts: must be a list, got dict"]
 
     def test_verdict_not_a_dict(self) -> None:
-        _, errors = _parse_rescope_verdicts(
-            '{"verdicts": ["nope"]}', [_intent(1)]
-        )
+        _, errors = _parse_rescope_verdicts('{"verdicts": ["nope"]}', [_intent(1)])
         # Plus the missing-verdict error for intent 1 since we couldn't parse it.
         assert "verdicts[0]: must be a dict" in errors[0]
 
@@ -1210,17 +1202,13 @@ class TestParseRescopeVerdicts:
     def test_missing_verdict_for_intent(self) -> None:
         # Intent 2 is in the batch but has no verdict → error.
         raw = '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored"}]}'
-        _, errors = _parse_rescope_verdicts(
-            raw, [_intent(1), _intent(2)]
-        )
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1), _intent(2)])
         assert any("missing verdict for intent_comment_id 2" in e for e in errors)
 
     def test_multiple_missing_verdicts_all_reported(self) -> None:
         # All-errors-at-once contract — both missing ids listed.
         raw = '{"verdicts": []}'
-        _, errors = _parse_rescope_verdicts(
-            raw, [_intent(1), _intent(2)]
-        )
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1), _intent(2)])
         assert any("missing verdict for intent_comment_id 1" in e for e in errors)
         assert any("missing verdict for intent_comment_id 2" in e for e in errors)
 
@@ -1234,9 +1222,7 @@ class TestParseRescopeVerdicts:
 
     def test_intent_verdict_construction_error_captured(self) -> None:
         # Outcome typo → IntentVerdict ctor raises ValueError → captured as parse error.
-        raw = (
-            '{"verdicts": [{"intent_comment_id": 1, "outcome": "supersede"}]}'
-        )
+        raw = '{"verdicts": [{"intent_comment_id": 1, "outcome": "supersede"}]}'
         _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
         assert any("outcome must be one of" in e for e in errors)
 
@@ -1259,9 +1245,7 @@ class TestParseRescopeVerdicts:
             ' "by_intent_comment_id": 1, "narrative": "y"}'
             "]}"
         )
-        _, errors = _parse_rescope_verdicts(
-            raw, [_intent(1), _intent(2)]
-        )
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1), _intent(2)])
         assert any("supersedence graph has a cycle" in e for e in errors)
 
     def test_longer_supersedence_cycle_detected(self) -> None:
@@ -1276,9 +1260,7 @@ class TestParseRescopeVerdicts:
             ' "by_intent_comment_id": 1, "narrative": "z"}'
             "]}"
         )
-        _, errors = _parse_rescope_verdicts(
-            raw, [_intent(1), _intent(2), _intent(3)]
-        )
+        _, errors = _parse_rescope_verdicts(raw, [_intent(1), _intent(2), _intent(3)])
         assert any("supersedence graph has a cycle" in e for e in errors)
 
     def test_long_chain_no_cycle_ok(self) -> None:
