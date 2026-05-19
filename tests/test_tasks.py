@@ -4063,6 +4063,150 @@ class TestReorderTasks:
         result = Tasks(tmp_path).list()
         assert result[0]["status"] == str(TaskStatus.IN_PROGRESS)
 
+    def test_on_inprogress_affected_called_when_new_task_demotes_inprogress(
+        self, tmp_path: Path
+    ) -> None:
+        # #1844: a comment-driven new task lands at position 0 in Opus's
+        # ordered_items, ahead of the in-progress task.  The reorder
+        # interleaves the new task at Opus's position; the in-progress
+        # is no longer first in the pending block, so it's demoted to
+        # pending and the on_inprogress_affected callback fires so the
+        # worker aborts its turn and re-picks against the new front.
+        t1 = self._add(tmp_path, "Current task")
+        Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
+        raw = self._response(
+            [
+                # null-id at position 0 = new task placed ahead of t1.
+                {"id": None, "title": "Higher-priority new ask"},
+                {"id": t1["id"]},
+            ]
+        )
+        affected: list[str] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_inprogress_affected=lambda task_id: affected.append(task_id),
+        )
+        assert affected == [t1["id"]]
+        result = Tasks(tmp_path).list()
+        assert result[0]["title"] == "Higher-priority new ask"
+        # t1 is demoted to pending; worker will re-pick it after the
+        # new task completes.
+        t1_after = next(t for t in result if t["id"] == t1["id"])
+        assert t1_after["status"] == str(TaskStatus.PENDING)
+
+    def test_inprogress_not_demoted_when_new_task_lands_after(
+        self, tmp_path: Path
+    ) -> None:
+        # Inverse: the new task lands after the in-progress one.  No
+        # demotion, no preempt callback.
+        t1 = self._add(tmp_path, "Current task")
+        Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
+        raw = self._response(
+            [
+                {"id": t1["id"]},
+                {"id": None, "title": "Later ask"},
+            ]
+        )
+        affected: list[str] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_inprogress_affected=lambda task_id: affected.append(task_id),
+        )
+        assert affected == []
+        result = Tasks(tmp_path).list()
+        assert result[0]["id"] == t1["id"]
+        assert result[0]["status"] == str(TaskStatus.IN_PROGRESS)
+
+    def test_inprogress_demoted_helper_skips_completed_at_front(self) -> None:
+        # #1844: a completed task at the front of result doesn't count
+        # as a demotion (the picker skips completed).
+        from fido.tasks import _inprogress_was_demoted
+
+        ip = {"id": "ip", "status": "in_progress", "type": "spec"}
+        result = [
+            {"id": "done", "status": "completed", "type": "spec"},
+            ip,
+        ]
+        assert _inprogress_was_demoted(ip, result) is False
+
+    def test_inprogress_demoted_helper_skips_ask_and_defer_prefixed(
+        self,
+    ) -> None:
+        # codex P2 on PR #1847: ASK:/DEFER: title-prefixed tasks aren't
+        # runnable (the picker filters them out), so a leading ASK: or
+        # DEFER: row doesn't count as demotion.
+        from fido.tasks import _inprogress_was_demoted
+
+        ip = {"id": "ip", "status": "in_progress", "type": "spec", "title": "Real work"}
+        result = [
+            {
+                "id": "ask1",
+                "status": "pending",
+                "type": "spec",
+                "title": "ASK: should we...",
+            },
+            {
+                "id": "defer1",
+                "status": "pending",
+                "type": "spec",
+                "title": "DEFER: maybe later",
+            },
+            ip,
+        ]
+        assert _inprogress_was_demoted(ip, result) is False
+
+    def test_inprogress_demoted_helper_returns_false_when_only_ci_remain(
+        self,
+    ) -> None:
+        # #1844: edge case — in-progress task IS the only non-CI item
+        # but it doesn't appear in result (defensive; shouldn't happen
+        # in practice).  The helper walks past every CI / completed
+        # entry and returns False rather than crashing.
+        from fido.tasks import _inprogress_was_demoted
+
+        ip = {"id": "ip", "status": "in_progress", "type": "ci"}
+        result = [
+            {"id": "ci1", "status": "pending", "type": "ci"},
+            {"id": "done", "status": "completed", "type": "spec"},
+        ]
+        assert _inprogress_was_demoted(ip, result) is False
+
+    def test_inprogress_demotion_skips_intervening_ci_and_completed(
+        self, tmp_path: Path
+    ) -> None:
+        # The demotion check only looks at non-CI, non-completed tasks
+        # ahead of the in-progress one.  A completed task at position 0
+        # doesn't count as a demotion (it's a no-op for the picker), and
+        # CI tasks are intentionally skipped (pre-#1846 they always come
+        # first via the structural invariant + the existing CI preempt
+        # path handles them).
+        ci = self._add(tmp_path, "Fix CI", task_type=TaskType.CI)
+        done = self._add(tmp_path, "Already done")
+        Tasks(tmp_path).update(done["id"], TaskStatus.COMPLETED)
+        t1 = self._add(tmp_path, "Current task")
+        Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
+        raw = self._response(
+            [
+                {"id": ci["id"]},
+                {"id": t1["id"]},
+                {"id": done["id"], "status": "completed"},
+            ]
+        )
+        affected: list[str] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_inprogress_affected=lambda task_id: affected.append(task_id),
+        )
+        # CI at front + completed at end is the existing invariant; t1
+        # is first non-CI pending so NOT demoted.
+        assert affected == []
+
     def test_on_inprogress_affected_called_when_anchor_changes(
         self, tmp_path: Path
     ) -> None:

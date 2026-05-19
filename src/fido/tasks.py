@@ -2649,28 +2649,28 @@ def _inprogress_was_demoted(
     """Return True iff *inprogress_row* is no longer at the front of the
     runnable-pending block of *result* (#1844).
 
-    A new task landing ahead of the in-progress one is Opus's signal that
-    the new task should preempt.  The caller demotes the in-progress row
-    to pending and fires ``_on_inprogress_affected`` so the worker aborts
-    and re-picks.
+    A new runnable task landing ahead of the in-progress one is Opus's
+    signal that the new task should preempt.  The caller demotes the
+    in-progress row to pending and fires ``_on_inprogress_affected`` so
+    the worker aborts and re-picks.
 
-    Tasks the picker would skip (completed, blocked, CI) are ignored:
-
-    - **Completed** rows don't compete for picker attention.
-    - **Blocked** rows are pending-but-paused; the picker walks past them
-      until they unblock, so they don't represent a demotion either
-      (codex P1 on PR #1847).
-    - **CI** rows are excluded both ways: this helper is only called
-      for non-CI in-progress rows (CI preempt has its own path pre-#1846)
-      so a CI new task landing ahead doesn't count as demotion through
-      this signal.
+    Eligibility mirrors the picker's filter in ``worker._pick_next_task``,
+    delegated to the rocq oracle wherever possible to avoid duplicated
+    magic — ASK:/DEFER: classification is title-prefix-driven (see
+    #1848) and lives in ``_rescope_task_kind_for_oracle``, which the
+    oracle's ``task_executable`` then evaluates for runnability.  CI
+    rows are excluded explicitly because this helper is only called for
+    non-CI in-progress rows; CI preempt has its own path pre-#1846.
     """
     skip_statuses = (str(TaskStatus.COMPLETED), str(TaskStatus.BLOCKED))
     inprogress_id = inprogress_row.get("id")
     for task in result:
         if task.get("status") in skip_statuses:
             continue
-        if task.get("type") == "ci":
+        kind = _rescope_task_kind_for_oracle(task)
+        if isinstance(kind, rescope_oracle.TaskCI):
+            continue
+        if not rescope_oracle.task_executable(kind):
             continue
         return task.get("id") != inprogress_id
     return False
