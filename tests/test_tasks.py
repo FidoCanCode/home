@@ -4207,6 +4207,70 @@ class TestReorderTasks:
         # is first non-CI pending so NOT demoted.
         assert affected == []
 
+    def test_omitted_snapshot_task_keeps_position_when_new_task_added(
+        self, tmp_path: Path
+    ) -> None:
+        # codex P1 round 3 on #1847: a snapshot task Opus didn't
+        # mention (omitted ⇒ KeepTask) must keep its snapshot position
+        # even when another item in ordered_items spawns a new task.
+        # Earlier interleave appended every "unseen" oracle task at
+        # the end of the list, silently demoting omitted tasks behind
+        # every explicit item.
+        t1 = self._add(tmp_path, "First")
+        self._add(tmp_path, "Second — Opus doesn't mention")
+        t3 = self._add(tmp_path, "Third")
+        # Opus emits only t1 and t3, plus a new task after t3.
+        # t2 is omitted ⇒ KeepTask ⇒ should stay at position 1.
+        raw = self._response(
+            [
+                {"id": t1["id"]},
+                {"id": t3["id"]},
+                {"id": None, "title": "Brand new"},
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        result = Tasks(tmp_path).list()
+        titles = [t["title"] for t in result]
+        # t2 stays at position 1 (between t1 and t3), new task goes
+        # after t3 (its anchor in ordered_items).
+        assert titles == [
+            "First",
+            "Second — Opus doesn't mention",
+            "Third",
+            "Brand new",
+        ]
+
+    def test_inprogress_demoted_by_ci_failure_titled_spec_task(
+        self, tmp_path: Path
+    ) -> None:
+        # codex P2 round 3 on #1847: ``"CI FAILURE:"`` title with
+        # ``type: "spec"`` is treated as a normal runnable pending task
+        # by the picker (CI prioritisation looks at ``type`` only).
+        # The demotion check must match — a new such row landing ahead
+        # of the in-progress one must demote.
+        t1 = self._add(tmp_path, "Current task")
+        Tasks(tmp_path).update(t1["id"], TaskStatus.IN_PROGRESS)
+        raw = self._response(
+            [
+                # spec-typed new task with a CI-flavored title prefix
+                # — picker sees runnable, so we must too.
+                {
+                    "id": None,
+                    "title": "CI FAILURE: looks like CI but spec type",
+                    "type": "spec",
+                },
+                {"id": t1["id"]},
+            ]
+        )
+        affected: list[str] = []
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            _on_inprogress_affected=lambda task_id: affected.append(task_id),
+        )
+        assert affected == [t1["id"]]
+
     def test_on_inprogress_affected_called_when_anchor_changes(
         self, tmp_path: Path
     ) -> None:

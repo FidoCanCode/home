@@ -2654,23 +2654,29 @@ def _inprogress_was_demoted(
     in-progress row to pending and fires ``_on_inprogress_affected`` so
     the worker aborts and re-picks.
 
-    Eligibility mirrors the picker's filter in ``worker._pick_next_task``,
-    delegated to the rocq oracle wherever possible to avoid duplicated
-    magic — ASK:/DEFER: classification is title-prefix-driven (see
-    #1848) and lives in ``_rescope_task_kind_for_oracle``, which the
-    oracle's ``task_executable`` then evaluates for runnability.  CI
-    rows are excluded explicitly because this helper is only called for
-    non-CI in-progress rows; CI preempt has its own path pre-#1846.
+    Eligibility mirrors the picker's filter in
+    :func:`fido.worker._pick_next_task` *exactly*:
+
+    - status in ``{pending, in_progress}`` (skip completed/blocked).
+    - ``type != \"ci\"`` (the picker prioritises ``type == \"ci\"``
+      separately; this helper is only invoked for non-CI in-progress
+      rows so CI preempt has its own path pre-#1846).  We use the raw
+      ``type`` field rather than the title-prefix-aware oracle kind
+      classifier because the picker does (codex P2 round 3 on this PR
+      — a ``\"CI FAILURE:\"`` titled row with ``type: \"spec\"`` is
+      runnable per the picker, so it must count as demotion here).
+    - title not starting ``\"ask:\"`` / ``\"defer:\"`` (case-insensitive)
+      — the picker filters them; the magic-prefix smell that motivates
+      this duplication is #1848.
     """
     skip_statuses = (str(TaskStatus.COMPLETED), str(TaskStatus.BLOCKED))
     inprogress_id = inprogress_row.get("id")
     for task in result:
         if task.get("status") in skip_statuses:
             continue
-        kind = _rescope_task_kind_for_oracle(task)
-        if isinstance(kind, rescope_oracle.TaskCI):
+        if task.get("type") == "ci":
             continue
-        if not rescope_oracle.task_executable(kind):
+        if task.get("title", "").lower().startswith(("ask:", "defer:")):
             continue
         return task.get("id") != inprogress_id
     return False
@@ -2726,40 +2732,52 @@ def _apply_reorder(
     if not any(slot is not None for slot in new_task_slots):
         return oracle_result
 
-    # #1844: interleave new tasks at the position Opus assigned in
-    # ordered_items, not unconditionally at the end of pending.  Walk
-    # ordered_items: for each existing-id item use the oracle's
-    # transformed version (carries merges/splits/rewrites); for each
-    # null-id item pull the slot at the corresponding declaration
-    # position (codex P2 — slots are aligned with null-id positions so
-    # a dropped slot doesn't shift later new tasks into earlier
-    # positions).  After the interleave, enforce the two structural
-    # invariants the picker depends on: CI tasks first, completed
-    # tasks last.
+    # #1844: inject new tasks at the positions Opus declared in
+    # ``ordered_items``.  Walk ``oracle_result`` (which carries every
+    # existing task in oracle order, including omitted ones the model
+    # treated as KeepTask) and inject new tasks RELATIVE to the
+    # existing tasks Opus did name.  For each null-id slot, the "after
+    # anchor" is the id of the last existing-id item that appeared
+    # before it in ``ordered_items`` (or ``None`` if Opus put the new
+    # task before any existing-id mention).  Omitted snapshot tasks
+    # stay at their oracle position untouched (codex P1 on this PR —
+    # earlier interleave appended them after every explicit item,
+    # silently demoting tasks Opus hadn't moved).
     completed_status = str(TaskStatus.COMPLETED)
-    oracle_by_id = {t["id"]: t for t in oracle_result}
-    interleaved: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
+    after_anchor: dict[str | None, list[dict[str, Any]]] = {}
+    last_existing: str | None = None
     null_slot_idx = 0
     for item in ordered_items:
         item_id = item.get("id")
-        if item_id and item_id in oracle_by_id and item_id not in seen_ids:
-            interleaved.append(oracle_by_id[item_id])
-            seen_ids.add(item_id)
-        elif item_id is None:
-            if null_slot_idx < len(new_task_slots):
-                slot = new_task_slots[null_slot_idx]
-                if slot is not None:
-                    interleaved.append(slot)
-            null_slot_idx += 1
-    # Oracle tasks that weren't in ordered_items (post-snapshot tasks
-    # added between batches) get appended in their oracle order.
-    for t in oracle_result:
-        if t["id"] not in seen_ids:
-            interleaved.append(t)
-            seen_ids.add(t["id"])
+        if item_id is not None:
+            last_existing = item_id
+            continue
+        if null_slot_idx < len(new_task_slots):
+            slot = new_task_slots[null_slot_idx]
+            if slot is not None:
+                after_anchor.setdefault(last_existing, []).append(slot)
+        null_slot_idx += 1
+
+    interleaved: list[dict[str, Any]] = []
+    # Insert new tasks anchored before any existing (Opus put them at
+    # the head of ``ordered_items`` before mentioning any id).
+    interleaved.extend(after_anchor.pop(None, []))
+    for existing in oracle_result:
+        interleaved.append(existing)
+        interleaved.extend(after_anchor.pop(existing["id"], []))
+    # Any after_anchor entries still keyed on an id we never saw in
+    # oracle_result would indicate a parser/validator bug — the
+    # cross-op validator rejects ordered_items items that reference
+    # unknown ids before we get here, so the only valid anchors are
+    # ``None`` (head) or an id present in oracle_result.  Per the
+    # fail-fast convention we don't paper over them.
+    assert not after_anchor, (
+        f"after_anchor has unresolved keys: {sorted(k for k in after_anchor if k is not None)!r}"
+    )
+
     # Structural sort: CI first (preserving relative order), pending
-    # next (preserving interleaved order), completed last.
+    # next (preserving interleaved order), completed last.  Backstop
+    # until #1846 retires the CI-in-tasks.json shape entirely.
     ci = [
         t
         for t in interleaved
