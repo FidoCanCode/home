@@ -253,6 +253,12 @@ the pending task list based on dependency analysis.
   contract (`threading.Event`, `queue.Queue`, `threading.local`). In
   particular, `dict.setdefault`, attribute reads, and integer increments are
   **not** safe across threads without a lock. When in doubt, hold the lock.
+- **No `monkeypatch.setattr`** — banned and CI-enforced
+  (`tools/check_no_monkeypatch_setattr.py`). `monkeypatch.setattr` is
+  patching under another name; it reaches into module internals the same way
+  `unittest.mock.patch` does. Use constructor-DI and typed collaborators
+  instead (see #1773). The 14 existing dirty files carry temporary exemptions
+  and should be migrated over time.
 
 ## OO + constructor-DI architecture
 
