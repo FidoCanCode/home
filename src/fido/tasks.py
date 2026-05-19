@@ -2901,6 +2901,7 @@ def reorder_tasks(
     *,
     intents: list[RescopeIntent] | None = None,
     agent: ProviderAgent | None = None,
+    _client_factory: Callable[[], ProviderAgent] | None = None,
     prompts: Prompts | None = None,
     issue: ActiveIssue | None = None,
     pr: ActivePR | None = None,
@@ -2951,7 +2952,7 @@ def reorder_tasks(
         return
 
     if agent is None:
-        agent = ClaudeClient()
+        agent = (_client_factory if _client_factory is not None else ClaudeClient)()
     if prompts is None:
         prompts = Prompts("")
 
@@ -3531,6 +3532,7 @@ class Tasks(JsonFileStore):
         *,
         collaborators: frozenset[str] = frozenset(),
         allowed_bots: frozenset[str] = frozenset(),
+        _sync_background: Callable[..., None] | None = None,
     ) -> None:
         """Mark a task completed and resolve its review thread if we posted last.
 
@@ -3544,8 +3546,11 @@ class Tasks(JsonFileStore):
         another sync between this completion and the PR-ready/merge step
         (#988).
         """
+        _do_sync = (
+            _sync_background if _sync_background is not None else sync_tasks_background
+        )
         thread = self.complete_by_id(task_id)
-        sync_tasks_background(self._work_dir, gh)
+        _do_sync(self._work_dir, gh)
         if not thread:
             return
         repo = thread.get("repo", "")

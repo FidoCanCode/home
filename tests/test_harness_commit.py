@@ -1,16 +1,14 @@
 """Tests for fido.harness_commit — harness-owned commit logic."""
 
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
 from fido.harness_commit import HarnessCommitter
 from fido.rocq import harness_commit_decision as _hcd_mod
-from fido.rocq import turn_outcome as _to_mod
 from fido.rocq.commit_result import (
     CommitHookFailure,
     CommitNothingStaged,
@@ -23,6 +21,7 @@ from fido.rocq.turn_outcome import (
     CommitTaskInProgress,
     SkipTaskWithReason,
     StuckOnTask,
+    TurnOutcome,
 )
 from fido.types import GitIdentity
 
@@ -56,10 +55,22 @@ class _FakeRunner:
 
 
 def _committer(
-    work_dir: Path, results: list[subprocess.CompletedProcess[str]]
+    work_dir: Path,
+    results: list[subprocess.CompletedProcess[str]],
+    *,
+    _decision_oracle: Callable[..., Any] | None = None,
+    _commit_oracle: Callable[[TurnOutcome], bool] | None = None,
 ) -> tuple[HarnessCommitter, _FakeRunner]:
     runner = _FakeRunner(results)
-    return HarnessCommitter(work_dir, runner), runner
+    return (
+        HarnessCommitter(
+            work_dir,
+            runner,
+            _decision_oracle=_decision_oracle,
+            _commit_oracle=_commit_oracle,
+        ),
+        runner,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -462,15 +473,13 @@ class TestDecisionOracle:
 
     def test_oracle_mismatch_raises(self, tmp_path: Path) -> None:
         """If harness_commit_decision returns a different result, AssertionError fires."""
-        hc, _ = _committer(tmp_path, [])
 
-        # Monkeypatch the oracle to return the wrong thing
         def bad_oracle(_o: object, _env: object) -> object:
             return _hcd_mod.CommitSuccess("wrong_sha")
 
-        with patch.object(_hcd_mod, "harness_commit_decision", bad_oracle):
-            with pytest.raises(AssertionError, match="oracle mismatch"):
-                hc.commit(SkipTaskWithReason(reason="done"))
+        hc, _ = _committer(tmp_path, [], _decision_oracle=bad_oracle)
+        with pytest.raises(AssertionError, match="oracle mismatch"):
+            hc.commit(SkipTaskWithReason(reason="done"))
 
 
 class TestCommitDispatchOracle:
@@ -478,41 +487,30 @@ class TestCommitDispatchOracle:
 
     def test_dispatch_oracle_mismatch_raises_on_skip(self, tmp_path: Path) -> None:
         """If outcome_is_commit disagrees with the skip dispatch, AssertionError fires."""
-        hc, _ = _committer(tmp_path, [])
 
-        # Monkeypatch to claim SkipTaskWithReason should trigger a commit
         def bad_oracle(_o: object) -> bool:
             return True
 
-        with patch.object(_to_mod, "outcome_is_commit", bad_oracle):
-            with pytest.raises(
-                AssertionError, match="outcome_is_commit oracle mismatch"
-            ):
-                hc.commit(SkipTaskWithReason(reason="done"))
+        hc, _ = _committer(tmp_path, [], _commit_oracle=bad_oracle)
+        with pytest.raises(AssertionError, match="outcome_is_commit oracle mismatch"):
+            hc.commit(SkipTaskWithReason(reason="done"))
 
     def test_dispatch_oracle_mismatch_raises_on_stuck(self, tmp_path: Path) -> None:
         """If outcome_is_commit disagrees with the StuckOnTask dispatch, AssertionError fires."""
-        hc, _ = _committer(tmp_path, [])
 
         def bad_oracle(_o: object) -> bool:
             return True
 
-        with patch.object(_to_mod, "outcome_is_commit", bad_oracle):
-            with pytest.raises(
-                AssertionError, match="outcome_is_commit oracle mismatch"
-            ):
-                hc.commit(StuckOnTask(reason="stuck"))
+        hc, _ = _committer(tmp_path, [], _commit_oracle=bad_oracle)
+        with pytest.raises(AssertionError, match="outcome_is_commit oracle mismatch"):
+            hc.commit(StuckOnTask(reason="stuck"))
 
     def test_dispatch_oracle_mismatch_raises_on_commit(self, tmp_path: Path) -> None:
         """If outcome_is_commit disagrees with the commit dispatch, AssertionError fires."""
-        hc, _ = _committer(tmp_path, [])
 
-        # Monkeypatch to claim CommitTaskComplete should not trigger a commit
         def bad_oracle(_o: object) -> bool:
             return False
 
-        with patch.object(_to_mod, "outcome_is_commit", bad_oracle):
-            with pytest.raises(
-                AssertionError, match="outcome_is_commit oracle mismatch"
-            ):
-                hc.commit(CommitTaskComplete(summary="done"))
+        hc, _ = _committer(tmp_path, [], _commit_oracle=bad_oracle)
+        with pytest.raises(AssertionError, match="outcome_is_commit oracle mismatch"):
+            hc.commit(CommitTaskComplete(summary="done"))

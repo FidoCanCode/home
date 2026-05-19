@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -3429,15 +3429,16 @@ class TestReorderTasks:
         client.run_turn.assert_not_called()
 
     def test_creates_default_client_when_none(self, tmp_path: Path) -> None:
-        from unittest.mock import patch
-
         self._add(tmp_path, "Task A")
-        with patch(
-            "fido.tasks.ClaudeClient",
-            return_value=_client(""),
-        ) as mock_cls:
-            reorder_tasks(Tasks(tmp_path), "")
-            mock_cls.assert_called_once_with()
+
+        factory_calls: list[None] = []
+
+        def fake_factory() -> object:
+            factory_calls.append(None)
+            return _client("")
+
+        reorder_tasks(Tasks(tmp_path), "", _client_factory=fake_factory)
+        assert factory_calls == [None]
 
     def test_skips_on_empty_opus_response(self, tmp_path: Path) -> None:
         self._add(tmp_path, "Task A")
@@ -5411,18 +5412,26 @@ class TestTasksCompleteWithResolve:
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.SPEC)
         gh = MagicMock()
-        with patch("fido.tasks.sync_tasks_background") as mock_sync:
-            Tasks(work_dir).complete_with_resolve(task["id"], gh)
-        mock_sync.assert_called_once_with(work_dir, gh)
+        sync_calls: list[tuple[Any, Any]] = []
+        Tasks(work_dir).complete_with_resolve(
+            task["id"],
+            gh,
+            _sync_background=lambda wd, g: sync_calls.append((wd, g)),
+        )
+        assert sync_calls == [(work_dir, gh)]
 
     def test_triggers_background_sync_even_for_unknown_id(self, tmp_path: Path) -> None:
         """Sync still fires even when the task_id isn't found — caller
         intent ('I just tried to complete something') is the trigger."""
         work_dir = self._work_dir(tmp_path)
         gh = MagicMock()
-        with patch("fido.tasks.sync_tasks_background") as mock_sync:
-            Tasks(work_dir).complete_with_resolve("nonexistent-id", gh)
-        mock_sync.assert_called_once_with(work_dir, gh)
+        sync_calls: list[tuple[Any, Any]] = []
+        Tasks(work_dir).complete_with_resolve(
+            "nonexistent-id",
+            gh,
+            _sync_background=lambda wd, g: sync_calls.append((wd, g)),
+        )
+        assert sync_calls == [(work_dir, gh)]
 
     def test_resolves_thread_when_we_are_last(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

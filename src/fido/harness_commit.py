@@ -15,8 +15,9 @@ Type definitions live in Rocq-extracted modules — importers should get
 
 import logging
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from fido.infra import ProcessRunner
 from fido.rocq import harness_commit_decision as _hcd_mod
@@ -55,11 +56,30 @@ class HarnessCommitter:
     Dependencies are injected through the constructor so tests can supply
     a fake :class:`~fido.infra.ProcessRunner` without patching
     :mod:`subprocess`.
+
+    *_decision_oracle* and *_commit_oracle* override the default Rocq oracle
+    functions; used by tests to exercise divergence-detection paths without
+    patching module symbols.
     """
 
-    def __init__(self, work_dir: Path, runner: ProcessRunner) -> None:
+    def __init__(
+        self,
+        work_dir: Path,
+        runner: ProcessRunner,
+        *,
+        _decision_oracle: Callable[..., Any] | None = None,
+        _commit_oracle: Callable[[TurnOutcome], bool] | None = None,
+    ) -> None:
         self._work_dir = work_dir
         self._runner = runner
+        self._decision_oracle = (
+            _decision_oracle
+            if _decision_oracle is not None
+            else _hcd_mod.harness_commit_decision
+        )
+        self._commit_oracle = (
+            _commit_oracle if _commit_oracle is not None else _to_mod.outcome_is_commit
+        )
 
     def _git(
         self,
@@ -119,7 +139,7 @@ class HarnessCommitter:
             commit_sha=commit_sha,
             commit_output=commit_output,
         )
-        oracle = _hcd_mod.harness_commit_decision(outcome, env)
+        oracle = self._decision_oracle(outcome, env)
         if result != oracle:
             raise AssertionError(
                 f"harness_commit_decision oracle mismatch: "
@@ -130,7 +150,7 @@ class HarnessCommitter:
         self, outcome: TurnOutcome, *, dispatched_to_commit: bool
     ) -> None:
         """Assert that the Rocq-proven outcome_is_commit agrees with our dispatch."""
-        oracle = _to_mod.outcome_is_commit(outcome)
+        oracle = self._commit_oracle(outcome)
         if oracle != dispatched_to_commit:
             raise AssertionError(
                 f"outcome_is_commit oracle mismatch: "

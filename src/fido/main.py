@@ -1,11 +1,17 @@
 """Top-level fido server entry point."""
 
+from collections.abc import Callable
 
-def main(argv: list[str] | None = None) -> None:
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    _run: Callable[[], None] | None = None,
+) -> None:
     del argv
-    from fido.server import run as server_run
-
-    server_run()
+    if _run is None:
+        from fido.server import run as _run  # pragma: no cover
+    _run()
 
 
 if __name__ == "__main__":  # pragma: no cover

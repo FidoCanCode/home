@@ -2857,23 +2857,31 @@ class TestParseOracleAssertions:
     def test_oracle_none_raises(self) -> None:
         """If parse_sentinel returns None but the parser produced a result,
         the assertion fires."""
-        from fido.rocq.turn_outcome import CommitTaskComplete
+        from fido.rocq.turn_outcome import CommitTaskComplete, parse_sentinel
         from fido.turn_outcome import _assert_parse_oracle
 
         # Empty payload → oracle returns None, but we pass a result anyway.
         with pytest.raises(AssertionError, match="oracle returned None"):
-            _assert_parse_oracle("commit-task-complete", "", CommitTaskComplete("x"))
+            _assert_parse_oracle(
+                "commit-task-complete",
+                "",
+                CommitTaskComplete("x"),
+                _oracle=parse_sentinel,
+            )
 
     def test_oracle_mismatch_raises(self) -> None:
         """If parse_sentinel returns a different variant, the assertion fires."""
-        from fido.rocq.turn_outcome import SkipTaskWithReason
+        from fido.rocq.turn_outcome import SkipTaskWithReason, parse_sentinel
         from fido.turn_outcome import _assert_parse_oracle
 
         # Oracle will produce CommitTaskComplete("hello") for this kind+payload,
         # but we claim we got a SkipTaskWithReason.
         with pytest.raises(AssertionError, match="oracle mismatch"):
             _assert_parse_oracle(
-                "commit-task-complete", "hello", SkipTaskWithReason("hello")
+                "commit-task-complete",
+                "hello",
+                SkipTaskWithReason("hello"),
+                _oracle=parse_sentinel,
             )
 
 
