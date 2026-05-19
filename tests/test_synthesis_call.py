@@ -58,9 +58,11 @@ def _make_agent(return_value: str | list[str]) -> MagicMock:
 def _make_prompts(
     system: str = "sys",
     user: str = "user",
+    followup_system: str = "followup-sys",
 ) -> MagicMock:
     prompts = MagicMock()
     prompts.synthesis_system_prompt.return_value = system
+    prompts.synthesis_followup_system_prompt.return_value = followup_system
     prompts.synthesis_prompt.return_value = user
     return prompts
 
@@ -727,6 +729,44 @@ class TestCallSynthesisVerificationTurn:
         # Third call is the derive turn.
         _, kwargs = agent.run_turn.call_args_list[2]
         assert kwargs.get("allowed_tools") == READ_ONLY_ALLOWED_TOOLS
+
+    def test_verify_turn_carries_followup_system_prompt(self) -> None:
+        """#1850: the verify turn must pass the *follow-up* synthesis
+        system prompt, not the main one.  The worker's persistent
+        ClaudeSession has no anchor across turns — a bare Yes/No prompt
+        against task framing is read as task continuation, and the agent
+        goes off running unrelated tools (observed on PR #1842, 84-second
+        turn before the reply landed).  The follow-up variant strips the
+        JSON-only directive so ``startswith("no")`` actually works
+        (codex P1)."""
+        raw = _make_raw(reply_text="Looks fine.", change_request=None)
+        agent = _make_agent([raw, "Yes"])
+        prompts = _make_prompts(
+            system="SYNTHESIS_JSON_ONLY", followup_system="SYNTHESIS_FOLLOWUP"
+        )
+
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        # First turn: main synthesis with the JSON-only system prompt.
+        _, synth_kwargs = agent.run_turn.call_args_list[0]
+        assert synth_kwargs.get("system_prompt") == "SYNTHESIS_JSON_ONLY"
+        # Second turn: verify with the follow-up system prompt.
+        _, verify_kwargs = agent.run_turn.call_args_list[1]
+        assert verify_kwargs.get("system_prompt") == "SYNTHESIS_FOLLOWUP"
+
+    def test_derive_turn_carries_followup_system_prompt(self) -> None:
+        """#1850: the derive turn (after a No verify) must also carry the
+        follow-up synthesis system prompt — same plain-text framing."""
+        raw = _make_raw(reply_text="Looks fine.", change_request=None)
+        agent = _make_agent([raw, "No", "Add missing tests"])
+        prompts = _make_prompts(
+            system="SYNTHESIS_JSON_ONLY", followup_system="SYNTHESIS_FOLLOWUP"
+        )
+
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        _, derive_kwargs = agent.run_turn.call_args_list[2]
+        assert derive_kwargs.get("system_prompt") == "SYNTHESIS_FOLLOWUP"
 
     def test_verify_turn_exception_returns_original_response(self) -> None:
         """A transport error in the verify turn must not discard the synthesis result."""

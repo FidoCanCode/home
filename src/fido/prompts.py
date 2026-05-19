@@ -864,18 +864,46 @@ class Prompts:
         before responding, so it can write an informed reply *and* a meaningful
         change_request intent, without being able to modify files or run mutations.
         """
-        active = ""
-        if issue is not None:
-            active = render_active_context(issue, pr, [], None, []) + "\n\n"
         return (
-            f"{self.persona}\n\n"
-            f"{active}"
+            f"{self._synthesis_base_system_prompt(issue, pr)}"
             "You are responding to a GitHub PR comment with a single structured "
             "JSON response.  "
             f"{TRIAGE_CLAUSE}  "
             "Output ONLY the JSON object — no preamble, no trailing text, "
             "no explanation outside the JSON fields."
         )
+
+    def synthesis_followup_system_prompt(
+        self,
+        issue: ActiveIssue | None = None,
+        pr: ActivePR | None = None,
+    ) -> str:
+        """Return the system prompt for follow-up turns after :meth:`synthesis_system_prompt` (#1850).
+
+        Shares the persona and active-work framing with the main synthesis
+        turn so the agent stays anchored in synthesis-reply mode, but DROPS
+        the JSON-only directive — the verify / derive follow-ups want
+        plain-text answers (a single ``Yes`` or ``No`` then a one-sentence
+        request).  Without this, reusing the JSON-only prompt would either
+        starve those checks (``startswith("no")`` fails on a JSON wrapper)
+        or push the model toward the wrong shape.
+        """
+        return (
+            f"{self._synthesis_base_system_prompt(issue, pr)}"
+            "You are in a synthesis follow-up turn — a brief plain-text "
+            "question about the reply you just produced.  Answer exactly "
+            "as asked: no JSON, no markdown, no preamble."
+        )
+
+    def _synthesis_base_system_prompt(
+        self,
+        issue: ActiveIssue | None,
+        pr: ActivePR | None,
+    ) -> str:
+        active = ""
+        if issue is not None:
+            active = render_active_context(issue, pr, [], None, []) + "\n\n"
+        return f"{self.persona}\n\n{active}"
 
     def synthesis_prompt(
         self,

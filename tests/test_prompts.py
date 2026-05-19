@@ -1707,6 +1707,53 @@ class TestSynthesisSystemPrompt:
         assert "JSON" in result
 
 
+# ── Prompts.synthesis_followup_system_prompt ─────────────────────────────────
+
+
+class TestSynthesisFollowupSystemPrompt:
+    def test_includes_persona(self) -> None:
+        result = Prompts("I am Fido.").synthesis_followup_system_prompt()
+        assert "I am Fido." in result
+
+    def test_drops_json_only_directive(self) -> None:
+        """#1850 codex P1: the follow-up turn asks for a plain Yes/No
+        answer.  Reusing the JSON-only directive from the main synthesis
+        prompt would push the model toward wrapping its answer in JSON,
+        and ``startswith("no")`` would then fail on a ``{...`` reply."""
+        result = Prompts("persona").synthesis_followup_system_prompt()
+        # The main synthesis prompt says "Output ONLY the JSON object";
+        # the follow-up must NOT carry that directive.
+        assert "Output ONLY the JSON" not in result
+        assert "structured JSON response" not in result
+        # And it must explicitly steer the model away from JSON output.
+        assert "no JSON" in result
+
+    def test_active_context_included_when_issue_given(self) -> None:
+        """Same active-context anchoring as the main synthesis prompt —
+        the follow-up still needs the active issue/PR to reason about
+        what was queued."""
+        issue = ActiveIssue(number=7, title="Fix crash", body="some body")
+        result = Prompts("persona").synthesis_followup_system_prompt(issue=issue)
+        assert "## Active issue" in result
+        assert "#7: Fix crash" in result
+
+    def test_active_context_no_pr_section_when_pr_is_none(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="")
+        result = Prompts("persona").synthesis_followup_system_prompt(
+            issue=issue, pr=None
+        )
+        assert "## Active PR" not in result
+
+    def test_active_context_includes_pr_when_given(self) -> None:
+        issue = ActiveIssue(number=7, title="Fix crash", body="")
+        pr = ActivePR(
+            number=42, title="Fix the crash", body="", url="https://example/42"
+        )
+        result = Prompts("persona").synthesis_followup_system_prompt(issue=issue, pr=pr)
+        assert "## Active PR" in result
+        assert "PR #42: Fix the crash" in result
+
+
 # ── Prompts.synthesis_prompt ─────────────────────────────────────────────────
 
 
