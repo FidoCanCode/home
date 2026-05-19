@@ -2166,7 +2166,7 @@ def _make_new_tasks_from_opus(
     snapshot_ids: frozenset[str],
     current: list[dict[str, Any]] | None = None,
     intents: list[RescopeIntent] | None = None,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any] | None]:
     """Create fresh task dicts for items Opus returned with a null or absent id.
 
     Items with a non-null id (whether in the snapshot or not) are not treated
@@ -2175,8 +2175,14 @@ def _make_new_tasks_from_opus(
     ``"id"`` key is absent or explicitly ``null`` are promoted to new tasks.
 
     Each new task receives a UUIDv7 id, ``status: "pending"``, and
-    ``type: "spec"`` unless Opus specified a different type.  Items with
-    blank titles are silently skipped.
+    ``type: "spec"`` unless Opus specified a different type.
+
+    Returns a list aligned with the null-id positions in *ordered_items*
+    (codex P2 on PR #1847): one entry per null-id item, in declaration
+    order.  Entry is the new task dict when the item was materialized,
+    ``None`` when the item was dropped (blank title OR dedup-suppressed).
+    The caller (``_apply_reorder``) walks this list positionally so a
+    dropped slot doesn't shift later new tasks into earlier positions.
 
     Dedup against post-snapshot thread tasks (#1337): when *current* and
     *intents* are provided, any rescope intent whose ``comment_id`` is already
@@ -2198,7 +2204,7 @@ def _make_new_tasks_from_opus(
             if intent.comment_id in post_snapshot_lineage:
                 covered_intents += 1
 
-    new_tasks: list[dict[str, Any]] = []
+    slots: list[dict[str, Any] | None] = []
     skipped = 0
     for item in ordered_items:
         if "id" in item and item["id"] is not None:
@@ -2209,6 +2215,7 @@ def _make_new_tasks_from_opus(
         # normalization Tasks.add applies, so PR-body round-tripping holds.
         title = _effective_title(item, {})
         if not title:
+            slots.append(None)
             continue
         if skipped < covered_intents:
             log.info(
@@ -2217,6 +2224,7 @@ def _make_new_tasks_from_opus(
                 title[:80],
             )
             skipped += 1
+            slots.append(None)
             continue
         task: dict[str, Any] = {
             "id": str(uuid.uuid7()),
@@ -2242,8 +2250,8 @@ def _make_new_tasks_from_opus(
         thread = _derive_thread_from_intents(op_intents, intents)
         if thread is not None:
             task["thread"] = thread
-        new_tasks.append(task)
-    return new_tasks
+        slots.append(task)
+    return slots
 
 
 def _validate_rescope_batch(
@@ -2635,6 +2643,45 @@ def _find_duplicate_titles(
     return duplicates
 
 
+def _inprogress_was_demoted(
+    inprogress_row: dict[str, Any], result: list[dict[str, Any]]
+) -> bool:
+    """Return True iff *inprogress_row* is no longer at the front of the
+    runnable-pending block of *result* (#1844).
+
+    A new runnable task landing ahead of the in-progress one is Opus's
+    signal that the new task should preempt.  The caller demotes the
+    in-progress row to pending and fires ``_on_inprogress_affected`` so
+    the worker aborts and re-picks.
+
+    Eligibility mirrors the picker's filter in
+    :func:`fido.worker._pick_next_task` *exactly*:
+
+    - status in ``{pending, in_progress}`` (skip completed/blocked).
+    - ``type != \"ci\"`` (the picker prioritises ``type == \"ci\"``
+      separately; this helper is only invoked for non-CI in-progress
+      rows so CI preempt has its own path pre-#1846).  We use the raw
+      ``type`` field rather than the title-prefix-aware oracle kind
+      classifier because the picker does (codex P2 round 3 on this PR
+      — a ``\"CI FAILURE:\"`` titled row with ``type: \"spec\"`` is
+      runnable per the picker, so it must count as demotion here).
+    - title not starting ``\"ask:\"`` / ``\"defer:\"`` (case-insensitive)
+      — the picker filters them; the magic-prefix smell that motivates
+      this duplication is #1848.
+    """
+    skip_statuses = (str(TaskStatus.COMPLETED), str(TaskStatus.BLOCKED))
+    inprogress_id = inprogress_row.get("id")
+    for task in result:
+        if task.get("status") in skip_statuses:
+            continue
+        if task.get("type") == "ci":
+            continue
+        if task.get("title", "").lower().startswith(("ask:", "defer:")):
+            continue
+        return task.get("id") != inprogress_id
+    return False
+
+
 def _apply_reorder(
     current: list[dict[str, Any]],
     ordered_items: list[dict[str, Any]],
@@ -2679,25 +2726,70 @@ def _apply_reorder(
         current, ordered_items, snapshot_ids, oracle_result, split_child_ids
     )
 
-    new_tasks = _make_new_tasks_from_opus(
+    new_task_slots = _make_new_tasks_from_opus(
         ordered_items, snapshot_ids, current=current, intents=intents
     )
-    if not new_tasks:
+    if not any(slot is not None for slot in new_task_slots):
         return oracle_result
 
-    # Merge new tasks into oracle result: CI tasks first (in both groups),
-    # then non-CI pending (oracle then new), then completed at end.
+    # #1844: inject new tasks at the positions Opus declared in
+    # ``ordered_items``.  Walk ``oracle_result`` (which carries every
+    # existing task in oracle order, including omitted ones the model
+    # treated as KeepTask) and inject new tasks RELATIVE to the
+    # existing tasks Opus did name.  For each null-id slot, the "after
+    # anchor" is the id of the last existing-id item that appeared
+    # before it in ``ordered_items`` (or ``None`` if Opus put the new
+    # task before any existing-id mention).  Omitted snapshot tasks
+    # stay at their oracle position untouched (codex P1 on this PR —
+    # earlier interleave appended them after every explicit item,
+    # silently demoting tasks Opus hadn't moved).
     completed_status = str(TaskStatus.COMPLETED)
-    oracle_pending = [t for t in oracle_result if t.get("status") != completed_status]
-    oracle_completed = [t for t in oracle_result if t.get("status") == completed_status]
+    after_anchor: dict[str | None, list[dict[str, Any]]] = {}
+    last_existing: str | None = None
+    null_slot_idx = 0
+    for item in ordered_items:
+        item_id = item.get("id")
+        if item_id is not None:
+            last_existing = item_id
+            continue
+        if null_slot_idx < len(new_task_slots):
+            slot = new_task_slots[null_slot_idx]
+            if slot is not None:
+                after_anchor.setdefault(last_existing, []).append(slot)
+        null_slot_idx += 1
 
-    ci_new = [t for t in new_tasks if t.get("type") == "ci"]
-    non_ci_new = [t for t in new_tasks if t.get("type") != "ci"]
+    interleaved: list[dict[str, Any]] = []
+    # Insert new tasks anchored before any existing (Opus put them at
+    # the head of ``ordered_items`` before mentioning any id).
+    interleaved.extend(after_anchor.pop(None, []))
+    for existing in oracle_result:
+        interleaved.append(existing)
+        interleaved.extend(after_anchor.pop(existing["id"], []))
+    # Any after_anchor entries still keyed on an id we never saw in
+    # oracle_result would indicate a parser/validator bug — the
+    # cross-op validator rejects ordered_items items that reference
+    # unknown ids before we get here, so the only valid anchors are
+    # ``None`` (head) or an id present in oracle_result.  Per the
+    # fail-fast convention we don't paper over them.
+    assert not after_anchor, (
+        f"after_anchor has unresolved keys: {sorted(k for k in after_anchor if k is not None)!r}"
+    )
 
-    ci_oracle = [t for t in oracle_pending if t.get("type") == "ci"]
-    non_ci_oracle = [t for t in oracle_pending if t.get("type") != "ci"]
-
-    return ci_oracle + ci_new + non_ci_oracle + non_ci_new + oracle_completed
+    # Structural sort: CI first (preserving relative order), pending
+    # next (preserving interleaved order), completed last.  Backstop
+    # until #1846 retires the CI-in-tasks.json shape entirely.
+    ci = [
+        t
+        for t in interleaved
+        if t.get("type") == "ci" and t.get("status") != completed_status
+    ]
+    pending_non_ci = [
+        t
+        for t in interleaved
+        if t.get("type") != "ci" and t.get("status") != completed_status
+    ]
+    completed = [t for t in interleaved if t.get("status") == completed_status]
+    return ci + pending_non_ci + completed
 
 
 def _merge_source_ids(ordered_items: list[dict[str, Any]]) -> set[str]:
@@ -3138,6 +3230,28 @@ def reorder_tasks(
                                 "Opus — reset to pending: %s",
                                 inprogress_in_result.get("title", "")[:60],
                             )
+                    elif inprogress_in_result.get("type") != "ci" and (
+                        _inprogress_was_demoted(inprogress_in_result, result)
+                    ):
+                        # #1844: a NEW task landed ahead of the in-progress
+                        # one (no modification to the in-progress row itself,
+                        # but Opus placed something else before it).  Treat
+                        # as preempt: demote in-progress to pending so the
+                        # picker re-picks against the new front of queue.
+                        #
+                        # Only fires for non-CI in-progress rows (codex P1
+                        # on this PR): CI preempt has its own path pre-#1846
+                        # and the demotion helper skips CI rows during its
+                        # walk, so calling it for a CI in-progress would
+                        # always return False anyway.
+                        inprogress_affected = True
+                        inprogress_in_result["status"] = str(TaskStatus.PENDING)
+                        log.info(
+                            "reorder_tasks: in-progress task demoted by "
+                            "rescope (a later-arriving task took position 0) "
+                            "— reset to pending: %s",
+                            inprogress_in_result.get("title", "")[:60],
+                        )
             # Slice-assign so JsonFileStore.modify writes the recomputed
             # list back (it persists the same dict/list object it yielded).
             current[:] = result
