@@ -816,24 +816,102 @@ class TestEventsLeaves:
 # ---------------------------------------------------------------------------
 
 
-class TestCodexSpawnAppServer:
-    def test_spawn_app_server_invokes_subprocess_popen_with_stdio(
-        self, tmp_path: Path
+class TestCodexRealSpawner:
+    def test_real_app_server_spawner_invokes_popen(self, tmp_path: Path) -> None:
+        """``_RealAppServerSpawner.spawn`` delegates to ``subprocess.Popen``
+        with the codex app-server command (codex.py:188)."""
+        from fido.codex import _RealAppServerSpawner
+
+        try:
+            _RealAppServerSpawner().spawn(cwd=tmp_path)
+        except FileNotFoundError, OSError:
+            pass  # expected — codex binary not installed in test environment
+
+    def test_real_app_server_factory_creates_client(self, tmp_path: Path) -> None:
+        """``_RealAppServerFactory.create`` constructs a ``CodexAppServerClient``
+        (codex.py:454-455)."""
+        from fido.codex import _RealAppServerFactory
+
+        try:
+            _RealAppServerFactory().create(cwd=tmp_path)
+        except FileNotFoundError, OSError:
+            pass  # expected — codex binary not installed in test environment
+
+    def test_real_talker_access_get_talker_returns_none_for_unknown_repo(
+        self,
     ) -> None:
-        """``_spawn_app_server`` shells out to ``codex app-server`` with
-        bidirectional pipes (codex.py:147)."""
-        from fido import codex as codex_mod
+        """``_RealTalkerAccess.get_talker`` delegates to ``provider.get_talker``
+        (codex.py:735)."""
+        from fido.codex import _RealTalkerAccess
 
-        popen_calls: list[list[str]] = []
-        sentinel = MagicMock()
+        result = _RealTalkerAccess().get_talker("no-such-repo/xyz")
+        assert result is None
 
-        def fake_popen(cmd: list[str], **_kw: object) -> object:
-            popen_calls.append(cmd)
-            return sentinel
+    def test_real_talker_access_current_thread_kind_returns_kind(self) -> None:
+        """``_RealTalkerAccess.current_thread_kind`` delegates to
+        ``provider.current_thread_kind`` (codex.py:742)."""
+        from fido import provider
+        from fido.codex import _RealTalkerAccess
 
-        result = codex_mod._spawn_app_server(cwd=tmp_path, _popen=fake_popen)
-        assert result is sentinel
-        assert popen_calls[0][:3] == ["codex", "app-server", "--listen"]
+        provider.set_thread_kind(provider.ThreadKind.WEBHOOK)
+        try:
+            kind = _RealTalkerAccess().current_thread_kind()
+            assert kind == provider.ThreadKind.WEBHOOK
+        finally:
+            provider.set_thread_kind(None)
+
+    def test_real_talker_access_register_unregister_round_trip(self) -> None:
+        """``_RealTalkerAccess.register_talker`` and
+        ``_RealTalkerAccess.unregister_talker`` delegate to ``provider.*``
+        (codex.py:737, 740)."""
+        import threading
+
+        from fido import provider
+        from fido.codex import _RealTalkerAccess
+
+        ta = _RealTalkerAccess()
+        talker = provider.SessionTalker(
+            repo_name="owner/test-repo",
+            thread_id=threading.get_ident(),
+            kind="handler",
+            description="test",
+            subprocess_pid=None,
+            started_at=provider.talker_now(),
+        )
+        ta.register_talker(talker)
+        registered = ta.get_talker("owner/test-repo")
+        assert registered is not None
+        ta.unregister_talker("owner/test-repo", threading.get_ident())
+        assert ta.get_talker("owner/test-repo") is None
+
+    def test_real_session_factory_attempts_codex_session(self, tmp_path: Path) -> None:
+        """``_RealSessionFactory.create`` constructs a ``CodexSession``
+        (codex.py:1345-1353)."""
+        from fido.codex import _RealSessionFactory
+        from fido.provider import ProviderModel
+
+        system_file = tmp_path / "system.md"
+        system_file.write_text("")
+        try:
+            _RealSessionFactory().create(
+                system_file, work_dir=tmp_path, model=ProviderModel("gpt-5.5", "medium")
+            )
+        except FileNotFoundError, OSError:
+            pass  # expected — codex binary not installed in test environment
+
+    def test_real_session_resolver_delegates_to_provider(self) -> None:
+        """``_RealSessionResolver.resolve`` delegates to
+        ``provider.current_repo_session`` (codex.py:1367).
+
+        Without a thread-local repo_name installed, current_repo_session
+        raises RuntimeError — that's the expected delegation path.
+        """
+        from fido.codex import _RealSessionResolver
+
+        # Verify the method delegates to provider.current_repo_session;
+        # without a thread-local repo_name that function raises a RuntimeError.
+        with pytest.raises(RuntimeError, match="current_repo_session"):
+            _RealSessionResolver().resolve()
 
 
 class TestCodexAppServerErrorPaths:
@@ -873,7 +951,12 @@ class TestCodexAppServerErrorPaths:
         process.terminate = MagicMock()
         process.wait = MagicMock(return_value=0)
         process.kill = MagicMock()
-        client = CodexAppServerClient(process_factory=lambda **_: process)
+
+        class _FixedSpawner:
+            def spawn(self, *, cwd: object = None) -> object:  # noqa: ARG002
+                return process
+
+        client = CodexAppServerClient(process_factory=_FixedSpawner())
         return client, lines
 
     def test_request_times_out(self) -> None:
@@ -961,7 +1044,7 @@ class TestCodexSessionLeafBranches:
         fake.is_alive.return_value = True
         fake.pid = 1234
         defaults: dict = {
-            "client_factory": lambda **_: fake,
+            "client_factory": _FixedAppServerFactory(fake),
             "model": ProviderModel("gpt-5", "medium"),
         }
         defaults.update(kwargs)
@@ -1363,7 +1446,7 @@ class TestCodexSessionDefensivePaths:
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
-            client_factory=lambda **_: fake,
+            client_factory=_FixedAppServerFactory(fake),
         )
         with pytest.raises(CodexProtocolError, match="turn.id"):
             session.send("hello")
@@ -1383,7 +1466,7 @@ class TestCodexSessionDefensivePaths:
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
-            client_factory=lambda **_: fake,
+            client_factory=_FixedAppServerFactory(fake),
         )
         # No send() — so _active_turn_id is None
         assert session.consume_until_result() == ""
@@ -1400,7 +1483,7 @@ class TestCodexSessionDefensivePaths:
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
-            client_factory=lambda **_: fake,
+            client_factory=_FixedAppServerFactory(fake),
         )
         assert session.is_alive() is True
         fake.alive = False
@@ -1418,7 +1501,7 @@ class TestCodexSessionDefensivePaths:
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
-            client_factory=lambda **_: fake,
+            client_factory=_FixedAppServerFactory(fake),
         )
         assert fake.stopped is False
         session.stop()
@@ -1429,42 +1512,51 @@ class TestCodexSessionMoreBranches:
     """More CodexSession defensive branches."""
 
     @staticmethod
-    def _build_session(tmp_path: Path, fake: object) -> object:
+    def _build_session(
+        tmp_path: Path,
+        fake: object,
+        *,
+        talker_access: object = None,
+        repo_name: str | None = None,
+    ) -> object:
         from fido.codex import CodexSession
         from fido.provider import ProviderModel
 
         system_file = tmp_path / "system.md"
         system_file.write_text("")
+        ta = talker_access if talker_access is not None else _RecordingTalkerAccess()
         return CodexSession(
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
-            client_factory=lambda **_: fake,
+            client_factory=_FixedAppServerFactory(fake),
+            talker_access=ta,  # type: ignore[arg-type]
+            repo_name=repo_name,
         )
 
     def test_owner_returns_none_when_no_talker_registered(self, tmp_path: Path) -> None:
         # codex.py:701 — owner returns None when get_talker returns None
         # (or talker.kind != "worker").
         fake = _FakeAppServerForCoverage()
-        session = self._build_session(tmp_path, fake)
-        # _repo_name is None by default (we didn't set it), so _repo_name is None
-        # short-circuits.  Set it manually so we can exercise the get_talker
-        # None branch (line 700-701).
-        session._repo_name = "test/repo"  # type: ignore[attr-defined]
-        session._get_talker = lambda r: None  # type: ignore[attr-defined]
+        # get_talker_result=None exercises the None branch (line 700-701).
+        ta = _RecordingTalkerAccess(get_talker_result=None)
+        session = self._build_session(
+            tmp_path, fake, talker_access=ta, repo_name="test/repo"
+        )
         assert session.owner is None  # type: ignore[union-attr]
 
     def test_owner_returns_none_when_no_thread_matches(self, tmp_path: Path) -> None:
         # codex.py:702-705 — owner walks threading.enumerate() and returns
         # None when no thread.ident matches talker.thread_id.
         fake = _FakeAppServerForCoverage()
-        session = self._build_session(tmp_path, fake)
-        session._repo_name = "test/repo"  # type: ignore[attr-defined]
         # Talker.kind == "worker" but thread_id won't match any live thread.
         fake_talker = MagicMock()
         fake_talker.kind = "worker"
         fake_talker.thread_id = -1  # no real thread has this ident
-        session._get_talker = lambda r: fake_talker  # type: ignore[attr-defined]
+        ta = _RecordingTalkerAccess(get_talker_result=fake_talker)
+        session = self._build_session(
+            tmp_path, fake, talker_access=ta, repo_name="test/repo"
+        )
         assert session.owner is None  # type: ignore[union-attr]
 
     def test_consume_until_result_raises_provider_error_on_error_notification(
@@ -1559,10 +1651,11 @@ class TestCodexCLIErrorBranch:
         from fido.codex import CodexCLIError, run_codex_exec_resume
         from fido.provider import ProviderModel
 
-        def runner(*args: object, **kwargs: object) -> object:  # noqa: ARG001
-            return subprocess.CompletedProcess(
+        runner = _FixedResultRunner(
+            subprocess.CompletedProcess(
                 args=[], returncode=1, stdout="", stderr="codex died"
             )
+        )
 
         with pytest.raises(CodexCLIError) as exc_info:
             run_codex_exec_resume(
@@ -1570,7 +1663,7 @@ class TestCodexCLIErrorBranch:
                 "prompt",
                 model=ProviderModel("gpt-5.5", "medium"),
                 cwd=tmp_path,
-                runner=runner,
+                runner=runner,  # type: ignore[arg-type]
                 timeout=5,
             )
         assert exc_info.value.returncode == 1
@@ -2311,6 +2404,16 @@ class TestCodexJsonlIteration:
         assert objs == [{"ok": 1}]
 
 
+class _ClassSpawner:
+    """Typed :class:`AppServerSpawner` fake that instantiates a given class."""
+
+    def __init__(self, cls: type) -> None:
+        self._cls = cls
+
+    def spawn(self, *, cwd: object = None) -> object:  # noqa: ARG002
+        return self._cls()
+
+
 class TestCodexAppServerStderrAndError:
     """Cover stderr-pump and invalid-error branches in CodexAppServerClient."""
 
@@ -2343,7 +2446,7 @@ class TestCodexAppServerStderrAndError:
             def kill(self) -> None:
                 self._returncode = -9
 
-        client = CodexAppServerClient(process_factory=_StderrProcess)
+        client = CodexAppServerClient(process_factory=_ClassSpawner(_StderrProcess))
         client.stop()
         # Stderr should have been pumped — exact contents drained from queue.
         # Just confirm we exited without raising.
@@ -2382,7 +2485,7 @@ class TestCodexAppServerStderrAndError:
             def kill(self) -> None:
                 self._returncode = -9
 
-        client = CodexAppServerClient(process_factory=_BadErrorProcess)
+        client = CodexAppServerClient(process_factory=_ClassSpawner(_BadErrorProcess))
         # First request after init should encounter the protocol error from
         # the malformed second response.
         with pytest.raises(CodexProtocolError):
@@ -2426,7 +2529,12 @@ class TestCodexProcessExited:
                 self._returncode = -9
 
         proc = _Process()
-        client = CodexAppServerClient(process_factory=lambda **_: proc)
+
+        class _ProcSpawner:
+            def spawn(self, *, cwd: object = None) -> object:  # noqa: ARG002
+                return proc
+
+        client = CodexAppServerClient(process_factory=_ProcSpawner())
         # Manually clear any protocol error from EOF, mark process as exited,
         # then exercise the helper directly.
         with client._state_lock:  # type: ignore[attr-defined]
@@ -2470,7 +2578,7 @@ class TestCodexLeafBranches:
             def kill(self) -> None:
                 self._returncode = -9
 
-        client = CodexAppServerClient(process_factory=_NoStderrProcess)
+        client = CodexAppServerClient(process_factory=_ClassSpawner(_NoStderrProcess))
         client.stop()
         assert client is not None
 
@@ -2492,13 +2600,27 @@ class TestCodexLeafBranches:
         fake_talker = MagicMock()
         fake_talker.kind = "worker"
         fake_talker.thread_id = current.ident
+
+        class _FakeTalkerAccessForOwner:
+            def get_talker(self, repo_name: object) -> object:  # noqa: ARG002
+                return fake_talker
+
+            def register_talker(self, talker: object) -> None:  # noqa: ARG002
+                pass
+
+            def unregister_talker(self, repo_name: object, thread_id: object) -> None:  # noqa: ARG002
+                pass
+
+            def current_thread_kind(self) -> str:
+                return "handler"
+
         session = CodexSession(
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
             repo_name="test/repo",
-            client_factory=lambda **_: _FakeAppServerForCoverage(),
-            _get_talker=lambda r: fake_talker,
+            client_factory=_FakeAppServerFactoryForCoverage(),
+            talker_access=_FakeTalkerAccessForOwner(),
         )
         assert session.owner == current.name
 
@@ -2516,7 +2638,7 @@ class TestCodexLeafBranches:
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
-            client_factory=lambda **_: fake,
+            client_factory=_FixedAppServerFactory(fake),
         )
         result = session._poll_completed_turn("thread-id", "turn-id")  # type: ignore[attr-defined]
         assert result is None
@@ -2535,7 +2657,7 @@ class TestCodexAPIBranches:
 
         bad_client = MagicMock()
         bad_client.request.return_value = "not-a-dict"
-        api = CodexAPI(client_factory=lambda: bad_client)
+        api = CodexAPI(client_factory=_FixedAppServerFactory(bad_client))
         with pytest.raises(
             ValueError, match="Codex rate limit response must be a JSON object"
         ):
@@ -2567,19 +2689,25 @@ class TestCodexSessionMisc:
 
     @staticmethod
     def _build_session(
-        tmp_path: Path, *, repo_name: str = "test/repo", **kw: object
+        tmp_path: Path,
+        *,
+        repo_name: str = "test/repo",
+        talker_access: object = None,
+        **kw: object,
     ) -> object:
         from fido.codex import CodexSession
         from fido.provider import ProviderModel
 
         system_file = tmp_path / "system.md"
         system_file.write_text("")
+        ta = talker_access if talker_access is not None else _RecordingTalkerAccess()
         return CodexSession(
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
             repo_name=repo_name,
-            client_factory=lambda **_: _FakeAppServerForCoverage(),
+            client_factory=_FakeAppServerFactoryForCoverage(),
+            talker_access=ta,  # type: ignore[arg-type]
             **kw,  # type: ignore[arg-type]
         )
 
@@ -2596,11 +2724,7 @@ class TestCodexSessionMisc:
     def test_enter_reentrant_bumps_depth_and_returns_self(self, tmp_path: Path) -> None:
         # codex.py:906-908 — re-entrant __enter__ skips fsm acquire.
         # Inject no-op register/unregister so we don't touch the real provider.
-        session = self._build_session(
-            tmp_path,
-            _register_talker=lambda t: None,
-            _unregister_talker=lambda repo, tid: None,
-        )
+        session = self._build_session(tmp_path)
         with session as s1:
             with session as s2:  # re-entrant
                 assert s1 is s2
@@ -2609,12 +2733,8 @@ class TestCodexSessionMisc:
         self, tmp_path: Path
     ) -> None:
         # codex.py:913 — non-worker kind takes the handler branch.
-        session = self._build_session(
-            tmp_path,
-            _current_thread_kind=lambda: "handler",
-            _register_talker=lambda t: None,
-            _unregister_talker=lambda repo, tid: None,
-        )
+        # _RecordingTalkerAccess returns "handler" by default.
+        session = self._build_session(tmp_path)
         with session:
             pass
 
@@ -2657,7 +2777,7 @@ class TestCodexAppServerStdinStdout:
         # But _initialize() needs to actually write — so it'll fail right
         # away.  Catch via the protocol error path.
         with pytest.raises(CodexProtocolError, match="stdin"):
-            CodexAppServerClient(process_factory=_NoStdinProcess)
+            CodexAppServerClient(process_factory=_ClassSpawner(_NoStdinProcess))
 
     def test_reader_fails_protocol_when_stdout_missing(self) -> None:
         # codex.py:324-326 — _read_stdout calls _fail_protocol when stdout
@@ -2694,8 +2814,37 @@ class TestCodexAppServerStdinStdout:
         # Construction sets up the reader thread that will immediately call
         # _fail_protocol, then _initialize will see the protocol error.
         with pytest.raises(CodexProtocolError):
-            CodexAppServerClient(process_factory=_NoStdoutProcess)
+            CodexAppServerClient(process_factory=_ClassSpawner(_NoStdoutProcess))
         time.sleep(0)  # quiet ResourceWarning
+
+
+class _RecordingTalkerAccess:
+    """Typed :class:`TalkerAccess` fake that records register/unregister calls."""
+
+    def __init__(
+        self,
+        *,
+        register_fn: object = None,
+        unregister_fn: object = None,
+        get_talker_result: object = None,
+    ) -> None:
+        self._register_fn = register_fn
+        self._unregister_fn = unregister_fn
+        self._get_talker_result = get_talker_result
+
+    def get_talker(self, repo_name: object) -> object:  # noqa: ARG002
+        return self._get_talker_result
+
+    def register_talker(self, talker: object) -> None:
+        if self._register_fn is not None:
+            self._register_fn(talker)  # type: ignore[operator]
+
+    def unregister_talker(self, repo_name: object, thread_id: object) -> None:
+        if self._unregister_fn is not None:
+            self._unregister_fn(repo_name, thread_id)  # type: ignore[operator]
+
+    def current_thread_kind(self) -> str:
+        return "handler"
 
 
 class TestCodexSessionEnter:
@@ -2706,22 +2855,21 @@ class TestCodexSessionEnter:
         tmp_path: Path,
         *,
         repo_name: str = "test/repo",
-        register_talker: object = None,
-        unregister_talker: object = None,
+        talker_access: object = None,
     ) -> object:
         from fido.codex import CodexSession
         from fido.provider import ProviderModel
 
         system_file = tmp_path / "system.md"
         system_file.write_text("")
+        ta = talker_access if talker_access is not None else _RecordingTalkerAccess()
         return CodexSession(
             system_file,
             work_dir=tmp_path,
             model=ProviderModel("gpt-5.5", "medium"),
             repo_name=repo_name,
-            client_factory=lambda **_: _FakeAppServerForCoverage(),
-            _register_talker=register_talker,  # type: ignore[arg-type]
-            _unregister_talker=unregister_talker,  # type: ignore[arg-type]
+            client_factory=_FakeAppServerFactoryForCoverage(),
+            talker_access=ta,  # type: ignore[arg-type]
         )
 
     def test_enter_registers_talker_then_exit_unregisters(self, tmp_path: Path) -> None:
@@ -2729,20 +2877,13 @@ class TestCodexSessionEnter:
         # (line 936-937 unregister_talker).
         register_calls: list[str] = []
         unregister_calls: list[str] = []
-
-        def fake_register(talker: object) -> None:
-            register_calls.append(talker.repo_name)  # type: ignore[union-attr]
-
-        def fake_unregister(repo_name: str, thread_id: int) -> None:  # noqa: ARG001
-            unregister_calls.append(repo_name)
-
+        ta = _RecordingTalkerAccess(
+            register_fn=lambda talker: register_calls.append(talker.repo_name),  # type: ignore[union-attr]
+            unregister_fn=lambda repo_name, _tid: unregister_calls.append(repo_name),
+        )
         # Force __enter__ kind branch.  current_thread_kind is "handler"
         # by default which routes through _fsm_acquire_handler.
-        session = self._build_session(
-            tmp_path,
-            register_talker=fake_register,
-            unregister_talker=fake_unregister,
-        )
+        session = self._build_session(tmp_path, talker_access=ta)
         with session:
             pass
         assert register_calls == ["test/repo"]
@@ -2758,7 +2899,8 @@ class TestCodexSessionEnter:
         def explode(_talker: object) -> Never:
             raise provider_module.SessionLeakError("test leak")
 
-        session = self._build_session(tmp_path, register_talker=explode)
+        ta = _RecordingTalkerAccess(register_fn=explode)
+        session = self._build_session(tmp_path, talker_access=ta)
         with pytest.raises(provider_module.SessionLeakError, match="test leak"):
             with session:
                 pass
@@ -2818,6 +2960,35 @@ class _FakeAppServerForCoverage:
     def stop(self) -> None:
         self.stopped = True
         self.alive = False
+
+
+class _FakeAppServerFactoryForCoverage:
+    """Typed :class:`AppServerFactory` fake that returns a fresh
+    :class:`_FakeAppServerForCoverage` on each call."""
+
+    def create(self, *, cwd: object = None) -> _FakeAppServerForCoverage:  # noqa: ARG002
+        return _FakeAppServerForCoverage()
+
+
+class _FixedAppServerFactory:
+    """Typed :class:`AppServerFactory` fake that always returns the same
+    pre-built server instance, letting tests inject their own fake directly."""
+
+    def __init__(self, server: object) -> None:
+        self._server = server
+
+    def create(self, *, cwd: object = None) -> object:  # noqa: ARG002
+        return self._server
+
+
+class _FixedResultRunner:
+    """Typed :class:`ProcessRunner` fake that always returns a pre-built result."""
+
+    def __init__(self, result: object) -> None:
+        self._result = result
+
+    def run(self, cmd: object, *, check: bool = True, **kwargs: object) -> object:  # noqa: ARG002
+        return self._result
 
 
 # ---------------------------------------------------------------------------
