@@ -1306,6 +1306,7 @@ class Worker:
         _harness_committer_cls: type | None = None,
         _sync_tasks: Callable[..., None] | None = None,
         _sleep_fn: Callable[[float], None] | None = None,
+        _recover_reply_promises: Callable[..., Any] | None = None,
         *,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
@@ -1379,6 +1380,7 @@ class Worker:
         )
         self._sync_tasks = _sync_tasks if _sync_tasks is not None else tasks.sync_tasks
         self._sleep_fn = _sleep_fn if _sleep_fn is not None else time.sleep
+        self._recover_reply_promises_fn = _recover_reply_promises
 
     def _ensure_provider(self) -> Provider:
         """Return the owned provider, creating the configured provider if needed."""
@@ -4587,12 +4589,17 @@ class Worker:
                 log_level="WARNING",
                 sub_dir=_sub_dir(),
             )
-            from fido.events import recover_reply_promises
+            from fido.events import recover_reply_promises as _default_recover
 
             assert self._registry is not None, (
                 "Worker._registry is required for recover_reply_promises"
             )
-            recovered_promises = recover_reply_promises(
+            _recover_fn = (
+                self._recover_reply_promises_fn
+                if self._recover_reply_promises_fn is not None
+                else _default_recover
+            )
+            recovered_promises = _recover_fn(
                 ctx.fido_dir,
                 recovery_config,
                 recovery_repo_cfg,

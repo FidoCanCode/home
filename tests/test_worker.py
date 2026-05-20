@@ -1189,19 +1189,17 @@ class TestWorker:
         gh = self._make_gh()
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_create = MagicMock()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session", mock_create),
-            patch.object(worker, "stop_session"),
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", return_value=None),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.create_session = mock_create
+        worker.stop_session = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=None)
+        worker.find_next_issue = MagicMock(return_value=None)
+        worker.run()
         mock_create.assert_called_once_with()
 
     def test_first_iteration_sweep_runs_for_idle_repo_with_no_issue(
@@ -1232,21 +1230,17 @@ class TestWorker:
             first_iteration=True,
             registry=MagicMock(spec=ActivityReporter),
         )
-        with (
-            patch.object(
-                worker, "create_context", return_value=self._make_mock_ctx(tmp_path)
-            ),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session"),
-            patch.object(worker, "stop_session"),
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", return_value=None),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=self._make_mock_ctx(tmp_path))
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.create_session = MagicMock()
+        worker.stop_session = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=None)
+        worker.find_next_issue = MagicMock(return_value=None)
+        worker.run()
 
         # The sweep cleared the orphan even though no issue was selected.
         assert FidoStore(tmp_path).pending_pr_numbers(repo="owner/repo") == []
@@ -1257,7 +1251,6 @@ class TestWorker:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         order: list[str] = []
 
         def mark_recover(*args: object, **kwargs: object) -> bool:
@@ -1275,32 +1268,31 @@ class TestWorker:
         def mark_rescope(*args: object, **kwargs: object) -> None:
             order.append("rescope")
 
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session"),
-            patch.object(worker, "stop_session"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("fido.events.recover_reply_promises", side_effect=mark_recover),
-            patch.object(
-                worker, "handle_queued_comments", side_effect=mark_queued_comments
-            ),
-            patch.object(worker, "rescope_before_pick", side_effect=mark_rescope),
-            patch.object(worker, "handle_ci", side_effect=mark_ci),
-            patch.object(worker, "handle_threads", return_value=False),
-            patch.object(worker, "execute_task", return_value=False),
-            patch.object(worker, "handle_promote_merge", return_value=0),
-        ):
-            worker.run()
+        worker = Worker(
+            tmp_path,
+            gh,
+            _recover_reply_promises=mark_recover,
+            registry=MagicMock(spec=ActivityReporter),
+        )
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.create_session = MagicMock()
+        worker.stop_session = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", False))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.handle_queued_comments = MagicMock(side_effect=mark_queued_comments)
+        worker.rescope_before_pick = MagicMock(side_effect=mark_rescope)
+        worker.handle_ci = MagicMock(side_effect=mark_ci)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.execute_task = MagicMock(return_value=False)
+        worker.handle_promote_merge = MagicMock(return_value=0)
+        worker.run()
         # Drain queued comments before rescope so synthesis-produced tasks
         # are visible when rescope rewrites the list (#1689).
         assert order[:4] == ["recover", "queued_comments", "rescope", "ci"]
@@ -1320,25 +1312,21 @@ class TestWorker:
             session_issue=7,
             registry=MagicMock(spec=ActivityReporter),
         )
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-            patch.object(worker, "execute_task", return_value=False),
-            patch.object(worker, "handle_promote_merge", return_value=0),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", False))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.execute_task = MagicMock(return_value=False)
+        worker.handle_promote_merge = MagicMock(return_value=0)
+        worker.run()
         assert worker._next_turn_session_mode == TurnSessionMode.REUSE
 
     def test_run_marks_fresh_session_mode_at_issue_boundary(
@@ -1356,25 +1344,21 @@ class TestWorker:
             session_issue=5,
             registry=MagicMock(spec=ActivityReporter),
         )
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-            patch.object(worker, "execute_task", return_value=False),
-            patch.object(worker, "handle_promote_merge", return_value=0),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", False))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.execute_task = MagicMock(return_value=False)
+        worker.handle_promote_merge = MagicMock(return_value=0)
+        worker.run()
         assert worker._next_turn_session_mode == TurnSessionMode.FRESH
 
     def test_run_sets_session_issue_after_picking_issue(self, tmp_path: Path) -> None:
@@ -1389,25 +1373,21 @@ class TestWorker:
             session_issue=7,
             registry=MagicMock(spec=ActivityReporter),
         )
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-            patch.object(worker, "execute_task", return_value=False),
-            patch.object(worker, "handle_promote_merge", return_value=0),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", False))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.execute_task = MagicMock(return_value=False)
+        worker.handle_promote_merge = MagicMock(return_value=0)
+        worker.run()
         assert worker._session_issue == 7
 
     def test_run_does_not_create_session_when_provided(self, tmp_path: Path) -> None:
@@ -1420,18 +1400,17 @@ class TestWorker:
             session=mock_session,
             registry=MagicMock(spec=ActivityReporter),
         )
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session") as mock_create,
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", return_value=None),
-        ):
-            worker.run()
+        mock_create = MagicMock()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.create_session = mock_create
+        worker.get_current_issue = MagicMock(return_value=None)
+        worker.find_next_issue = MagicMock(return_value=None)
+        worker.run()
         mock_create.assert_not_called()
 
     # --- run() ---
@@ -1439,46 +1418,31 @@ class TestWorker:
     def test_run_returns_2_when_lock_held(self, tmp_path: Path) -> None:
         gh = self._make_gh()
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
-        with patch.object(worker, "create_context", side_effect=LockHeld("held")):
-            assert worker.run() == 2
+        worker.create_context = MagicMock(side_effect=LockHeld("held"))
+        assert worker.run() == 2
 
-    def _run_patches(self, worker: Worker, mock_ctx: MagicMock) -> list:
-        """Return a list of common patches needed to run Worker.run() in tests.
+    def _stub_idle_run(self, worker: Worker, mock_ctx: MagicMock) -> None:
+        """Stub Worker run-loop step methods for an idle (no-issue) iteration.
 
-        Patches create_context, discover_repo_context, setup_hooks, teardown_hooks,
-        get_current_issue (→ None), and find_next_issue (→ None) so the loop exits
-        cleanly without hitting GitHub or Claude.
+        Sets create_context, discover_repo_context, setup_hooks, teardown_hooks,
+        get_current_issue (→ None), and find_next_issue (→ None) as instance
+        attributes so worker.run() exits cleanly without hitting GitHub or Claude.
         """
-        return [
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(
-                worker, "setup_hooks", return_value=("compact-cmd", "sync-cmd")
-            ),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", return_value=None),
-        ]
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("compact-cmd", "sync-cmd"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=None)
+        worker.find_next_issue = MagicMock(return_value=None)
 
     def test_run_returns_0_on_success(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(
-                worker, "setup_hooks", return_value=("compact-cmd", "sync-cmd")
-            ),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", return_value=None),
-        ):
-            assert worker.run() == 0
+        self._stub_idle_run(worker, mock_ctx)
+        assert worker.run() == 0
 
     def test_run_logs_warning_on_lock_held(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -1487,9 +1451,9 @@ class TestWorker:
 
         gh = self._make_gh()
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
-        with patch.object(worker, "create_context", side_effect=LockHeld("held")):
-            with caplog.at_level(logging.WARNING, logger="fido"):
-                worker.run()
+        worker.create_context = MagicMock(side_effect=LockHeld("held"))
+        with caplog.at_level(logging.WARNING, logger="fido"):
+            worker.run()
         assert "another fido" in caplog.text
 
     def test_run_logs_info_on_success(
@@ -1500,20 +1464,9 @@ class TestWorker:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(
-                worker, "setup_hooks", return_value=("compact-cmd", "sync-cmd")
-            ),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", return_value=None),
-        ):
-            with caplog.at_level(logging.INFO, logger="fido"):
-                worker.run()
+        self._stub_idle_run(worker, mock_ctx)
+        with caplog.at_level(logging.INFO, logger="fido"):
+            worker.run()
         assert "worker started" in caplog.text
 
     def test_run_logs_repo_info(
@@ -1524,20 +1477,9 @@ class TestWorker:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(
-                worker, "setup_hooks", return_value=("compact-cmd", "sync-cmd")
-            ),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", return_value=None),
-        ):
-            with caplog.at_level(logging.INFO, logger="fido"):
-                worker.run()
+        self._stub_idle_run(worker, mock_ctx)
+        with caplog.at_level(logging.INFO, logger="fido"):
+            worker.run()
         assert "owner/repo" in caplog.text
 
     def test_run_teardown_called_even_on_exception(self, tmp_path: Path) -> None:
@@ -1546,19 +1488,9 @@ class TestWorker:
         mock_teardown = MagicMock()
         gh = self._make_gh()
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(
-                worker, "setup_hooks", return_value=("compact-cmd", "sync-cmd")
-            ),
-            patch.object(worker, "teardown_hooks", mock_teardown),
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", return_value=None),
-        ):
-            worker.run()
+        self._stub_idle_run(worker, mock_ctx)
+        worker.teardown_hooks = mock_teardown
+        worker.run()
         mock_teardown.assert_called_once()
 
     def test_run_setup_hooks_called_with_fido_dir(self, tmp_path: Path) -> None:
@@ -1566,17 +1498,9 @@ class TestWorker:
         mock_setup = MagicMock(return_value=("c", "s"))
         gh = self._make_gh()
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", mock_setup),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", return_value=None),
-        ):
-            worker.run()
+        self._stub_idle_run(worker, mock_ctx)
+        worker.setup_hooks = mock_setup
+        worker.run()
         mock_setup.assert_called_once_with(mock_ctx.fido_dir)
 
     def test_run_calls_get_current_issue(self, tmp_path: Path) -> None:
@@ -1584,17 +1508,9 @@ class TestWorker:
         gh = self._make_gh()
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_get_issue = MagicMock(return_value=None)
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", mock_get_issue),
-            patch.object(worker, "find_next_issue", return_value=None),
-        ):
-            worker.run()
+        self._stub_idle_run(worker, mock_ctx)
+        worker.get_current_issue = mock_get_issue
+        worker.run()
         mock_get_issue.assert_called_once_with(mock_ctx.fido_dir, "owner/repo")
 
     def test_run_calls_find_next_issue_when_no_current(self, tmp_path: Path) -> None:
@@ -1603,15 +1519,10 @@ class TestWorker:
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_find = MagicMock(return_value=None)
         repo_ctx = self._make_mock_repo_ctx()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", mock_find),
-        ):
-            worker.run()
+        self._stub_idle_run(worker, mock_ctx)
+        worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+        worker.find_next_issue = mock_find
+        worker.run()
         mock_find.assert_called_once_with(mock_ctx.fido_dir, repo_ctx)
 
     def test_run_skips_find_next_when_current_issue_exists(
@@ -1622,40 +1533,27 @@ class TestWorker:
         gh.view_issue.return_value = {"title": "Fix bug", "body": "", "state": "OPEN"}
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_find = MagicMock(return_value=None)
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "find_next_issue", mock_find),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(1, "my-branch", False)
-            ),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.find_next_issue = mock_find
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(1, "my-branch", False))
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.run()
         mock_find.assert_not_called()
 
     def test_run_returns_0_when_no_issue(self, tmp_path: Path) -> None:
         mock_ctx = self._make_mock_ctx(tmp_path)
         gh = self._make_gh()
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", return_value=None),
-        ):
-            assert worker.run() == 0
+        self._stub_idle_run(worker, mock_ctx)
+        assert worker.run() == 0
 
     def test_run_ensures_pickup_comment_when_resuming_issue(
         self, tmp_path: Path
@@ -1670,20 +1568,16 @@ class TestWorker:
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_pickup = MagicMock()
         repo_ctx = self._make_mock_repo_ctx()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=5),
-            patch.object(worker, "post_pickup_comment", mock_pickup),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(1, "my-branch", False)
-            ),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=5)
+        worker.post_pickup_comment = mock_pickup
+        worker.find_or_create_pr = MagicMock(return_value=(1, "my-branch", False))
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.run()
         mock_pickup.assert_called_once_with("owner/repo", 5, "Test issue", "fido-bot")
         assert State(mock_ctx.fido_dir).load()["pickup_comment_ensured"] is True
 
@@ -1701,20 +1595,16 @@ class TestWorker:
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_pickup = MagicMock()
         repo_ctx = self._make_mock_repo_ctx()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=5),
-            patch.object(worker, "post_pickup_comment", mock_pickup),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(1, "my-branch", False)
-            ),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=5)
+        worker.post_pickup_comment = mock_pickup
+        worker.find_or_create_pr = MagicMock(return_value=(1, "my-branch", False))
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.run()
         mock_pickup.assert_not_called()
 
     def test_run_views_issue_for_title(self, tmp_path: Path) -> None:
@@ -1726,22 +1616,18 @@ class TestWorker:
             "state": "OPEN",
         }
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=3),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(1, "my-branch", False)
-            ),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=3)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(1, "my-branch", False))
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.run()
         gh.view_issue.assert_called_once_with("owner/repo", 3)
 
     def test_run_calls_find_or_create_pr_when_issue_found(self, tmp_path: Path) -> None:
@@ -1755,18 +1641,16 @@ class TestWorker:
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_focp = MagicMock(return_value=(42, "my-branch", False))
         repo_ctx = self._make_mock_repo_ctx()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=8),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", mock_focp),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=8)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = mock_focp
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.run()
         mock_focp.assert_called_once_with(
             mock_ctx.fido_dir,
             repo_ctx,
@@ -1785,27 +1669,23 @@ class TestWorker:
         mock_rescope = MagicMock()
         mock_ci = MagicMock(return_value=False)
         mock_threads = MagicMock(return_value=False)
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "new-thing", True)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "rescope_before_pick", mock_rescope),
-            patch.object(worker, "handle_ci", mock_ci),
-            patch.object(worker, "handle_threads", mock_threads),
-            patch.object(worker, "execute_task", return_value=False),
-            patch.object(worker, "handle_promote_merge", return_value=0),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.create_session = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "new-thing", True))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.rescope_before_pick = mock_rescope
+        worker.handle_ci = mock_ci
+        worker.handle_threads = mock_threads
+        worker.execute_task = MagicMock(return_value=False)
+        worker.handle_promote_merge = MagicMock(return_value=0)
+        worker.run()
         mock_rescope.assert_not_called()
         mock_ci.assert_not_called()
         mock_threads.assert_not_called()
@@ -1819,27 +1699,23 @@ class TestWorker:
         mock_rescope = MagicMock()
         mock_ci = MagicMock(return_value=False)
         mock_threads = MagicMock(return_value=False)
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "old-thing", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "rescope_before_pick", mock_rescope),
-            patch.object(worker, "handle_ci", mock_ci),
-            patch.object(worker, "handle_threads", mock_threads),
-            patch.object(worker, "execute_task", return_value=False),
-            patch.object(worker, "handle_promote_merge", return_value=0),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.create_session = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "old-thing", False))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.rescope_before_pick = mock_rescope
+        worker.handle_ci = mock_ci
+        worker.handle_threads = mock_threads
+        worker.execute_task = MagicMock(return_value=False)
+        worker.handle_promote_merge = MagicMock(return_value=0)
+        worker.run()
         mock_rescope.assert_called_once()
         mock_ci.assert_called_once()
         mock_threads.assert_called_once()
@@ -1852,21 +1728,12 @@ class TestWorker:
         mock_rescope = MagicMock()
         mock_ci = MagicMock(return_value=False)
         mock_threads = MagicMock(return_value=False)
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session"),
-            patch.object(worker, "get_current_issue", return_value=None),
-            patch.object(worker, "find_next_issue", return_value=None),
-            patch.object(worker, "rescope_before_pick", mock_rescope),
-            patch.object(worker, "handle_ci", mock_ci),
-            patch.object(worker, "handle_threads", mock_threads),
-        ):
-            result = worker.run()
+        self._stub_idle_run(worker, mock_ctx)
+        worker.create_session = MagicMock()
+        worker.rescope_before_pick = mock_rescope
+        worker.handle_ci = mock_ci
+        worker.handle_threads = mock_threads
+        result = worker.run()
         assert result == 0
         mock_rescope.assert_not_called()
         mock_ci.assert_not_called()
@@ -1894,26 +1761,24 @@ class TestWorker:
             ci_calls.append(iteration)
             return False
 
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(worker, "find_or_create_pr", side_effect=focp_side_effect),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "rescope_before_pick"),
-            patch.object(worker, "handle_ci", side_effect=ci_side_effect),
-            patch.object(worker, "handle_threads", return_value=False),
-            patch.object(worker, "execute_task", return_value=False),
-            patch.object(worker, "handle_promote_merge", return_value=0),
-        ):
-            worker.run()  # iteration 1: fresh PR — checks skipped
-            worker.run()  # iteration 2: existing PR — checks run
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.create_session = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(side_effect=focp_side_effect)
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.rescope_before_pick = MagicMock()
+        worker.handle_ci = MagicMock(side_effect=ci_side_effect)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.execute_task = MagicMock(return_value=False)
+        worker.handle_promote_merge = MagicMock(return_value=0)
+        worker.run()  # iteration 1: fresh PR — checks skipped
+        worker.run()  # iteration 2: existing PR — checks run
         # handle_ci was only called on iteration 2
         assert ci_calls == [2]
 
@@ -1929,22 +1794,20 @@ class TestWorker:
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_execute = MagicMock(return_value=False)
         mock_merge = MagicMock(return_value=0)
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "create_session"),
-            patch.object(worker, "get_current_issue", return_value=5),
-            patch.object(worker, "post_pickup_comment"),
-            # Terminal sentinel — all-covered close path fired
-            patch.object(worker, "find_or_create_pr", return_value=None),
-            patch.object(worker, "execute_task", mock_execute),
-            patch.object(worker, "handle_promote_merge", mock_merge),
-        ):
-            result = worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.create_session = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=5)
+        worker.post_pickup_comment = MagicMock()
+        # Terminal sentinel — all-covered close path fired
+        worker.find_or_create_pr = MagicMock(return_value=None)
+        worker.execute_task = mock_execute
+        worker.handle_promote_merge = mock_merge
+        result = worker.run()
         # Must return 1 (completed work — closed PR + issue)
         assert result == 1
         # Must not try to execute tasks or promote/merge on a closed PR
@@ -2006,8 +1869,8 @@ class TestWorkerFindNextIssue:
         worker, gh = self._make_worker(tmp_path)
         # Empty cache (no load_inventory call needed) → no candidates → None.
         fido_dir = self._fido_dir(tmp_path)
-        with patch.object(worker, "set_status"):
-            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result is None
 
     def test_pauses_before_querying_when_provider_is_over_ninety_five_percent(
@@ -2127,11 +1990,9 @@ class TestWorkerFindNextIssue:
         self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "set_status"),
-            patch.object(worker, "post_pickup_comment"),
-        ):
-            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        worker.post_pickup_comment = MagicMock()
+        result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 42
 
     def test_returns_issue_number_when_all_subissues_closed(
@@ -2147,11 +2008,9 @@ class TestWorkerFindNextIssue:
         self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "set_status"),
-            patch.object(worker, "post_pickup_comment"),
-        ):
-            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        worker.post_pickup_comment = MagicMock()
+        result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 10
 
     def test_skips_tree_when_open_subissue_assigned_to_other(
@@ -2175,8 +2034,8 @@ class TestWorkerFindNextIssue:
         self._load_issues(worker, [parent_issue, child])
         gh.find_issues.return_value = [parent_issue]
         fido_dir = self._fido_dir(tmp_path)
-        with patch.object(worker, "set_status"):
-            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result is None
 
     def test_picks_first_eligible_issue(self, tmp_path: Path) -> None:
@@ -2200,11 +2059,9 @@ class TestWorkerFindNextIssue:
         self._load_issues(worker, issues)
         gh.find_issues.return_value = issues
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "set_status"),
-            patch.object(worker, "post_pickup_comment"),
-        ):
-            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        worker.post_pickup_comment = MagicMock()
+        result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 1
 
     def test_saves_state_when_issue_found(self, tmp_path: Path) -> None:
@@ -2218,11 +2075,9 @@ class TestWorkerFindNextIssue:
         self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "set_status"),
-            patch.object(worker, "post_pickup_comment"),
-        ):
-            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        worker.post_pickup_comment = MagicMock()
+        worker.find_next_issue(fido_dir, self._make_repo_ctx())
         state = State(fido_dir).load()
         assert state["issue"] == 7
         assert state["issue_title"] == "Fetch!"
@@ -2233,8 +2088,8 @@ class TestWorkerFindNextIssue:
         # Empty cache → no candidates → no state saved.
         gh.find_issues.return_value = []
         fido_dir = self._fido_dir(tmp_path)
-        with patch.object(worker, "set_status"):
-            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert State(fido_dir).load() == {}
 
     def test_calls_set_status_with_issue_info_when_found(self, tmp_path: Path) -> None:
@@ -2249,11 +2104,9 @@ class TestWorkerFindNextIssue:
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         mock_status = MagicMock()
-        with (
-            patch.object(worker, "set_status", mock_status),
-            patch.object(worker, "post_pickup_comment"),
-        ):
-            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = mock_status
+        worker.post_pickup_comment = MagicMock()
+        worker.find_next_issue(fido_dir, self._make_repo_ctx())
         mock_status.assert_called_once_with("Picking up issue #5: Add tests")
 
     def test_calls_post_pickup_comment_when_issue_found(self, tmp_path: Path) -> None:
@@ -2268,11 +2121,9 @@ class TestWorkerFindNextIssue:
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
         mock_pickup = MagicMock()
-        with (
-            patch.object(worker, "set_status"),
-            patch.object(worker, "post_pickup_comment", mock_pickup),
-        ):
-            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        worker.post_pickup_comment = mock_pickup
+        worker.find_next_issue(fido_dir, self._make_repo_ctx())
         mock_pickup.assert_called_once_with("alice/proj", 5, "Add tests", "fido-bot")
 
     def test_calls_set_status_done_when_no_issue(self, tmp_path: Path) -> None:
@@ -2280,8 +2131,8 @@ class TestWorkerFindNextIssue:
         # Empty cache → no candidates → "All done" status.
         fido_dir = self._fido_dir(tmp_path)
         mock_status = MagicMock()
-        with patch.object(worker, "set_status", mock_status):
-            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = mock_status
+        worker.find_next_issue(fido_dir, self._make_repo_ctx())
         mock_status.assert_called_once_with("All done — no issues to fetch", busy=False)
 
     def test_logs_info_when_starting_issue(
@@ -2299,11 +2150,9 @@ class TestWorkerFindNextIssue:
         self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "set_status"),
-            patch.object(worker, "post_pickup_comment"),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker.set_status = MagicMock()
+        worker.post_pickup_comment = MagicMock()
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert "9" in caplog.text
 
@@ -2315,10 +2164,8 @@ class TestWorkerFindNextIssue:
         worker, gh = self._make_worker(tmp_path)
         # Empty cache → no candidates → "no eligible" log line.
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "set_status"),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker.set_status = MagicMock()
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert "no eligible" in caplog.text
 
@@ -2355,11 +2202,9 @@ class TestWorkerFindNextIssue:
         self._load_issues(worker, [root, child])
         gh.find_issues.return_value = [child]
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "set_status"),
-            patch.object(worker, "post_pickup_comment"),
-        ):
-            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        worker.post_pickup_comment = MagicMock()
+        result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 200
         gh.find_all_open_issues.assert_not_called()
 
@@ -2401,11 +2246,9 @@ class TestWorkerFindNextIssue:
         self._load_issues(worker, [parent_issue, open_child])
         gh.find_issues.return_value = [parent_issue]
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "set_status"),
-            patch.object(worker, "post_pickup_comment"),
-        ):
-            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        worker.post_pickup_comment = MagicMock()
+        result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 111
         # #779 — the chosen leaf is claimed exactly once for GitHub visibility.
         gh.add_assignee.assert_called_once_with("alice/proj", 111, "fido-bot")
@@ -2415,8 +2258,8 @@ class TestWorkerFindNextIssue:
         worker, gh = self._make_worker(tmp_path)
         # Empty cache → no candidates → no leaf-claim.
         fido_dir = self._fido_dir(tmp_path)
-        with patch.object(worker, "set_status"):
-            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        worker.find_next_issue(fido_dir, self._make_repo_ctx())
         gh.add_assignee.assert_not_called()
 
     def test_claims_chosen_leaf_even_when_already_assigned(
@@ -2434,11 +2277,9 @@ class TestWorkerFindNextIssue:
         self._load_issues(worker, [issue])
         gh.find_issues.return_value = [issue]
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "set_status"),
-            patch.object(worker, "post_pickup_comment"),
-        ):
-            result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        worker.post_pickup_comment = MagicMock()
+        result = worker.find_next_issue(fido_dir, self._make_repo_ctx())
         assert result == 42
         gh.add_assignee.assert_called_once_with("alice/proj", 42, "fido-bot")
 
@@ -2460,11 +2301,9 @@ class TestWorkerFindNextIssue:
         repo_ctx = self._make_repo_ctx(
             owner="alice", repo_name="proj", repo="alice/proj", gh_user="fido-bot"
         )
-        with (
-            patch.object(worker, "set_status"),
-            patch.object(worker, "post_pickup_comment", mock_pickup),
-        ):
-            result = worker.find_next_issue(fido_dir, repo_ctx)
+        worker.set_status = MagicMock()
+        worker.post_pickup_comment = mock_pickup
+        result = worker.find_next_issue(fido_dir, repo_ctx)
         assert result == 17
         mock_pickup.assert_called_once_with(
             "alice/proj", 17, "Fix the thing", "fido-bot"
@@ -2477,11 +2316,9 @@ class TestWorkerFindNextIssue:
         # Empty cache → no candidates → no pickup comment.
         fido_dir = self._fido_dir(tmp_path)
         mock_pickup = MagicMock()
-        with (
-            patch.object(worker, "set_status"),
-            patch.object(worker, "post_pickup_comment", mock_pickup),
-        ):
-            worker.find_next_issue(fido_dir, self._make_repo_ctx())
+        worker.set_status = MagicMock()
+        worker.post_pickup_comment = mock_pickup
+        worker.find_next_issue(fido_dir, self._make_repo_ctx())
         mock_pickup.assert_not_called()
 
 
@@ -3204,11 +3041,9 @@ class TestWorkerFindNextIssueCacheBranch:
             default_branch="main",
             membership=RepoMembership(collaborators=frozenset({"owner"})),
         )
-        with (
-            patch.object(worker, "set_status"),
-            patch.object(worker, "post_pickup_comment"),
-        ):
-            result = worker.find_next_issue(fido_dir, repo_ctx)
+        worker.set_status = MagicMock()
+        worker.post_pickup_comment = MagicMock()
+        result = worker.find_next_issue(fido_dir, repo_ctx)
         assert result == 77
         # Cache branch did not call find_issues at all
         gh.find_issues.assert_not_called()
