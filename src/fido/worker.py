@@ -69,7 +69,7 @@ from fido.state import (
     State,
     _resolve_git_dir,  # pyright: ignore[reportPrivateUsage]
 )
-from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
+from fido.store import FidoStore, PRCommentQueueRecord, ReplyOwner, ReplyPromiseRecord
 from fido.tasks import Tasks
 from fido.turn_outcome import TurnOutcomeBundle, parse_turn_outcome
 from fido.types import (
@@ -2335,8 +2335,8 @@ class Worker:
             f"Upstream: origin/{repo_ctx.default_branch}\n"
             f"Work dir: {self.work_dir}\n"
         )
-        build_prompt(fido_dir, "merge", context, labels=issue_labels)
-        session_id, _ = provider_run(
+        self._build_prompt(fido_dir, "merge", context, labels=issue_labels)
+        session_id, _ = self._provider_run(
             fido_dir,
             agent=self._provider_agent,
             model=self._provider_agent.work_model,
@@ -2443,7 +2443,7 @@ class Worker:
         self.set_status(f"Fixing CI: {check_name} on PR #{pr_number}")
 
         run_id = self._extract_run_id(failing.get("link", ""))
-        _assert_ci_failure_matches_oracle(
+        self._assert_ci_failure_matches_oracle(
             self._tasks.list(),
             check_name,
             failing.get("state", ""),
@@ -2473,10 +2473,10 @@ class Worker:
             f"\nReview threads related to this CI failure"
             f" (JSON — may be empty):\n{json.dumps(ci_threads)}"
         )
-        build_prompt(fido_dir, "ci", context, labels=issue_labels)
+        self._build_prompt(fido_dir, "ci", context, labels=issue_labels)
         if not self._admit_worker_turn(pr_number):
             return True
-        session_id, _ = provider_run(
+        session_id, _ = self._provider_run(
             fido_dir,
             agent=self._provider_agent,
             model=self._provider_agent.work_model,
@@ -2487,8 +2487,18 @@ class Worker:
         log.info("CI fix done (session=%s)", session_id)
 
         # CI failures have no task entry — no complete call needed
-        tasks.sync_tasks(self.work_dir, self.gh, blocking=True)
+        self._sync_tasks(self.work_dir, self.gh, blocking=True)
         return True
+
+    def _assert_ci_failure_matches_oracle(
+        self,
+        task_list: list[dict[str, Any]],
+        check_name: str,
+        state: str,
+        run_id: str,
+    ) -> None:
+        """Thin delegation — tests override via direct instance attribute assignment."""
+        _assert_ci_failure_matches_oracle(task_list, check_name, state, run_id)
 
     def _filter_threads(
         self,
@@ -2634,13 +2644,12 @@ class Worker:
         # SQLite promise first owns that comment.
         claimable: list[dict[str, Any]] = []
         promises: list[ReplyPromiseRecord] = []
-        store = FidoStore(self.work_dir)
         for t in threads:
             first_db_id = t.get("first_db_id")
             if first_db_id is None:
                 claimable.append(t)
                 continue
-            promise = store.prepare_reply(
+            promise = self._prepare_reply(
                 owner="worker",
                 comment_type="pulls",
                 anchor_comment_id=int(first_db_id),
@@ -2655,8 +2664,6 @@ class Worker:
             return False
 
         log.info("unresolved threads: %d", len(claimable))
-        from fido import events
-
         config = self._config
         repo_cfg = self._repo_cfg
         if config is None or repo_cfg is None:
@@ -2680,9 +2687,9 @@ class Worker:
             comment = self.gh.get_pull_comment(repo_ctx.repo, first_db_id)
             if comment is None:
                 log.info("skipping thread %s — root comment missing", first_db_id)
-                store.mark_failed(promise.promise_id)
+                FidoStore(self.work_dir).mark_failed(promise.promise_id)
                 continue
-            action = events.build_review_comment_action(
+            action = self._build_review_comment_action(
                 repo_ctx.repo,
                 pr_number,
                 pr_title,
@@ -2704,7 +2711,7 @@ class Worker:
                 "Worker._registry is required for handle_threads reply path"
             )
             try:
-                category, titles = events.reply_to_comment(
+                category, titles = self._do_reply_to_comment(
                     action,
                     config,
                     repo_cfg,
@@ -2713,7 +2720,7 @@ class Worker:
                     agent=self._provider_agent,
                 )
             except Exception:
-                store.mark_failed(promise.promise_id)
+                FidoStore(self.work_dir).mark_failed(promise.promise_id)
                 raise
             # #1816 / INV-B: no direct task creation from the
             # ``(category, titles)`` return.  Synthesis emitted a
@@ -2721,8 +2728,97 @@ class Worker:
             # any task mutations.
             del category, titles
         log.info("threads done")
-        tasks.sync_tasks_background(self.work_dir, self.gh)
+        self._sync_tasks_background(self.work_dir, self.gh)
         return True
+
+    def _build_review_comment_action(
+        self,
+        repo: str,
+        pr_number: int,
+        pr_title: str,
+        pr_body: str,
+        comment: dict[str, Any],
+        *,
+        comment_body: str | None = None,
+        comment_author: str | None = None,
+    ) -> "Action":
+        """Thin delegation — tests override via direct instance attribute assignment."""
+        from fido import events
+
+        return events.build_review_comment_action(
+            repo,
+            pr_number,
+            pr_title,
+            pr_body,
+            comment,
+            comment_body=comment_body,
+            comment_author=comment_author,
+        )
+
+    def _do_reply_to_comment(
+        self,
+        action: "Action",
+        config: Config,
+        repo_cfg: RepoConfig,
+        gh: GitHub,
+        registry: ActivityReporter,
+        *,
+        agent: ProviderAgent,
+        prompts: Prompts | None = None,
+    ) -> tuple[str, list[str]]:
+        """Thin delegation — tests override via direct instance attribute assignment."""
+        from fido import events
+
+        return events.reply_to_comment(
+            action,
+            config,
+            repo_cfg,
+            gh,
+            registry,
+            agent=agent,
+            prompts=prompts,
+        )
+
+    def _do_reply_to_issue_comment(
+        self,
+        action: "Action",
+        config: Config,
+        repo_cfg: RepoConfig,
+        gh: GitHub,
+        registry: ActivityReporter,
+        *,
+        agent: ProviderAgent,
+        prompts: Prompts | None = None,
+    ) -> tuple[str, list[str]]:
+        """Thin delegation — tests override via direct instance attribute assignment."""
+        from fido import events
+
+        return events.reply_to_issue_comment(
+            action,
+            config,
+            repo_cfg,
+            gh,
+            registry,
+            agent=agent,
+            prompts=prompts,
+        )
+
+    def _sync_tasks_background(self, work_dir: Path, gh: GitHub) -> None:
+        """Thin delegation — tests override via direct instance attribute assignment."""
+        tasks.sync_tasks_background(work_dir, gh)
+
+    def _prepare_reply(
+        self,
+        owner: ReplyOwner,
+        comment_type: str,
+        anchor_comment_id: int,
+    ) -> "ReplyPromiseRecord | None":
+        """Thin delegation — tests override via direct instance attribute assignment."""
+        return FidoStore(self.work_dir).prepare_reply(
+            owner=owner,
+            comment_type=comment_type,
+            anchor_comment_id=anchor_comment_id,
+        )
 
     def sweep_orphan_pr_comments(self, repo: str) -> int:
         """Drop queued PR-comment entries whose PR is closed (#1691).
@@ -2840,7 +2936,7 @@ class Worker:
             store.retry_pr_comment(queued.queue_id, failure_reason=str(exc))
             raise
         store.complete_pr_comment(queued.queue_id)
-        tasks.sync_tasks_background(self.work_dir, self.gh)
+        self._sync_tasks_background(self.work_dir, self.gh)
 
     def _queued_comment_action(
         self,
@@ -2860,8 +2956,6 @@ class Worker:
         config: Config,
         repo_cfg: RepoConfig,
     ) -> tuple[str, list[str]]:
-        from fido import events
-
         # registry is required (#1336): without it the synthesis path
         # constructs _BackgroundRescopeTrigger with no registry, the rescope
         # BG run_loop's finally cannot call exit_untriaged, and the inbox
@@ -2870,7 +2964,7 @@ class Worker:
             "Worker._registry is required when replying to queued comments"
         )
         if queued.comment_type == "pulls":
-            return events.reply_to_comment(
+            return self._do_reply_to_comment(
                 action,
                 config,
                 repo_cfg,
@@ -2879,7 +2973,7 @@ class Worker:
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
             )
-        return events.reply_to_issue_comment(
+        return self._do_reply_to_issue_comment(
             action,
             config,
             repo_cfg,
@@ -2896,10 +2990,8 @@ class Worker:
         pr_title: str,
         pr_body: str,
     ) -> "Action":
-        from fido import events
-
         comment = _queued_comment_payload(queued)
-        action = events.build_review_comment_action(
+        action = self._build_review_comment_action(
             repo,
             queued.pr_number,
             pr_title,
@@ -4425,13 +4517,10 @@ class Worker:
             return
 
         from fido.events import (
-            _get_commit_summary,  # pyright: ignore[reportPrivateUsage]
-            _make_reorder_kwargs,  # pyright: ignore[reportPrivateUsage]
             _rewrite_pr_description,  # pyright: ignore[reportPrivateUsage]
         )
-        from fido.tasks import reorder_tasks
 
-        commit_summary = _get_commit_summary(self.work_dir)
+        commit_summary = self._get_commit_summary_fn()
         # _make_reorder_kwargs always wires up on_inprogress_affected (#1336);
         # at pick time there is no in-progress task so the callback won't fire,
         # but the registry must be a real reference to keep the type contract.
@@ -4441,7 +4530,7 @@ class Worker:
         assert self._repo_cfg is not None, (
             "Worker._repo_cfg is required for rescope_before_pick"
         )
-        kwargs = _make_reorder_kwargs(
+        reorder_kwargs = self._make_reorder_kwargs_fn(
             self.work_dir,
             self._config,
             self._repo_cfg,
@@ -4452,7 +4541,54 @@ class Worker:
             _rewrite_pr_description,
         )
         log.info("rescope_before_pick: rescoping task list before next pick")
-        reorder_tasks(self._tasks, commit_summary, **kwargs)
+        self._reorder_tasks_fn(self._tasks, commit_summary, reorder_kwargs)
+
+    def _get_commit_summary_fn(self) -> str:
+        """Thin delegation — tests override via direct instance attribute assignment."""
+        from fido.events import (
+            _get_commit_summary,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        return _get_commit_summary(self.work_dir)
+
+    def _make_reorder_kwargs_fn(
+        self,
+        work_dir: Path,
+        config: Config,
+        repo_cfg: RepoConfig,
+        registry: "ActivityReporter",
+        gh: GitHub,
+        agent: ProviderAgent,
+        prompts: Prompts,
+        rewrite_fn: Callable[..., None],
+        sync_fn: Callable[[Path, Any], None] | None = None,
+        sync_tasks_fn: Callable[[Path, Any], None] | None = None,
+    ) -> dict[str, Any]:
+        """Thin delegation — tests override via direct instance attribute assignment."""
+        from fido.events import (
+            _make_reorder_kwargs,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        return _make_reorder_kwargs(
+            work_dir,
+            config,
+            repo_cfg,
+            registry,
+            gh,
+            agent,
+            prompts,
+            rewrite_fn,
+            sync_fn,
+            sync_tasks_fn,
+        )
+
+    def _reorder_tasks_fn(
+        self, tasks_obj: Tasks, commit_summary: str, reorder_kwargs: dict[str, Any]
+    ) -> None:
+        """Thin delegation — tests override via direct instance attribute assignment."""
+        from fido.tasks import reorder_tasks
+
+        reorder_tasks(tasks_obj, commit_summary, **reorder_kwargs)
 
     def assert_git_identity(self, *, phase: str) -> None:
         """Enforce the git-identity invariant (see #792).
