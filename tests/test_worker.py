@@ -3482,8 +3482,7 @@ class TestBuildPrompt:
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
-        with patch("fido.worker._sub_dir", return_value=sub):
-            sys_file, prompt_file = build_prompt(fido_dir, "task", "context")
+        sys_file, prompt_file = build_prompt(fido_dir, "task", "context", sub_dir=sub)
         assert sys_file == fido_dir / "system"
         assert prompt_file == fido_dir / "prompt"
 
@@ -3491,24 +3490,21 @@ class TestBuildPrompt:
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
-        with patch("fido.worker._sub_dir", return_value=sub):
-            sys_file, _ = build_prompt(fido_dir, "task", "context")
+        sys_file, _ = build_prompt(fido_dir, "task", "context", sub_dir=sub)
         assert "I am Fido" in sys_file.read_text()
 
     def test_system_file_contains_skill(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
-        with patch("fido.worker._sub_dir", return_value=sub):
-            sys_file, _ = build_prompt(fido_dir, "task", "context")
+        sys_file, _ = build_prompt(fido_dir, "task", "context", sub_dir=sub)
         assert "Implement the task carefully." in sys_file.read_text()
 
     def test_system_file_joins_with_blank_line(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
-        with patch("fido.worker._sub_dir", return_value=sub):
-            sys_file, _ = build_prompt(fido_dir, "task", "context")
+        sys_file, _ = build_prompt(fido_dir, "task", "context", sub_dir=sub)
         content = sys_file.read_text()
         assert "I am Fido, a very good dog.\n\nImplement the task carefully." in content
 
@@ -3516,24 +3512,21 @@ class TestBuildPrompt:
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
-        with patch("fido.worker._sub_dir", return_value=sub):
-            _, prompt_file = build_prompt(fido_dir, "task", "do the work")
+        _, prompt_file = build_prompt(fido_dir, "task", "do the work", sub_dir=sub)
         assert "do the work" in prompt_file.read_text()
 
     def test_system_file_ends_with_newline(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
-        with patch("fido.worker._sub_dir", return_value=sub):
-            sys_file, _ = build_prompt(fido_dir, "task", "ctx")
+        sys_file, _ = build_prompt(fido_dir, "task", "ctx", sub_dir=sub)
         assert sys_file.read_text().endswith("\n")
 
     def test_prompt_file_ends_with_newline(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
-        with patch("fido.worker._sub_dir", return_value=sub):
-            _, prompt_file = build_prompt(fido_dir, "task", "ctx")
+        _, prompt_file = build_prompt(fido_dir, "task", "ctx", sub_dir=sub)
         assert prompt_file.read_text().endswith("\n")
 
     def test_uses_correct_subskill_file(self, tmp_path: Path) -> None:
@@ -3541,8 +3534,7 @@ class TestBuildPrompt:
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         (sub / "ci.md").write_text("Fix the CI failure.")
-        with patch("fido.worker._sub_dir", return_value=sub):
-            sys_file, _ = build_prompt(fido_dir, "ci", "ctx")
+        sys_file, _ = build_prompt(fido_dir, "ci", "ctx", sub_dir=sub)
         assert "Fix the CI failure." in sys_file.read_text()
         assert "Implement the task carefully." not in sys_file.read_text()
 
@@ -3551,8 +3543,7 @@ class TestBuildPrompt:
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         (sub / "persona.md").write_text("Persona text\n\n\n")
-        with patch("fido.worker._sub_dir", return_value=sub):
-            sys_file, _ = build_prompt(fido_dir, "task", "ctx")
+        sys_file, _ = build_prompt(fido_dir, "task", "ctx", sub_dir=sub)
         content = sys_file.read_text()
         assert content.startswith("Persona text\n\n")
         assert not content.startswith("Persona text\n\n\n\n")
@@ -3562,8 +3553,9 @@ class TestBuildPrompt:
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         (sub / "life.md").write_text("Rob is my person. I live in a cozy house.")
-        with patch("fido.worker._sub_dir", return_value=sub):
-            sys_file, _ = build_prompt(fido_dir, "task", "ctx", labels=["Blog"])
+        sys_file, _ = build_prompt(
+            fido_dir, "task", "ctx", labels=["Blog"], sub_dir=sub
+        )
         content = sys_file.read_text()
         assert "I am Fido" in content
         assert "Rob is my person." in content
@@ -3579,8 +3571,7 @@ class TestBuildPrompt:
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         (sub / "life.md").write_text("Rob is my person.")
-        with patch("fido.worker._sub_dir", return_value=sub):
-            _, _ = build_prompt(fido_dir, "task", "ctx", labels=["Blog"])
+        build_prompt(fido_dir, "task", "ctx", labels=["Blog"], sub_dir=sub)
         skill_content = (fido_dir / "skill").read_text()
         assert "Rob is my person." in skill_content
         assert "Implement the task carefully." in skill_content
@@ -3594,8 +3585,9 @@ class TestBuildPrompt:
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         (sub / "life.md").write_text("This should not appear.")
-        with patch("fido.worker._sub_dir", return_value=sub):
-            sys_file, _ = build_prompt(fido_dir, "task", "ctx", labels=["enhancement"])
+        sys_file, _ = build_prompt(
+            fido_dir, "task", "ctx", labels=["enhancement"], sub_dir=sub
+        )
         assert "This should not appear." not in sys_file.read_text()
 
     def test_no_labels_omits_life(self, tmp_path: Path) -> None:
@@ -3603,8 +3595,7 @@ class TestBuildPrompt:
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         (sub / "life.md").write_text("This should not appear.")
-        with patch("fido.worker._sub_dir", return_value=sub):
-            sys_file, _ = build_prompt(fido_dir, "task", "ctx")
+        sys_file, _ = build_prompt(fido_dir, "task", "ctx", sub_dir=sub)
         assert "This should not appear." not in sys_file.read_text()
 
     def test_blog_label_missing_life_file_does_not_crash(self, tmp_path: Path) -> None:
@@ -3612,8 +3603,9 @@ class TestBuildPrompt:
         fido_dir.mkdir(parents=True)
         sub = self._setup_sub_dir(tmp_path)
         # life.md intentionally absent
-        with patch("fido.worker._sub_dir", return_value=sub):
-            sys_file, _ = build_prompt(fido_dir, "task", "ctx", labels=["Blog"])
+        sys_file, _ = build_prompt(
+            fido_dir, "task", "ctx", labels=["Blog"], sub_dir=sub
+        )
         # Falls back to the normal persona + skill layout
         content = sys_file.read_text()
         assert "I am Fido" in content
@@ -3814,6 +3806,29 @@ class TestProviderStart:
         provider_start(fido_dir, agent=client, model=client.voice_model)
         session.__enter__.assert_not_called()
         session.__exit__.assert_not_called()
+
+    def test_worker_provider_start_delegates_to_module_function(
+        self, tmp_path: Path
+    ) -> None:
+        """Worker._provider_start is a thin delegation to provider_start.
+
+        Exercises the delegation body directly so coverage does not require
+        the real provider_start to run from TestFindOrCreatePr (where the
+        method is always mocked).
+        """
+        fido_dir = self._setup_fido_dir(tmp_path)
+        output = '{"type":"result","session_id":"sess-xyz"}'
+        client = _client()
+        client.print_prompt_from_file.return_value = output
+        client.extract_session_id.return_value = "sess-xyz"
+        worker = Worker(
+            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+        )
+        session_id, raw = worker._provider_start(  # type: ignore[attr-defined]
+            fido_dir, agent=client, model=client.voice_model
+        )
+        assert session_id == "sess-xyz"
+        assert raw == output
 
 
 class TestProviderRun:
@@ -4448,36 +4463,26 @@ class TestLocalBranchExists:
 
     def test_returns_true_on_exit_zero(self, tmp_path: Path) -> None:
         worker = self._worker(tmp_path)
-        with patch.object(worker, "_git", return_value=MagicMock(returncode=0)):
-            assert worker._local_branch_exists("my-branch") is True
+        worker._git = MagicMock(return_value=MagicMock(returncode=0))
+        assert worker._local_branch_exists("my-branch") is True
 
     def test_returns_false_on_exit_one(self, tmp_path: Path) -> None:
         worker = self._worker(tmp_path)
-        with patch.object(
-            worker, "_git", side_effect=subprocess.CalledProcessError(1, "git")
-        ):
-            assert worker._local_branch_exists("ghost") is False
+        worker._git = MagicMock(side_effect=subprocess.CalledProcessError(1, "git"))
+        assert worker._local_branch_exists("ghost") is False
 
     def test_propagates_other_exit_codes(self, tmp_path: Path) -> None:
         worker = self._worker(tmp_path)
-        with (
-            patch.object(
-                worker,
-                "_git",
-                side_effect=subprocess.CalledProcessError(128, "git"),
-            ),
-            pytest.raises(subprocess.CalledProcessError) as excinfo,
-        ):
+        worker._git = MagicMock(side_effect=subprocess.CalledProcessError(128, "git"))
+        with pytest.raises(subprocess.CalledProcessError) as excinfo:
             worker._local_branch_exists("any")
         assert excinfo.value.returncode == 128
 
     def test_queries_refs_heads_with_quiet_verify(self, tmp_path: Path) -> None:
         worker = self._worker(tmp_path)
-        with patch.object(
-            worker, "_git", return_value=MagicMock(returncode=0)
-        ) as mock_git:
-            worker._local_branch_exists("feature/foo")
-        mock_git.assert_called_once_with(
+        worker._git = MagicMock(return_value=MagicMock(returncode=0))
+        worker._local_branch_exists("feature/foo")
+        worker._git.assert_called_once_with(
             ["rev-parse", "--verify", "--quiet", "refs/heads/feature/foo"]
         )
 
@@ -4501,8 +4506,8 @@ class TestGitClean:
             calls.append(args)
             return self._git_result()
 
-        with patch.object(worker, "_git", side_effect=capture):
-            worker.git_clean()
+        worker._git = MagicMock(side_effect=capture)
+        worker.git_clean()
 
         assert ["checkout", "--", "."] in calls
 
@@ -4514,8 +4519,8 @@ class TestGitClean:
             calls.append(args)
             return self._git_result()
 
-        with patch.object(worker, "_git", side_effect=capture):
-            worker.git_clean()
+        worker._git = MagicMock(side_effect=capture)
+        worker.git_clean()
 
         assert ["clean", "-fd"] in calls
 
@@ -4531,9 +4536,9 @@ class TestGitClean:
 
         import logging
 
-        with patch.object(worker, "_git", side_effect=fake_git):
-            with caplog.at_level(logging.INFO):
-                worker.git_clean()
+        worker._git = MagicMock(side_effect=fake_git)
+        with caplog.at_level(logging.INFO):
+            worker.git_clean()
 
         assert "Removing foo.py" in caplog.text
 
@@ -4542,11 +4547,11 @@ class TestGitClean:
     ) -> None:
         worker = self._make_worker(tmp_path)
 
-        with patch.object(worker, "_git", return_value=self._git_result("")):
-            import logging
+        worker._git = MagicMock(return_value=self._git_result(""))
+        import logging
 
-            with caplog.at_level(logging.INFO):
-                worker.git_clean()
+        with caplog.at_level(logging.INFO):
+            worker.git_clean()
 
         assert "nothing to remove" in caplog.text
 
@@ -4561,8 +4566,8 @@ class TestGitClean:
                 order.append("clean")
             return self._git_result()
 
-        with patch.object(worker, "_git", side_effect=capture):
-            worker.git_clean()
+        worker._git = MagicMock(side_effect=capture)
+        worker.git_clean()
 
         assert order == ["checkout", "clean"]
 
@@ -4632,17 +4637,17 @@ class TestWritePrDescription:
         from contextlib import nullcontext
 
         mock_cc = _client(print_return)
-        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
-            result = _write_pr_description(
-                work_dir or Path("/tmp"),
-                gh,
-                "owner/repo",
-                pr_number,
-                issue,
-                task_list or [],
-                existing_body,
-                agent=mock_cc,
-            )
+        result = _write_pr_description(
+            work_dir or Path("/tmp"),
+            gh,
+            "owner/repo",
+            pr_number,
+            issue,
+            task_list or [],
+            existing_body,
+            agent=mock_cc,
+            _pr_body_lock=lambda _: nullcontext(),
+        )
         return result, mock_cc
 
     def test_writes_to_github(self) -> None:
@@ -4654,17 +4659,18 @@ class TestWritePrDescription:
         from contextlib import nullcontext
 
         gh = MagicMock()
-        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()) as mock_lock:
-            _write_pr_description(
-                Path("/tmp"),
-                gh,
-                "owner/repo",
-                42,
-                1,
-                [],
-                agent=_client("<body>Desc.\n\nFixes #1.</body>"),
-            )
-        mock_lock.assert_called_once_with(Path("/tmp"))
+        lock_spy = MagicMock(return_value=nullcontext())
+        _write_pr_description(
+            Path("/tmp"),
+            gh,
+            "owner/repo",
+            42,
+            1,
+            [],
+            agent=_client("<body>Desc.\n\nFixes #1.</body>"),
+            _pr_body_lock=lock_spy,
+        )
+        lock_spy.assert_called_once_with(Path("/tmp"))
 
     def test_raises_when_provider_returns_empty(self) -> None:
         gh = MagicMock()
@@ -4883,17 +4889,17 @@ class TestWritePrDescription:
         gh = MagicMock()
         agent = MagicMock()
         agent.print_prompt_from_file = MagicMock()
-        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
-            _write_pr_description(
-                tmp_path,
-                gh,
-                "owner/repo",
-                99,
-                42,
-                [{"title": "x", "status": "pending"}],
-                agent=agent,
-                pre_baked_description="## Summary\n\n- thing\n\nFixes #42.",
-            )
+        _write_pr_description(
+            tmp_path,
+            gh,
+            "owner/repo",
+            99,
+            42,
+            [{"title": "x", "status": "pending"}],
+            agent=agent,
+            pre_baked_description="## Summary\n\n- thing\n\nFixes #42.",
+            _pr_body_lock=lambda _: nullcontext(),
+        )
         agent.print_prompt_from_file.assert_not_called()
         body = gh.edit_pr_body.call_args[0][2]
         assert "## Summary" in body
@@ -4907,16 +4913,16 @@ class TestWritePrDescription:
         from contextlib import nullcontext
 
         gh = MagicMock()
-        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
-            _write_pr_description(
-                tmp_path,
-                gh,
-                "owner/repo",
-                99,
-                42,
-                [{"title": "x", "status": "pending"}],
-                pre_baked_description="## Summary\n\nbody.",
-            )
+        _write_pr_description(
+            tmp_path,
+            gh,
+            "owner/repo",
+            99,
+            42,
+            [{"title": "x", "status": "pending"}],
+            pre_baked_description="## Summary\n\nbody.",
+            _pr_body_lock=lambda _: nullcontext(),
+        )
         body = gh.edit_pr_body.call_args[0][2]
         assert "body." in body
         assert body.count("Fixes #42.") == 1
@@ -4927,16 +4933,16 @@ class TestWritePrDescription:
         from contextlib import nullcontext
 
         gh = MagicMock()
-        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
-            _write_pr_description(
-                tmp_path,
-                gh,
-                "owner/repo",
-                99,
-                42,
-                [{"title": "x", "status": "pending"}],
-                pre_baked_description="## Summary\n\nbody.\n\nFixes #42.",
-            )
+        _write_pr_description(
+            tmp_path,
+            gh,
+            "owner/repo",
+            99,
+            42,
+            [{"title": "x", "status": "pending"}],
+            pre_baked_description="## Summary\n\nbody.\n\nFixes #42.",
+            _pr_body_lock=lambda _: nullcontext(),
+        )
         body = gh.edit_pr_body.call_args[0][2]
         assert body.count("Fixes #42.") == 1
         # The canonical trailer is the last line before the divider
@@ -4948,21 +4954,47 @@ class TestWritePrDescription:
         from contextlib import nullcontext
 
         gh = MagicMock()
-        with patch("fido.tasks.pr_body_lock", return_value=nullcontext()):
-            _write_pr_description(
-                tmp_path,
-                gh,
-                "owner/repo",
-                99,
-                42,
-                [{"title": "x", "status": "pending"}],
-                pre_baked_description="## Summary\n\nbody.\n\nFixes #42",
-            )
+        _write_pr_description(
+            tmp_path,
+            gh,
+            "owner/repo",
+            99,
+            42,
+            [{"title": "x", "status": "pending"}],
+            pre_baked_description="## Summary\n\nbody.\n\nFixes #42",
+            _pr_body_lock=lambda _: nullcontext(),
+        )
         body = gh.edit_pr_body.call_args[0][2]
         before_divider = body.split("\n\n---\n\n")[0]
         # No bare "Fixes #42" without period; exactly one canonical "Fixes #42."
         assert before_divider.rstrip().endswith("Fixes #42.")
         assert body.count("Fixes #42") == 1
+
+    def test_worker_write_pr_description_delegates_to_module_function(
+        self, tmp_path: Path
+    ) -> None:
+        """Worker._write_pr_description is a thin delegation to _write_pr_description.
+
+        Exercises the delegation body directly so coverage does not require
+        a full TestFindOrCreatePr scenario (where the method is always mocked).
+        Initialises a bare git repo so pr_body_lock can resolve .git.
+        """
+        import subprocess
+
+        subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+        gh = MagicMock()
+        gh.get_pr.return_value = {"body": ""}
+        worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
+        worker._write_pr_description(  # type: ignore[attr-defined]
+            tmp_path,
+            gh,
+            "owner/repo",
+            99,
+            7,
+            [],
+            pre_baked_description="## Summary\n\nDelegation test.\n\nFixes #7.",
+        )
+        gh.edit_pr_body.assert_called_once()
 
 
 class TestFindOrCreatePr:
@@ -5018,13 +5050,9 @@ class TestFindOrCreatePr:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-branch")
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", return_value=["a task"]),
-        ):
-            result = worker.find_or_create_pr(
-                fido_dir, self._make_repo_ctx(), 5, "title"
-            )
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(return_value=["a task"])
+        result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert result == (20, "my-branch", False)
 
     def test_open_pr_logs_resuming(
@@ -5035,11 +5063,9 @@ class TestFindOrCreatePr:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._open_pr(number=20, slug="fix-stuff")
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", return_value=["a task"]),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(return_value=["a task"])
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "resuming" in caplog.text
 
@@ -5055,15 +5081,13 @@ class TestFindOrCreatePr:
                 '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
             )
         )
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-            patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", mock_start),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker._build_prompt = mock_build
+        worker._provider_start = mock_start
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY, labels=None)
         mock_start.assert_called_once_with(
             fido_dir,
@@ -5080,21 +5104,18 @@ class TestFindOrCreatePr:
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "sess",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker._build_prompt = mock_build
+        worker._provider_start = MagicMock(
+            return_value=(
+                "sess",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert f"Work dir: {tmp_path}" in context
 
@@ -5106,23 +5127,20 @@ class TestFindOrCreatePr:
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
         gh.get_issue_comments.return_value = []
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "_pr_has_real_diff", return_value=True),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "sess",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-        ):
-            result = worker.find_or_create_pr(
-                fido_dir, self._make_repo_ctx(), 5, "Issue title"
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "sess",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
             )
+        )
+        result = worker.find_or_create_pr(
+            fido_dir, self._make_repo_ctx(), 5, "Issue title"
+        )
         assert result == (20, "my-br", False)
         gh.comment_issue.assert_called_once()
         body = gh.comment_issue.call_args.args[2]
@@ -5142,20 +5160,17 @@ class TestFindOrCreatePr:
             call_count += 1
             return [] if call_count <= 2 else [task]
 
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", side_effect=list_tasks_side_effect),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(side_effect=list_tasks_side_effect)
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
 
     def test_open_pr_seeds_from_pr_body_before_setup(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
@@ -5163,24 +5178,18 @@ class TestFindOrCreatePr:
         fido_dir = self._fido_dir(tmp_path)
         # seed_tasks_from_pr_body populates tasks → setup not called
         call_order = []
-        with (
-            patch.object(worker, "_git"),
-            patch(
-                "fido.tasks.Tasks.list",
-                side_effect=[[], [{"id": "1", "title": "t", "status": "pending"}]],
-            ),
-            patch.object(
-                worker,
-                "seed_tasks_from_pr_body",
-                side_effect=lambda *a: call_order.append("seed"),
-            ),
-            patch(
-                "fido.worker.build_prompt",
-                side_effect=lambda *a: call_order.append("setup"),
-            ),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
-        ):
-            result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(
+            side_effect=[[], [{"id": "1", "title": "t", "status": "pending"}]]
+        )
+        worker.seed_tasks_from_pr_body = MagicMock(
+            side_effect=lambda *a: call_order.append("seed")
+        )
+        worker._build_prompt = MagicMock(
+            side_effect=lambda *a, **kw: call_order.append("setup")
+        )
+        worker._provider_start = MagicMock(return_value=("sess", ""))
+        result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result == (20, "my-br", False)
         assert "seed" in call_order
         assert "setup" not in call_order
@@ -5197,13 +5206,11 @@ class TestFindOrCreatePr:
             call_count += 1
             return [] if call_count == 1 else [task]
 
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", side_effect=list_tasks_side_effect),
-            patch("fido.worker.build_prompt"),
-            patch("fido.worker.provider_start", return_value=("sess", "")),
-        ):
-            result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(side_effect=list_tasks_side_effect)
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(return_value=("sess", ""))
+        result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result == (20, "my-br", False)
 
     def test_open_pr_skips_setup_when_tasks_exist(self, tmp_path: Path) -> None:
@@ -5211,15 +5218,12 @@ class TestFindOrCreatePr:
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch(
-                "fido.tasks.Tasks.list",
-                return_value=[{"title": "t", "status": "pending"}],
-            ),
-            patch("fido.worker.build_prompt", mock_build),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(
+            return_value=[{"title": "t", "status": "pending"}]
+        )
+        worker._build_prompt = mock_build
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_not_called()
 
     def test_open_pr_checkout_fallback_on_error(self, tmp_path: Path) -> None:
@@ -5237,11 +5241,9 @@ class TestFindOrCreatePr:
                 raise subprocess.CalledProcessError(1, "git")
             return MagicMock()
 
-        with (
-            patch.object(worker, "_git", side_effect=side_effect),
-            patch("fido.tasks.Tasks.list", return_value=["t"]),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock(side_effect=side_effect)
+        worker._tasks.list = MagicMock(return_value=["t"])
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert ["checkout", "-b", "br", "--track", "origin/br"] in git_calls
         assert ["checkout", "br"] not in git_calls
 
@@ -5260,11 +5262,9 @@ class TestFindOrCreatePr:
                 raise subprocess.CalledProcessError(128, "git", stderr="fatal: bad cwd")
             return MagicMock()
 
-        with (
-            patch.object(worker, "_git", side_effect=side_effect),
-            patch("fido.tasks.Tasks.list", return_value=["t"]),
-            pytest.raises(subprocess.CalledProcessError) as excinfo,
-        ):
+        worker._git = MagicMock(side_effect=side_effect)
+        worker._tasks.list = MagicMock(return_value=["t"])
+        with pytest.raises(subprocess.CalledProcessError) as excinfo:
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert excinfo.value.returncode == 128
         assert ["checkout", "-b", "br", "--track", "origin/br"] not in git_calls
@@ -5279,11 +5279,9 @@ class TestFindOrCreatePr:
             git_calls.append(args)
             return MagicMock()
 
-        with (
-            patch.object(worker, "_git", side_effect=side_effect),
-            patch("fido.tasks.Tasks.list", return_value=["t"]),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock(side_effect=side_effect)
+        worker._tasks.list = MagicMock(return_value=["t"])
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert git_calls[0] == ["fetch", "origin"]
 
     # --- No PR (new branch) path ---
@@ -5295,25 +5293,21 @@ class TestFindOrCreatePr:
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/55"
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "sess",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.worker._write_pr_description"),
-            patch(
-                "fido.tasks.Tasks.list",
-                return_value=[{"title": "Do thing", "status": "pending"}],
-            ),
-        ):
-            result = worker.find_or_create_pr(
-                fido_dir, self._make_repo_ctx(), 5, "Fix the bug"
+        worker._git = MagicMock()
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "sess",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
             )
+        )
+        worker._write_pr_description = MagicMock()
+        worker._tasks.list = MagicMock(
+            return_value=[{"title": "Do thing", "status": "pending"}]
+        )
+        result = worker.find_or_create_pr(
+            fido_dir, self._make_repo_ctx(), 5, "Fix the bug"
+        )
         assert result is not None
         pr_number, slug, is_fresh = result
         assert pr_number == 55
@@ -5331,21 +5325,18 @@ class TestFindOrCreatePr:
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.worker._write_pr_description"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            caplog.at_level(logging.INFO, logger="fido"),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
+        worker._git = MagicMock()
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._write_pr_description = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "new branch" in caplog.text
 
@@ -5360,15 +5351,13 @@ class TestFindOrCreatePr:
         mock_start = MagicMock(
             return_value=("s", '{"setup_outcome": "no-tasks-needed", "reason": "test"}')
         )
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch("fido.worker.provider_start", mock_start),
-            patch("fido.worker._write_pr_description"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_start = mock_start
+        worker._write_pr_description = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         mock_build.assert_called_once_with(fido_dir, "setup", ANY, labels=None)
         mock_start.assert_called_once_with(
             fido_dir,
@@ -5387,21 +5376,18 @@ class TestFindOrCreatePr:
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "s",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.worker._write_pr_description"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_start = MagicMock(
+            return_value=(
+                "s",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._write_pr_description = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert f"Work dir: {tmp_path}" in context
 
@@ -5413,23 +5399,19 @@ class TestFindOrCreatePr:
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/99"
         fido_dir = self._fido_dir(tmp_path)
         repo_ctx = self._make_repo_ctx(repo="owner/proj", default_branch="main")
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.worker._write_pr_description"),
-            patch(
-                "fido.tasks.Tasks.list",
-                return_value=[{"title": "t", "status": "pending"}],
-            ),
-        ):
-            worker.find_or_create_pr(fido_dir, repo_ctx, 7, "Do the work")
+        worker._git = MagicMock()
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._write_pr_description = MagicMock()
+        worker._tasks.list = MagicMock(
+            return_value=[{"title": "t", "status": "pending"}]
+        )
+        worker.find_or_create_pr(fido_dir, repo_ctx, 7, "Do the work")
         gh.create_pr.assert_called_once_with(
             "owner/proj",
             "Do the work (closes #7)",
@@ -5454,21 +5436,18 @@ class TestFindOrCreatePr:
             fake.returncode = 0
             return fake
 
-        with (
-            patch.object(worker, "_git", side_effect=side_effect),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.worker._write_pr_description"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock(side_effect=side_effect)
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._write_pr_description = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         # _reset_local_workspace fires first: checkout default, fetch, reset
         # --hard, clean, for-each-ref (which returns empty, so no branch -D).
         assert git_calls[0] == ["checkout", "main"]
@@ -5500,21 +5479,18 @@ class TestFindOrCreatePr:
             git_calls.append(list(args))
             return MagicMock()
 
-        with (
-            patch.object(worker, "_git", side_effect=side_effect),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.worker._write_pr_description"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock(side_effect=side_effect)
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._write_pr_description = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert ["branch", "-D", "slug"] in git_calls
         assert ["checkout", "-b", "slug", "origin/main"] in git_calls
 
@@ -5531,23 +5507,19 @@ class TestFindOrCreatePr:
             git_calls.append(list(args))
             return MagicMock()
 
-        with (
-            patch.object(worker, "_git", side_effect=side_effect),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.worker._write_pr_description"),
-            patch(
-                "fido.tasks.Tasks.list",
-                return_value=[{"title": "t", "status": "pending"}],
-            ),
-        ):
-            result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
+        worker._git = MagicMock(side_effect=side_effect)
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._write_pr_description = MagicMock()
+        worker._tasks.list = MagicMock(
+            return_value=[{"title": "t", "status": "pending"}]
+        )
+        result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "t")
         assert result is not None
         _, slug, is_fresh = result
         assert slug == slug.lower()
@@ -5564,23 +5536,20 @@ class TestFindOrCreatePr:
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
         gh.get_issue_comments.return_value = []
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "_git"),
-            patch.object(worker, "_reset_local_workspace"),
-            patch.object(worker, "_pr_has_real_diff", return_value=True),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "sess",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-        ):
-            result = worker.find_or_create_pr(
-                fido_dir, self._make_repo_ctx(), 5, "Issue title"
+        worker._git = MagicMock()
+        worker._reset_local_workspace = MagicMock()
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "sess",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
             )
+        )
+        worker._tasks.list = MagicMock(return_value=[])
+        result = worker.find_or_create_pr(
+            fido_dir, self._make_repo_ctx(), 5, "Issue title"
+        )
         assert result == (77, "fix-bug", True)
         gh.create_pr.assert_called_once()
         gh.comment_issue.assert_called_once()
@@ -5599,23 +5568,19 @@ class TestFindOrCreatePr:
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/42"
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.worker._write_pr_description"),
-            patch(
-                "fido.tasks.Tasks.list",
-                return_value=[{"title": "t", "status": "pending"}],
-            ),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker._git = MagicMock()
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._write_pr_description = MagicMock()
+        worker._tasks.list = MagicMock(
+            return_value=[{"title": "t", "status": "pending"}]
+        )
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert "42" in caplog.text
 
@@ -5634,24 +5599,20 @@ class TestFindOrCreatePr:
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/300"
         fido_dir = self._fido_dir(tmp_path)
         mock_retry = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch.object(worker, "_post_retry_acknowledgement", mock_retry),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.worker._write_pr_description"),
-            patch(
-                "fido.tasks.Tasks.list",
-                return_value=[{"title": "t", "status": "pending"}],
-            ),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 206, "Migrate")
+        worker._git = MagicMock()
+        worker._post_retry_acknowledgement = mock_retry
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._write_pr_description = MagicMock()
+        worker._tasks.list = MagicMock(
+            return_value=[{"title": "t", "status": "pending"}]
+        )
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 206, "Migrate")
         mock_retry.assert_called_once_with(
             "owner/proj", 206, "Migrate", "fido-bot", [215]
         )
@@ -5662,27 +5623,24 @@ class TestFindOrCreatePr:
         gh.get_pr_body.return_value = ""
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "sess",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(
-                fido_dir,
-                self._make_repo_ctx(),
-                5,
-                "Do the thing",
-                issue_body="Important requirement here.",
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_start = MagicMock(
+            return_value=(
+                "sess",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
             )
+        )
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(
+            fido_dir,
+            self._make_repo_ctx(),
+            5,
+            "Do the thing",
+            issue_body="Important requirement here.",
+        )
         _, _, context = mock_build.call_args.args
         assert "Important requirement here." in context
         assert "#5: Do the thing" in context
@@ -5693,21 +5651,18 @@ class TestFindOrCreatePr:
         gh.get_pr_body.return_value = "PR description body"
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "sess",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Do the thing")
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_start = MagicMock(
+            return_value=(
+                "sess",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "Do the thing")
         _, _, context = mock_build.call_args.args
         assert "PR #20" in context
         assert "https://github.com/owner/proj/pull/20" in context
@@ -5720,26 +5675,23 @@ class TestFindOrCreatePr:
         gh.find_pr.return_value = None
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "s",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(
-                fido_dir,
-                self._make_repo_ctx(),
-                7,
-                "Fix the bug",
-                issue_body="Steps to reproduce here.",
+        worker._git = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_start = MagicMock(
+            return_value=(
+                "s",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
             )
+        )
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(
+            fido_dir,
+            self._make_repo_ctx(),
+            7,
+            "Fix the bug",
+            issue_body="Steps to reproduce here.",
+        )
         _, _, context = mock_build.call_args.args
         assert "Steps to reproduce here." in context
         assert "#7: Fix the bug" in context
@@ -5751,20 +5703,17 @@ class TestFindOrCreatePr:
         gh.find_pr.return_value = None
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "s",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_start = MagicMock(
+            return_value=(
+                "s",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert "## Active PR" not in context
 
@@ -5775,11 +5724,9 @@ class TestFindOrCreatePr:
         worker, gh = self._make_worker(tmp_path)
         gh.find_pr.return_value = self._open_pr(number=20, slug="my-br")
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", return_value=["a task"]),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 7, "title")
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(return_value=["a task"])
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 7, "title")
         gh.fetch_closed_sub_issues.assert_not_called()
 
     def test_fetch_closed_sub_issues_called_for_open_pr_no_tasks_path(
@@ -5791,21 +5738,18 @@ class TestFindOrCreatePr:
         gh.get_pr_body.return_value = ""
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "s",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 7, "title")
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_start = MagicMock(
+            return_value=(
+                "s",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 7, "title")
         gh.fetch_closed_sub_issues.assert_called_once_with("owner/proj", 7)
 
     def test_fetch_closed_sub_issues_called_for_new_pr_path(
@@ -5818,20 +5762,17 @@ class TestFindOrCreatePr:
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/1"
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "s",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 9, "title")
+        worker._git = MagicMock()
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "s",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 9, "title")
         gh.fetch_closed_sub_issues.assert_called_once_with("owner/proj", 9)
 
     def test_open_pr_setup_context_includes_closed_sub_issues(
@@ -5855,21 +5796,18 @@ class TestFindOrCreatePr:
         ]
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "sess",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_start = MagicMock(
+            return_value=(
+                "sess",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert "## Closed sub-issues" in context
         assert "#55: Closed child" in context
@@ -5897,20 +5835,17 @@ class TestFindOrCreatePr:
         ]
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "s",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_start = MagicMock(
+            return_value=(
+                "s",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert "## Closed sub-issues" in context
         assert "#33: Already done" in context
@@ -5927,20 +5862,17 @@ class TestFindOrCreatePr:
         gh.fetch_closed_sub_issues.return_value = []
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "s",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_start = MagicMock(
+            return_value=(
+                "s",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert "## Closed sub-issues" not in context
 
@@ -5962,20 +5894,17 @@ class TestFindOrCreatePr:
         ]
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "s",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_start = MagicMock(
+            return_value=(
+                "s",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert "## Prior attempts" in context
         assert "PR #99" in context
@@ -5995,21 +5924,18 @@ class TestFindOrCreatePr:
         ]
         fido_dir = self._fido_dir(tmp_path)
         mock_build = MagicMock()
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("fido.worker.build_prompt", mock_build),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "sess",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=False),
-        ):
-            worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker._build_prompt = mock_build
+        worker._provider_start = MagicMock(
+            return_value=(
+                "sess",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
+            )
+        )
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=False)
+        worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         _, _, context = mock_build.call_args.args
         assert "## Prior attempts" in context
         assert "PR #88" in context
@@ -6028,24 +5954,19 @@ class TestFindOrCreatePr:
         gh.find_pr.return_value = None
         gh.create_pr.return_value = "https://github.com/owner/proj/pull/77"
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "_git"),
-            patch.object(worker, "_reset_local_workspace"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "sess",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "done"}',
-                ),
-            ),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            # Simulate the all-covered terminal close path
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=True),
-        ):
-            result = worker.find_or_create_pr(
-                fido_dir, self._make_repo_ctx(), 5, "title"
+        worker._git = MagicMock()
+        worker._reset_local_workspace = MagicMock()
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "sess",
+                '{"setup_outcome": "no-tasks-needed", "reason": "done"}',
             )
+        )
+        worker._tasks.list = MagicMock(return_value=[])
+        # Simulate the all-covered terminal close path
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=True)
+        result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert result is None
 
     def test_open_pr_returns_none_when_terminal_close_fires(
@@ -6057,24 +5978,19 @@ class TestFindOrCreatePr:
         worker, gh = self._make_worker(tmp_path, provider_agent=mock_client)
         gh.find_pr.return_value = self._open_pr(number=20, slug="fix-bug")
         fido_dir = self._fido_dir(tmp_path)
-        with (
-            patch.object(worker, "_git"),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "sess",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "done"}',
-                ),
-            ),
-            # Simulate the all-covered terminal close path
-            patch.object(worker, "_finalize_setup_with_no_tasks", return_value=True),
-        ):
-            result = worker.find_or_create_pr(
-                fido_dir, self._make_repo_ctx(), 5, "title"
+        worker._git = MagicMock()
+        worker._tasks.list = MagicMock(return_value=[])
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "sess",
+                '{"setup_outcome": "no-tasks-needed", "reason": "done"}',
             )
+        )
+        # Simulate the all-covered terminal close path
+        worker._finalize_setup_with_no_tasks = MagicMock(return_value=True)
+        result = worker.find_or_create_pr(fido_dir, self._make_repo_ctx(), 5, "title")
         assert result is None
 
 
@@ -6202,10 +6118,10 @@ class TestFinalizeSetupWithNoTasks:
         worker, gh, agent = self._make_worker(
             tmp_path, comment_text="Looks like this PR is already cooked through."
         )
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+        )
         agent.run_turn.assert_called_once()
         gh.comment_issue.assert_called_once()
         repo_arg, num_arg, body_arg = gh.comment_issue.call_args.args
@@ -6219,10 +6135,10 @@ class TestFinalizeSetupWithNoTasks:
     def test_skips_ready_when_branch_has_no_diff(self, tmp_path: Path) -> None:
         """#1194 diff guard: comment still posted, but PR stays draft."""
         worker, gh, _agent = self._make_worker(tmp_path)
-        with patch.object(worker, "_pr_has_real_diff", return_value=False):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+        )
         gh.comment_issue.assert_called_once()
         gh.pr_ready.assert_not_called()
         gh.add_pr_reviewers.assert_not_called()
@@ -6234,10 +6150,10 @@ class TestFinalizeSetupWithNoTasks:
         gh.get_issue_comments.return_value = [
             {"body": "earlier finalize\n\n<!-- fido:no-tasks-finalize -->"},
         ]
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+        )
         agent.run_turn.assert_not_called()
         gh.comment_issue.assert_not_called()
         # pr_ready and add_pr_reviewers are API-idempotent and must still fire
@@ -6251,23 +6167,23 @@ class TestFinalizeSetupWithNoTasks:
             {"body": None},
             {"body": "unrelated comment"},
         ]
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+        )
         gh.comment_issue.assert_called_once()
 
     def test_skips_reviewer_request_when_no_collaborators(self, tmp_path: Path) -> None:
         worker, gh, _agent = self._make_worker(tmp_path)
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(collaborators=frozenset()),
-                5,
-                "Issue title",
-                42,
-                "fix-bug",
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(collaborators=frozenset()),
+            5,
+            "Issue title",
+            42,
+            "fix-bug",
+        )
         gh.comment_issue.assert_called_once()
         gh.pr_ready.assert_called_once()
         gh.add_pr_reviewers.assert_not_called()
@@ -6301,16 +6217,16 @@ class TestFinalizeSetupWithNoTasks:
                 pr_body="",
             ),
         ]
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                5,
-                "My issue",
-                42,
-                "fix-bug",
-                closed_sub_issues=subs,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            5,
+            "My issue",
+            42,
+            "fix-bug",
+            closed_sub_issues=subs,
+        )
         # The voice turn must have been called — extract the prompt
         agent.run_turn.assert_called_once()
         prompt_arg = (
@@ -6339,16 +6255,16 @@ class TestFinalizeSetupWithNoTasks:
                 pr_body="",
             )
         ]
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                1,
-                "Parent",
-                10,
-                "slug",
-                closed_sub_issues=subs,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            1,
+            "Parent",
+            10,
+            "slug",
+            closed_sub_issues=subs,
+        )
         agent.run_turn.assert_called_once()
         prompt_arg = (
             agent.run_turn.call_args.kwargs.get("prompt")
@@ -6373,16 +6289,16 @@ class TestFinalizeSetupWithNoTasks:
                 pr_body="",
             )
         ]
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                1,
-                "Parent",
-                10,
-                "slug",
-                closed_sub_issues=subs,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            1,
+            "Parent",
+            10,
+            "slug",
+            closed_sub_issues=subs,
+        )
         agent.run_turn.assert_called_once()
         prompt_arg = (
             agent.run_turn.call_args.kwargs.get("prompt")
@@ -6409,16 +6325,16 @@ class TestFinalizeSetupWithNoTasks:
                 pr_body="",
             )
         ]
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                1,
-                "Parent",
-                10,
-                "slug",
-                closed_sub_issues=subs,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            1,
+            "Parent",
+            10,
+            "slug",
+            closed_sub_issues=subs,
+        )
         agent.run_turn.assert_called_once()
         prompt_arg = (
             agent.run_turn.call_args.kwargs.get("prompt")
@@ -6445,16 +6361,16 @@ class TestFinalizeSetupWithNoTasks:
                 pr_body="",
             )
         ]
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                5,
-                "My issue",
-                42,
-                "fix-bug",
-                closed_sub_issues=subs,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            5,
+            "My issue",
+            42,
+            "fix-bug",
+            closed_sub_issues=subs,
+        )
         agent.run_turn.assert_called_once()
         prompt_arg = (
             agent.run_turn.call_args.kwargs.get("prompt")
@@ -6483,17 +6399,17 @@ class TestFinalizeSetupWithNoTasks:
             )
         ]
         # has_real_diff=False, explicit_no_tasks=False (not an issue-close path)
-        with patch.object(worker, "_pr_has_real_diff", return_value=False):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                5,
-                "My issue",
-                42,
-                "fix-bug",
-                closed_sub_issues=subs,
-                explicit_no_tasks=False,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            5,
+            "My issue",
+            42,
+            "fix-bug",
+            closed_sub_issues=subs,
+            explicit_no_tasks=False,
+        )
         agent.run_turn.assert_called_once()
         prompt_arg = (
             agent.run_turn.call_args.kwargs.get("prompt")
@@ -6519,16 +6435,16 @@ class TestFinalizeSetupWithNoTasks:
                 pr_body="",
             )
         ]
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                1,
-                "Parent",
-                10,
-                "slug",
-                closed_sub_issues=subs,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            1,
+            "Parent",
+            10,
+            "slug",
+            closed_sub_issues=subs,
+        )
         agent.run_turn.assert_called_once()
         prompt_arg = (
             agent.run_turn.call_args.kwargs.get("prompt")
@@ -6554,16 +6470,16 @@ class TestFinalizeSetupWithNoTasks:
                 pr_body="",
             )
         ]
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                1,
-                "Parent",
-                10,
-                "slug",
-                closed_sub_issues=subs,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            1,
+            "Parent",
+            10,
+            "slug",
+            closed_sub_issues=subs,
+        )
         gh.comment_issue.assert_called_once()
         body = gh.comment_issue.call_args.args[2]
         assert "Sub-issues handled everything." in body
@@ -6574,10 +6490,10 @@ class TestFinalizeSetupWithNoTasks:
         worker, gh, agent = self._make_worker(
             tmp_path, comment_text="Branch covers it."
         )
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path, self._make_repo_ctx(), 5, "My issue", 42, "fix-bug"
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path, self._make_repo_ctx(), 5, "My issue", 42, "fix-bug"
+        )
         agent.run_turn.assert_called_once()
         prompt_arg = (
             agent.run_turn.call_args.kwargs.get("prompt")
@@ -6606,17 +6522,17 @@ class TestFinalizeSetupWithNoTasks:
                 pr_body="",
             )
         ]
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                5,
-                "My issue",
-                42,
-                "fix-bug",
-                closed_sub_issues=subs,
-                no_tasks_reason="#10 handled the full auth migration",
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            5,
+            "My issue",
+            42,
+            "fix-bug",
+            closed_sub_issues=subs,
+            no_tasks_reason="#10 handled the full auth migration",
+        )
         agent.run_turn.assert_called_once()
         prompt_arg = (
             agent.run_turn.call_args.kwargs.get("prompt")
@@ -6642,18 +6558,18 @@ class TestFinalizeSetupWithNoTasks:
                 pr_body="",
             )
         ]
-        with patch.object(worker, "_pr_has_real_diff", return_value=False):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                issue=5,
-                issue_title="My issue",
-                pr_number=42,
-                slug="fix-bug",
-                closed_sub_issues=subs,
-                explicit_no_tasks=True,
-                no_tasks_reason="#10 covered the authentication surface completely",
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            issue=5,
+            issue_title="My issue",
+            pr_number=42,
+            slug="fix-bug",
+            closed_sub_issues=subs,
+            explicit_no_tasks=True,
+            no_tasks_reason="#10 covered the authentication surface completely",
+        )
         agent.run_turn.assert_called_once()
         prompt_arg = (
             agent.run_turn.call_args.kwargs.get("prompt")
@@ -6676,17 +6592,17 @@ class TestFinalizeSetupWithNoTasks:
                 pr_body="",
             )
         ]
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                5,
-                "My issue",
-                42,
-                "fix-bug",
-                closed_sub_issues=subs,
-                # no_tasks_reason omitted (defaults to "")
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            5,
+            "My issue",
+            42,
+            "fix-bug",
+            closed_sub_issues=subs,
+            # no_tasks_reason omitted (defaults to "")
+        )
         agent.run_turn.assert_called_once()
         prompt_arg = (
             agent.run_turn.call_args.kwargs.get("prompt")
@@ -6720,17 +6636,17 @@ class TestFinalizeSetupWithNoTasks:
         )
         gh.get_issue_comments.return_value = []
         subs = self._make_subs()
-        with patch.object(worker, "_pr_has_real_diff", return_value=False):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                issue=5,
-                issue_title="My issue",
-                pr_number=42,
-                slug="fix-bug",
-                closed_sub_issues=subs,
-                explicit_no_tasks=True,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            issue=5,
+            issue_title="My issue",
+            pr_number=42,
+            slug="fix-bug",
+            closed_sub_issues=subs,
+            explicit_no_tasks=True,
+        )
         gh.comment_issue.assert_called_once()
         repo_arg, num_arg, _body_arg = gh.comment_issue.call_args.args
         assert repo_arg == "owner/proj"
@@ -6742,17 +6658,17 @@ class TestFinalizeSetupWithNoTasks:
         worker, gh, _agent = self._make_worker(tmp_path)
         gh.get_issue_comments.return_value = []
         subs = self._make_subs()
-        with patch.object(worker, "_pr_has_real_diff", return_value=False):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                issue=5,
-                issue_title="My issue",
-                pr_number=42,
-                slug="fix-bug",
-                closed_sub_issues=subs,
-                explicit_no_tasks=True,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            issue=5,
+            issue_title="My issue",
+            pr_number=42,
+            slug="fix-bug",
+            closed_sub_issues=subs,
+            explicit_no_tasks=True,
+        )
         gh.close_pr.assert_called_once_with("owner/proj", 42)
 
     def test_sub_issue_no_diff_closes_issue(self, tmp_path: Path) -> None:
@@ -6760,17 +6676,17 @@ class TestFinalizeSetupWithNoTasks:
         worker, gh, _agent = self._make_worker(tmp_path)
         gh.get_issue_comments.return_value = []
         subs = self._make_subs()
-        with patch.object(worker, "_pr_has_real_diff", return_value=False):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                issue=5,
-                issue_title="My issue",
-                pr_number=42,
-                slug="fix-bug",
-                closed_sub_issues=subs,
-                explicit_no_tasks=True,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            issue=5,
+            issue_title="My issue",
+            pr_number=42,
+            slug="fix-bug",
+            closed_sub_issues=subs,
+            explicit_no_tasks=True,
+        )
         gh.close_issue.assert_called_once_with("owner/proj", 5)
 
     def test_sub_issue_no_diff_does_not_mark_pr_ready(self, tmp_path: Path) -> None:
@@ -6778,17 +6694,17 @@ class TestFinalizeSetupWithNoTasks:
         worker, gh, _agent = self._make_worker(tmp_path)
         gh.get_issue_comments.return_value = []
         subs = self._make_subs()
-        with patch.object(worker, "_pr_has_real_diff", return_value=False):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                issue=5,
-                issue_title="My issue",
-                pr_number=42,
-                slug="fix-bug",
-                closed_sub_issues=subs,
-                explicit_no_tasks=True,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            issue=5,
+            issue_title="My issue",
+            pr_number=42,
+            slug="fix-bug",
+            closed_sub_issues=subs,
+            explicit_no_tasks=True,
+        )
         gh.pr_ready.assert_not_called()
 
     def test_sub_issue_no_diff_idempotent_skips_comment_but_still_closes(
@@ -6803,17 +6719,17 @@ class TestFinalizeSetupWithNoTasks:
             {"body": "Already done.\n\n<!-- fido:no-tasks-finalize -->"},
         ]
         subs = self._make_subs()
-        with patch.object(worker, "_pr_has_real_diff", return_value=False):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                issue=5,
-                issue_title="My issue",
-                pr_number=42,
-                slug="fix-bug",
-                closed_sub_issues=subs,
-                explicit_no_tasks=True,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            issue=5,
+            issue_title="My issue",
+            pr_number=42,
+            slug="fix-bug",
+            closed_sub_issues=subs,
+            explicit_no_tasks=True,
+        )
         agent.run_turn.assert_not_called()
         gh.comment_issue.assert_not_called()
         # Close calls still fire — they are API-idempotent
@@ -6831,17 +6747,17 @@ class TestFinalizeSetupWithNoTasks:
         )
         gh.get_issue_comments.return_value = []
         subs = self._make_subs()
-        with patch.object(worker, "_pr_has_real_diff", return_value=False):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                issue=5,
-                issue_title="My issue",
-                pr_number=42,
-                slug="fix-bug",
-                closed_sub_issues=subs,
-                explicit_no_tasks=False,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            issue=5,
+            issue_title="My issue",
+            pr_number=42,
+            slug="fix-bug",
+            closed_sub_issues=subs,
+            explicit_no_tasks=False,
+        )
         # Falls through to the standard PR path — comment on PR, not issue
         gh.comment_issue.assert_called_once()
         _repo, num_arg, _body = gh.comment_issue.call_args.args
@@ -6858,17 +6774,17 @@ class TestFinalizeSetupWithNoTasks:
         )
         gh.get_issue_comments.return_value = []
         subs = self._make_subs()
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                issue=5,
-                issue_title="My issue",
-                pr_number=42,
-                slug="fix-bug",
-                closed_sub_issues=subs,
-                explicit_no_tasks=True,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            issue=5,
+            issue_title="My issue",
+            pr_number=42,
+            slug="fix-bug",
+            closed_sub_issues=subs,
+            explicit_no_tasks=True,
+        )
         gh.comment_issue.assert_called_once()
         _repo, num_arg, _body = gh.comment_issue.call_args.args
         # Comment goes on the PR (42), not the issue (5)
@@ -6888,17 +6804,17 @@ class TestFinalizeSetupWithNoTasks:
         worker, gh, _agent = self._make_worker(tmp_path, comment_text="All covered.")
         gh.get_issue_comments.return_value = []
         subs = self._make_subs()
-        with patch.object(worker, "_pr_has_real_diff", return_value=False):
-            result = worker._finalize_setup_with_no_tasks(
-                tmp_path,
-                self._make_repo_ctx(),
-                issue=5,
-                issue_title="My issue",
-                pr_number=42,
-                slug="fix-bug",
-                closed_sub_issues=subs,
-                explicit_no_tasks=True,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        result = worker._finalize_setup_with_no_tasks(
+            tmp_path,
+            self._make_repo_ctx(),
+            issue=5,
+            issue_title="My issue",
+            pr_number=42,
+            slug="fix-bug",
+            closed_sub_issues=subs,
+            explicit_no_tasks=True,
+        )
         assert result is True
 
     def test_returns_false_on_standard_pr_path(self, tmp_path: Path) -> None:
@@ -6906,20 +6822,20 @@ class TestFinalizeSetupWithNoTasks:
         worker, gh, _agent = self._make_worker(
             tmp_path, comment_text="Branch covers it."
         )
-        with patch.object(worker, "_pr_has_real_diff", return_value=True):
-            result = worker._finalize_setup_with_no_tasks(
-                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        result = worker._finalize_setup_with_no_tasks(
+            tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+        )
         assert result is False
 
     def test_returns_false_on_no_diff_standard_path(self, tmp_path: Path) -> None:
         """_finalize_setup_with_no_tasks returns False when no diff but NOT
         the all-covered path (e.g. explicit_no_tasks=False)."""
         worker, gh, _agent = self._make_worker(tmp_path)
-        with patch.object(worker, "_pr_has_real_diff", return_value=False):
-            result = worker._finalize_setup_with_no_tasks(
-                tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        result = worker._finalize_setup_with_no_tasks(
+            tmp_path, self._make_repo_ctx(), 5, "Issue title", 42, "fix-bug"
+        )
         assert result is False
 
     def test_clears_durable_state_on_all_covered_close_path(
@@ -6944,17 +6860,17 @@ class TestFinalizeSetupWithNoTasks:
             state["pr_number"] = 42
             state["pr_title"] = "My issue (closes #5)"
             state["current_task_id"] = "abc-123"
-        with patch.object(worker, "_pr_has_real_diff", return_value=False):
-            worker._finalize_setup_with_no_tasks(
-                fido_dir,
-                self._make_repo_ctx(),
-                issue=5,
-                issue_title="My issue",
-                pr_number=42,
-                slug="fix-bug",
-                closed_sub_issues=subs,
-                explicit_no_tasks=True,
-            )
+        worker._pr_has_real_diff = MagicMock(return_value=False)
+        worker._finalize_setup_with_no_tasks(
+            fido_dir,
+            self._make_repo_ctx(),
+            issue=5,
+            issue_title="My issue",
+            pr_number=42,
+            slug="fix-bug",
+            closed_sub_issues=subs,
+            explicit_no_tasks=True,
+        )
         remaining = State(fido_dir).load()
         assert "issue" not in remaining
         assert "issue_title" not in remaining
@@ -7006,34 +6922,29 @@ class TestFinalizeSetupWithNoTasks:
         def capture_finalize(*args: object, **kwargs: object) -> None:
             finalize_calls.append({"args": args, "kwargs": kwargs})
 
-        with (
-            patch.object(worker, "_git"),
-            patch.object(worker, "_reset_local_workspace"),
-            patch.object(worker, "_pr_has_real_diff", return_value=True),
-            patch("fido.worker.build_prompt"),
-            patch(
-                "fido.worker.provider_start",
-                return_value=(
-                    "sess",
-                    '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
-                ),
-            ),
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch.object(
-                worker, "_finalize_setup_with_no_tasks", side_effect=capture_finalize
-            ),
-        ):
-            from fido.worker import RepoContext, RepoMembership
-
-            repo_ctx = RepoContext(
-                repo="owner/proj",
-                owner="owner",
-                repo_name="proj",
-                gh_user="fido-bot",
-                default_branch="main",
-                membership=RepoMembership(collaborators=frozenset()),
+        worker._git = MagicMock()
+        worker._reset_local_workspace = MagicMock()
+        worker._pr_has_real_diff = MagicMock(return_value=True)
+        worker._build_prompt = MagicMock()
+        worker._provider_start = MagicMock(
+            return_value=(
+                "sess",
+                '{"setup_outcome": "no-tasks-needed", "reason": "test"}',
             )
-            worker.find_or_create_pr(tmp_path / "fido", repo_ctx, 5, "Issue title")
+        )
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._finalize_setup_with_no_tasks = MagicMock(side_effect=capture_finalize)
+        from fido.worker import RepoContext, RepoMembership
+
+        repo_ctx = RepoContext(
+            repo="owner/proj",
+            owner="owner",
+            repo_name="proj",
+            gh_user="fido-bot",
+            default_branch="main",
+            membership=RepoMembership(collaborators=frozenset()),
+        )
+        worker.find_or_create_pr(tmp_path / "fido", repo_ctx, 5, "Issue title")
         assert len(finalize_calls) == 1
         assert finalize_calls[0]["kwargs"].get("closed_sub_issues") == subs
         # provider_start returned NoTasksNeeded sentinel → explicit_no_tasks=True
@@ -7085,12 +6996,11 @@ class TestResetLocalWorkspaceAndRetryAck:
             fake.returncode = 0
             return fake
 
-        with (
-            patch.object(worker, "_git", side_effect=side_effect),
-            patch("fido.tasks.Tasks.modify") as mock_modify,
-        ):
-            mock_modify.return_value.__enter__.return_value = []
-            worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
+        worker._git = MagicMock(side_effect=side_effect)
+        mock_modify = MagicMock()
+        mock_modify.return_value.__enter__.return_value = []
+        worker._tasks.modify = mock_modify
+        worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
         assert git_calls[0] == ["checkout", "main"]
         assert git_calls[1] == ["fetch", "origin"]
         assert git_calls[2] == ["reset", "--hard", "origin/main"]
@@ -7113,12 +7023,11 @@ class TestResetLocalWorkspaceAndRetryAck:
                 fake.stdout = ""
             return fake
 
-        with (
-            patch.object(worker, "_git", side_effect=side_effect),
-            patch("fido.tasks.Tasks.modify") as mock_modify,
-        ):
-            mock_modify.return_value.__enter__.return_value = []
-            worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
+        worker._git = MagicMock(side_effect=side_effect)
+        mock_modify = MagicMock()
+        mock_modify.return_value.__enter__.return_value = []
+        worker._tasks.modify = mock_modify
+        worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
         assert delete_calls == ["old-feature", "stale-branch"]
 
     def test_reset_tolerates_missing_branch(
@@ -7142,12 +7051,11 @@ class TestResetLocalWorkspaceAndRetryAck:
                 fake.returncode = 0
             return fake
 
-        with (
-            patch.object(worker, "_git", side_effect=side_effect),
-            patch("fido.tasks.Tasks.modify") as mock_modify,
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
-            mock_modify.return_value.__enter__.return_value = []
+        worker._git = MagicMock(side_effect=side_effect)
+        mock_modify = MagicMock()
+        mock_modify.return_value.__enter__.return_value = []
+        worker._tasks.modify = mock_modify
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
         assert "ghost-branch already absent" in caplog.text
 
@@ -7172,11 +7080,9 @@ class TestResetLocalWorkspaceAndRetryAck:
             def __exit__(self_lock, *args: object) -> object:
                 pass
 
-        with (
-            patch.object(worker, "_git", side_effect=side_effect),
-            patch.object(worker._tasks, "modify", return_value=FakeLock()),
-        ):
-            worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
+        worker._git = MagicMock(side_effect=side_effect)
+        worker._tasks.modify = MagicMock(return_value=FakeLock())
+        worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
         # The reset called .clear() on the yielded list.
         assert initial == []
 
@@ -7202,12 +7108,11 @@ class TestResetLocalWorkspaceAndRetryAck:
             fake.returncode = 0
             return fake
 
-        with (
-            patch.object(worker, "_git", side_effect=side_effect),
-            patch("fido.tasks.Tasks.modify") as mock_modify,
-        ):
-            mock_modify.return_value.__enter__.return_value = []
-            worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
+        worker._git = MagicMock(side_effect=side_effect)
+        mock_modify = MagicMock()
+        mock_modify.return_value.__enter__.return_value = []
+        worker._tasks.modify = mock_modify
+        worker._reset_local_workspace(fido_dir, self._repo_ctx(), "origin")
         state = State(fido_dir).load()
         assert state["issue"] == 206
         assert state["issue_title"] == "X"
@@ -7305,25 +7210,24 @@ class TestSeedTasksFromPrBody:
 
     def test_noop_when_tasks_exist(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
-        with patch("fido.tasks.Tasks.list", return_value=[{"title": "t"}]):
-            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        worker._tasks.list = MagicMock(return_value=[{"title": "t"}])
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
         gh.get_pr.assert_not_called()
 
     def test_fetches_pr_body_when_no_tasks(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {"body": ""}
-        with patch("fido.tasks.Tasks.list", return_value=[]):
-            worker.seed_tasks_from_pr_body("owner/repo", 42)
+        worker._tasks.list = MagicMock(return_value=[])
+        worker.seed_tasks_from_pr_body("owner/repo", 42)
         gh.get_pr.assert_called_once_with("owner/repo", 42)
 
     def test_noop_when_no_markers_in_body(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {"body": "No markers here."}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch("fido.tasks.Tasks.add") as mock_add,
-        ):
-            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
         mock_add.assert_not_called()
 
     def test_noop_when_no_unchecked_tasks_in_queue(self, tmp_path: Path) -> None:
@@ -7335,11 +7239,10 @@ class TestSeedTasksFromPrBody:
                 "<!-- WORK_QUEUE_END -->"
             )
         }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch("fido.tasks.Tasks.add") as mock_add,
-        ):
-            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
         mock_add.assert_not_called()
 
     def test_adds_single_task_from_body(self, tmp_path: Path) -> None:
@@ -7347,11 +7250,10 @@ class TestSeedTasksFromPrBody:
 
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = self._pr_with_queue("Fix the bug")
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch("fido.tasks.Tasks.add") as mock_add,
-        ):
-            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
         mock_add.assert_called_once_with(
             "Fix the bug", TaskType.SPEC, status=TaskStatus.PENDING
         )
@@ -7361,11 +7263,10 @@ class TestSeedTasksFromPrBody:
         gh.get_pr.return_value = self._pr_with_queue(
             "Task one", "Task two", "Task three"
         )
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch("fido.tasks.Tasks.add") as mock_add,
-        ):
-            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert mock_add.call_count == 3
 
     def test_seeds_completed_tasks_as_completed(self, tmp_path: Path) -> None:
@@ -7383,11 +7284,10 @@ class TestSeedTasksFromPrBody:
                 "<!-- WORK_QUEUE_END -->"
             )
         }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch("fido.tasks.Tasks.add") as mock_add,
-        ):
-            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert mock_add.call_count == 3
         statuses = [c.kwargs["status"] for c in mock_add.call_args_list]
         assert statuses == [
@@ -7410,11 +7310,10 @@ class TestSeedTasksFromPrBody:
                 "<!-- WORK_QUEUE_END -->"
             )
         }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch("fido.tasks.Tasks.add") as mock_add,
-        ):
-            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert mock_add.call_count == 2
         for c in mock_add.call_args_list:
             assert c.kwargs["status"] == TaskStatus.COMPLETED
@@ -7429,11 +7328,10 @@ class TestSeedTasksFromPrBody:
                 "<!-- WORK_QUEUE_END -->"
             )
         }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch("fido.tasks.Tasks.add") as mock_add,
-        ):
-            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
         titles = [call.args[0] for call in mock_add.call_args_list]
         assert titles[0] == "First task"
         assert "**→ next**" not in titles[0]
@@ -7442,24 +7340,20 @@ class TestSeedTasksFromPrBody:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = self._pr_with_queue("Write the tests", "Fix the lint")
         received: list[str] = []
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch(
-                "fido.tasks.Tasks.add",
-                side_effect=lambda t, tt, **kw: received.append(t),
-            ),
-        ):
-            worker.seed_tasks_from_pr_body("owner/repo", 5)
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._tasks.add = MagicMock(
+            side_effect=lambda t, tt, **kw: received.append(t)
+        )
+        worker.seed_tasks_from_pr_body("owner/repo", 5)
         assert received == ["Write the tests", "Fix the lint"]
 
     def test_noop_when_body_is_none(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {"body": None}
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch("fido.tasks.Tasks.add") as mock_add,
-        ):
-            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
         mock_add.assert_not_called()
 
     def test_skips_lines_without_type_comment(
@@ -7476,11 +7370,10 @@ class TestSeedTasksFromPrBody:
                 "<!-- WORK_QUEUE_END -->"
             )
         }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch("fido.tasks.Tasks.add") as mock_add,
-            caplog.at_level(logging.WARNING, logger="fido"),
-        ):
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        with caplog.at_level(logging.WARNING, logger="fido"):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert mock_add.call_count == 1
         assert "without type marker" in caplog.text
@@ -7492,11 +7385,9 @@ class TestSeedTasksFromPrBody:
 
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = self._pr_with_queue("T1", "T2")
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch("fido.tasks.Tasks.add"),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker._tasks.list = MagicMock(return_value=[])
+        worker._tasks.add = MagicMock()
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert "seeded" in caplog.text
         assert "2" in caplog.text
@@ -7510,10 +7401,8 @@ class TestSeedTasksFromPrBody:
         gh.get_pr.return_value = {
             "body": "<!-- WORK_QUEUE_START -->\n<!-- WORK_QUEUE_END -->"
         }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            caplog.at_level(logging.INFO, logger="fido"),
-        ):
+        worker._tasks.list = MagicMock(return_value=[])
+        with caplog.at_level(logging.INFO, logger="fido"):
             worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert "seeded" not in caplog.text
 
@@ -7527,11 +7416,10 @@ class TestSeedTasksFromPrBody:
                 "<!-- WORK_QUEUE_END -->"
             )
         }
-        with (
-            patch("fido.tasks.Tasks.list", return_value=[]),
-            patch("fido.tasks.Tasks.add") as mock_add,
-        ):
-            worker.seed_tasks_from_pr_body("owner/repo", 1)
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
         assert mock_add.call_count == 1
 
 
@@ -7567,21 +7455,17 @@ class TestRunSeedTasksIntegration:
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_seed = MagicMock()
         repo_ctx = self._make_mock_repo_ctx()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body", mock_seed),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", False))
+        worker.seed_tasks_from_pr_body = mock_seed
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.run()
         mock_seed.assert_called_once_with("owner/repo", 42)
 
     def test_backfill_runs_on_first_iteration_only(self, tmp_path: Path) -> None:
@@ -7606,23 +7490,19 @@ class TestRunSeedTasksIntegration:
                 dispatcher=mock_dispatcher,
                 registry=MagicMock(spec=ActivityReporter),
             )
-            with (
-                patch.object(
-                    worker, "create_context", return_value=self._make_mock_ctx(tmp_path)
-                ),
-                patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-                patch.object(worker, "setup_hooks", return_value=("c", "s")),
-                patch.object(worker, "teardown_hooks"),
-                patch.object(worker, "get_current_issue", return_value=7),
-                patch.object(worker, "post_pickup_comment"),
-                patch.object(
-                    worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-                ),
-                patch.object(worker, "seed_tasks_from_pr_body"),
-                patch.object(worker, "handle_ci", return_value=False),
-                patch.object(worker, "handle_threads", return_value=False),
-            ):
-                worker.run()
+            worker.create_context = MagicMock(
+                return_value=self._make_mock_ctx(tmp_path)
+            )
+            worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+            worker.setup_hooks = MagicMock(return_value=("c", "s"))
+            worker.teardown_hooks = MagicMock()
+            worker.get_current_issue = MagicMock(return_value=7)
+            worker.post_pickup_comment = MagicMock()
+            worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", False))
+            worker.seed_tasks_from_pr_body = MagicMock()
+            worker.handle_ci = MagicMock(return_value=False)
+            worker.handle_threads = MagicMock(return_value=False)
+            worker.run()
 
         _run_once(first=True)
         _run_once(first=False)
@@ -7660,24 +7540,18 @@ class TestRunSeedTasksIntegration:
             registry=MagicMock(spec=ActivityReporter),
         )
         repo_ctx = self._make_mock_repo_ctx()
-        with (
-            patch.object(
-                worker, "create_context", return_value=self._make_mock_ctx(tmp_path)
-            ),
-            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", False)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_queued_comments", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-            caplog.at_level(logging.WARNING, logger="fido"),
-        ):
+        worker.create_context = MagicMock(return_value=self._make_mock_ctx(tmp_path))
+        worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", False))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_queued_comments = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        with caplog.at_level(logging.WARNING, logger="fido"):
             worker.run()
 
         pending = store.pending_pr_comments(repo="owner/repo", pr_number=42)
@@ -7702,21 +7576,15 @@ class TestRunSeedTasksIntegration:
             registry=MagicMock(spec=ActivityReporter),
         )
         repo_ctx = self._make_mock_repo_ctx()
-        with (
-            patch.object(
-                worker, "create_context", return_value=self._make_mock_ctx(tmp_path)
-            ),
-            patch.object(worker, "discover_repo_context", return_value=repo_ctx),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=7),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(42, "fix-bug", True)
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body"),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=self._make_mock_ctx(tmp_path))
+        worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", True))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.run()
         assert mock_dispatcher.backfill_calls == []
 
     def test_seed_not_called_when_find_or_create_pr_raises(
@@ -7727,23 +7595,19 @@ class TestRunSeedTasksIntegration:
         gh.view_issue.return_value = {"title": "Done", "body": "", "state": "OPEN"}
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
         mock_seed = MagicMock()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=3),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker,
-                "find_or_create_pr",
-                side_effect=RuntimeError("setup produced no tasks"),
-            ),
-            patch.object(worker, "seed_tasks_from_pr_body", mock_seed),
-            pytest.raises(RuntimeError),
-        ):
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=3)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(
+            side_effect=RuntimeError("setup produced no tasks")
+        )
+        worker.seed_tasks_from_pr_body = mock_seed
+        with pytest.raises(RuntimeError):
             worker.run()
         mock_seed.assert_not_called()
 
@@ -7767,18 +7631,16 @@ class TestRunSeedTasksIntegration:
             '"current_task_id": "t1", "session_id": "keep-me"}'
         )
         find_or_create_pr_mock = MagicMock()
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=201),
-            patch.object(worker, "_issue_has_open_sub_issues", return_value=True),
-            patch.object(worker, "find_or_create_pr", find_or_create_pr_mock),
-        ):
-            result = worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=201)
+        worker._issue_has_open_sub_issues = MagicMock(return_value=True)
+        worker.find_or_create_pr = find_or_create_pr_mock
+        result = worker.run()
         # Worker returned cleanly without touching find_or_create_pr.
         assert result == 0
         find_or_create_pr_mock.assert_not_called()
@@ -7806,24 +7668,21 @@ class TestRunSeedTasksIntegration:
         gh = self._make_gh()
         gh.view_issue.return_value = {"title": "Leaf", "body": "", "state": "OPEN"}
         worker = Worker(tmp_path, gh, registry=MagicMock(spec=ActivityReporter))
-        with (
-            patch.object(worker, "create_context", return_value=mock_ctx),
-            patch.object(
-                worker, "discover_repo_context", return_value=self._make_mock_repo_ctx()
-            ),
-            patch.object(worker, "setup_hooks", return_value=("c", "s")),
-            patch.object(worker, "teardown_hooks"),
-            patch.object(worker, "get_current_issue", return_value=42),
-            patch.object(worker, "_issue_has_open_sub_issues", return_value=False),
-            patch.object(worker, "post_pickup_comment"),
-            patch.object(
-                worker, "find_or_create_pr", return_value=(100, "fix", False)
-            ) as mock_pr,
-            patch.object(worker, "seed_tasks_from_pr_body"),
-            patch.object(worker, "handle_ci", return_value=False),
-            patch.object(worker, "handle_threads", return_value=False),
-        ):
-            worker.run()
+        worker.create_context = MagicMock(return_value=mock_ctx)
+        worker.discover_repo_context = MagicMock(
+            return_value=self._make_mock_repo_ctx()
+        )
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=42)
+        worker._issue_has_open_sub_issues = MagicMock(return_value=False)
+        worker.post_pickup_comment = MagicMock()
+        mock_pr = MagicMock(return_value=(100, "fix", False))
+        worker.find_or_create_pr = mock_pr
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        worker.run()
         # Normal flow: find_or_create_pr was called.
         mock_pr.assert_called_once()
 

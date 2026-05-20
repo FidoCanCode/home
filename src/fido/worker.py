@@ -364,6 +364,8 @@ def build_prompt(
     subskill: str,
     context: str,
     labels: list[str] | None = None,
+    *,
+    sub_dir: Path | None = None,
 ) -> tuple[Path, Path]:
     """Write system and prompt files for a sub-agent session.
 
@@ -383,9 +385,12 @@ def build_prompt(
     blog/journal work (closes #1164).  If ``life.md`` is absent the label is
     silently ignored.
 
+    *sub_dir* overrides :func:`_sub_dir` — pass in tests to avoid filesystem
+    access.
+
     Returns ``(system_file, prompt_file)`` where both live in *fido_dir*.
     """
-    sub = _sub_dir()
+    sub = sub_dir if sub_dir is not None else _sub_dir()
     persona = (sub / "persona.md").read_text().rstrip()
     skill = (sub / f"{subskill}.md").read_text().rstrip()
 
@@ -1114,6 +1119,7 @@ def _write_pr_description(
     *,
     agent: ProviderAgent | None = None,
     pre_baked_description: str = "",
+    _pr_body_lock: Callable[[Path], AbstractContextManager[None]] = tasks.pr_body_lock,
 ) -> None:
     """Write or rewrite the PR description.
 
@@ -1217,7 +1223,7 @@ def _write_pr_description(
     new_body = f"{new_desc.strip()}{divider}{rest}"
     # Hold sync.lock during the PATCH so concurrent sync_tasks calls (which
     # also acquire this lock) cannot interleave and overwrite each other.
-    with tasks.pr_body_lock(work_dir):
+    with _pr_body_lock(work_dir):
         gh.edit_pr_body(repo, pr_number, new_body)
     log.info("_write_pr_description: PR #%s description written", pr_number)
 
@@ -1410,6 +1416,61 @@ class Worker:
         provider = self._provider
         if provider is not None:
             provider.agent.attach_session(agent.session)
+
+    def _provider_start(
+        self,
+        fido_dir: Path,
+        *,
+        agent: ProviderAgent | None = None,
+        model: ProviderModel,
+        cwd: Path | str = ".",
+        session: str | None = None,
+        session_mode: TurnSessionMode = TurnSessionMode.REUSE,
+    ) -> tuple[str, str]:
+        """Delegate to module-level :func:`provider_start`.
+
+        Instance method so tests can override via ``worker._provider_start = mock``
+        without patching the module-level name.
+        """
+        return provider_start(
+            fido_dir,
+            agent=agent,
+            model=model,
+            cwd=cwd,
+            session=session,
+            session_mode=session_mode,
+        )
+
+    def _write_pr_description(
+        self,
+        work_dir: Path,
+        gh: GitHub,
+        repo: str,
+        pr_number: int,
+        issue: int,
+        task_list: list[dict[str, Any]],
+        existing_body: str = "",
+        *,
+        agent: ProviderAgent | None = None,
+        pre_baked_description: str = "",
+    ) -> None:
+        """Delegate to module-level :func:`_write_pr_description`.
+
+        Instance method so tests can override via
+        ``worker._write_pr_description = mock`` without patching the
+        module-level name.
+        """
+        _write_pr_description(
+            work_dir,
+            gh,
+            repo,
+            pr_number,
+            issue,
+            task_list,
+            existing_body,
+            agent=agent,
+            pre_baked_description=pre_baked_description,
+        )
 
     def _get_prompts(self, *, _sub_dir_fn: Callable[..., Path] = _sub_dir) -> Prompts:
         """Return the injected Prompts or build one from the persona file."""
@@ -2056,8 +2117,8 @@ class Worker:
                     f"Upstream: {remote}/{repo_ctx.default_branch}\n"
                     f"Work dir: {self.work_dir}"
                 )
-                build_prompt(fido_dir, "setup", context, labels=issue_labels)
-                _, setup_output = provider_start(
+                self._build_prompt(fido_dir, "setup", context, labels=issue_labels)
+                _, setup_output = self._provider_start(
                     fido_dir,
                     agent=self._provider_agent,
                     model=self._provider_agent.voice_model,
@@ -2161,8 +2222,8 @@ class Worker:
             f"Upstream: {remote}/{repo_ctx.default_branch}\n"
             f"Work dir: {self.work_dir}"
         )
-        build_prompt(fido_dir, "setup", context, labels=issue_labels)
-        _, setup_output = provider_start(
+        self._build_prompt(fido_dir, "setup", context, labels=issue_labels)
+        _, setup_output = self._provider_start(
             fido_dir,
             agent=self._provider_agent,
             model=self._provider_agent.voice_model,
@@ -2218,7 +2279,7 @@ class Worker:
             log.info("PR: #%s  %s", pr_number, url)
             return pr_number, slug, True
 
-        _write_pr_description(
+        self._write_pr_description(
             self.work_dir,
             self.gh,
             repo_ctx.repo,
