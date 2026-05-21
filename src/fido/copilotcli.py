@@ -15,7 +15,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from typing import Any, TypeVar
 
 import acp
 from acp.exceptions import RequestError
@@ -53,12 +53,6 @@ from fido.session_agent import SessionBackedAgent
 log = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
-
-
-class TalkerResolver(Protocol):
-    """Resolves the current session talker for a given repository name."""
-
-    def __call__(self, repo_name: str) -> "provider.SessionTalker | None": ...
 
 
 _COPILOT_COMMAND = ("copilot", "--acp", "--allow-all")
@@ -1020,7 +1014,7 @@ class CopilotCLISession(OwnedSession):
         runtime_factory: Callable[..., CopilotACPRuntime] | None = None,
         session_id: str | None = None,
         snapshot_publisher: provider.SnapshotPublisher | None = None,
-        talker_resolver: TalkerResolver = provider.get_talker,
+        talker_resolver: provider.TalkerResolver = provider.get_talker,
     ) -> None:
         self._work_dir = Path(work_dir)
         self._repo_name = repo_name

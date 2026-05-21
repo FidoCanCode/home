@@ -175,7 +175,7 @@ class TestProviderTryPreemptWorker:
             fired, _kind = provider.try_preempt_worker(
                 repo_name="owner/repo",
                 cancel_fn=MagicMock(),
-                _get_talker=lambda r: None,
+                talker_resolver=lambda r: None,
             )
             assert fired is False
         finally:
@@ -188,7 +188,7 @@ class TestProviderTryPreemptWorker:
             fired, kind = provider.try_preempt_worker(
                 repo_name="owner/repo",
                 cancel_fn=cancel,
-                _get_talker=lambda r: None,
+                talker_resolver=lambda r: None,
             )
             assert fired is False
             assert kind is None
@@ -230,7 +230,7 @@ class TestOwnedSessionPreemptWorker:
             subprocess_pid=None,
             started_at=provider.talker_now(),
         )
-        assert session.preempt_worker(_get_talker=lambda r: worker_talker) is True
+        assert session.preempt_worker(talker_resolver=lambda r: worker_talker) is True
         assert len(session.cancels) == 1  # type: ignore[attr-defined]
 
     def test_returns_false_when_holder_is_webhook(self) -> None:
@@ -243,7 +243,7 @@ class TestOwnedSessionPreemptWorker:
             subprocess_pid=None,
             started_at=provider.talker_now(),
         )
-        assert session.preempt_worker(_get_talker=lambda r: webhook_talker) is False
+        assert session.preempt_worker(talker_resolver=lambda r: webhook_talker) is False
         assert session.cancels == []  # type: ignore[attr-defined]
 
     def test_returns_false_when_repo_name_is_none(self) -> None:
