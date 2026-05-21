@@ -354,16 +354,55 @@ def _fido_pid(*, _pgrep_fn: Callable[[str], list[int]] = _pgrep) -> int | None:
     return pids[0] if pids else None
 
 
+class StatusCollector:
+    """Groups system-introspection methods used by :func:`repo_status`,
+    :func:`collect`, and :func:`running_repo_configs`.
+
+    The real implementation delegates to the private module-level helpers
+    (``_git_dir``, ``_fido_running``, …).  Tests inject a subclass or a
+    hand-rolled fake that overrides specific methods without touching the
+    others.
+    """
+
+    def git_dir(self, path: Path) -> Path | None:
+        return _git_dir(path)
+
+    def fido_running(self, lock_path: Path) -> bool:
+        return _fido_running(lock_path)
+
+    def claude_pid(self, fido_dir: Path) -> int | None:
+        return _claude_pid(fido_dir)
+
+    def process_uptime(self, pid: int) -> int | None:
+        return _process_uptime_seconds(pid)
+
+    def fido_pid(self) -> int | None:
+        return _fido_pid()
+
+    def repos_from_pid(self, pid: int) -> list[RepoConfig]:
+        return _repos_from_pid(pid)
+
+    def port_from_pid(self, pid: int) -> int | None:
+        return _port_from_pid(pid)
+
+    def fetch_activities(
+        self, port: int
+    ) -> tuple[dict[str, Any], RateLimitInfo | None]:
+        return _fetch_activities(port)
+
+
+_REAL_COLLECTOR: StatusCollector = StatusCollector()
+
+
 def running_repo_configs(
     *,
-    _fido_pid_fn: Callable[[], int | None] = _fido_pid,
-    _repos_from_pid_fn: Callable[[int], list[RepoConfig]] = _repos_from_pid,
+    collector: StatusCollector = _REAL_COLLECTOR,
 ) -> list[RepoConfig]:
     """Return the repo configs for the currently running fido, or []."""
-    pid = _fido_pid_fn()
+    pid = collector.fido_pid()
     if pid is None:
         return []
-    return _repos_from_pid_fn(pid)
+    return collector.repos_from_pid(pid)
 
 
 def _status_persona_path() -> Path:
@@ -658,14 +697,11 @@ def repo_status(
     provider_status: ProviderPressureStatus | None = None,
     issue_cache: IssueCacheInfo | None = None,
     *,
-    _git_dir_fn: Callable[[Path], Path | None] = _git_dir,
-    _fido_running_fn: Callable[[Path], bool] = _fido_running,
-    _claude_pid_fn: Callable[[Path], int | None] = _claude_pid,
-    _process_uptime_fn: Callable[[int], int | None] = _process_uptime_seconds,
+    collector: StatusCollector = _REAL_COLLECTOR,
 ) -> RepoStatus:
     """Collect status for a single repo."""
     webhook_activities = list(webhook_activities or [])
-    git_dir = _git_dir_fn(repo_config.work_dir)
+    git_dir = collector.git_dir(repo_config.work_dir)
     if git_dir is None:
         return RepoStatus(
             name=repo_config.name,
@@ -701,7 +737,7 @@ def repo_status(
         )
 
     fido_dir = git_dir / "fido"
-    running = _fido_running_fn(fido_dir / "lock")
+    running = collector.fido_running(fido_dir / "lock")
 
     state = State(fido_dir).load()
     issue = state.get("issue")
@@ -720,8 +756,12 @@ def repo_status(
     # Prefer the fido-tracked session pid (authoritative, known from the
     # ClaudeSession subprocess) over a pgrep heuristic that can't find the
     # persistent session (its system file is outside fido_dir).
-    claude_pid = session_pid if session_pid is not None else _claude_pid_fn(fido_dir)
-    claude_uptime = _process_uptime_fn(claude_pid) if claude_pid is not None else None
+    claude_pid = (
+        session_pid if session_pid is not None else collector.claude_pid(fido_dir)
+    )
+    claude_uptime = (
+        collector.process_uptime(claude_pid) if claude_pid is not None else None
+    )
 
     return RepoStatus(
         name=repo_config.name,
@@ -759,26 +799,19 @@ def repo_status(
 
 def collect(
     *,
-    _fido_pid_fn: Callable[[], int | None] = _fido_pid,
-    _repos_from_pid_fn: Callable[[int], list[RepoConfig]] = _repos_from_pid,
-    _process_uptime_fn: Callable[[int], int | None] = _process_uptime_seconds,
-    _port_from_pid_fn: Callable[[int], int | None] = _port_from_pid,
-    _fetch_activities_fn: Callable[
-        [int], tuple[dict[str, Any], RateLimitInfo | None]
-    ] = _fetch_activities,
-    _repo_status_fn: Callable[..., RepoStatus] = repo_status,
+    collector: StatusCollector = _REAL_COLLECTOR,
 ) -> FidoStatus:
     """Collect the full fido + per-repo status."""
-    pid = _fido_pid_fn()
-    uptime = _process_uptime_fn(pid) if pid is not None else None
-    repo_configs = _repos_from_pid_fn(pid) if pid is not None else []
+    pid = collector.fido_pid()
+    uptime = collector.process_uptime(pid) if pid is not None else None
+    repo_configs = collector.repos_from_pid(pid) if pid is not None else []
 
     activities: dict[str, Any] = {}
     rate_limit_info: RateLimitInfo | None = None
     if pid is not None:
-        port = _port_from_pid_fn(pid)
+        port = collector.port_from_pid(pid)
         if port is not None:
-            activities, rate_limit_info = _fetch_activities_fn(port)
+            activities, rate_limit_info = collector.fetch_activities(port)
 
     provider_statuses: dict[ProviderID, ProviderPressureStatus] = {}
     repos = []
@@ -818,7 +851,7 @@ def collect(
         ):
             provider_statuses[provider_status.provider] = provider_status
         repos.append(
-            _repo_status_fn(
+            repo_status(
                 rc,
                 worker_what=info["what"] if info else None,
                 crash_count=info["crash_count"] if info else 0,
@@ -842,6 +875,7 @@ def collect(
                 rescoping=bool(info.get("rescoping")) if info else False,
                 provider_status=provider_status,
                 issue_cache=cache_info,
+                collector=collector,
             )
         )
     return FidoStatus(

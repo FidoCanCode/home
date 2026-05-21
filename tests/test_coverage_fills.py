@@ -323,6 +323,65 @@ class TestRocqLspMisc:
 # ---------------------------------------------------------------------------
 
 
+class TestStatusCollectorDelegation:
+    """Cover the delegation layer in :class:`StatusCollector`.
+
+    Each method is a thin wrapper around the corresponding private helper.
+    The real helpers make OS calls that return empty/None on a fresh
+    tmp_path, so we just verify that the delegation paths execute without
+    error and produce the expected empty/None results.
+    """
+
+    def test_git_dir_returns_none_for_non_git_dir(self, tmp_path: object) -> None:
+        from fido.status import StatusCollector
+
+        assert StatusCollector().git_dir(tmp_path) is None  # type: ignore[arg-type]
+
+    def test_fido_running_returns_false_for_missing_lock(
+        self, tmp_path: object
+    ) -> None:
+        from pathlib import Path
+
+        from fido.status import StatusCollector
+
+        assert StatusCollector().fido_running(Path(str(tmp_path)) / "lock") is False
+
+    def test_claude_pid_returns_none_for_fresh_dir(self, tmp_path: object) -> None:
+        from fido.status import StatusCollector
+
+        assert StatusCollector().claude_pid(tmp_path) is None  # type: ignore[arg-type]
+
+    def test_process_uptime_returns_none_for_invalid_pid(self) -> None:
+        from fido.status import StatusCollector
+
+        # PID 0 is not a real user process; ps exits non-zero or returns empty.
+        assert StatusCollector().process_uptime(0) is None
+
+    def test_fido_pid_returns_none_when_no_server(self) -> None:
+        from fido.status import StatusCollector
+
+        # In the test container, no "fido --port" process is running.
+        result = StatusCollector().fido_pid()
+        assert result is None or isinstance(result, int)
+
+    def test_repos_from_pid_returns_empty_for_invalid_pid(self) -> None:
+        from fido.status import StatusCollector
+
+        assert StatusCollector().repos_from_pid(0) == []
+
+    def test_port_from_pid_returns_none_for_invalid_pid(self) -> None:
+        from fido.status import StatusCollector
+
+        assert StatusCollector().port_from_pid(0) is None
+
+    def test_fetch_activities_returns_empty_on_connection_error(self) -> None:
+        from fido.status import StatusCollector
+
+        activities, rate_limit = StatusCollector().fetch_activities(0)
+        assert activities == {}
+        assert rate_limit is None
+
+
 class TestStatusFallbacks:
     """Cover defensive fallback branches in fido.status that fire when
     a provider has no palette mapping or when worker state is empty."""

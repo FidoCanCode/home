@@ -5,9 +5,11 @@
 import fcntl
 import json
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 from fido.appstate import (
@@ -28,6 +30,7 @@ from fido.status import (
     RateLimitInfo,
     RateLimitWindowInfo,
     RepoStatus,
+    StatusCollector,
     SystemResourceInfo,
     WebhookActivityInfo,
     _claude_pid,
@@ -71,6 +74,59 @@ class RepoConfig(_RepoConfig):
         **kwargs: object,
     ) -> None:
         super().__init__(*args, provider=provider, **kwargs)
+
+
+class _FakeStatusCollector(StatusCollector):
+    """Test fake for :class:`StatusCollector` — per-method lambda overrides.
+
+    Every method has a safe default (no git dir, no pid, etc.) so tests
+    only need to supply the callables they actually care about.
+    """
+
+    def __init__(
+        self,
+        *,
+        git_dir_fn: Callable[[Path], Path | None] = lambda _: None,
+        fido_running_fn: Callable[[Path], bool] = lambda _: False,
+        claude_pid_fn: Callable[[Path], int | None] = lambda _: None,
+        process_uptime_fn: Callable[[int], int | None] = lambda _: None,
+        fido_pid_fn: Callable[[], int | None] = lambda: None,
+        repos_from_pid_fn: Callable[[int], list] = lambda _: [],
+        port_from_pid_fn: Callable[[int], int | None] = lambda _: None,
+        fetch_activities_fn: Callable[[int], Any] = lambda _: ({}, None),
+    ) -> None:
+        self._git_dir_fn = git_dir_fn
+        self._fido_running_fn = fido_running_fn
+        self._claude_pid_fn = claude_pid_fn
+        self._process_uptime_fn = process_uptime_fn
+        self._fido_pid_fn = fido_pid_fn
+        self._repos_from_pid_fn = repos_from_pid_fn
+        self._port_from_pid_fn = port_from_pid_fn
+        self._fetch_activities_fn = fetch_activities_fn
+
+    def git_dir(self, path: Path) -> Path | None:
+        return self._git_dir_fn(path)
+
+    def fido_running(self, lock_path: Path) -> bool:
+        return self._fido_running_fn(lock_path)
+
+    def claude_pid(self, fido_dir: Path) -> int | None:
+        return self._claude_pid_fn(fido_dir)
+
+    def process_uptime(self, pid: int) -> int | None:
+        return self._process_uptime_fn(pid)
+
+    def fido_pid(self) -> int | None:
+        return self._fido_pid_fn()
+
+    def repos_from_pid(self, pid: int) -> list:
+        return self._repos_from_pid_fn(pid)
+
+    def port_from_pid(self, pid: int) -> int | None:
+        return self._port_from_pid_fn(pid)
+
+    def fetch_activities(self, port: int) -> object:
+        return self._fetch_activities_fn(port)
 
 
 class TestFormatUptime:
@@ -166,13 +222,15 @@ class TestPgrep:
 
 class TestRunningRepoConfigs:
     def test_returns_empty_when_fido_not_running(self) -> None:
-        assert running_repo_configs(_fido_pid_fn=lambda: None) == []
+        assert running_repo_configs(collector=_FakeStatusCollector()) == []
 
     def test_reads_repos_from_running_fido(self, tmp_path: Path) -> None:
         repo_cfg = RepoConfig(name="owner/repo", work_dir=tmp_path)
         assert running_repo_configs(
-            _fido_pid_fn=lambda: 123,
-            _repos_from_pid_fn=lambda pid: [repo_cfg],
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 123,
+                repos_from_pid_fn=lambda pid: [repo_cfg],
+            )
         ) == [repo_cfg]
 
 
@@ -336,6 +394,21 @@ class TestReposFromPid:
         result = _repos_from_pid(1, _read_bytes=lambda p: cmdline)
         assert len(result) == 1
         assert result[0].name == "rhencke/repo"
+
+    def test_skips_spec_with_one_colon_in_remainder(self) -> None:
+        """Arg like 'name:value' (one colon total) has no second colon in
+        remainder and must be skipped (line 333 continue branch)."""
+        cmdline = b"name:value\x00rhencke/repo:/path:claude-code\x00"
+        result = _repos_from_pid(1, _read_bytes=lambda p: cmdline)
+        assert len(result) == 1
+        assert result[0].name == "rhencke/repo"
+
+    def test_skips_unknown_provider(self) -> None:
+        """An arg with two colons but an unrecognised provider string must
+        be skipped (except ValueError branch, lines 337-338)."""
+        cmdline = b"owner/repo:/path/repo:badprovider\x00"
+        result = _repos_from_pid(1, _read_bytes=lambda p: cmdline)
+        assert result == []
 
 
 class TestFidoPid:
@@ -555,39 +628,20 @@ class TestCollectWebhookPropagation:
                 {"description": "triaging", "elapsed_seconds": 5.0},
             ],
         }
-        fake_status = RepoStatus(
-            name="owner/repo",
-            fido_running=False,
-            issue=None,
-            pending=0,
-            completed=0,
-            current_task=None,
-            claude_pid=None,
-            claude_uptime=None,
-            worker_what=None,
-            crash_count=0,
-            last_crash_error=None,
-            worker_stuck=False,
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                process_uptime_fn=lambda pid: 0,
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: ({"owner/repo": activity}, None),
+            )
         )
-        rs_kwargs: list[dict] = []
-
-        def capturing_rs(*args: object, **kwargs: object) -> RepoStatus:
-            rs_kwargs.append(kwargs)
-            return fake_status
-
-        collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 0,
-            _port_from_pid_fn=lambda pid: 9000,
-            _fetch_activities_fn=lambda port: ({"owner/repo": activity}, None),
-            _repo_status_fn=capturing_rs,
-        )
-        kwargs = rs_kwargs[0]
-        assert kwargs["worker_uptime"] == 120
-        assert len(kwargs["webhook_activities"]) == 1
-        assert kwargs["webhook_activities"][0].description == "triaging"
-        assert kwargs["webhook_activities"][0].elapsed_seconds == 5
+        repo = result.repos[0]
+        assert repo.worker_uptime == 120
+        assert len(repo.webhook_activities) == 1
+        assert repo.webhook_activities[0].description == "triaging"
+        assert repo.webhook_activities[0].elapsed_seconds == 5
 
 
 class TestFetchActivities:
@@ -997,7 +1051,7 @@ class TestRepoStatus:
 
     def test_no_git_dir_returns_empty_status(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
-        result = repo_status(cfg, _git_dir_fn=lambda p: None)
+        result = repo_status(cfg, collector=_FakeStatusCollector())
         assert result.name == "owner/repo"
         assert result.fido_running is False
         assert result.issue is None
@@ -1012,12 +1066,14 @@ class TestRepoStatus:
 
     def test_no_git_dir_passes_worker_what(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
-        result = repo_status(cfg, worker_what="Napping", _git_dir_fn=lambda p: None)
+        result = repo_status(
+            cfg, worker_what="Napping", collector=_FakeStatusCollector()
+        )
         assert result.worker_what == "Napping"
 
     def test_crash_count_defaults_to_zero(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
-        result = repo_status(cfg, _git_dir_fn=lambda p: None)
+        result = repo_status(cfg, collector=_FakeStatusCollector())
         assert result.crash_count == 0
 
     def test_crash_fields_passed_through(self, tmp_path: Path) -> None:
@@ -1026,7 +1082,7 @@ class TestRepoStatus:
             cfg,
             crash_count=5,
             last_crash_error="ValueError: oops",
-            _git_dir_fn=lambda p: None,
+            collector=_FakeStatusCollector(),
         )
         assert result.crash_count == 5
         assert result.last_crash_error == "ValueError: oops"
@@ -1046,10 +1102,12 @@ class TestRepoStatus:
         result = repo_status(
             cfg,
             worker_what="Working on: #7 do thing",
-            _git_dir_fn=lambda p: git_dir,
-            _fido_running_fn=lambda p: True,
-            _claude_pid_fn=lambda p: 555,
-            _process_uptime_fn=lambda p: 180,
+            collector=_FakeStatusCollector(
+                git_dir_fn=lambda p: git_dir,
+                fido_running_fn=lambda p: True,
+                claude_pid_fn=lambda p: 555,
+                process_uptime_fn=lambda p: 180,
+            ),
         )
 
         assert result.name == "owner/repo"
@@ -1070,10 +1128,9 @@ class TestRepoStatus:
         cfg = self._make_config(tmp_path)
         result = repo_status(
             cfg,
-            _git_dir_fn=lambda p: git_dir,
-            _fido_running_fn=lambda p: False,
-            _claude_pid_fn=lambda p: None,
-            _process_uptime_fn=lambda p: None,
+            collector=_FakeStatusCollector(
+                git_dir_fn=lambda p: git_dir,
+            ),
         )
         assert result.worker_what is None
 
@@ -1092,10 +1149,10 @@ class TestRepoStatus:
         cfg = self._make_config(tmp_path)
         result = repo_status(
             cfg,
-            _git_dir_fn=lambda p: git_dir,
-            _fido_running_fn=lambda p: False,
-            _claude_pid_fn=lambda p: None,
-            _process_uptime_fn=tracking_uptime,
+            collector=_FakeStatusCollector(
+                git_dir_fn=lambda p: git_dir,
+                process_uptime_fn=tracking_uptime,
+            ),
         )
 
         assert not uptime_called
@@ -1104,12 +1161,12 @@ class TestRepoStatus:
 
     def test_worker_stuck_defaults_to_false(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
-        result = repo_status(cfg, _git_dir_fn=lambda p: None)
+        result = repo_status(cfg, collector=_FakeStatusCollector())
         assert result.worker_stuck is False
 
     def test_worker_stuck_passed_through_no_git_dir(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
-        result = repo_status(cfg, worker_stuck=True, _git_dir_fn=lambda p: None)
+        result = repo_status(cfg, worker_stuck=True, collector=_FakeStatusCollector())
         assert result.worker_stuck is True
 
     def test_worker_stuck_passed_through_with_git_dir(self, tmp_path: Path) -> None:
@@ -1120,17 +1177,16 @@ class TestRepoStatus:
         result = repo_status(
             cfg,
             worker_stuck=True,
-            _git_dir_fn=lambda p: git_dir,
-            _fido_running_fn=lambda p: False,
-            _claude_pid_fn=lambda p: None,
-            _process_uptime_fn=lambda p: None,
+            collector=_FakeStatusCollector(git_dir_fn=lambda p: git_dir),
         )
         assert result.worker_stuck is True
 
     def test_provider_status_passed_through(self, tmp_path: Path) -> None:
         cfg = self._make_config(tmp_path)
         status = ProviderPressureStatus(provider=ProviderID.CLAUDE_CODE, pressure=0.95)
-        result = repo_status(cfg, provider_status=status, _git_dir_fn=lambda p: None)
+        result = repo_status(
+            cfg, provider_status=status, collector=_FakeStatusCollector()
+        )
         assert result.provider is ProviderID.CLAUDE_CODE
         assert result.provider_status == status
 
@@ -1156,10 +1212,10 @@ class TestRepoStatus:
         cfg = self._make_config(tmp_path)
         result = repo_status(
             cfg,
-            _git_dir_fn=lambda p: git_dir,
-            _fido_running_fn=lambda p: True,
-            _claude_pid_fn=lambda p: None,
-            _process_uptime_fn=lambda p: None,
+            collector=_FakeStatusCollector(
+                git_dir_fn=lambda p: git_dir,
+                fido_running_fn=lambda p: True,
+            ),
         )
 
         # Non-completed: [pending, in_progress, pending] → 3 total; in_progress is #2.
@@ -1212,11 +1268,11 @@ class TestCollect:
     def test_fido_up_with_uptime(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
         result = collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 600,
-            _port_from_pid_fn=lambda pid: None,
-            _repo_status_fn=lambda *a, **kw: self._fake_repo_status(),
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                process_uptime_fn=lambda pid: 600,
+            )
         )
 
         assert result.fido_pid == 42
@@ -1225,16 +1281,7 @@ class TestCollect:
         assert result.provider_statuses == []
 
     def test_fido_down(self) -> None:
-        def _should_not_be_called(*_: object, **__: object) -> object:
-            raise AssertionError("should not be called")
-
-        result = collect(
-            _fido_pid_fn=lambda: None,
-            _repos_from_pid_fn=_should_not_be_called,
-            _process_uptime_fn=_should_not_be_called,
-            _port_from_pid_fn=_should_not_be_called,
-            _repo_status_fn=_should_not_be_called,
-        )
+        result = collect(collector=_FakeStatusCollector())
         assert result.fido_pid is None
         assert result.fido_uptime is None
 
@@ -1244,26 +1291,25 @@ class TestCollect:
             provider=ProviderID.CLAUDE_CODE,
             pressure=0.91,
         )
-        rs_kwargs: list[dict] = []
-
-        def capturing_rs(*args: object, **kwargs: object) -> RepoStatus:
-            rs_kwargs.append(kwargs)
-            return self._fake_repo_status()
-
         result = collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 600,
-            _port_from_pid_fn=lambda pid: 9000,
-            _fetch_activities_fn=lambda port: (
-                {"owner/repo": self._activity_info(provider_status=provider_status)},
-                None,
-            ),
-            _repo_status_fn=capturing_rs,
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                process_uptime_fn=lambda pid: 600,
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: (
+                    {
+                        "owner/repo": self._activity_info(
+                            provider_status=provider_status
+                        )
+                    },
+                    None,
+                ),
+            )
         )
 
         assert result.provider_statuses == [provider_status]
-        assert rs_kwargs[0]["provider_status"] == provider_status
+        assert result.repos[0].provider_status == provider_status
 
     def test_fetches_activities_when_port_known(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
@@ -1274,12 +1320,12 @@ class TestCollect:
             return ({"owner/repo": self._activity_info()}, None)
 
         collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 0,
-            _port_from_pid_fn=lambda pid: 9000,
-            _fetch_activities_fn=tracking_fetch,
-            _repo_status_fn=lambda *a, **kw: self._fake_repo_status(),
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=tracking_fetch,
+            )
         )
         assert fetch_calls == [9000]
 
@@ -1290,139 +1336,97 @@ class TestCollect:
             raise AssertionError("should not be called")
 
         collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 0,
-            _port_from_pid_fn=lambda pid: None,
-            _fetch_activities_fn=_should_not_fetch,
-            _repo_status_fn=lambda *a, **kw: self._fake_repo_status(),
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                fetch_activities_fn=_should_not_fetch,
+            )
         )
 
     def test_passes_worker_what_to_repo_status(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        rs_calls: list[tuple] = []
-
-        def capturing_rs(*args: object, **kwargs: object) -> RepoStatus:
-            rs_calls.append((args, kwargs))
-            return self._fake_repo_status()
-
-        collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 0,
-            _port_from_pid_fn=lambda pid: 9000,
-            _fetch_activities_fn=lambda port: (
-                {"owner/repo": self._activity_info("Fixing CI: tests")},
-                None,
-            ),
-            _repo_status_fn=capturing_rs,
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: (
+                    {"owner/repo": self._activity_info("Fixing CI: tests")},
+                    None,
+                ),
+            )
         )
-        assert len(rs_calls) == 1
-        args, kwargs = rs_calls[0]
-        assert args == (rc,)
-        assert kwargs == {
-            "worker_what": "Fixing CI: tests",
-            "crash_count": 0,
-            "last_crash_error": None,
-            "worker_stuck": False,
-            "worker_uptime": None,
-            "webhook_activities": [],
-            "provider_status": None,
-            "session_owner": None,
-            "session_alive": False,
-            "session_pid": None,
-            "session_dropped_count": 0,
-            "session_sent_count": 0,
-            "session_received_count": 0,
-            "claude_talker": None,
-            "rescoping": False,
-            "issue_cache": None,
-        }
+        assert len(result.repos) == 1
+        repo = result.repos[0]
+        assert repo.worker_what == "Fixing CI: tests"
+        assert repo.crash_count == 0
+        assert repo.last_crash_error is None
+        assert repo.worker_stuck is False
+        assert repo.worker_uptime is None
+        assert repo.webhook_activities == []
+        assert repo.provider_status is None
+        assert repo.session_owner is None
+        assert repo.session_alive is False
+        assert repo.session_dropped_count == 0
+        assert repo.session_sent_count == 0
+        assert repo.session_received_count == 0
+        assert repo.claude_talker is None
+        assert repo.rescoping is False
+        assert repo.issue_cache is None
 
     def test_passes_crash_info_to_repo_status(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        rs_calls: list[tuple] = []
-
-        def capturing_rs(*args: object, **kwargs: object) -> RepoStatus:
-            rs_calls.append((args, kwargs))
-            return self._fake_repo_status()
-
-        collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 0,
-            _port_from_pid_fn=lambda pid: 9000,
-            _fetch_activities_fn=lambda port: (
-                {
-                    "owner/repo": self._activity_info(
-                        "Napping",
-                        crash_count=3,
-                        last_crash_error="ValueError: oops",
-                    )
-                },
-                None,
-            ),
-            _repo_status_fn=capturing_rs,
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: (
+                    {
+                        "owner/repo": self._activity_info(
+                            "Napping",
+                            crash_count=3,
+                            last_crash_error="ValueError: oops",
+                        )
+                    },
+                    None,
+                ),
+            )
         )
-        assert len(rs_calls) == 1
-        args, kwargs = rs_calls[0]
-        assert args == (rc,)
-        assert kwargs == {
-            "worker_what": "Napping",
-            "crash_count": 3,
-            "last_crash_error": "ValueError: oops",
-            "worker_stuck": False,
-            "worker_uptime": None,
-            "webhook_activities": [],
-            "provider_status": None,
-            "session_owner": None,
-            "session_alive": False,
-            "session_pid": None,
-            "session_dropped_count": 0,
-            "session_sent_count": 0,
-            "session_received_count": 0,
-            "claude_talker": None,
-            "rescoping": False,
-            "issue_cache": None,
-        }
+        assert len(result.repos) == 1
+        repo = result.repos[0]
+        assert repo.worker_what == "Napping"
+        assert repo.crash_count == 3
+        assert repo.last_crash_error == "ValueError: oops"
+        assert repo.worker_stuck is False
 
     def test_worker_what_none_for_unknown_repo(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        rs_calls: list[tuple] = []
-
-        def capturing_rs(*args: object, **kwargs: object) -> RepoStatus:
-            rs_calls.append((args, kwargs))
-            return self._fake_repo_status()
-
-        collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 0,
-            _port_from_pid_fn=lambda pid: 9000,
-            _fetch_activities_fn=lambda port: ({}, None),
-            _repo_status_fn=capturing_rs,
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: ({}, None),
+            )
         )
-        assert len(rs_calls) == 1
-        args, kwargs = rs_calls[0]
-        assert args == (rc,)
-        assert kwargs == {
-            "worker_what": None,
-            "crash_count": 0,
-            "last_crash_error": None,
-            "worker_stuck": False,
-            "worker_uptime": None,
-            "webhook_activities": [],
-            "provider_status": None,
-            "session_owner": None,
-            "session_alive": False,
-            "session_pid": None,
-            "session_dropped_count": 0,
-            "session_sent_count": 0,
-            "session_received_count": 0,
-            "claude_talker": None,
-            "rescoping": False,
-            "issue_cache": None,
-        }
+        assert len(result.repos) == 1
+        repo = result.repos[0]
+        assert repo.worker_what is None
+        assert repo.crash_count == 0
+        assert repo.last_crash_error is None
+        assert repo.worker_stuck is False
+        assert repo.worker_uptime is None
+        assert repo.webhook_activities == []
+        assert repo.provider_status is None
+        assert repo.session_owner is None
+        assert repo.session_alive is False
+        assert repo.session_dropped_count == 0
+        assert repo.session_sent_count == 0
+        assert repo.session_received_count == 0
+        assert repo.claude_talker is None
+        assert repo.rescoping is False
+        assert repo.issue_cache is None
 
     def test_passes_claude_talker_to_repo_status(self, tmp_path: Path) -> None:
         """An active SessionTalker in /status → ClaudeTalkerInfo on RepoStatus."""
@@ -1446,28 +1450,29 @@ class TestCollect:
                 "started_at": "2026-04-14T18:00:00+00:00",
             },
         }
-        rs_kwargs: list[dict] = []
-
-        def capturing_rs(*args: object, **kwargs: object) -> RepoStatus:
-            rs_kwargs.append(kwargs)
-            return self._fake_repo_status()
-
-        collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 0,
-            _port_from_pid_fn=lambda pid: 9000,
-            _fetch_activities_fn=lambda port: ({"owner/repo": activity_info}, None),
-            _repo_status_fn=capturing_rs,
+        # Use a real git dir so repo_status() reaches the full path and applies
+        # session_pid → claude_pid substitution (early-exit always sets claude_pid=None).
+        git_dir = tmp_path / ".git"
+        (git_dir / "fido").mkdir(parents=True)
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: ({"owner/repo": activity_info}, None),
+                git_dir_fn=lambda p: git_dir,
+            )
         )
-        kwargs = rs_kwargs[0]
-        assert kwargs["claude_talker"] == ClaudeTalkerInfo(
+        repo = result.repos[0]
+        assert repo.claude_talker == ClaudeTalkerInfo(
             thread_id=1234,
             kind="worker",
             description="persistent session turn",
             subprocess_pid=42,
         )
-        assert kwargs["session_pid"] == 42
+        # session_pid=42 in the activity dict → collect() passes session_pid=42 to
+        # repo_status() → used as claude_pid (authoritative over pgrep heuristic).
+        assert repo.claude_pid == 42
 
     def test_claude_talker_subprocess_pid_none_when_absent(
         self, tmp_path: Path
@@ -1493,22 +1498,16 @@ class TestCollect:
                 "started_at": "2026-04-14T18:00:00+00:00",
             },
         }
-        rs_kwargs: list[dict] = []
-
-        def capturing_rs(*args: object, **kwargs: object) -> RepoStatus:
-            rs_kwargs.append(kwargs)
-            return self._fake_repo_status()
-
-        collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 0,
-            _port_from_pid_fn=lambda pid: 9000,
-            _fetch_activities_fn=lambda port: ({"owner/repo": activity_info}, None),
-            _repo_status_fn=capturing_rs,
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: ({"owner/repo": activity_info}, None),
+            )
         )
-        kwargs = rs_kwargs[0]
-        assert kwargs["claude_talker"] == ClaudeTalkerInfo(
+        repo = result.repos[0]
+        assert repo.claude_talker == ClaudeTalkerInfo(
             thread_id=7,
             kind="worker",
             description="copilot session turn",
@@ -1517,84 +1516,49 @@ class TestCollect:
 
     def test_passes_is_stuck_to_repo_status(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        rs_calls: list[tuple] = []
-
-        def capturing_rs(*args: object, **kwargs: object) -> RepoStatus:
-            rs_calls.append((args, kwargs))
-            return self._fake_repo_status()
-
-        collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 0,
-            _port_from_pid_fn=lambda pid: 9000,
-            _fetch_activities_fn=lambda port: (
-                {"owner/repo": self._activity_info(is_stuck=True)},
-                None,
-            ),
-            _repo_status_fn=capturing_rs,
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: (
+                    {"owner/repo": self._activity_info(is_stuck=True)},
+                    None,
+                ),
+            )
         )
-        assert len(rs_calls) == 1
-        args, kwargs = rs_calls[0]
-        assert args == (rc,)
-        assert kwargs == {
-            "worker_what": "Working on: #1",
-            "crash_count": 0,
-            "last_crash_error": None,
-            "worker_stuck": True,
-            "worker_uptime": None,
-            "webhook_activities": [],
-            "provider_status": None,
-            "session_owner": None,
-            "session_alive": False,
-            "session_pid": None,
-            "session_dropped_count": 0,
-            "session_sent_count": 0,
-            "session_received_count": 0,
-            "claude_talker": None,
-            "rescoping": False,
-            "issue_cache": None,
-        }
+        assert len(result.repos) == 1
+        repo = result.repos[0]
+        assert repo.worker_what == "Working on: #1"
+        assert repo.worker_stuck is True
 
     def test_passes_rescoping_true_to_repo_status(self, tmp_path: Path) -> None:
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        rs_kwargs: list[dict] = []
-
-        def capturing_rs(*args: object, **kwargs: object) -> RepoStatus:
-            rs_kwargs.append(kwargs)
-            return self._fake_repo_status()
-
-        collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 0,
-            _port_from_pid_fn=lambda pid: 9000,
-            _fetch_activities_fn=lambda port: (
-                {"owner/repo": self._activity_info(rescoping=True)},
-                None,
-            ),
-            _repo_status_fn=capturing_rs,
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: (
+                    {"owner/repo": self._activity_info(rescoping=True)},
+                    None,
+                ),
+            )
         )
-        assert rs_kwargs[0]["rescoping"] is True
+        assert result.repos[0].rescoping is True
 
     def test_rescoping_false_when_no_activity_info(self, tmp_path: Path) -> None:
         """Repos with no activity entry (unknown to the live server) get rescoping=False."""
         rc = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        rs_kwargs: list[dict] = []
-
-        def capturing_rs(*args: object, **kwargs: object) -> RepoStatus:
-            rs_kwargs.append(kwargs)
-            return self._fake_repo_status()
-
-        collect(
-            _fido_pid_fn=lambda: 42,
-            _repos_from_pid_fn=lambda pid: [rc],
-            _process_uptime_fn=lambda pid: 0,
-            _port_from_pid_fn=lambda pid: 9000,
-            _fetch_activities_fn=lambda port: ({}, None),
-            _repo_status_fn=capturing_rs,
+        result = collect(
+            collector=_FakeStatusCollector(
+                fido_pid_fn=lambda: 42,
+                repos_from_pid_fn=lambda pid: [rc],
+                port_from_pid_fn=lambda pid: 9000,
+                fetch_activities_fn=lambda port: ({}, None),
+            )
         )
-        assert rs_kwargs[0]["rescoping"] is False
+        assert result.repos[0].rescoping is False
 
 
 class TestFormatAgentLine:
