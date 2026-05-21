@@ -33,7 +33,6 @@ from fido.tasks import (
     _thread_task_for_auto_resolve_oracle,
     review_thread_for_auto_resolve_oracle,
 )
-from tests.fakes import _FakeDispatcher
 
 # ---------------------------------------------------------------------------
 # provider_factory.py — fallback ValueError branches
@@ -1265,19 +1264,29 @@ class TestCopilotCLIOwnerMore:
         )
 
     def test_owner_returns_none_when_no_talker_registered(self, tmp_path: Path) -> None:
-        # copilotcli.py:975-977 — get_talker None or wrong kind.
+        # copilotcli.py:975-977 — talker_resolver returns None.
         session = self._build_session(tmp_path)
-        session._get_talker = lambda r: None  # type: ignore[attr-defined]
         assert session.owner is None  # type: ignore[union-attr]
 
     def test_owner_returns_none_when_no_thread_matches(self, tmp_path: Path) -> None:
         # copilotcli.py:978-981 — talker.kind == worker but thread_id absent.
-        session = self._build_session(tmp_path)
+        from fido.copilotcli import CopilotCLISession
+
         fake_talker = MagicMock()
         fake_talker.kind = "worker"
         fake_talker.thread_id = -1
-        session._get_talker = lambda r: fake_talker  # type: ignore[attr-defined]
-        assert session.owner is None  # type: ignore[union-attr]
+        runtime = MagicMock()
+        runtime.ensure_session.return_value = "sess-1"
+        runtime.pid = 4321
+        session = CopilotCLISession(
+            tmp_path / "sys.md",
+            work_dir=tmp_path,
+            model="gpt-5",
+            runtime=runtime,
+            repo_name="test/repo",
+            talker_resolver=lambda r: fake_talker,
+        )
+        assert session.owner is None
 
     def test_owner_returns_thread_name_when_thread_id_matches(
         self, tmp_path: Path
@@ -1285,13 +1294,24 @@ class TestCopilotCLIOwnerMore:
         # copilotcli.py:980 — return t.name when ident matches.
         import threading
 
-        session = self._build_session(tmp_path)
+        from fido.copilotcli import CopilotCLISession
+
         current = threading.current_thread()
         fake_talker = MagicMock()
         fake_talker.kind = "worker"
         fake_talker.thread_id = current.ident
-        session._get_talker = lambda r: fake_talker  # type: ignore[attr-defined]
-        assert session.owner == current.name  # type: ignore[union-attr]
+        runtime = MagicMock()
+        runtime.ensure_session.return_value = "sess-1"
+        runtime.pid = 4321
+        session = CopilotCLISession(
+            tmp_path / "sys.md",
+            work_dir=tmp_path,
+            model="gpt-5",
+            runtime=runtime,
+            repo_name="test/repo",
+            talker_resolver=lambda r: fake_talker,
+        )
+        assert session.owner == current.name
 
 
 class TestCopilotCLIOwner:
@@ -1803,7 +1823,7 @@ class TestEventsCreateTaskExitUntriaged:
     def test_exception_in_reorder_calls_exit_untriaged_and_reraises(
         self, tmp_path: Path
     ) -> None:
-        from fido import events
+        from fido.events import Dispatcher
 
         # Build a config + repo_cfg minimal enough to exercise the path.
         repo_cfg = MagicMock()
@@ -1827,15 +1847,12 @@ class TestEventsCreateTaskExitUntriaged:
         def boom(*args: object, **kwargs: object) -> Never:  # noqa: ARG001
             raise RuntimeError("explode")
 
+        dispatcher = Dispatcher(config, repo_cfg, gh)
         with pytest.raises(RuntimeError, match="explode"):
-            events.create_task(
+            dispatcher.create_task(
                 "prompt",
-                config,
-                repo_cfg,
-                gh,
                 thread=thread,
                 registry=registry,
-                dispatcher=_FakeDispatcher(),
                 _reorder_background_fn=boom,
                 _get_commit_summary_fn=lambda wd: "summary",
                 _tasks=tasks,

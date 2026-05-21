@@ -34,8 +34,6 @@ from fido.events import (
     Dispatcher,
     WebhookIngressOracle,
     launch_worker,
-    reply_to_comment,
-    reply_to_issue_comment,
     reply_to_review,
     thread_lineage_comment_ids,
 )
@@ -366,9 +364,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     # Infrastructure ports — set by server.run() composition root.
     infra: Infra = real_infra()
     static_files: StaticFiles | None = None
-    _fn_reply_to_comment = staticmethod(reply_to_comment)
     _fn_reply_to_review = staticmethod(reply_to_review)
-    _fn_reply_to_issue_comment = staticmethod(reply_to_issue_comment)
     _fn_launch_worker = staticmethod(launch_worker)
     _fn_spawn_bg = staticmethod(_spawn_bg)
     _fn_after_do_post = staticmethod(_noop_after_post)
@@ -867,8 +863,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 else:
                     activity.set_description("triaging review comment")
                     try:
-                        category, _ = type(self)._fn_reply_to_comment(
-                            action, self.config, repo_cfg, gh, self.registry
+                        category, _ = self.dispatchers[repo_cfg.name].reply_to_comment(
+                            action, self.registry
                         )
                     except Exception:
                         self._fail_reply(repo_cfg, promise)
@@ -899,9 +895,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 else:
                     activity.set_description("triaging PR comment")
                     try:
-                        category, _ = type(self)._fn_reply_to_issue_comment(
-                            action, self.config, repo_cfg, gh, self.registry
-                        )
+                        category, _ = self.dispatchers[
+                            repo_cfg.name
+                        ].reply_to_issue_comment(action, self.registry)
                     except Exception:
                         self._fail_reply(repo_cfg, promise)
                         raise

@@ -46,7 +46,7 @@ from fido.server import FidoHTTPServer, PreflightError, WebhookHandler
 from fido.store import FidoStore
 from fido.tasks import Tasks
 from fido.types import TaskStatus, TaskType
-from tests.fakes import _FakeDispatcher
+from tests.fakes import _FakeDispatcher, _ReplyFakeDispatcher
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
@@ -196,9 +196,7 @@ def _restore_handler_fns() -> object:
     saved = {
         "_gh": WebhookHandler._gh,
         "dispatchers": WebhookHandler.dispatchers,
-        "_fn_reply_to_comment": WebhookHandler._fn_reply_to_comment,
         "_fn_reply_to_review": WebhookHandler._fn_reply_to_review,
-        "_fn_reply_to_issue_comment": WebhookHandler._fn_reply_to_issue_comment,
         "_fn_launch_worker": WebhookHandler._fn_launch_worker,
         "_fn_spawn_bg": WebhookHandler._fn_spawn_bg,
         "_fn_after_do_post": WebhookHandler._fn_after_do_post,
@@ -835,9 +833,12 @@ class TestProcessAction:
             "pull_request": {"number": 5, "title": "My PR", "body": ""},
         }
         mock_task = MagicMock()
-        WebhookHandler._fn_reply_to_comment = MagicMock(
-            return_value=("DEFER", ["big refactor"])
-        )
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_comment_return=("DEFER", ["big refactor"]),
+            )
+        }
         WebhookHandler._fn_create_task = mock_task
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
@@ -864,13 +865,13 @@ class TestProcessAction:
             },
             "pull_request": {"number": 6, "title": "My PR", "body": ""},
         }
-        mock_reply = MagicMock()
-        WebhookHandler._fn_reply_to_comment = mock_reply
+        fake = _ReplyFakeDispatcher(WebhookHandler.dispatchers["owner/repo"])
+        WebhookHandler.dispatchers = {"owner/repo": fake}
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
-        mock_reply.assert_not_called()
+        assert len(fake.reply_to_comment_calls) == 0
 
     def test_preempted_review_comment_creates_no_phantom_task(
         self, server: tuple
@@ -897,7 +898,12 @@ class TestProcessAction:
         mock_task = MagicMock()
         # Simulate lock-contention: another process holds the lock, so
         # reply_to_comment returns ACT with empty titles instead of a task title.
-        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ACT", []))
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_comment_return=("ACT", []),
+            )
+        }
         WebhookHandler._fn_create_task = mock_task
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
@@ -929,9 +935,12 @@ class TestProcessAction:
                 "pull_request": {"url": "https://api.github.com/..."},
             },
         }
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            return_value=("ANSWER", [])
-        )
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_issue_comment_return=("ANSWER", []),
+            )
+        }
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         with caplog.at_level(logging.INFO, logger="fido.server"):
@@ -1093,17 +1102,22 @@ class TestProcessAction:
         handler.registry = WorkerRegistry(MagicMock(), updater)
         handler.registry.start(cfg.repos["owner/repo"])
         type(handler)._gh = MagicMock()
-        handler.dispatchers = {"owner/repo": _FakeDispatcher()}
         phases: list[str] = []
 
-        def reply_to_issue_comment(*args: object) -> tuple[str, list[str]]:
-            del args
+        def _reply_side_effect(
+            action: object, registry: object
+        ) -> tuple[str, list[str]]:
+            del action, registry
             phases.append(
                 handler.registry.get_webhook_activities("owner/repo")[0].description
             )
             return "ACT", ["do it"]
 
-        WebhookHandler._fn_reply_to_issue_comment = reply_to_issue_comment
+        handler.dispatchers = {
+            "owner/repo": _FakeDispatcher(
+                reply_to_issue_comment_side_effect=_reply_side_effect
+            )
+        }
         WebhookHandler._fn_launch_worker = MagicMock()
         action = Action(
             prompt="test",
@@ -1194,7 +1208,12 @@ class TestProcessAction:
             },
             "pull_request": {"number": 71, "title": "My PR", "body": ""},
         }
-        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_comment_return=("ANSWER", []),
+            )
+        }
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
@@ -1223,9 +1242,12 @@ class TestProcessAction:
             },
         }
         WebhookHandler._gh = MagicMock()
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            return_value=("ANSWER", [])
-        )
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_issue_comment_return=("ANSWER", []),
+            )
+        }
         WebhookHandler._fn_launch_worker = MagicMock()
         status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
@@ -1253,8 +1275,8 @@ class TestProcessAction:
         url, cfg = server
         mock_session = MagicMock()
         WebhookHandler.registry.get_session.return_value = mock_session
-        mock_reply = MagicMock(return_value=("ANSWER", []))
-        WebhookHandler._fn_reply_to_comment = mock_reply
+        fake = _ReplyFakeDispatcher(WebhookHandler.dispatchers["owner/repo"])
+        WebhookHandler.dispatchers = {"owner/repo": fake}
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         payload = {
@@ -1274,7 +1296,7 @@ class TestProcessAction:
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
         mock_session.hold_for_handler.assert_not_called()
-        mock_reply.assert_not_called()
+        assert len(fake.reply_to_comment_calls) == 0
         WebhookHandler._fn_launch_worker.assert_called_once()
 
     def test_issue_comment_handler_stays_off_provider(self, server: tuple) -> None:
@@ -1282,8 +1304,8 @@ class TestProcessAction:
         url, cfg = server
         mock_session = MagicMock()
         WebhookHandler.registry.get_session.return_value = mock_session
-        mock_reply = MagicMock(return_value=("ANSWER", []))
-        WebhookHandler._fn_reply_to_issue_comment = mock_reply
+        fake = _ReplyFakeDispatcher(WebhookHandler.dispatchers["owner/repo"])
+        WebhookHandler.dispatchers = {"owner/repo": fake}
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         payload = {
@@ -1307,7 +1329,7 @@ class TestProcessAction:
         status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
         mock_session.hold_for_handler.assert_not_called()
-        mock_reply.assert_not_called()
+        assert len(fake.reply_to_issue_comment_calls) == 0
         WebhookHandler._fn_launch_worker.assert_called_once()
 
     def test_publish_provider_snapshot_inside_hold_for_handler(
@@ -1354,7 +1376,9 @@ class TestProcessAction:
         reg.start(cfg.repos["owner/repo"])
         handler.registry = reg
         type(handler)._gh = MagicMock()
-        handler.dispatchers = {"owner/repo": _FakeDispatcher()}
+        handler.dispatchers = {
+            "owner/repo": _FakeDispatcher(reply_to_issue_comment_return=("ACT", []))
+        }
 
         # Install the spy AFTER start() so start()'s own publish isn't counted.
         # server.py calls publish_provider_snapshot (public) which delegates to
@@ -1383,9 +1407,6 @@ class TestProcessAction:
 
         reg.get_session = patched_get_session  # type: ignore[method-assign]
 
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(  # type: ignore[assignment]
-            return_value=("ACT", [])
-        )
         WebhookHandler._fn_create_task = MagicMock()  # type: ignore[assignment]
         WebhookHandler._fn_launch_worker = MagicMock()  # type: ignore[assignment]
 
@@ -1463,7 +1484,11 @@ class TestProcessAction:
         reg.start(cfg.repos["owner/repo"])
         handler.registry = reg
         type(handler)._gh = MagicMock()
-        handler.dispatchers = {"owner/repo": _FakeDispatcher()}
+        handler.dispatchers = {
+            "owner/repo": _FakeDispatcher(
+                reply_to_issue_comment_side_effect=RuntimeError("boom")
+            )
+        }
 
         captured_snapshots: list[ProviderSnapshot | None] = []
         original_private_publish = reg._publish_provider_snapshot  # type: ignore[method-assign]
@@ -1488,11 +1513,6 @@ class TestProcessAction:
 
         reg.get_session = patched_get_session  # type: ignore[method-assign]
 
-        def raise_in_handler(*args: object, **kwargs: object) -> tuple[str, list[str]]:
-            del args, kwargs
-            raise RuntimeError("boom")
-
-        WebhookHandler._fn_reply_to_issue_comment = raise_in_handler  # type: ignore[assignment]
         WebhookHandler._fn_create_task = MagicMock()  # type: ignore[assignment]
         WebhookHandler._fn_launch_worker = MagicMock()  # type: ignore[assignment]
 
@@ -1594,14 +1614,14 @@ class TestProcessActionInner:
             comment_body="please add logging",
             is_bot=False,
         )
-        mock_reply = MagicMock(return_value=("ACT", ["add logging"]))
         mock_task = MagicMock()
-        WebhookHandler._fn_reply_to_comment = mock_reply
         WebhookHandler._fn_create_task = mock_task
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
+        fake = _FakeDispatcher(reply_to_comment_return=("ACT", ["add logging"]))
+        handler.dispatchers = {"owner/repo": fake}
         handler._process_action_inner(action, repo_cfg, self._activity())
-        mock_reply.assert_called_once()
+        assert len(fake.reply_to_comment_calls) == 1
 
     def test_action_with_reply_to_skips_when_promise_is_none(
         self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
@@ -1625,13 +1645,13 @@ class TestProcessActionInner:
             comment_body="please add logging",
             is_bot=False,
         )
-        mock_reply = MagicMock()
-        WebhookHandler._fn_reply_to_comment = mock_reply
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
+        fake = _FakeDispatcher()
+        handler.dispatchers = {"owner/repo": fake}
         handler._process_action_inner(action, repo_cfg, self._activity())
-        mock_reply.assert_not_called()  # already-claimed → skipped
+        assert len(fake.reply_to_comment_calls) == 0  # already-claimed → skipped
 
     def test_action_with_reply_to_failure_marks_promise_retryable(
         self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
@@ -1655,10 +1675,13 @@ class TestProcessActionInner:
             },
             comment_body="boom",
         )
-        mock_reply = MagicMock(side_effect=requests.RequestException("API down"))
-        WebhookHandler._fn_reply_to_comment = mock_reply
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
+        handler.dispatchers = {
+            "owner/repo": _FakeDispatcher(
+                reply_to_comment_side_effect=requests.RequestException("API down")
+            )
+        }
         # _process_action_inner swallows the recoverable exception (logs + signal).
         handler._process_action_inner(action, repo_cfg, self._activity())
         # _signal_action_error fired → confused reaction posted.
@@ -1683,10 +1706,13 @@ class TestProcessActionInner:
             },
             comment_body="boom",
         )
-        mock_reply = MagicMock(side_effect=KeyError("missing_key"))
-        WebhookHandler._fn_reply_to_comment = mock_reply
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
+        handler.dispatchers = {
+            "owner/repo": _FakeDispatcher(
+                reply_to_comment_side_effect=KeyError("missing_key")
+            )
+        }
         with pytest.raises(KeyError):
             handler._process_action_inner(action, repo_cfg, self._activity())
 
@@ -1721,13 +1747,13 @@ class TestProcessActionInner:
             },
             comment_body="any thoughts?",
         )
-        mock_reply = MagicMock(return_value=("ANSWER", []))
-        WebhookHandler._fn_reply_to_issue_comment = mock_reply
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
+        fake = _FakeDispatcher(reply_to_issue_comment_return=("ANSWER", []))
+        handler.dispatchers = {"owner/repo": fake}
         handler._process_action_inner(action, repo_cfg, self._activity())
-        mock_reply.assert_called_once()
+        assert len(fake.reply_to_issue_comment_calls) == 1
 
     def test_action_with_comment_body_skips_when_promise_is_none(
         self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
@@ -1749,12 +1775,12 @@ class TestProcessActionInner:
             },
             comment_body="dup",
         )
-        mock_reply = MagicMock()
-        WebhookHandler._fn_reply_to_issue_comment = mock_reply
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
+        fake = _FakeDispatcher()
+        handler.dispatchers = {"owner/repo": fake}
         handler._process_action_inner(action, repo_cfg, self._activity())
-        mock_reply.assert_not_called()
+        assert len(fake.reply_to_issue_comment_calls) == 0
 
     def test_action_with_comment_body_failure_marks_promise_retryable(
         self, cfg: Config, repo_cfg: RepoConfig, tmp_path: Path
@@ -1775,10 +1801,13 @@ class TestProcessActionInner:
             },
             comment_body="boom",
         )
-        mock_reply = MagicMock(side_effect=requests.RequestException("API down"))
-        WebhookHandler._fn_reply_to_issue_comment = mock_reply
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
+        handler.dispatchers = {
+            "owner/repo": _FakeDispatcher(
+                reply_to_issue_comment_side_effect=requests.RequestException("API down")
+            )
+        }
         handler._process_action_inner(action, repo_cfg, self._activity())
         handler.gh.add_reaction.assert_called_with(
             "owner/repo", "issues", 500, "confused"
@@ -1801,9 +1830,11 @@ class TestProcessActionInner:
             comment_body="please fix this",
             is_bot=False,
         )
-        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
+        handler.dispatchers = {
+            "owner/repo": _FakeDispatcher(reply_to_comment_return=("ANSWER", []))
+        }
         handler._process_action_inner(action, repo_cfg, self._activity())
         handler.gh.add_reaction.assert_any_call("owner/repo", "pulls", 101, "eyes")
 
@@ -1824,11 +1855,11 @@ class TestProcessActionInner:
             comment_body="any thoughts?",
             is_bot=False,
         )
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            return_value=("ANSWER", [])
-        )
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
+        handler.dispatchers = {
+            "owner/repo": _FakeDispatcher(reply_to_issue_comment_return=("ANSWER", []))
+        }
         handler._process_action_inner(action, repo_cfg, self._activity())
         handler.gh.add_reaction.assert_any_call("owner/repo", "issues", 301, "eyes")
 
@@ -1871,9 +1902,11 @@ class TestProcessActionInner:
             comment_body="please fix this",
             is_bot=False,
         )
-        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
+        handler.dispatchers = {
+            "owner/repo": _FakeDispatcher(reply_to_comment_return=("ANSWER", []))
+        }
         handler._process_action_inner(action, repo_cfg, self._activity())
         for call in handler.gh.add_reaction.call_args_list:
             assert call.args[3] != "eyes", (
@@ -1897,9 +1930,11 @@ class TestProcessActionInner:
             comment_body="automated feedback",
             is_bot=True,
         )
-        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
+        handler.dispatchers = {
+            "owner/repo": _FakeDispatcher(reply_to_comment_return=("ANSWER", []))
+        }
         handler._process_action_inner(action, repo_cfg, self._activity())
         for call in handler.gh.add_reaction.call_args_list:
             assert call.args[3] != "eyes", f"eyes was posted for bot action: {call}"
@@ -1933,9 +1968,11 @@ class TestProcessActionInner:
             comment_body="please fix",
             is_bot=False,
         )
-        WebhookHandler._fn_reply_to_comment = MagicMock(return_value=("ANSWER", []))
         WebhookHandler._fn_launch_worker = MagicMock()
         handler = self._handler(cfg)
+        handler.dispatchers = {
+            "owner/repo": _FakeDispatcher(reply_to_comment_return=("ANSWER", []))
+        }
         handler.gh.add_reaction.side_effect = requests.RequestException("network down")
         # Should not raise — eyes failure is best-effort.
         handler._process_action_inner(action, repo_cfg, self._activity())
@@ -2042,9 +2079,6 @@ class TestProcessActionInner:
             comment_body="please fix",
             is_bot=False,
         )
-        WebhookHandler._fn_reply_to_comment = MagicMock(
-            side_effect=requests.RequestException("network down")
-        )
         WebhookHandler._fn_launch_worker = MagicMock()
         remove_order: list[str] = []
 
@@ -2063,7 +2097,11 @@ class TestProcessActionInner:
         handler.config = cfg
         type(handler)._gh = MagicMock()
         handler.registry = MagicMock()
-        handler.dispatchers = {"owner/repo": _FakeDispatcher()}
+        handler.dispatchers = {
+            "owner/repo": _FakeDispatcher(
+                reply_to_comment_side_effect=requests.RequestException("network down")
+            )
+        }
         # Recoverable exception — should not propagate
         handler._process_action_inner(action, repo_cfg, self._activity())
         # Eyes must be removed before the confused reaction is signalled
@@ -2259,9 +2297,12 @@ class TestSynchronousPreemption:
         WebhookHandler.registry.get_session.return_value = mock_session
 
         self._record_background_spawn_order(call_order)
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            return_value=("ANSWER", [])
-        )
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_issue_comment_return=("ANSWER", []),
+            )
+        }
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
 
@@ -2299,9 +2340,12 @@ class TestSynchronousPreemption:
 
         mock_session.preempt_worker.side_effect = failing_preempt
         self._record_background_spawn_order(call_order)
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            return_value=("ANSWER", [])
-        )
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_issue_comment_return=("ANSWER", []),
+            )
+        }
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
 
@@ -2358,9 +2402,12 @@ class TestSynchronousPreemption:
 
         mock_session.preempt_worker.side_effect = wedged_preempt
         self._record_background_spawn_order(call_order)
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            return_value=("ANSWER", [])
-        )
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_issue_comment_return=("ANSWER", []),
+            )
+        }
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
 
@@ -2421,9 +2468,12 @@ class TestSynchronousPreemption:
 
         mock_session.preempt_worker.side_effect = wedged_preempt
         self._record_background_spawn_order(call_order)
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            return_value=("ANSWER", [])
-        )
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_issue_comment_return=("ANSWER", []),
+            )
+        }
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
 
@@ -2474,9 +2524,12 @@ class TestSynchronousPreemption:
         url, cfg = server
 
         WebhookHandler.registry.get_session.return_value = None
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            return_value=("ANSWER", [])
-        )
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_issue_comment_return=("ANSWER", []),
+            )
+        }
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
 
@@ -2531,9 +2584,12 @@ class TestUntriagedInboxWiring:
     def test_enter_untriaged_called_for_comment_demand(self, server: tuple) -> None:
         """enter_untriaged must be called synchronously for durable demand."""
         url, cfg = server
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            return_value=("ANSWER", [])
-        )
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_issue_comment_return=("ANSWER", []),
+            )
+        }
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
 
@@ -2573,9 +2629,12 @@ class TestUntriagedInboxWiring:
         """exit_untriaged must be called in the _process_action finally block
         when the handler completes successfully."""
         url, cfg = server
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            return_value=("ANSWER", [])
-        )
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_issue_comment_return=("ANSWER", []),
+            )
+        }
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
 
@@ -2589,9 +2648,12 @@ class TestUntriagedInboxWiring:
         """exit_untriaged must still be called even when _process_action_inner
         raises — the finally block must fire on all non-os._exit paths."""
         url, cfg = server
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            side_effect=RuntimeError("boom")
-        )
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_issue_comment_side_effect=RuntimeError("boom"),
+            )
+        }
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
 
@@ -2638,9 +2700,12 @@ class TestUntriagedInboxWiring:
             original_spawn(fn, args)
 
         WebhookHandler._fn_spawn_bg = staticmethod(tracking_spawn)  # type: ignore[assignment]
-        WebhookHandler._fn_reply_to_issue_comment = MagicMock(
-            return_value=("ANSWER", [])
-        )
+        WebhookHandler.dispatchers = {
+            "owner/repo": _ReplyFakeDispatcher(
+                WebhookHandler.dispatchers["owner/repo"],
+                reply_to_issue_comment_return=("ANSWER", []),
+            )
+        }
         WebhookHandler._fn_create_task = MagicMock()
         WebhookHandler._fn_launch_worker = MagicMock()
 
