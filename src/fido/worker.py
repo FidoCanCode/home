@@ -1344,21 +1344,6 @@ class TaskSyncer(Protocol):
     ) -> None: ...
 
 
-class ReplyPromiseRecoverer(Protocol):
-    """Recovers queued webhook replies from durable SQLite promises."""
-
-    def recover(
-        self,
-        fido_dir: Path,
-        pr_number: int,
-        registry: "ActivityReporter",
-        dispatcher: "Dispatcher",
-        *,
-        agent: ProviderAgent | None = None,
-        prompts: Prompts | None = None,
-    ) -> bool: ...
-
-
 class BackgroundTaskSyncer(Protocol):
     """Launches :func:`~fido.tasks.sync_tasks_background` in a daemon thread."""
 
@@ -1466,26 +1451,6 @@ class _RealTaskSyncer:  # pragma: no cover
         tasks.sync_tasks(work_dir, gh, blocking=blocking)
 
 
-class _RealReplyPromiseRecoverer:
-    def recover(
-        self,
-        fido_dir: Path,
-        pr_number: int,
-        registry: "ActivityReporter",
-        dispatcher: "Dispatcher",
-        *,
-        agent: ProviderAgent | None = None,
-        prompts: Prompts | None = None,
-    ) -> bool:
-        return dispatcher.recover_reply_promises(
-            fido_dir,
-            pr_number,
-            registry,
-            agent=agent,
-            prompts=prompts,
-        )
-
-
 _DEFAULT_PROMPT_BUILDER: PromptBuilder = _RealPromptBuilder()
 _DEFAULT_PROVIDER_RUNNER: ProviderRunner = _RealProviderRunner()
 _DEFAULT_HARNESS_COMMITTER_FACTORY: HarnessCommitterFactory = (
@@ -1493,7 +1458,6 @@ _DEFAULT_HARNESS_COMMITTER_FACTORY: HarnessCommitterFactory = (
 )
 _DEFAULT_TASK_SYNCER: TaskSyncer = _RealTaskSyncer()
 _DEFAULT_CLOCK: Clock = RealClock()
-_DEFAULT_REPLY_PROMISE_RECOVERER: ReplyPromiseRecoverer = _RealReplyPromiseRecoverer()
 
 
 class Worker:
@@ -1534,7 +1498,6 @@ class Worker:
         harness_committer_factory: HarnessCommitterFactory,
         task_syncer: TaskSyncer,
         clock: Clock,
-        reply_promise_recoverer: ReplyPromiseRecoverer,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
         background_syncer: BackgroundTaskSyncer,
@@ -1595,7 +1558,6 @@ class Worker:
         self._harness_committer_factory = harness_committer_factory
         self._task_syncer = task_syncer
         self._clock = clock
-        self._reply_promise_recoverer = reply_promise_recoverer
         self._background_syncer = background_syncer
         self._task_reorderer = task_reorderer
         self._commit_summarizer = commit_summarizer
@@ -4933,11 +4895,10 @@ class Worker:
             assert self._registry is not None, (
                 "Worker._registry is required for recover_reply_promises"
             )
-            recovered_promises = self._reply_promise_recoverer.recover(
+            recovered_promises = self._dispatcher.recover_reply_promises(
                 ctx.fido_dir,
                 pr_number,
                 self._registry,
-                self._dispatcher,
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
             )
@@ -5316,7 +5277,6 @@ class WorkerThread(threading.Thread):
             harness_committer_factory=_DEFAULT_HARNESS_COMMITTER_FACTORY,
             task_syncer=_DEFAULT_TASK_SYNCER,
             clock=_DEFAULT_CLOCK,
-            reply_promise_recoverer=_DEFAULT_REPLY_PROMISE_RECOVERER,
             dispatcher=self._dispatcher,
             issue_cache=self._issue_cache,
             background_syncer=tasks.sync_tasks_background,

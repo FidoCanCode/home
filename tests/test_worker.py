@@ -196,35 +196,6 @@ class _FakeTaskSyncer:
         self.sync_tasks: MagicMock = MagicMock()
 
 
-class _FakeReplyPromiseRecoverer:
-    """Typed :class:`ReplyPromiseRecoverer` fake — replaces ``_recover_reply_promises`` seam."""
-
-    def __init__(
-        self,
-        *,
-        return_value: bool = False,
-        on_call: Callable[[], None] | None = None,
-    ) -> None:
-        self._return_value = return_value
-        self._on_call = on_call
-        self.call_count = 0
-
-    def recover(
-        self,
-        fido_dir: Path,
-        pr_number: int,
-        registry: object,
-        dispatcher: object,
-        *,
-        agent: object = None,
-        prompts: object = None,
-    ) -> bool:
-        self.call_count += 1
-        if self._on_call is not None:
-            self._on_call()
-        return self._return_value
-
-
 def _enqueue_pr_comment(tmp_path: Path, *, pr_number: int = 1) -> None:
     FidoStore(tmp_path).enqueue_pr_comment(
         delivery_id=f"delivery-{pr_number}",
@@ -302,10 +273,6 @@ class Worker(_WorkerBase):
             kwargs["task_syncer"] = worker_module._DEFAULT_TASK_SYNCER  # pyright: ignore[reportPrivateUsage]
         if "clock" not in kwargs:
             kwargs["clock"] = worker_module._DEFAULT_CLOCK  # pyright: ignore[reportPrivateUsage]
-        if "reply_promise_recoverer" not in kwargs:
-            kwargs["reply_promise_recoverer"] = (
-                worker_module._DEFAULT_REPLY_PROMISE_RECOVERER
-            )  # pyright: ignore[reportPrivateUsage]
         if "background_syncer" not in kwargs:
             kwargs["background_syncer"] = lambda _w, _g: None
         if "task_reorderer" not in kwargs:
@@ -1463,13 +1430,14 @@ class TestWorker:
         def mark_rescope(*args: object, **kwargs: object) -> None:
             order.append("rescope")
 
+        def _on_recover(*args: object, **kwargs: object) -> bool:
+            order.append("recover")
+            return True
+
         worker = Worker(
             tmp_path,
             gh,
-            reply_promise_recoverer=_FakeReplyPromiseRecoverer(
-                return_value=True,
-                on_call=lambda: order.append("recover"),
-            ),
+            dispatcher=_FakeDispatcher(recover_side_effect=_on_recover),
             registry=MagicMock(spec=ActivityReporter),
         )
         worker.create_context = MagicMock(return_value=mock_ctx)
@@ -2673,7 +2641,6 @@ class TestAssertGitIdentity:
                 harness_committer_factory=worker_module._DEFAULT_HARNESS_COMMITTER_FACTORY,  # pyright: ignore[reportPrivateUsage]
                 task_syncer=worker_module._DEFAULT_TASK_SYNCER,  # pyright: ignore[reportPrivateUsage]
                 clock=worker_module._DEFAULT_CLOCK,  # pyright: ignore[reportPrivateUsage]
-                reply_promise_recoverer=worker_module._DEFAULT_REPLY_PROMISE_RECOVERER,  # pyright: ignore[reportPrivateUsage]
                 dispatcher=_FakeDispatcher(),
                 issue_cache=IssueCache("test/repo"),
                 background_syncer=lambda _w, _g: None,

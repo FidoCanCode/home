@@ -30,6 +30,7 @@ class _FakeDispatcher:
         backfill_return: int = 0,
         backfill_side_effect: (Callable[..., int] | BaseException | None) = None,
         recover_return: bool = False,
+        recover_side_effect: (Callable[..., bool] | BaseException | None) = None,
         reply_to_comment_return: tuple[str, list[str]] = ("ANSWER", []),
         reply_to_comment_side_effect: (
             Callable[..., tuple[str, list[str]]] | BaseException | None
@@ -51,6 +52,7 @@ class _FakeDispatcher:
         self._backfill_return = backfill_return
         self._backfill_side_effect = backfill_side_effect
         self._recover_return = recover_return
+        self._recover_side_effect = recover_side_effect
         self._reply_to_comment_return = reply_to_comment_return
         self._reply_to_comment_side_effect = reply_to_comment_side_effect
         self._reply_to_issue_comment_return = reply_to_issue_comment_return
@@ -119,6 +121,12 @@ class _FakeDispatcher:
                 "prompts": prompts,
             }
         )
+        if callable(self._recover_side_effect):
+            return self._recover_side_effect(
+                fido_dir, pr_number, registry, agent=agent, prompts=prompts
+            )
+        if isinstance(self._recover_side_effect, BaseException):
+            raise self._recover_side_effect
         return self._recover_return
 
     def reply_to_comment(
