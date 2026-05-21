@@ -217,8 +217,8 @@ class ActivityReporter(Protocol):
     threads it through to the reply / rescope chain in :mod:`fido.events`.
     Methods cover both worker-side calls (``has_untriaged``,
     ``wait_for_inbox_drain``, ``assert_worker_turn_ok``, ...) and the
-    ingress/rescope-side calls that ``reply_to_*`` and
-    ``_reorder_tasks_background`` make on the same reference
+    ingress/rescope-side calls that ``Dispatcher.reply_to_*`` and
+    ``Dispatcher.reorder_tasks_background`` make on the same reference
     (``enter_untriaged``, ``exit_untriaged``, ``set_rescoping``,
     ``abort_task``).  Keeping them on one Protocol lets us avoid a circular
     ``WorkerRegistry`` import in :mod:`fido.events` while still threading a
@@ -1350,9 +1350,6 @@ class ReplyPromiseRecoverer(Protocol):
     def recover(
         self,
         fido_dir: Path,
-        config: Config,
-        repo_cfg: RepoConfig,
-        gh: GitHub,
         pr_number: int,
         registry: "ActivityReporter",
         dispatcher: "Dispatcher",
@@ -1379,44 +1376,10 @@ class TaskReorderer(Protocol):
     ) -> None: ...
 
 
-class CommentReplier(Protocol):
-    """Replies to a PR comment via the synthesis LLM."""
-
-    def __call__(
-        self,
-        action: "Action",
-        config: Config,
-        repo_cfg: RepoConfig,
-        gh: GitHub,
-        registry: ActivityReporter,
-        *,
-        agent: ProviderAgent | None = None,
-        prompts: Prompts | None = None,
-    ) -> tuple[str, list[str]]: ...
-
-
 class CommitSummarizer(Protocol):
     """Returns a short ``git log --oneline`` summary of recent commits."""
 
     def __call__(self, work_dir: Path) -> str: ...
-
-
-class ReorderKwargsFactory(Protocol):
-    """Builds the kwargs dict for a :func:`~fido.tasks.reorder_tasks` call."""
-
-    def __call__(
-        self,
-        work_dir: Path,
-        config: Config,
-        repo_cfg: RepoConfig,
-        registry: ActivityReporter,
-        gh: GitHub,
-        agent: ProviderAgent,
-        prompts: Prompts,
-        rewrite_fn: Callable[..., None],
-        sync_fn: Callable[[Path, Any], None] | None = None,
-        sync_tasks_fn: Callable[[Path, Any], None] | None = None,
-    ) -> dict[str, Any]: ...
 
 
 class _RealPromptBuilder:  # pragma: no cover
@@ -1507,9 +1470,6 @@ class _RealReplyPromiseRecoverer:
     def recover(
         self,
         fido_dir: Path,
-        config: Config,
-        repo_cfg: RepoConfig,
-        gh: GitHub,
         pr_number: int,
         registry: "ActivityReporter",
         dispatcher: "Dispatcher",
@@ -1517,16 +1477,10 @@ class _RealReplyPromiseRecoverer:
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
     ) -> bool:
-        from fido.events import recover_reply_promises  # noqa: PLC0415
-
-        return recover_reply_promises(
+        return dispatcher.recover_reply_promises(
             fido_dir,
-            config,
-            repo_cfg,
-            gh,
             pr_number,
             registry,
-            dispatcher,
             agent=agent,
             prompts=prompts,
         )
@@ -1585,10 +1539,7 @@ class Worker:
         issue_cache: IssueCache,
         background_syncer: BackgroundTaskSyncer,
         task_reorderer: TaskReorderer,
-        comment_replier: CommentReplier,
-        issue_comment_replier: CommentReplier,
         commit_summarizer: CommitSummarizer,
-        reorder_kwargs_factory: ReorderKwargsFactory,
     ) -> None:
         self.work_dir = work_dir
         self.gh = gh
@@ -1647,10 +1598,7 @@ class Worker:
         self._reply_promise_recoverer = reply_promise_recoverer
         self._background_syncer = background_syncer
         self._task_reorderer = task_reorderer
-        self._comment_replier = comment_replier
-        self._issue_comment_replier = issue_comment_replier
         self._commit_summarizer = commit_summarizer
-        self._reorder_kwargs_factory = reorder_kwargs_factory
 
     def _ensure_provider(self) -> Provider:
         """Return the owned provider, creating the configured provider if needed."""
@@ -2983,9 +2931,6 @@ class Worker:
             try:
                 category, titles = self._do_reply_to_comment(
                     action,
-                    config,
-                    repo_cfg,
-                    self.gh,
                     self._registry,
                     agent=self._provider_agent,
                 )
@@ -3028,19 +2973,13 @@ class Worker:
     def _do_reply_to_comment(
         self,
         action: "Action",
-        config: Config,
-        repo_cfg: RepoConfig,
-        gh: GitHub,
         registry: ActivityReporter,
         *,
         agent: ProviderAgent,
         prompts: Prompts | None = None,
     ) -> tuple[str, list[str]]:
-        return self._comment_replier(
+        return self._dispatcher.reply_to_comment(
             action,
-            config,
-            repo_cfg,
-            gh,
             registry,
             agent=agent,
             prompts=prompts,
@@ -3049,19 +2988,13 @@ class Worker:
     def _do_reply_to_issue_comment(
         self,
         action: "Action",
-        config: Config,
-        repo_cfg: RepoConfig,
-        gh: GitHub,
         registry: ActivityReporter,
         *,
         agent: ProviderAgent,
         prompts: Prompts | None = None,
     ) -> tuple[str, list[str]]:
-        return self._issue_comment_replier(
+        return self._dispatcher.reply_to_issue_comment(
             action,
-            config,
-            repo_cfg,
-            gh,
             registry,
             agent=agent,
             prompts=prompts,
@@ -3185,9 +3118,7 @@ class Worker:
                 **(action.context or {}),
                 "reply_promise_id": promise.promise_id,
             }
-            category, titles = self._reply_to_queued_comment(
-                queued, action, config, repo_cfg
-            )
+            category, titles = self._reply_to_queued_comment(queued, action)
             # #1816 / INV-B: drop the direct-task path; rescope
             # handles task mutations via the RescopeIntent that
             # synthesis emitted inside _reply_to_queued_comment.
@@ -3216,8 +3147,6 @@ class Worker:
         self,
         queued: PRCommentQueueRecord,
         action: "Action",
-        config: Config,
-        repo_cfg: RepoConfig,
     ) -> tuple[str, list[str]]:
         # registry is required (#1336): without it the synthesis path
         # constructs _BackgroundRescopeTrigger with no registry, the rescope
@@ -3229,18 +3158,12 @@ class Worker:
         if queued.comment_type == "pulls":
             return self._do_reply_to_comment(
                 action,
-                config,
-                repo_cfg,
-                self.gh,
                 self._registry,
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
             )
         return self._do_reply_to_issue_comment(
             action,
-            config,
-            repo_cfg,
-            self.gh,
             self._registry,
             agent=self._provider_agent,
             prompts=self._get_prompts(),
@@ -4796,11 +4719,7 @@ class Worker:
             "Worker._repo_cfg is required for rescope_before_pick"
         )
         reorder_kwargs = self._make_reorder_kwargs_fn(
-            self.work_dir,
-            self._config,
-            self._repo_cfg,
             self._registry,
-            self.gh,
             self._provider_agent,
             self._get_prompts(),
             _rewrite_pr_description,
@@ -4813,23 +4732,15 @@ class Worker:
 
     def _make_reorder_kwargs_fn(
         self,
-        work_dir: Path,
-        config: Config,
-        repo_cfg: RepoConfig,
         registry: "ActivityReporter",
-        gh: GitHub,
         agent: ProviderAgent,
         prompts: Prompts,
         rewrite_fn: Callable[..., None],
         sync_fn: Callable[[Path, Any], None] | None = None,
         sync_tasks_fn: Callable[[Path, Any], None] | None = None,
     ) -> dict[str, Any]:
-        return self._reorder_kwargs_factory(
-            work_dir,
-            config,
-            repo_cfg,
+        return self._dispatcher._make_reorder_kwargs(  # pyright: ignore[reportPrivateUsage]
             registry,
-            gh,
             agent,
             prompts,
             rewrite_fn,
@@ -5019,33 +4930,11 @@ class Worker:
                         len(recovered_comments),
                         repo_ctx.repo,
                     )
-            recovery_provider = (
-                self._ensure_provider().provider_id
-                if self._repo_cfg is None
-                else self._repo_cfg.provider
-            )
-            recovery_repo_cfg = RepoConfig(
-                name=repo_ctx.repo,
-                work_dir=self.work_dir,
-                provider=recovery_provider,
-                membership=repo_ctx.membership,
-            )
-            recovery_config = Config(
-                port=0,
-                secret=b"",
-                repos={repo_ctx.repo: recovery_repo_cfg},
-                allowed_bots=frozenset(),
-                log_level="WARNING",
-                sub_dir=_sub_dir(),
-            )
             assert self._registry is not None, (
                 "Worker._registry is required for recover_reply_promises"
             )
             recovered_promises = self._reply_promise_recoverer.recover(
                 ctx.fido_dir,
-                recovery_config,
-                recovery_repo_cfg,
-                self.gh,
                 pr_number,
                 self._registry,
                 self._dispatcher,
@@ -5432,10 +5321,7 @@ class WorkerThread(threading.Thread):
             issue_cache=self._issue_cache,
             background_syncer=tasks.sync_tasks_background,
             task_reorderer=tasks.reorder_tasks,  # pyright: ignore[reportArgumentType]
-            comment_replier=_fev.reply_to_comment,
-            issue_comment_replier=_fev.reply_to_issue_comment,
             commit_summarizer=_fev._get_commit_summary,  # pyright: ignore[reportPrivateUsage]
-            reorder_kwargs_factory=_fev._make_reorder_kwargs,  # pyright: ignore[reportPrivateUsage]
         )
 
     def _resolve_fido_dir(self) -> Path | None:

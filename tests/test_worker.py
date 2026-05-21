@@ -212,9 +212,6 @@ class _FakeReplyPromiseRecoverer:
     def recover(
         self,
         fido_dir: Path,
-        config: object,
-        repo_cfg: object,
-        gh: object,
         pr_number: int,
         registry: object,
         dispatcher: object,
@@ -313,14 +310,8 @@ class Worker(_WorkerBase):
             kwargs["background_syncer"] = lambda _w, _g: None
         if "task_reorderer" not in kwargs:
             kwargs["task_reorderer"] = lambda *_a, **_kw: None
-        if "comment_replier" not in kwargs:
-            kwargs["comment_replier"] = lambda *_a, **_kw: ("ANSWER", [])
-        if "issue_comment_replier" not in kwargs:
-            kwargs["issue_comment_replier"] = lambda *_a, **_kw: ("ANSWER", [])
         if "commit_summarizer" not in kwargs:
             kwargs["commit_summarizer"] = lambda _w: ""
-        if "reorder_kwargs_factory" not in kwargs:
-            kwargs["reorder_kwargs_factory"] = lambda *_a, **_kw: {}
         super().__init__(work_dir, gh, *args, **kwargs)
 
     def assert_git_identity(self, *, phase: str) -> None:
@@ -2687,10 +2678,7 @@ class TestAssertGitIdentity:
                 issue_cache=IssueCache("test/repo"),
                 background_syncer=lambda _w, _g: None,
                 task_reorderer=lambda *_a, **_kw: None,
-                comment_replier=lambda *_a, **_kw: ("ANSWER", []),
-                issue_comment_replier=lambda *_a, **_kw: ("ANSWER", []),
                 commit_summarizer=lambda _w: "",
-                reorder_kwargs_factory=lambda *_a, **_kw: {},
             ),
             gh,
         )
@@ -10161,10 +10149,11 @@ class TestHandleQueuedComments:
         mock_reply.assert_called_once()
         # Regression #1336: registry must flow through to reply_to_issue_comment
         # so _BackgroundRescopeTrigger gets a real registry to call
-        # exit_untriaged on.  registry is the 5th positional arg.
+        # exit_untriaged on.  registry is now the 2nd positional arg (after
+        # action), since config/repo_cfg/gh are on the Dispatcher constructor.
         args = mock_reply.call_args.args
-        assert len(args) >= 5, "registry must be passed positionally (5th arg)"
-        assert args[4] is worker._registry  # noqa: SLF001
+        assert len(args) >= 2, "registry must be passed positionally (2nd arg)"
+        assert args[1] is worker._registry  # noqa: SLF001
         # #1816 / INV-B slice 2: handle_queued_comments no longer queues tasks
         # from reply outcomes — the intent path is authoritative.
         mock_sync.assert_called()
@@ -10638,9 +10627,7 @@ class TestRescopeBeforePick:
         worker._reorder_tasks_fn = MagicMock()
         worker._get_commit_summary_fn = MagicMock(return_value="")
         worker._make_reorder_kwargs_fn = MagicMock(
-            side_effect=lambda wd, cfg, repo_cfg, reg, *a, **kw: (
-                captured_registry.append(reg) or {}
-            )
+            side_effect=lambda reg, *a, **kw: captured_registry.append(reg) or {}
         )
         worker.rescope_before_pick()
         assert captured_registry == [worker._registry]  # noqa: SLF001
@@ -10783,56 +10770,64 @@ class TestNewDelegationMethods:
         worker._sync_tasks_background(tmp_path, worker.gh)  # noqa: SLF001
         mock_sync.assert_called_once_with(tmp_path, worker.gh)
 
-    def test_do_reply_to_comment_delegates_to_collaborator(
-        self, tmp_path: Path
-    ) -> None:
-        mock_fn = MagicMock(return_value=("ASK", []))
+    def test_do_reply_to_comment_delegates_to_dispatcher(self, tmp_path: Path) -> None:
+        calls: list[tuple] = []
+
+        class _SpyDispatcher(_FakeDispatcher):
+            def reply_to_comment(
+                self, action: object, registry: object, **kw: object
+            ) -> tuple[str, list[str]]:  # type: ignore[override]
+                calls.append((action, registry, kw))
+                return ("ASK", [])
+
+        fake_registry = MagicMock(spec=ActivityReporter)
+        fake_action = MagicMock()
+        fake_agent = MagicMock()
         worker = Worker(
             tmp_path,
             MagicMock(),
-            registry=MagicMock(spec=ActivityReporter),
-            comment_replier=mock_fn,
+            registry=fake_registry,
+            dispatcher=_SpyDispatcher(),
         )
-        fake_action = MagicMock()
-        fake_config = MagicMock()
-        fake_repo_cfg = MagicMock()
-        fake_registry = MagicMock()
-        fake_agent = MagicMock()
         result = worker._do_reply_to_comment(  # noqa: SLF001
             fake_action,
-            fake_config,
-            fake_repo_cfg,
-            worker.gh,
             fake_registry,
             agent=fake_agent,
         )
-        mock_fn.assert_called_once()
+        assert len(calls) == 1
+        assert calls[0][0] is fake_action
+        assert calls[0][1] is fake_registry
         assert result == ("ASK", [])
 
-    def test_do_reply_to_issue_comment_delegates_to_collaborator(
+    def test_do_reply_to_issue_comment_delegates_to_dispatcher(
         self, tmp_path: Path
     ) -> None:
-        mock_fn = MagicMock(return_value=("ACT", []))
+        calls: list[tuple] = []
+
+        class _SpyDispatcher(_FakeDispatcher):
+            def reply_to_issue_comment(
+                self, action: object, registry: object, **kw: object
+            ) -> tuple[str, list[str]]:  # type: ignore[override]
+                calls.append((action, registry, kw))
+                return ("ACT", [])
+
+        fake_registry = MagicMock(spec=ActivityReporter)
+        fake_action = MagicMock()
+        fake_agent = MagicMock()
         worker = Worker(
             tmp_path,
             MagicMock(),
-            registry=MagicMock(spec=ActivityReporter),
-            issue_comment_replier=mock_fn,
+            registry=fake_registry,
+            dispatcher=_SpyDispatcher(),
         )
-        fake_action = MagicMock()
-        fake_config = MagicMock()
-        fake_repo_cfg = MagicMock()
-        fake_registry = MagicMock()
-        fake_agent = MagicMock()
         result = worker._do_reply_to_issue_comment(  # noqa: SLF001
             fake_action,
-            fake_config,
-            fake_repo_cfg,
-            worker.gh,
             fake_registry,
             agent=fake_agent,
         )
-        mock_fn.assert_called_once()
+        assert len(calls) == 1
+        assert calls[0][0] is fake_action
+        assert calls[0][1] is fake_registry
         assert result == ("ACT", [])
 
     def test_get_commit_summary_fn_delegates_to_collaborator(
@@ -10849,36 +10844,43 @@ class TestNewDelegationMethods:
         mock_fn.assert_called_once_with(tmp_path)
         assert result == "abc123 msg"
 
-    def test_make_reorder_kwargs_fn_delegates_to_collaborator(
+    def test_make_reorder_kwargs_fn_delegates_to_dispatcher(
         self, tmp_path: Path
     ) -> None:
-        from fido.config import Config, RepoConfig
-        from fido.prompts import Prompts
+        calls: list[tuple] = []
 
-        mock_fn = MagicMock(return_value={"k": "v"})
+        class _SpyDispatcher(_FakeDispatcher):
+            def _make_reorder_kwargs(
+                self,
+                registry: object,
+                agent: object,
+                prompts: object,
+                rewrite_fn: object,
+                sync_fn: object = None,
+                sync_tasks_fn: object = None,
+            ) -> dict[str, object]:  # type: ignore[override]
+                calls.append((registry, agent, prompts, rewrite_fn, {}))
+                return {"k": "v"}
+
+        fake_registry = MagicMock(spec=ActivityReporter)
+        fake_agent = MagicMock()
+        fake_prompts = MagicMock()
+        fake_rewrite = MagicMock()
         worker = Worker(
             tmp_path,
             MagicMock(),
-            registry=MagicMock(spec=ActivityReporter),
-            reorder_kwargs_factory=mock_fn,
+            registry=fake_registry,
+            dispatcher=_SpyDispatcher(),
         )
-        fake_config = MagicMock(spec=Config)
-        fake_repo_cfg = MagicMock(spec=RepoConfig)
-        fake_registry = MagicMock(spec=ActivityReporter)
-        fake_agent = MagicMock()
-        fake_prompts = MagicMock(spec=Prompts)
-        fake_rewrite = MagicMock()
         result = worker._make_reorder_kwargs_fn(  # noqa: SLF001
-            tmp_path,
-            fake_config,
-            fake_repo_cfg,
             fake_registry,
-            worker.gh,
             fake_agent,
             fake_prompts,
             fake_rewrite,
         )
-        mock_fn.assert_called_once()
+        assert len(calls) == 1
+        assert calls[0][0] is fake_registry
+        assert calls[0][1] is fake_agent
         assert result == {"k": "v"}
 
     def test_reorder_tasks_fn_delegates_to_collaborator(self, tmp_path: Path) -> None:

@@ -15,7 +15,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 import acp
 from acp.exceptions import RequestError
@@ -53,6 +53,13 @@ from fido.session_agent import SessionBackedAgent
 log = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+
+class TalkerResolver(Protocol):
+    """Resolves the current session talker for a given repository name."""
+
+    def __call__(self, repo_name: str) -> "provider.SessionTalker | None": ...
+
 
 _COPILOT_COMMAND = ("copilot", "--acp", "--allow-all")
 _COPILOT_JSON_BASE_ARGS = (
@@ -1013,13 +1020,11 @@ class CopilotCLISession(OwnedSession):
         runtime_factory: Callable[..., CopilotACPRuntime] | None = None,
         session_id: str | None = None,
         snapshot_publisher: provider.SnapshotPublisher | None = None,
-        _get_talker: Callable[[str], "provider.SessionTalker | None"] | None = None,
+        talker_resolver: TalkerResolver = provider.get_talker,
     ) -> None:
         self._work_dir = Path(work_dir)
         self._repo_name = repo_name
-        self._get_talker = (
-            _get_talker if _get_talker is not None else provider.get_talker
-        )
+        self._talker_resolver = talker_resolver
         try:
             self._base_system_prompt = system_file.read_text()
         except OSError:
@@ -1050,7 +1055,7 @@ class CopilotCLISession(OwnedSession):
     def owner(self) -> str | None:
         if self._repo_name is None:
             return None
-        talker = self._get_talker(self._repo_name)
+        talker = self._talker_resolver(self._repo_name)
         if talker is None or talker.kind != "worker":
             return None
         for t in threading.enumerate():
@@ -1463,6 +1468,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
             repo_name=self._repo_name,
             session_id=session_id,
             snapshot_publisher=self,
+            talker_resolver=provider.get_talker,
         )
 
     def _should_retry_prompt_failure(
