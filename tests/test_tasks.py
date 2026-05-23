@@ -5507,6 +5507,143 @@ class TestAppendNarrativeChainEntries:
         assert chain[1]["narrative"] == "second rescope"
 
 
+class TestMergeLineageNarrativeChain:
+    """HOL-9 / #1903: merge folds source narrative_chains into target."""
+
+    def _add_with_chain(
+        self, tmp_path: Path, title: str, chain: list[dict[str, Any]] | None = None
+    ) -> dict:
+        t = Tasks(tmp_path).add(title=title, task_type=TaskType.SPEC)
+        if chain is None:
+            return t
+        with Tasks(tmp_path).modify() as live:
+            for live_task in live:
+                if live_task["id"] == t["id"]:
+                    live_task["narrative_chain"] = chain
+        found = next(
+            (lt for lt in Tasks(tmp_path).list() if lt["id"] == t["id"]),
+            None,
+        )
+        assert found is not None
+        return found
+
+    def _response(self, items: list[dict[str, Any]]) -> str:
+        return json.dumps({"operations": items})
+
+    def test_merge_folds_source_chains_into_target(self, tmp_path: Path) -> None:
+        # Two source tasks with prior chains + a target with its own
+        # chain.  After merge, the target chain holds the union of
+        # all three (target entries first, then sources in order).
+        prior_target_entry = {
+            "outcome": "honored",
+            "narrative": "target-prior",
+            "intent_comment_id": 1,
+            "ts": "2024-01-01T00:00:00Z",
+        }
+        prior_src_a = {
+            "outcome": "reshaped",
+            "narrative": "src-a-prior",
+            "intent_comment_id": 2,
+            "ts": "2024-01-02T00:00:00Z",
+        }
+        prior_src_b = {
+            "outcome": "no_op",
+            "narrative": "src-b-prior",
+            "intent_comment_id": 3,
+            "ts": "2024-01-03T00:00:00Z",
+        }
+        target = self._add_with_chain(tmp_path, "Target", [prior_target_entry])
+        src_a = self._add_with_chain(tmp_path, "Source A", [prior_src_a])
+        src_b = self._add_with_chain(tmp_path, "Source B", [prior_src_b])
+        raw = self._response(
+            [
+                {
+                    "op": "merge",
+                    "target_id": target["id"],
+                    "sources": [src_a["id"], src_b["id"]],
+                    "title": "Merged",
+                    "description": "all the work",
+                },
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        merged = next(t for t in Tasks(tmp_path).list() if t["id"] == target["id"])
+        chain = merged.get("narrative_chain") or []
+        narratives = [e["narrative"] for e in chain]
+        assert "target-prior" in narratives
+        assert "src-a-prior" in narratives
+        assert "src-b-prior" in narratives
+        # Target's own entry comes first (pre-fold position preserved).
+        assert chain[0]["narrative"] == "target-prior"
+
+    def test_merge_dedupes_by_intent_id_and_ts(self, tmp_path: Path) -> None:
+        # Source and target share an entry (same intent_comment_id +
+        # same ts).  After merge, the target chain has the entry
+        # exactly once — not duplicated.
+        shared_entry = {
+            "outcome": "honored",
+            "narrative": "shared",
+            "intent_comment_id": 42,
+            "ts": "2024-01-01T00:00:00Z",
+        }
+        unique_entry = {
+            "outcome": "no_op",
+            "narrative": "src-only",
+            "intent_comment_id": 99,
+            "ts": "2024-01-02T00:00:00Z",
+        }
+        target = self._add_with_chain(tmp_path, "Target", [shared_entry])
+        src = self._add_with_chain(tmp_path, "Source", [shared_entry, unique_entry])
+        raw = self._response(
+            [
+                {
+                    "op": "merge",
+                    "target_id": target["id"],
+                    "sources": [src["id"]],
+                    "title": "Merged",
+                    "description": "",
+                },
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        merged = next(t for t in Tasks(tmp_path).list() if t["id"] == target["id"])
+        chain = merged.get("narrative_chain") or []
+        # Shared entry appears once; source-unique entry is added.
+        assert len(chain) == 2
+        narratives = [e["narrative"] for e in chain]
+        assert narratives.count("shared") == 1
+        assert "src-only" in narratives
+
+    def test_merge_target_without_prior_chain_inherits_source_chain(
+        self, tmp_path: Path
+    ) -> None:
+        # Fresh target (no prior chain) + source with a chain ⇒ target
+        # ends up with the source's chain only.
+        src_entry = {
+            "outcome": "honored",
+            "narrative": "src-history",
+            "intent_comment_id": 7,
+            "ts": "2024-02-01T00:00:00Z",
+        }
+        target = self._add_with_chain(tmp_path, "Target", None)
+        src = self._add_with_chain(tmp_path, "Source", [src_entry])
+        raw = self._response(
+            [
+                {
+                    "op": "merge",
+                    "target_id": target["id"],
+                    "sources": [src["id"]],
+                    "title": "Merged",
+                    "description": "",
+                },
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        merged = next(t for t in Tasks(tmp_path).list() if t["id"] == target["id"])
+        chain = merged.get("narrative_chain") or []
+        assert chain == [src_entry]
+
+
 class TestSkipMarkerEndToEnd:
     """HOL-6: integration through ``_apply_reorder``.
 

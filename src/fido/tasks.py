@@ -678,6 +678,34 @@ def _rescope_releases_for_oracle(
                     tasks_by_oracle_id[oracle_id]["contributing_intents"] = (
                         merged_intents
                     )
+                # HOL-9 / #1903: fold every source task's
+                # ``narrative_chain`` (HOL-8) into the merge target's
+                # chain, deduped by ``(intent_comment_id, ts)``.  Source
+                # entries land in source-iteration order, preserving
+                # the chronological prior-rescope history Opus reads
+                # on the next iteration.  Without this, prior verdict
+                # history that explained why each source task existed
+                # would be lost on merge.
+                target_chain: list[dict[str, Any]] = list(
+                    tasks_by_oracle_id[oracle_id].get("narrative_chain") or []
+                )
+                seen_keys: set[tuple[int | None, str | None]] = {
+                    (e.get("intent_comment_id"), e.get("ts")) for e in target_chain
+                }
+                for src_oracle_id in merge_sources:
+                    # ``merge_sources`` is derived from ``ids_by_task_id``
+                    # via ``_merge_source_oracle_ids``; every id MUST be
+                    # in ``tasks_by_oracle_id``.  Direct indexing
+                    # fail-closed per CLAUDE.md no-defensive-code rule.
+                    src_task = tasks_by_oracle_id[src_oracle_id]
+                    for entry in src_task.get("narrative_chain") or []:
+                        key = (entry.get("intent_comment_id"), entry.get("ts"))
+                        if key in seen_keys:
+                            continue
+                        target_chain.append(entry)
+                        seen_keys.add(key)
+                if target_chain:
+                    tasks_by_oracle_id[oracle_id]["narrative_chain"] = target_chain
             elif split_targets:
                 # Allocator and validator both iterate the same
                 # ``split_targets`` list, so the pre-allocated child
