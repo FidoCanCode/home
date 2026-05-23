@@ -7545,6 +7545,38 @@ class TestSeedTasksFromPrBody:
         for c in mock_add.call_args_list:
             assert c.kwargs["status"] == TaskStatus.COMPLETED
 
+    def test_seeds_skipped_marker_tasks(self, tmp_path: Path) -> None:
+        # HOL-7 / #1901: ``- ⊘ ...`` checkbox form round-trips back to
+        # ``TaskStatus.SKIPPED`` on seed.  Without this, a re-seed
+        # (PR-body → tasks.json) would silently drop the skipped
+        # marker tasks the original rescope created, losing the
+        # "this intent was dropped" record.
+        from fido.types import TaskStatus
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {
+            "body": (
+                "<!-- WORK_QUEUE_START -->\n"
+                "- [ ] Active work <!-- type:spec -->\n"
+                "- [x] Done thing <!-- type:spec -->\n"
+                "- ⊘ Skipped: drop A <!-- type:spec -->\n"
+                "- ⊘ Skipped: drop B <!-- type:spec -->\n"
+                "<!-- WORK_QUEUE_END -->"
+            )
+        }
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
+        assert mock_add.call_count == 4
+        statuses = [c.kwargs["status"] for c in mock_add.call_args_list]
+        assert statuses == [
+            TaskStatus.PENDING,
+            TaskStatus.COMPLETED,
+            TaskStatus.SKIPPED,
+            TaskStatus.SKIPPED,
+        ]
+
     def test_strips_next_marker(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {

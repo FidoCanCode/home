@@ -189,6 +189,44 @@ class TestTaskStoreOracleAdapter:
         assert "Blocked" not in queue
         assert "- [x] Done <!-- type:thread -->" in queue
 
+    def test_format_work_queue_renders_skipped_separately(self) -> None:
+        # HOL-7 / #1901: SKIPPED marker tasks land in their own
+        # collapsed ``<details>`` block below completed.  The oracle
+        # projects SKIPPED → StatusCompleted (HOL-5) so the formatter
+        # has to read the underlying status to distinguish.
+        task_list = [
+            {"title": "Active work", "status": "pending", "type": "spec"},
+            {"title": "Skipped: drop A", "status": "skipped", "type": "spec"},
+            {"title": "Done thing", "status": "completed", "type": "spec"},
+            {"title": "Skipped: drop B", "status": "skipped", "type": "spec"},
+        ]
+
+        queue = _format_work_queue(task_list)
+
+        # Pending at top.
+        assert "- [ ] Active work" in queue
+        # Completed in its own block.
+        assert "<details><summary>Completed (1)</summary>" in queue
+        assert "- [x] Done thing" in queue
+        # Skipped in a SEPARATE block — both markers present, glyph is ⊘.
+        assert "<details><summary>Skipped (2)</summary>" in queue
+        assert "- ⊘ Skipped: drop A <!-- type:spec -->" in queue
+        assert "- ⊘ Skipped: drop B <!-- type:spec -->" in queue
+
+    def test_format_work_queue_no_skipped_block_when_none(self) -> None:
+        # The "Skipped" block only appears when at least one skipped
+        # task exists.  Otherwise the rendering matches the pre-HOL-7
+        # shape exactly.
+        task_list = [
+            {"title": "Active", "status": "pending", "type": "spec"},
+            {"title": "Done", "status": "completed", "type": "spec"},
+        ]
+
+        queue = _format_work_queue(task_list)
+
+        assert "Skipped" not in queue
+        assert "⊘" not in queue
+
 
 class TestRescopeOracleAdapter:
     def test_task_kind_maps_all_runtime_kinds(self) -> None:

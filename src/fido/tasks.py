@@ -1020,12 +1020,17 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
 
     Priority order: CI failures → everything else (preserving list order).
     Completed tasks appear in a collapsible ``<details>`` section.
-    Each line includes a ``<!-- type:X -->`` HTML comment for round-tripping.
+    Skipped tasks (HOL-7 / #1901) appear in a separate ``<details>``
+    block below completed — they're terminal but distinct from
+    completed (no work happened, only a narrative explaining why the
+    intent was dropped).  Each line includes a ``<!-- type:X -->``
+    HTML comment for round-tripping.
     """
     store, tasks_by_oracle_id = _task_store_for_oracle(task_list)
     projected_rows = task_store_oracle.project_task_store(store)
     pending: list[tuple[str, str]] = []
     completed: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = []
 
     def _fmt(row: task_store_oracle.PRBodyRow) -> tuple[str, str]:
         task = tasks_by_oracle_id[row.task]
@@ -1036,8 +1041,14 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
         return display, task_type
 
     for row in projected_rows:
+        task = tasks_by_oracle_id[row.task]
         display = _fmt(row)
-        if isinstance(row.status, task_store_oracle.PRCompleted):
+        # HOL-7: the oracle projects SKIPPED → StatusCompleted (both are
+        # terminal for picker purposes — HOL-5 mapping), so distinguish
+        # via the underlying task dict's status field.
+        if task.get("status") == str(TaskStatus.SKIPPED):
+            skipped.append(display)
+        elif isinstance(row.status, task_store_oracle.PRCompleted):
             completed.append(display)
         else:
             pending.append(display)
@@ -1053,6 +1064,19 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
         lines.append("")
         for display, task_type in completed:
             lines.append(f"- [x] {display} <!-- type:{task_type} -->")
+        lines.append("</details>")
+
+    if skipped:
+        lines.append("")
+        lines.append(f"<details><summary>Skipped ({len(skipped)})</summary>")
+        lines.append("")
+        for display, task_type in skipped:
+            # Skipped-marker rendering uses the unicode ⊘ "circled
+            # division slash" as the checkbox glyph so the line is
+            # visually distinct from both pending ``[ ]`` and completed
+            # ``[x]`` at a glance.  ASCII ``[~]`` would also work but
+            # would conflict with the existing IN_PROGRESS marker.
+            lines.append(f"- ⊘ {display} <!-- type:{task_type} -->")
         lines.append("</details>")
 
     return "\n".join(lines)

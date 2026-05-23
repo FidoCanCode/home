@@ -4279,13 +4279,18 @@ class Worker:
     def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:
         """Seed tasks.json from the PR body work-queue markers if tasks.json is empty.
 
-        Extracts **both** unchecked (``- [ ] ...``) and checked
-        (``- [x] ...``) task items between ``WORK_QUEUE_START`` and
-        ``WORK_QUEUE_END`` markers.  Unchecked items are added as pending;
-        checked items are added with status=COMPLETED so the downstream
-        "all tasks done → promote the PR" logic can see them (fix for #646 —
-        previously completed items were skipped, and a PR whose work queue
-        held only completed items looked like a fresh PR needing setup).
+        Extracts three checkbox forms between ``WORK_QUEUE_START`` and
+        ``WORK_QUEUE_END`` markers:
+
+        - ``- [ ] ...`` → ``TaskStatus.PENDING``
+        - ``- [x] ...`` → ``TaskStatus.COMPLETED`` (fix for #646 —
+          previously completed items were skipped, and a PR whose work
+          queue held only completed items looked like a fresh PR
+          needing setup)
+        - ``- ⊘ ...`` → ``TaskStatus.SKIPPED`` (HOL-7 / #1901 —
+          marker tasks from ``no_op`` rescope verdicts; treated as
+          terminal so re-seed preserves the "this intent was dropped"
+          record on PR body round-trip)
 
         Lines without a ``<!-- type:X -->`` comment are skipped with a
         warning (e.g. stale multi-line task bodies from older PR bodies).
@@ -4306,13 +4311,17 @@ class Worker:
             return
         parsed: list[tuple[str, TaskType, TaskStatus]] = []
         for line in match.group(1).splitlines():
-            check = re.match(r"^- \[( |x)\] (.+)$", line)
+            check = re.match(r"^- (\[( |x)\]|⊘) (.+)$", line)
             if not check:
                 continue
-            status = (
-                TaskStatus.COMPLETED if check.group(1) == "x" else TaskStatus.PENDING
-            )
-            rest = check.group(2)
+            marker = check.group(1)
+            if marker == "[x]":
+                status = TaskStatus.COMPLETED
+            elif marker == "⊘":
+                status = TaskStatus.SKIPPED
+            else:
+                status = TaskStatus.PENDING
+            rest = check.group(3)
             type_match = re.search(r"<!-- type:(\w+) -->", rest)
             if not type_match:
                 log.warning("skipping task line without type marker: %r", line)
@@ -4326,19 +4335,20 @@ class Worker:
             parsed.append((title, task_type, status))
         if not parsed:
             return
-        pending = 0
-        completed = 0
+        counts: dict[TaskStatus, int] = {
+            TaskStatus.PENDING: 0,
+            TaskStatus.COMPLETED: 0,
+            TaskStatus.SKIPPED: 0,
+        }
         for title, task_type, status in parsed:
             self._tasks.add(title, task_type, status=status)
-            if status == TaskStatus.COMPLETED:
-                completed += 1
-            else:
-                pending += 1
+            counts[status] = counts.get(status, 0) + 1
         log.info(
-            "seeded %d tasks from PR body (%d pending, %d completed)",
+            "seeded %d tasks from PR body (%d pending, %d completed, %d skipped)",
             len(parsed),
-            pending,
-            completed,
+            counts[TaskStatus.PENDING],
+            counts[TaskStatus.COMPLETED],
+            counts[TaskStatus.SKIPPED],
         )
 
     def post_pickup_comment(
