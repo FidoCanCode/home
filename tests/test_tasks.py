@@ -584,6 +584,31 @@ class TestAddTask:
         with pytest.raises(TypeError, match="task_type must be TaskType"):
             Tasks(tmp_path).add(title="t", task_type="spec")  # type: ignore[arg-type]
 
+    def test_invariant_field_stored_when_provided(self, tmp_path: Path) -> None:
+        """HOL-11 / #1905: ``Tasks.add`` accepts an ``invariant`` kwarg
+        and the task carries it forward.  HOL-12 will tighten the
+        rescope prompt so every new task names one; today the field
+        is the carrier."""
+        task = Tasks(tmp_path).add(
+            title="extract _RescopeOp dataclass",
+            task_type=TaskType.SPEC,
+            invariant="rescope ops are typed values, not raw dicts",
+        )
+        assert task["invariant"] == "rescope ops are typed values, not raw dicts"
+        assert (
+            Tasks(tmp_path).list()[0]["invariant"]
+            == "rescope ops are typed values, not raw dicts"
+        )
+
+    def test_invariant_omitted_when_empty(self, tmp_path: Path) -> None:
+        """Legacy callers (CLI ``./fido task add``, seed-from-PR-body)
+        don't supply an invariant.  We don't want a noisy ``invariant: ""``
+        field cluttering every legacy task — store the field only when
+        the caller actually named one."""
+        task = Tasks(tmp_path).add(title="legacy task", task_type=TaskType.SPEC)
+        assert "invariant" not in task
+        assert "invariant" not in Tasks(tmp_path).list()[0]
+
 
 class TestUpdateTask:
     def test_updates_status(self, tmp_path: Path) -> None:
@@ -2870,6 +2895,30 @@ class TestMakeNewTasksFromOpus:
         assert result[0] is None
         assert result[1] is not None
         assert result[1]["title"] == "Genuine new"
+
+    def test_carries_invariant_from_opus_item(self) -> None:
+        """HOL-11 / #1905: when Opus names an invariant on a new task,
+        the materialised task carries it forward.  HOL-12 will require
+        the field; today's contract is "if present, preserve it"."""
+        items = [
+            {
+                "title": "Extract _RescopeOp dataclass",
+                "description": "Replace raw dicts in the rescope reducer.",
+                "invariant": "rescope ops are typed values, not raw dicts",
+            },
+        ]
+        result = _make_new_tasks_from_opus(items, frozenset())
+        assert result[0] is not None
+        assert result[0]["invariant"] == "rescope ops are typed values, not raw dicts"
+
+    def test_omits_invariant_when_opus_did_not_supply(self) -> None:
+        """Pre-HOL-12 callers (legacy Opus prompt, hand-built items) won't
+        carry an ``invariant`` key.  We don't fabricate one, and we
+        don't write an empty placeholder."""
+        items = [{"title": "Untyped new task", "description": "no invariant"}]
+        result = _make_new_tasks_from_opus(items, frozenset())
+        assert result[0] is not None
+        assert "invariant" not in result[0]
 
 
 # ── _find_duplicate_titles ────────────────────────────────────────────────────

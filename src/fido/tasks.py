@@ -2499,6 +2499,14 @@ def _make_new_tasks_from_opus(
             "status": status,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        # HOL-11 / #1905: carry the invariant Opus named (if any) onto
+        # the materialised task.  Today this is best-effort — empty is
+        # accepted to avoid breaking legacy ``new`` ops that predate
+        # the schema.  HOL-12 will tighten the rescope prompt so every
+        # Opus-emitted ``new`` op carries a non-empty invariant.
+        invariant_value = item.get("invariant") or ""
+        if invariant_value:
+            task["invariant"] = invariant_value
         # #1722: a brand-new task carries the originating intents the
         # `new` op declared so a downstream classifier can route the
         # eventual completion notification to the right commenter(s).
@@ -3744,8 +3752,21 @@ class Tasks(JsonFileStore):
         description: str = "",
         status: TaskStatus = TaskStatus.PENDING,
         thread: dict[str, Any] | None = None,
+        invariant: str = "",
     ) -> dict[str, Any]:
-        """Add a task. Returns the new (or existing duplicate) task."""
+        """Add a task. Returns the new (or existing duplicate) task.
+
+        ``invariant`` (HOL-11 / #1905) is the one-line statement of the
+        property this task establishes — Rocq lemma / Python assertion
+        / CI rule / behavioural change.  Defaults to empty string so
+        legacy callers (CLI, seed-from-PR-body, ``events.create_task``)
+        keep working; HOL-12 tightens this at the rescope prompt by
+        requiring Opus to name an invariant on every ``new`` op, and
+        HOL-13 wires the worker pickup ``split-task`` sentinel for
+        tasks whose invariant doesn't fit a single commit boundary.
+        Legacy empty-invariant tasks are exempted from the new rule
+        — the field is the carrier, the enforcement layers come next.
+        """
         if not isinstance(task_type, TaskType):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise TypeError(
                 f"task_type must be TaskType, got {type(task_type).__name__}"
@@ -3759,6 +3780,8 @@ class Tasks(JsonFileStore):
             "status": str(status),
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        if invariant:
+            task["invariant"] = invariant
         if thread:
             task["thread"] = thread
         comment_id = (thread or {}).get("comment_id")
