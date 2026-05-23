@@ -271,8 +271,6 @@ ignore = ["E501"]
 # constructor-DI migration under #1773. Do not add new files here; fix the root
 # cause instead.
 "tests/test_claude.py" = ["TID251"]
-"tests/test_claude_hold_for_handler.py" = ["TID251"]
-"tests/test_cli.py" = ["TID251"]
 "tests/test_copilotcli.py" = ["TID251"]
 "tests/test_coverage_fills.py" = ["TID251"]
 "tests/test_events.py" = ["TID251"]
@@ -282,4 +280,3 @@ ignore = ["E501"]
 "tests/test_status.py" = ["TID251"]
 "tests/test_tasks.py" = ["TID251"]
 "tests/test_worker.py" = ["TID251"]
-"tests/test_worker_persist_session_id.py" = ["TID251"]
