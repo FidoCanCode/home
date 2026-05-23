@@ -12,11 +12,11 @@ from fido.synthesis_call import (
     CriticExhaustedError,
     CriticVerdict,
     SynthesisExhaustedError,
-    _extract_json_objects,
     _parse_comment_response,
     call_failure_explanation,
     call_synthesis,
     critic_loop,
+    extract_json_objects,
 )
 from fido.types import ActiveIssue, ActivePR
 
@@ -82,47 +82,47 @@ def _make_prompts(
 
 
 # ---------------------------------------------------------------------------
-# _extract_json_objects
+# extract_json_objects
 # ---------------------------------------------------------------------------
 
 
 class TestExtractJsonObjects:
     def test_returns_parsed_dict_for_clean_json(self) -> None:
-        result = _extract_json_objects('{"a": 1}')
+        result = extract_json_objects('{"a": 1}')
         assert result == [{"a": 1}]
 
     def test_returns_empty_for_no_braces(self) -> None:
-        result = _extract_json_objects("not json at all")
+        result = extract_json_objects("not json at all")
         assert result == []
 
     def test_finds_object_when_preamble_present(self) -> None:
-        result = _extract_json_objects('Here is the JSON: {"a": 1} done.')
+        result = extract_json_objects('Here is the JSON: {"a": 1} done.')
         assert result == [{"a": 1}]
 
     def test_skips_invalid_brace_and_continues(self) -> None:
-        result = _extract_json_objects('{ not json, then {"a": 1}')
+        result = extract_json_objects('{ not json, then {"a": 1}')
         assert result == [{"a": 1}]
 
     def test_returns_all_objects_in_order(self) -> None:
-        result = _extract_json_objects('{"a": 1} then {"b": 2}')
+        result = extract_json_objects('{"a": 1} then {"b": 2}')
         assert result == [{"a": 1}, {"b": 2}]
 
     def test_handles_nested_objects(self) -> None:
-        result = _extract_json_objects('{"outer": {"inner": 42}}')
+        result = extract_json_objects('{"outer": {"inner": 42}}')
         assert result == [{"outer": {"inner": 42}}]
 
     def test_skips_non_dict_json_values(self) -> None:
         # A JSON array starting with [ has no {, and a bare number has no {.
         # A JSON string has no {. Confirm arrays are skipped.
-        result = _extract_json_objects("[1, 2, 3]")
+        result = extract_json_objects("[1, 2, 3]")
         assert result == []
 
     def test_handles_leading_and_trailing_whitespace(self) -> None:
-        result = _extract_json_objects('  {"a": 1}  ')
+        result = extract_json_objects('  {"a": 1}  ')
         assert result == [{"a": 1}]
 
     def test_returns_empty_for_empty_string(self) -> None:
-        result = _extract_json_objects("")
+        result = extract_json_objects("")
         assert result == []
 
 

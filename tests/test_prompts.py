@@ -2032,3 +2032,107 @@ class TestIntentCoverageCriticPrompt:
         # JSON-only directive — no preamble/postamble lets parser pick
         # the verdict cleanly from the response.
         assert "No other text" in result
+
+
+# ─── HOL-16 / #1910 — task-creation critic prompt ──────────────────────────
+
+
+class TestTaskCreationCriticPrompt:
+    """Layer 2 critic that gates each proposed ``new`` op against the
+    queue along two axes: relationship (distinct/duplicate_of/supersedes)
+    and scope (single/multi)."""
+
+    def _proposed(self) -> dict[str, Any]:
+        return {
+            "title": "Add retry logic",
+            "description": "Retry on transient failures.",
+            "invariant": "transient failures retry up to 3 times",
+        }
+
+    def _queue(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "t-1",
+                "title": "Add CI for the new module",
+                "description": "Wire workflow.",
+                "invariant": "ci runs on every PR",
+            },
+            {
+                "id": "t-2",
+                "title": "Document the retry policy",
+                "description": "",
+                "invariant": "",
+            },
+        ]
+
+    def test_includes_proposed_task_fields(self) -> None:
+        result = Prompts("").task_creation_critic_prompt(
+            self._proposed(), self._queue()
+        )
+        assert "Add retry logic" in result
+        assert "Retry on transient failures." in result
+        assert "transient failures retry up to 3 times" in result
+
+    def test_includes_each_queue_entry_with_id(self) -> None:
+        result = Prompts("").task_creation_critic_prompt(
+            self._proposed(), self._queue()
+        )
+        assert "id=t-1" in result
+        assert "Add CI for the new module" in result
+        assert "id=t-2" in result
+        assert "Document the retry policy" in result
+
+    def test_renders_queue_invariants_when_present(self) -> None:
+        """When a queue entry has an invariant, render it — Opus
+        needs the invariant to compare scope for duplicate/supersede
+        verdicts."""
+        result = Prompts("").task_creation_critic_prompt(
+            self._proposed(), self._queue()
+        )
+        assert "ci runs on every PR" in result
+
+    def test_empty_queue_renders_explicit_sentinel(self) -> None:
+        """The empty-queue case is distinct from "many tasks" — render
+        a clear marker so Opus doesn't mistake silence for context."""
+        result = Prompts("").task_creation_critic_prompt(self._proposed(), [])
+        assert "queue is empty" in result
+
+    def test_relationship_axis_documented(self) -> None:
+        """Opus must see all three relationship values explained, not
+        just listed in the schema."""
+        result = Prompts("").task_creation_critic_prompt(
+            self._proposed(), self._queue()
+        )
+        assert '"distinct"' in result
+        assert '"duplicate_of"' in result
+        assert '"supersedes"' in result
+        # The follow-up actions on duplicate/supersedes (drop/replace)
+        # need to be discoverable from the prompt.
+        assert "duplicate_of_id" in result
+        assert "supersedes_id" in result
+
+    def test_scope_axis_documented_with_hol12_link(self) -> None:
+        """The ``scope`` axis is the HOL-12 invariant carrier — call
+        out the link so Opus reasons about single-invariant scoping."""
+        result = Prompts("").task_creation_critic_prompt(
+            self._proposed(), self._queue()
+        )
+        assert '"single"' in result
+        assert '"multi"' in result
+        assert "HOL-12" in result
+        assert "proposed_splits" in result
+
+    def test_response_schema_is_verdict_envelope(self) -> None:
+        """Output schema must include every field downstream parsing
+        reads — relationship/scope/duplicate_of_id/supersedes_id/
+        proposed_splits/rationale."""
+        result = Prompts("").task_creation_critic_prompt(
+            self._proposed(), self._queue()
+        )
+        assert '"relationship":' in result
+        assert '"scope":' in result
+        assert '"duplicate_of_id":' in result
+        assert '"supersedes_id":' in result
+        assert '"proposed_splits":' in result
+        assert '"rationale":' in result
+        assert "No other text" in result

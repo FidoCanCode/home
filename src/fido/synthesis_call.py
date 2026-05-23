@@ -338,7 +338,7 @@ def _run_intent_coverage_critic(
         )
         return CriticVerdict(passed=True)
 
-    objs = _extract_json_objects(raw or "")
+    objs = extract_json_objects(raw or "")
     if not objs:
         log.warning("intent-coverage critic returned no parseable JSON — failing open")
         return CriticVerdict(passed=True)
@@ -360,7 +360,7 @@ def _run_intent_coverage_critic(
     return CriticVerdict(passed=True)
 
 
-def _extract_json_objects(raw: str) -> list[dict[str, Any]]:
+def extract_json_objects(raw: str) -> list[dict[str, Any]]:
     """Return all JSON objects found in *raw* using a consume loop.
 
     Scans *raw* for ``{``, attempts :meth:`json.JSONDecoder.raw_decode`
@@ -394,13 +394,13 @@ def _extract_json_objects(raw: str) -> list[dict[str, Any]]:
 def _parse_comment_response(raw: str) -> CommentResponse:
     """Parse *raw* model output into a :class:`~fido.synthesis.CommentResponse`.
 
-    Extracts all JSON objects from *raw* via :func:`_extract_json_objects`
+    Extracts all JSON objects from *raw* via :func:`extract_json_objects`
     and returns the first that validates as a ``CommentResponse``.
     Raises :exc:`ValueError` if none does; the caller
     (:func:`call_synthesis`) catches this and retries.
     """
     last_error: Exception = ValueError("no JSON objects found in model output")
-    for obj in _extract_json_objects(raw):
+    for obj in extract_json_objects(raw):
         reasoning = obj.get("reasoning", "")
         reply_text = obj.get("reply_text", "")
 

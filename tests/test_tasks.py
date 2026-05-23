@@ -6028,6 +6028,234 @@ class TestSkipMarkerEndToEnd:
             new_tasks[0]["invariant"] == "rescope ops are typed values, not raw dicts"
         )
 
+    def test_task_creation_critic_drops_duplicate_proposal(
+        self, tmp_path: Path
+    ) -> None:
+        """HOL-16 / #1910: when the critic returns ``duplicate_of`` for a
+        proposed new task, the materialised queue must not contain it.
+        Closes #1861's shape (duplicate task spawn from follow-up
+        comments)."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_reorder
+
+        existing = self._add(tmp_path, "Existing work")
+        proposed_new = {
+            "id": None,
+            "title": "Same scope, different words",
+            "description": "",
+            "type": "spec",
+            "contributing_intents": [],
+        }
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            proposed_new,
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id=existing["id"],
+                rationale="covered by existing",
+            )
+
+        result = _apply_reorder([existing], items, task_creation_critic_fn=critic)
+        titles = [t["title"] for t in result if t.get("status") == "pending"]
+        assert "Existing work" in titles
+        assert "Same scope, different words" not in titles
+
+    def test_task_creation_critic_drops_supersedes_proposal(
+        self, tmp_path: Path
+    ) -> None:
+        """Supersedes is treated as a drop today (a follow-up leaf will
+        fold it into a rewrite op so the existing task is updated in
+        place).  This test pins today's behaviour."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_reorder
+
+        existing = self._add(tmp_path, "Old approach")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "Replacement approach",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict(
+                relationship="supersedes",
+                supersedes_id=existing["id"],
+                rationale="supersedes",
+            )
+
+        result = _apply_reorder([existing], items, task_creation_critic_fn=critic)
+        titles = [t["title"] for t in result if t.get("status") == "pending"]
+        assert "Replacement approach" not in titles
+
+    def test_task_creation_critic_fans_out_multi_proposal(self, tmp_path: Path) -> None:
+        """HOL-16 / #1910: a ``multi`` verdict replaces the single
+        proposed task with one materialised task per proposed split,
+        each carrying its own invariant (HOL-12 contract)."""
+        from fido.critics import TaskCreationProposedSplit, TaskCreationVerdict
+        from fido.tasks import _apply_reorder
+
+        existing = self._add(tmp_path, "Pre-existing")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "Too broad",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [42],
+            },
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict(
+                scope="multi",
+                proposed_splits=(
+                    TaskCreationProposedSplit(
+                        title="Phase 1",
+                        description="first half",
+                        invariant="invariant-1",
+                    ),
+                    TaskCreationProposedSplit(
+                        title="Phase 2",
+                        description="second half",
+                        invariant="invariant-2",
+                    ),
+                ),
+                rationale="spans two invariants",
+            )
+
+        result = _apply_reorder([existing], items, task_creation_critic_fn=critic)
+        new_tasks = [
+            t
+            for t in result
+            if t.get("status") == "pending" and t["id"] != existing["id"]
+        ]
+        assert len(new_tasks) == 2
+        titles = {t["title"] for t in new_tasks}
+        assert titles == {"Phase 1", "Phase 2"}
+        invariants = {t["invariant"] for t in new_tasks}
+        assert invariants == {"invariant-1", "invariant-2"}
+        for t in new_tasks:
+            assert t["contributing_intents"] == [42]
+
+    def test_task_creation_critic_pass_through_on_distinct_single(
+        self, tmp_path: Path
+    ) -> None:
+        """The default verdict (distinct + single) leaves the proposed
+        new task unchanged — wiring must not silently mutate the
+        happy-path queue."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_reorder
+
+        existing = self._add(tmp_path, "Pre-existing")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "Genuinely new",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict()  # default: distinct + single
+
+        result = _apply_reorder([existing], items, task_creation_critic_fn=critic)
+        titles = [t["title"] for t in result if t.get("status") == "pending"]
+        assert "Genuinely new" in titles
+
+    def test_task_creation_critic_skips_blank_title_items(self, tmp_path: Path) -> None:
+        """Blank-title items get dropped by ``_make_new_tasks_from_opus``
+        regardless; the critic must not be asked about them (no LLM
+        round-trip on guaranteed-drop items)."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_reorder
+
+        existing = self._add(tmp_path, "Pre-existing")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "  ",
+                "description": "blank",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        critic_calls: list[dict] = []
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            critic_calls.append(proposed)
+            return TaskCreationVerdict()
+
+        _apply_reorder([existing], items, task_creation_critic_fn=critic)
+        assert critic_calls == []
+
+    def test_task_creation_critic_skips_terminal_from_queue(
+        self, tmp_path: Path
+    ) -> None:
+        """The critic's queue context should only include pending work
+        — completed and skipped tasks are terminal and can't be the
+        ``duplicate_of`` target for a live new task."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_reorder
+
+        active = self._add(tmp_path, "Active task")
+        completed = self._add(tmp_path, "Already done")
+        Tasks(tmp_path).complete_by_id(completed["id"])
+        current = Tasks(tmp_path).list()
+        items = [
+            {"id": active["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "New task",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        seen_queues: list[list[dict]] = []
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            seen_queues.append(queue)
+            return TaskCreationVerdict()
+
+        _apply_reorder(current, items, task_creation_critic_fn=critic)
+        assert len(seen_queues) == 1
+        seen_ids = {t["id"] for t in seen_queues[0]}
+        assert active["id"] in seen_ids
+        assert completed["id"] not in seen_ids
+
+    def test_task_creation_critic_none_is_pass_through(self, tmp_path: Path) -> None:
+        """When ``critic_fn`` is ``None`` the wiring must be a no-op —
+        every legacy ``_apply_reorder`` call site relies on this."""
+        from fido.tasks import _apply_reorder
+
+        existing = self._add(tmp_path, "Pre-existing")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "New",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        result = _apply_reorder([existing], items)
+        titles = [t["title"] for t in result if t.get("status") == "pending"]
+        assert "New" in titles
+
     def test_split_child_invariants_land_on_materialised_children(
         self, tmp_path: Path
     ) -> None:

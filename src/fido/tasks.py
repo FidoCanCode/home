@@ -16,6 +16,7 @@ from typing import IO, TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from fido.appstate import FidoState, TaskListSnapshot
     from fido.atomic import AtomicUpdater
+    from fido.critics import TaskCreationVerdict
 
 from fido.claude import ClaudeClient
 from fido.github import GitHub
@@ -2495,6 +2496,94 @@ def _derive_thread_from_intents(
     return None
 
 
+def _apply_task_creation_critics(
+    ordered_items: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+    *,
+    critic_fn: "Callable[[dict[str, Any], list[dict[str, Any]]], TaskCreationVerdict] | None" = None,
+) -> list[dict[str, Any]]:
+    """HOL-16 / #1910: run the task-creation critic over every ``new`` op.
+
+    Walks ``ordered_items`` and, for each null-id item (a ``new`` op),
+    asks ``critic_fn`` to verdict it against the current queue.  Mutates
+    the item list per verdict:
+
+      * ``distinct`` + ``single`` — keep item unchanged.
+      * ``duplicate_of`` / ``supersedes`` — drop the item (logged).
+        Supersedes is treated as a drop today; a follow-up leaf will
+        fold it into a rewrite op so the existing task is updated.
+      * ``multi`` — replace the item with one new-op per proposed split,
+        each carrying its own title/description/invariant.  The split
+        children inherit the original item's ``contributing_intents``
+        so reply-back paths still attribute correctly.
+
+    ``critic_fn`` is optional; when ``None`` the function is a pass-through
+    (legacy no-critic behaviour).  Production wiring injects the critic
+    via :func:`fido.critics.run_task_creation_critic`.
+
+    Returns the mutated item list — caller passes it to
+    ``_make_new_tasks_from_opus`` as if it came from the parser directly.
+    """
+    if critic_fn is None:
+        return ordered_items
+    out: list[dict[str, Any]] = []
+    # Pending-only view of the queue — completed and skipped tasks are
+    # terminal and don't represent live "scope competition" for a new
+    # task.  The critic's "duplicate_of"/"supersedes" verdicts should
+    # only target tasks the new one could genuinely overlap with.
+    pending_queue = [
+        t
+        for t in current
+        if t.get("status") not in (str(TaskStatus.COMPLETED), str(TaskStatus.SKIPPED))
+    ]
+    for item in ordered_items:
+        if item.get("id") is not None:
+            out.append(item)
+            continue
+        if not (item.get("title") or "").strip():
+            # Blank-title items already get dropped by
+            # ``_make_new_tasks_from_opus``; no need to ask the critic.
+            out.append(item)
+            continue
+        verdict = critic_fn(item, pending_queue)
+        if verdict.drops_proposal:
+            target_id = verdict.duplicate_of_id or verdict.supersedes_id
+            log.info(
+                "task-creation critic dropped new task %r (%s of %s): %s",
+                item.get("title"),
+                verdict.relationship,
+                target_id,
+                verdict.rationale,
+            )
+            continue
+        if verdict.fans_out:
+            log.info(
+                "task-creation critic fanned new task %r into %d splits: %s",
+                item.get("title"),
+                len(verdict.proposed_splits),
+                verdict.rationale,
+            )
+            # Each split becomes its own ``new`` item, inheriting the
+            # original's contributing_intents so reply-back attribution
+            # is preserved across the fan-out.
+            inherited_intents = item.get("contributing_intents") or []
+            inherited_type = item.get("type") or "spec"
+            for split in verdict.proposed_splits:
+                child_item: dict[str, Any] = {
+                    "id": None,
+                    "title": split.title,
+                    "description": split.description,
+                    "type": inherited_type,
+                    "invariant": split.invariant,
+                    "contributing_intents": list(inherited_intents),
+                }
+                out.append(child_item)
+            continue
+        # distinct + single: pass through.
+        out.append(item)
+    return out
+
+
 def _make_new_tasks_from_opus(
     ordered_items: list[dict[str, Any]],
     snapshot_ids: frozenset[str],
@@ -3046,6 +3135,8 @@ def _apply_reorder(
     ordered_items: list[dict[str, Any]],
     original_ids: frozenset[str] = frozenset(),
     intents: list[RescopeIntent] | None = None,
+    *,
+    task_creation_critic_fn: "Callable[[dict[str, Any], list[dict[str, Any]]], TaskCreationVerdict] | None" = None,
 ) -> list[dict[str, Any]]:
     """Apply Opus-synthesised items to the current task list.
 
@@ -3070,6 +3161,15 @@ def _apply_reorder(
     """
     snapshot_ids = original_ids or frozenset(
         t["id"] for t in current if t.get("status") != TaskStatus.COMPLETED
+    )
+    # HOL-16 / #1910: run the task-creation critic over every ``new``
+    # op before materialisation.  Drops duplicate/supersedes proposals
+    # and replaces multi-invariant proposals with one new-op per split.
+    # When ``task_creation_critic_fn`` is None (test path, no agent
+    # wired), the helper is a pass-through and the legacy no-critic
+    # behaviour is preserved.
+    ordered_items = _apply_task_creation_critics(
+        ordered_items, current, critic_fn=task_creation_critic_fn
     )
     # Pre-allocate split children's ``(id, created_at)`` tuples once
     # so the apply and verify passes mint identical metadata even
@@ -3531,8 +3631,33 @@ def reorder_tasks(
             inprogress = next(
                 (t for t in current if t.get("status") == TaskStatus.IN_PROGRESS), None
             )
+
+            # HOL-16 / #1910: build the task-creation critic closure.
+            # The critic runs per new op inside ``_apply_reorder`` via
+            # ``_apply_task_creation_critics`` — dropping duplicates /
+            # supersedes proposals and fanning multi-invariant proposals
+            # into their proposed splits before materialisation.
+            def _task_creation_critic_fn(
+                proposed: dict[str, Any], queue: list[dict[str, Any]]
+            ) -> "TaskCreationVerdict":
+                from fido.critics import run_task_creation_critic
+
+                return run_task_creation_critic(
+                    proposed,
+                    queue,
+                    agent=agent,
+                    prompts=prompts,
+                    followup_system_prompt=prompts.synthesis_followup_system_prompt(
+                        issue=issue, pr=pr
+                    ),
+                )
+
             result = _apply_reorder(
-                current, ordered_items, original_ids, intents=intents
+                current,
+                ordered_items,
+                original_ids,
+                intents=intents,
+                task_creation_critic_fn=_task_creation_critic_fn,
             )
             # HOL-8 / #1902: append narrative_chain entries for every
             # verdict that touched a task in the result.  Runs before

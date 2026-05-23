@@ -1099,6 +1099,110 @@ class Prompts:
             "No other text before or after the JSON."
         )
 
+    def task_creation_critic_prompt(
+        self,
+        proposed_task: dict[str, Any],
+        current_queue: list[dict[str, Any]],
+    ) -> str:
+        """Build the HOL-16 / #1910 critic prompt.
+
+        Per-``new``-op critic that asks Opus to verdict a proposed new
+        task against the current queue along two axes:
+
+        - **Relationship**: ``distinct`` (genuinely new), ``duplicate_of``
+          (already exists), or ``supersedes`` (replaces an existing task).
+        - **Scope**: ``single`` (one statable invariant — HOL-12 contract)
+          or ``multi`` (proposed task spans multiple invariants and
+          should be fanned out into ``proposed_splits``).
+
+        Verdict JSON shape::
+
+            {
+              "relationship": "distinct" | "duplicate_of" | "supersedes",
+              "duplicate_of_id": "<task-id>" | null,
+              "supersedes_id": "<task-id>" | null,
+              "scope": "single" | "multi",
+              "proposed_splits": [
+                {"title": "...", "description": "...", "invariant": "..."}
+              ],
+              "rationale": "<one-line plain English>"
+            }
+
+        ``duplicate_of``/``supersedes`` triggers a drop; ``multi`` triggers
+        a fan-out into the proposed splits.  ``distinct`` + ``single``
+        passes through.  See ``fido.tasks._apply_task_creation_critics``
+        for the wiring.
+        """
+
+        def _fmt_queue_entry(t: dict[str, Any]) -> str:
+            tid = t.get("id", "?")
+            title = t.get("title", "")
+            desc = t.get("description", "") or ""
+            invariant = t.get("invariant", "") or ""
+            line = f'  - id={tid}: "{title}"'
+            if desc:
+                line += f"\n    description: {desc}"
+            if invariant:
+                line += f"\n    invariant: {invariant}"
+            return line
+
+        if current_queue:
+            queue_block = "\n".join(_fmt_queue_entry(t) for t in current_queue)
+        else:
+            queue_block = "  (queue is empty)"
+
+        proposed_title = proposed_task.get("title", "")
+        proposed_description = proposed_task.get("description", "") or ""
+        proposed_invariant = proposed_task.get("invariant", "") or ""
+        proposed_block = f"  title:       {proposed_title}"
+        if proposed_description:
+            proposed_block += f"\n  description: {proposed_description}"
+        if proposed_invariant:
+            proposed_block += f"\n  invariant:   {proposed_invariant}"
+
+        return (
+            "You proposed a NEW task to add to a pull request's work "
+            "queue.  Verify it against the existing queue along TWO "
+            "axes.\n\n"
+            "CURRENT QUEUE (existing tasks Opus already knows about):\n"
+            f"{queue_block}\n\n"
+            "PROPOSED NEW TASK:\n"
+            f"{proposed_block}\n\n"
+            "QUESTION: Does this proposed task belong in the queue as a "
+            "distinct, single-invariant new entry — or is it a duplicate, "
+            "a supersession, or too broad?\n\n"
+            "Axis 1 — RELATIONSHIP to existing queue:\n"
+            '  "distinct"      — genuinely new work, no existing task '
+            "covers it.\n"
+            '  "duplicate_of"  — an existing task already covers this '
+            "scope; the new task is redundant.  Set "
+            "``duplicate_of_id`` to the existing task id.\n"
+            '  "supersedes"    — the new task replaces an existing task '
+            "whose scope has shifted.  Set ``supersedes_id`` to the "
+            "existing task id.\n\n"
+            "Axis 2 — SCOPE (one invariant per task, HOL-12 contract):\n"
+            '  "single"  — the task establishes one statable property '
+            "(a Rocq lemma, a Python assertion, a CI rule that starts "
+            "failing, or one behavioural change a reviewer can verify "
+            "in isolation).\n"
+            '  "multi"   — the task spans multiple invariants and should '
+            "be fanned out.  Populate ``proposed_splits`` with one entry "
+            "per child invariant, each carrying its own ``title`` / "
+            "``description`` / ``invariant``.\n\n"
+            "Reply with ONLY one JSON object on one line:\n"
+            "  {\n"
+            '    "relationship": "distinct" | "duplicate_of" | "supersedes",\n'
+            '    "duplicate_of_id": "<task-id>" | null,\n'
+            '    "supersedes_id": "<task-id>" | null,\n'
+            '    "scope": "single" | "multi",\n'
+            '    "proposed_splits": [\n'
+            '      {"title": "...", "description": "...", "invariant": "..."}\n'
+            "    ],\n"
+            '    "rationale": "<one-line plain English>"\n'
+            "  }\n\n"
+            "No other text before or after the JSON."
+        )
+
     def synthesis_failure_explanation_prompt(self, comment_body: str) -> str:
         """Build the fallback prompt for when synthesis exhausts retries.
 
