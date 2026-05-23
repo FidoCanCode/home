@@ -94,45 +94,33 @@ class TestClaudeHelper:
         _claude("--help", runner=mock_run)
         assert mock_run.call_args.kwargs["input"] is None
 
-    def test_default_runner_uses_explicit_popen(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_default_runner_uses_explicit_popen(self) -> None:
         """When no runner is overridden, _claude drives Popen directly so
         TimeoutExpired actually reaps the child (closes #489)."""
-        import subprocess
-
         fake_proc = MagicMock()
         fake_proc.args = ["claude", "--print"]
         fake_proc.returncode = 0
         fake_proc.communicate = MagicMock(return_value=("hello", ""))
         fake_popen = MagicMock(return_value=fake_proc)
-        monkeypatch.setattr(subprocess, "Popen", fake_popen)
-        result = _claude("--print", "-p", "hi", prompt="body", timeout=5)
+        result = _claude(
+            "--print", "-p", "hi", prompt="body", timeout=5, popen=fake_popen
+        )
         fake_popen.assert_called_once()
         fake_proc.communicate.assert_called_once_with(input="body", timeout=5)
         assert result.stdout == "hello"
         assert result.returncode == 0
 
-    def test_default_runner_no_prompt_uses_devnull(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import subprocess
-
+    def test_default_runner_no_prompt_uses_devnull(self) -> None:
         fake_proc = MagicMock()
         fake_proc.args = ["claude", "--version"]
         fake_proc.returncode = 0
         fake_proc.communicate = MagicMock(return_value=("1.0", ""))
         fake_popen = MagicMock(return_value=fake_proc)
-        monkeypatch.setattr(subprocess, "Popen", fake_popen)
-        _claude("--version")
+        _claude("--version", popen=fake_popen)
         assert fake_popen.call_args.kwargs["stdin"] is subprocess.DEVNULL
 
-    def test_default_runner_kills_on_timeout(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_default_runner_kills_on_timeout(self) -> None:
         """TimeoutExpired from communicate → kill → re-raise with output."""
-        import subprocess
-
         fake_proc = MagicMock()
         fake_proc.args = ["claude", "--print"]
         fake_proc.returncode = -9
@@ -144,19 +132,21 @@ class TestClaudeHelper:
             ]
         )
         fake_proc.kill = MagicMock()
-        monkeypatch.setattr(subprocess, "Popen", MagicMock(return_value=fake_proc))
         with pytest.raises(subprocess.TimeoutExpired) as exc_info:
-            _claude("--print", "-p", "hi", prompt="x", timeout=5)
+            _claude(
+                "--print",
+                "-p",
+                "hi",
+                prompt="x",
+                timeout=5,
+                popen=MagicMock(return_value=fake_proc),
+            )
         fake_proc.kill.assert_called_once()
         assert exc_info.value.output == "partial"
         assert exc_info.value.stderr == "err"
 
-    def test_default_runner_unresponsive_after_kill(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_default_runner_unresponsive_after_kill(self) -> None:
         """Child that ignores SIGKILL too — still re-raise TimeoutExpired."""
-        import subprocess
-
         fake_proc = MagicMock()
         fake_proc.args = ["claude", "--print"]
         fake_proc.returncode = -9
@@ -167,9 +157,15 @@ class TestClaudeHelper:
             ]
         )
         fake_proc.kill = MagicMock()
-        monkeypatch.setattr(subprocess, "Popen", MagicMock(return_value=fake_proc))
         with pytest.raises(subprocess.TimeoutExpired):
-            _claude("--print", "-p", "hi", prompt="x", timeout=5)
+            _claude(
+                "--print",
+                "-p",
+                "hi",
+                prompt="x",
+                timeout=5,
+                popen=MagicMock(return_value=fake_proc),
+            )
 
 
 @pytest.fixture

@@ -154,6 +154,7 @@ def _claude(
     prompt: str | None = None,
     timeout: int = 30,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
 ) -> subprocess.CompletedProcess[str]:
     """Run the claude CLI with the given args, optionally piping prompt to stdin.
 
@@ -164,8 +165,9 @@ def _claude(
     drive the subprocess with explicit ``Popen`` + ``communicate`` so
     the child is guaranteed to be killed and reaped when the budget
     elapses.  Test overrides via *runner* still flow through whatever
-    mock the test supplies.  Logs entry and exit so a stalled status
-    call is localisable in the fido log.
+    mock the test supplies.  Pass *popen* to inject a fake subprocess
+    factory without patching the subprocess module.  Logs entry and
+    exit so a stalled status call is localisable in the fido log.
     """
     cmd = ["claude", *args]
     log.debug("_claude: running (timeout=%ds) %s", timeout, cmd[:3])
@@ -173,7 +175,7 @@ def _claude(
         return runner(
             cmd, input=prompt, capture_output=True, text=True, timeout=timeout
         )
-    proc = subprocess.Popen(
+    proc = popen(
         cmd,
         stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,

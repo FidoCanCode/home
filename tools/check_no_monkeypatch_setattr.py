@@ -20,7 +20,6 @@ from pathlib import Path
 _EXEMPTIONS: frozenset[str] = frozenset(
     {
         "tests/test_cli.py",
-        "tests/test_claude.py",
         "tests/test_claude_hold_for_handler.py",
         "tests/test_copilot_hold_for_handler.py",
         "tests/test_rocq_generated_pyright.py",
