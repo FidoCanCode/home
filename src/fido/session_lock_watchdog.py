@@ -49,6 +49,8 @@ directly — every action goes through the modeled
 import logging
 import threading
 import time
+from collections.abc import Callable
+from datetime import datetime
 
 from fido.config import RepoConfig
 from fido.provider import OwnedSession, get_talker, talker_now
@@ -88,10 +90,12 @@ class SessionLockWatchdog:
         repos: dict[str, RepoConfig],
         *,
         no_reply_seconds: float = _DEFAULT_NO_REPLY_SECONDS,
+        now: Callable[[], datetime] = talker_now,
     ) -> None:
         self.registry = registry
         self.repos = repos
         self.no_reply_seconds = no_reply_seconds
+        self._now = now
 
     def run(self) -> int:
         """Run one watchdog iteration. Returns 0.
@@ -129,7 +133,7 @@ class SessionLockWatchdog:
             talker = get_talker(repo_name)
             if talker is None:
                 continue
-            silent_for = (talker_now() - outstanding).total_seconds()
+            silent_for = (self._now() - outstanding).total_seconds()
             if silent_for <= self.no_reply_seconds:
                 continue
             reason = (
@@ -182,6 +186,9 @@ def run(
     repos: dict[str, RepoConfig],
     *,
     no_reply_seconds: float = _DEFAULT_NO_REPLY_SECONDS,
+    now: Callable[[], datetime] = talker_now,
 ) -> int:
     """Module-level entry point — create a watchdog and run one tick."""
-    return SessionLockWatchdog(registry, repos, no_reply_seconds=no_reply_seconds).run()
+    return SessionLockWatchdog(
+        registry, repos, no_reply_seconds=no_reply_seconds, now=now
+    ).run()
