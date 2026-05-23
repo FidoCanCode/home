@@ -971,6 +971,104 @@ class TestParseRescopeOperations:
             }
         ]
 
+    def test_parses_new_with_invariant(self) -> None:
+        """HOL-12 / #1906 + codex r3293319645 on PR #1932: the
+        ``invariant`` field on a ``new`` op must survive the typed
+        pipeline.  Before the codex fix, ``_RescopeOpNew`` dropped
+        the field and ``_operations_to_items`` emitted no
+        ``invariant`` key, silently breaking the HOL-11/12 carrier."""
+        raw = (
+            '{"operations": [{"op": "new", "title": "T", '
+            '"description": "d", "type": "spec", '
+            '"invariant": "rescope ops are typed values"}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert _operations_to_items(ops) == [
+            {
+                "id": None,
+                "title": "T",
+                "description": "d",
+                "type": "spec",
+                "invariant": "rescope ops are typed values",
+                "contributing_intents": [],
+            }
+        ]
+
+    def test_parses_split_with_per_child_invariants(self) -> None:
+        """HOL-12 / #1906 + codex r3293319645 on PR #1932: each
+        ``split`` child can carry its own ``invariant``; the field
+        must survive into ``_operations_to_items``'s
+        ``split_targets``."""
+        raw = (
+            '{"operations": [{"op": "split", "id": "src", "children": ['
+            '{"title": "A", "description": "first", '
+            '"invariant": "invariant-A"}, '
+            '{"title": "B", "description": "second", '
+            '"invariant": "invariant-B"}]}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert _operations_to_items(ops) == [
+            {
+                "id": "src",
+                "split_targets": [
+                    {
+                        "title": "A",
+                        "description": "first",
+                        "invariant": "invariant-A",
+                    },
+                    {
+                        "title": "B",
+                        "description": "second",
+                        "invariant": "invariant-B",
+                    },
+                ],
+                "contributing_intents": [],
+            }
+        ]
+
+    def test_parses_new_without_invariant_omits_field(self) -> None:
+        """Legacy ``new`` ops that predate HOL-12 don't supply an
+        invariant.  The materialised item must NOT carry an empty
+        ``invariant`` key — downstream consumers distinguish
+        "Opus gave one" from "field absent"."""
+        raw = (
+            '{"operations": [{"op": "new", "title": "T", '
+            '"description": "d", "type": "spec"}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        item = _operations_to_items(ops)[0]
+        assert "invariant" not in item
+
+    def test_parses_split_child_without_invariant_omits_field(self) -> None:
+        """Same omission rule on the split path — children without an
+        invariant don't get an empty placeholder."""
+        raw = (
+            '{"operations": [{"op": "split", "id": "src", "children": ['
+            '{"title": "A", "description": "first"}]}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        child = _operations_to_items(ops)[0]["split_targets"][0]
+        assert "invariant" not in child
+
+    def test_parses_new_with_non_string_invariant_treats_as_empty(self) -> None:
+        """A non-string ``invariant`` (e.g. ``null``, ``42``) is
+        ignored rather than rejected so a slightly malformed Opus
+        response still parses — the title/description/type gate is
+        the load-bearing one."""
+        raw = (
+            '{"operations": [{"op": "new", "title": "T", '
+            '"description": "d", "type": "spec", '
+            '"invariant": 42}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        item = _operations_to_items(ops)[0]
+        assert "invariant" not in item
+
     def test_parses_json_with_preamble(self) -> None:
         raw = 'Reordered:\n{"operations": [{"op": "keep", "id": "1"}]}'
         ops, errors = _parse_rescope_operations(raw)
@@ -5897,6 +5995,63 @@ class TestSkipMarkerEndToEnd:
         after = Tasks(tmp_path).list()
         skipped_after = next(t for t in after if t["id"] == skipped_id)
         assert skipped_after["status"] == "skipped"
+
+    def test_new_op_invariant_lands_on_materialised_task(self, tmp_path: Path) -> None:
+        """codex r3293319645 on PR #1932: the ``invariant`` Opus emits
+        on a ``new`` op must survive the typed rescope pipeline and
+        appear on the persisted task.  Before the fix, ``_RescopeOpNew``
+        dropped the field at parse time, ``_operations_to_items`` had
+        nothing to emit, and ``_make_new_tasks_from_opus`` always saw
+        ``invariant=None`` — silently breaking the HOL-11/12 carrier
+        contract for every Opus-driven new task."""
+        # Seed one existing task so the empty-queue short-circuit in
+        # ``reorder_tasks`` doesn't skip the rescope call entirely.
+        # The ``new`` op is what we're actually testing.
+        existing = self._add(tmp_path, "Pre-existing")
+        raw_ops = (
+            '{"operations": ['
+            f'{{"op": "keep", "id": "{existing["id"]}"}}, '
+            '{"op": "new", '
+            '"title": "extract _RescopeOp dataclass", '
+            '"description": "Replace raw dicts in the rescope reducer.", '
+            '"type": "spec", '
+            '"invariant": "rescope ops are typed values, not raw dicts"}'
+            "]}"
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw_ops))
+        result = Tasks(tmp_path).list()
+        new_tasks = [
+            t for t in result if t.get("title") == "extract _RescopeOp dataclass"
+        ]
+        assert len(new_tasks) == 1
+        assert (
+            new_tasks[0]["invariant"] == "rescope ops are typed values, not raw dicts"
+        )
+
+    def test_split_child_invariants_land_on_materialised_children(
+        self, tmp_path: Path
+    ) -> None:
+        """Same regression for the split-child path: each child's
+        invariant must survive to the persisted task."""
+        # Seed one parent task that the split op will fan out.
+        parent = self._add(tmp_path, "Refactor the whole rescope reducer")
+        raw_ops = (
+            '{"operations": [{"op": "split", '
+            f'"id": "{parent["id"]}", "children": ['
+            '{"title": "Typed ops", "description": "_RescopeOp dataclass", '
+            '"invariant": "rescope ops are typed values"}, '
+            '{"title": "SKIPPED lift", "description": "round-trip guard", '
+            '"invariant": "SKIPPED survives the rescope round-trip"}]}]}'
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw_ops))
+        result = Tasks(tmp_path).list()
+        pending = [t for t in result if t.get("status") == "pending"]
+        assert len(pending) == 2
+        invariants = {t["invariant"] for t in pending}
+        assert invariants == {
+            "rescope ops are typed values",
+            "SKIPPED survives the rescope round-trip",
+        }
 
 
 # ── _build_op_inputs (INV-F adapter glue) ─────────────────────────────────────

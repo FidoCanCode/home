@@ -522,6 +522,7 @@ def _split_child_synthetic_task(
     child_description: str,
     created_at: str,
     op_contributing_intents: list[int],
+    child_invariant: str = "",
 ) -> dict[str, Any]:
     """Build the synthetic original task dict for a split child.
 
@@ -545,6 +546,12 @@ def _split_child_synthetic_task(
     source task, so a downstream classifier can decide whether the
     split materially affected each commenter.
 
+    ``child_invariant`` (HOL-12 / #1906) is the per-child invariant
+    statement from the rescope prompt.  Empty when Opus didn't supply
+    one (legacy responses); when present, stamped on the child task so
+    HOL-13's worker pickup rule and HOL-11's PR-body serialisation see
+    the scope marker (codex r3293319645 on PR #1932).
+
     The thread is shallow-copied per child: every ``lineage_comment_ids``
     write in this codebase rebuilds the list and re-assigns the slot
     rather than mutating in place, so the inherited list reference is
@@ -561,6 +568,8 @@ def _split_child_synthetic_task(
         "created_at": created_at,
         "contributing_intents": _union_intents(source_intents, op_contributing_intents),
     }
+    if child_invariant:
+        child["invariant"] = child_invariant
     source_thread = source_task.get("thread")
     if isinstance(source_thread, dict):
         child["thread"] = dict(source_thread)
@@ -731,6 +740,16 @@ def _rescope_releases_for_oracle(
                     next_oracle_id += 1
                     child_title = _normalize_title(str(target.get("title") or ""))
                     child_description = str(target.get("description") or "")
+                    # HOL-12 / #1906: carry the per-child invariant from
+                    # the lowered ``split_targets`` (set by
+                    # ``_operations_to_items``) onto the materialised
+                    # child (codex r3293319645 on PR #1932).
+                    child_invariant_raw = target.get("invariant")
+                    child_invariant = (
+                        child_invariant_raw
+                        if isinstance(child_invariant_raw, str)
+                        else ""
+                    )
                     tasks_by_oracle_id[child_oracle_id] = _split_child_synthetic_task(
                         task,
                         child_string_id,
@@ -738,6 +757,7 @@ def _rescope_releases_for_oracle(
                         child_description,
                         child_created_at,
                         op_intents,
+                        child_invariant=child_invariant,
                     )
                     children_specs.append(
                         rescope_oracle.SplitChild(
@@ -1381,6 +1401,14 @@ class _RescopeOpMerge:
 class _RescopeOpSplitChild:
     title: str
     description: str
+    # HOL-12 / #1906: one-invariant-per-task contract.  Required by the
+    # rescope prompt on every split child; defaults to empty for legacy
+    # responses that predate the contract (Opus running an older prompt,
+    # CLI-built items, hand-built test fixtures).  Carries through
+    # ``_operations_to_items`` → ``_make_new_tasks_from_opus`` →
+    # ``Tasks.add(..., invariant=...)`` so the materialised child task
+    # stamps the field (codex r3293319645 on PR #1932).
+    invariant: str = ""
 
 
 @dataclass(frozen=True)
@@ -1400,6 +1428,10 @@ class _RescopeOpNew:
     description: str
     type: str  # noqa: A003 — schema field name
     contributing_intents: _RescopeIntentIds
+    # HOL-12 / #1906: same one-invariant-per-task contract as split
+    # children.  Carries from the rescope prompt through the typed
+    # pipeline to the materialised task (codex r3293319645 on PR #1932).
+    invariant: str = ""
 
 
 @dataclass(frozen=True)
@@ -2161,10 +2193,21 @@ def _parse_op_split(
             child_description = _require_string_field_allow_empty(
                 raw_child, "description", child_path, errors
             )
+            # HOL-12 / #1906: invariant is optional at the parser layer
+            # (defaults empty for legacy responses) but encouraged via
+            # the rescope prompt.  When Opus supplies a string, carry
+            # it through; non-string values are ignored rather than
+            # rejected so a slightly malformed older response still
+            # parses (the title/description gate is the load-bearing
+            # one).  codex r3293319645 on PR #1932.
+            raw_invariant = raw_child.get("invariant")
+            child_invariant = raw_invariant if isinstance(raw_invariant, str) else ""
             if child_title is not None and child_description is not None:
                 children.append(
                     _RescopeOpSplitChild(
-                        title=child_title, description=child_description
+                        title=child_title,
+                        description=child_description,
+                        invariant=child_invariant,
                     )
                 )
         if not children:
@@ -2189,6 +2232,11 @@ def _parse_op_new(
     description = _require_string_field_allow_empty(raw_op, "description", path, errors)
     task_type = _require_string_field(raw_op, "type", path, errors)
     intents = _parse_contributing_intents(raw_op, path, errors)
+    # HOL-12 / #1906: invariant is optional at the parser layer.  See
+    # the matching note on ``_parse_op_split`` children for the
+    # legacy-compatibility rationale.  codex r3293319645 on PR #1932.
+    raw_invariant = raw_op.get("invariant")
+    invariant = raw_invariant if isinstance(raw_invariant, str) else ""
     if title is None or description is None or task_type is None:
         return None, errors
     return (
@@ -2197,6 +2245,7 @@ def _parse_op_new(
             description=description,
             type=task_type,
             contributing_intents=intents,
+            invariant=invariant,
         ),
         errors,
     )
@@ -2350,13 +2399,25 @@ def _operations_to_items(operations: list[_RescopeOp]) -> list[dict[str, Any]]:
             case _RescopeOpSplit(
                 id=tid, children=children, contributing_intents=intents
             ):
+                # HOL-12 / #1906: carry each child's ``invariant`` into
+                # the lowered ``split_targets`` so the downstream
+                # synthesis path (split → N children) can stamp it on
+                # the materialised children (codex r3293319645 on
+                # PR #1932).  Omit when empty so legacy children that
+                # didn't supply one don't pollute the dict shape.
+                child_dicts: list[dict[str, Any]] = []
+                for c in children:
+                    child_dict: dict[str, Any] = {
+                        "title": c.title,
+                        "description": c.description,
+                    }
+                    if c.invariant:
+                        child_dict["invariant"] = c.invariant
+                    child_dicts.append(child_dict)
                 items.append(
                     {
                         "id": tid,
-                        "split_targets": [
-                            {"title": c.title, "description": c.description}
-                            for c in children
-                        ],
+                        "split_targets": child_dicts,
                         "contributing_intents": list(intents),
                     }
                 )
@@ -2365,16 +2426,23 @@ def _operations_to_items(operations: list[_RescopeOp]) -> list[dict[str, Any]]:
                 description=desc,
                 type=task_type,
                 contributing_intents=intents,
+                invariant=invariant,
             ):
-                items.append(
-                    {
-                        "id": None,
-                        "title": title,
-                        "description": desc,
-                        "type": task_type,
-                        "contributing_intents": list(intents),
-                    }
-                )
+                # HOL-12 / #1906: ``invariant`` lowers into the same
+                # item dict so ``_make_new_tasks_from_opus`` stamps it
+                # on the new task (codex r3293319645 on PR #1932).
+                # Omitted when empty so legacy new ops don't carry an
+                # empty placeholder field.
+                item: dict[str, Any] = {
+                    "id": None,
+                    "title": title,
+                    "description": desc,
+                    "type": task_type,
+                    "contributing_intents": list(intents),
+                }
+                if invariant:
+                    item["invariant"] = invariant
+                items.append(item)
             case _RescopeOpSkip(
                 title=title, description=desc, contributing_intents=intents
             ):
