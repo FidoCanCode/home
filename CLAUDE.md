@@ -4,495 +4,320 @@ Fido is a dog who accidentally learned to code and now blogs about it. He
 receives GitHub events, triages comments, manages per-repo task lists, and
 launches workers to implement code changes.
 
-Rob (rhencke on GitHub) is responsible for looking after Fido. He is Fido's person.
+Rob (rhencke on GitHub) is responsible for looking after Fido. He is Fido's
+person. Fido is in the US Eastern time zone (UTC−5 / UTC−4 in DST).
 
-Fido is in the Eastern time zone (US Eastern, UTC−5 / UTC−4 during daylight
-saving time).
+You are *not* under time pressure. These tasks are big, hard, intricate, and
+take multiple iterations. Prefer the slower correct fix over a quick one;
+use the extra time to repair stale structure so the system gets simpler and
+solider over time.
 
 ## Nested guides
 
-CLAUDE.md does not auto-load from subfolders. **Read these explicitly when
-working in those trees:**
+CLAUDE.md does not auto-load from subfolders. Read explicitly:
 
-- Blog or journal work under `docs/` → read `docs/CLAUDE.md` first.
-- Anything in `rocq-python-extraction/` → read `rocq-python-extraction/CLAUDE.md` first.
+- Blog/journal work under `docs/` → `docs/CLAUDE.md`.
+- Anything in `rocq-python-extraction/` → `rocq-python-extraction/CLAUDE.md`.
 
 ## Command surface
 
-Use the repo-root `./fido` launcher for normal work. It builds or reuses the
-right Docker buildx target, runs the command in the container, and avoids host
-`uv`, host Python, and host Rocq drift.
+`./fido <subcommand>` is the launcher — it owns the buildx image, container,
+UID/GID, and credentials mount. Don't call host `uv` or invent subcommands;
+run `./fido help` first when in doubt.
 
-Common commands (run `./fido help` for the full list):
+Most-used:
 
-| Command | Purpose |
-|---------|---------|
-| `./fido up [args...]` | Run the webhook server in the foreground. Supervises restarts, redirects to journald (`-t fido`), syncs the runner clone on update exits, rebuilds, restarts. |
-| `./fido ci` | Build the buildx `ci` group: format, lint, typecheck, generated typecheck, tests, and the production runtime image cache. CI and pre-commit use this. |
-| `./fido status` | Print server, repo, worker, provider, webhook, issue-cache, and rate-limit status. |
-| `./fido task <work_dir> ...` | Add, complete, or list task-file entries for a repo. |
-| `./fido tests [pytest args...]` | Run pytest inside the `fido-test` image. |
-| `./fido make-rocq [args...]` | Regenerate Rocq-extracted Python. |
-| `./fido gen-workflows` | Regenerate `.github/workflows/ci.yml` from the buildx graph. |
-| `./fido traceback [path...]` | Annotate extracted Python tracebacks. For host-only files, prefer stdin. |
-| `./fido lsp ... --json` | Query Rocq model navigation as JSON for shell agents (subcommands: hover, definition, references, callers, signature, completion, symbols, tokens, codelens, codeactions, graph, explain, rename, diagnostics). |
-| `./fido ruff ...` / `./fido pyright ...` / `./fido pytest ...` | Run individual tools from the prebuilt container toolchain. |
+- `./fido ci` — full pre-commit gate (format, lint, typecheck, generated
+  typecheck, tests, runtime image). Same as CI and the pre-commit hook.
+- `./fido tests [args]` — focused pytest while iterating.
+- `./fido ruff check . | format .` / `./fido pyright` — individual tools.
+- `./fido make-rocq` — regenerate Rocq-extracted Python.
+- `./fido task <work_dir> add|complete|list ...` — task-file CRUD.
 
-The internal Python package is `fido` because the repo-root launcher already
-owns the filesystem path `./fido`. Use lowercase `fido` for commands, package
-names, module paths, log filenames, secrets, status keys, and URLs. Use
-capitalized `Fido` when referring to him in prose.
-
-Do not invent unsupported `./fido` subcommands. Use only documented commands or
-check `./fido help` first.
-
-You are *not* under any time pressure or expectation. These tasks are often
-big, hard, and intricate, and they take time and multiple iterations. Do not
-cut corners to get something out quicker. Prefer the slower correct fix, and
-use the extra time to repair incorrect structure or stale assumptions so the
-system gets simpler and more solid over time.
+The internal Python package is `fido` (lowercase) — used for commands,
+module paths, log filenames, secrets, URLs. Capitalized `Fido` is for prose.
 
 ## Architecture
 
 ```
-Fido (single foreground container launched from /home/rhencke/home-runner/)
-  ├─ HTTP server: receives webhooks, routes by repo
-  ├─ Per-repo Fido workers: WorkerThread (fido/worker.py)
+Fido (single foreground container, runner clone at /home/rhencke/home-runner/)
+  ├─ HTTP server: webhooks, signature verify, repo routing
+  ├─ Per-repo WorkerThread (worker.py): one issue → one PR at a time
   ├─ Per-repo task sync: tasks.json → PR body
-  └─ Self-restart: exit 75 so ./fido syncs, rebuilds, and restarts
+  └─ Self-restart: exit 75, ./fido syncs runner clone + rebuilds + restarts
 ```
 
-Multi-repo: one Fido process handles multiple repos. Each repo has its own
-tasks.json, lock files, and worker process.
+One Fido process handles multiple repos. Each repo has its own tasks.json,
+flock, worker. Concurrency limit: one worker per repo, one issue per worker.
 
-**Concurrency model**: one Fido worker per repo, one issue per worker, one PR
-per issue. Fido finishes the current issue (PR merged or closed) before picking
-up the next. Two repos = two workers max, running in parallel, each on their
-own issue.
+**Runner vs workspace clones** are distinct and must stay so:
 
-**ClaudeSession persistence**: the persistent `ClaudeSession` (bidirectional
-stream-json subprocess) is held on `WorkerThread._session` and survives
-individual `Worker` crashes — the watchdog restarts the thread and the next
-`Worker` inherits the same session. A full Fido restart or Docker image upgrade
-still kills the live subprocess, but the worker persists the provider session
-id in the repo's bind-mounted `.git/fido/state.json`; the next container seeds
-its new provider session from that id so Claude can resume the same
-conversation.
+- **Runner clone** (`/home/rhencke/home-runner/`) — always on `main`, never
+  dirty, no feature branches. Fido imports his Python from here.
+  Self-restart `git pull`s here.
+- **Workspace clone** (`/home/rhencke/workspace/<repo>/`) — where Fido edits,
+  commits, pushes feature branches. Never used to run the server.
 
-## Runner vs workspace clones
+**ClaudeSession persistence**: held on `WorkerThread._session`; survives
+individual `Worker` crashes via the watchdog. A full Fido restart kills the
+live subprocess but the provider session id persists in
+`.git/fido/state.json`, so the next container seeds a resumed conversation.
 
-Fido runs from a dedicated **runner clone** at `/home/rhencke/home-runner/`,
-separate from the **workspace clone** at `/home/rhencke/workspace/home/`.
+## Modules
 
-- **Runner clone** — always on `main`, never dirty, never has feature branches.
-  Fido imports his Python code from here. Self-restart does `git pull` here.
-- **Workspace clone** — where Fido edits source files, commits, and pushes
-  feature branches. Never used to run the server.
-
-Launching: `/home/rhencke/start-fido.sh` (local, outside git) execs
-`./fido up ...` from the runner clone.
-
-Self-restart logic: `_self_restart` in `server.py` derives the runner clone
-from `Path(__file__).resolve().parents[1]`, checks the git remote matches the
-merged PR's repo, syncs the runner clone with exponential backoff (10s → 30s →
-60s, 10-minute budget), stops workers, kills active provider children, and
-exits `75`. The `./fido up` supervisor treats `75` as restart: it syncs the
-runner clone, rebuilds the buildx runtime image, and runs the server again.
-
-## Running
-
-```bash
-/home/rhencke/start-fido.sh
-# or directly from the runner clone:
-cd /home/rhencke/home-runner && ./fido up --port 9000 --secret-file /run/secrets/fido-secret \
-  rhencke/confusio:/home/rhencke/workspace/confusio \
-  FidoCanCode/home:/home/rhencke/workspace/home
-```
-
-## Testing and linting
-
-`./fido ci` is the canonical path — same as CI and the pre-commit hook. Use
-focused commands (`./fido tests`, `./fido ruff check .`, `./fido pyright`)
-only while iterating; the commit path is `./fido ci`.
-
-## Module guide
-
-Top-level modules live in `src/fido/`. A handful of entry points:
-
-- `server.py` — HTTP webhook handler, signature verification, repo routing
-- `worker.py` — per-repo `WorkerThread` / `Worker` loop
-- `events.py` — event dispatch, Opus triage/reply, reactions, task creation
-- `tasks.py` — `tasks.json` CRUD with flock; rescoping logic
-
-`ls src/fido/` for the full list — there are ~36 modules and any inline table
-will drift.
-
-System prompts for sub-Claude live in `sub/*.md`.
+Top-level Python lives in `src/fido/` (~36 modules — `ls` for the list).
+Entry points: `server.py` (HTTP handler), `worker.py` (per-repo loop),
+`events.py` (dispatch + Opus triage + reactions + task creation), `tasks.py`
+(`tasks.json` CRUD + rescoping). Sub-Claude system prompts live in
+`sub/*.md`.
 
 ### Coordination models (`models/`)
 
-Rocq source files (`.v`) that formally specify Fido's coordination invariants.
-Each model is extracted to Python and run as a runtime oracle that crashes
-loudly when the invariant is violated. Generated Python lives in
-`src/fido/rocq/`.
+Rocq source files (`.v`) that formally specify Fido's coordination
+invariants. Each model extracts to Python in `src/fido/rocq/` and runs as a
+runtime oracle that crashes loudly on violation.
 
-**Survey:** `models/BUG_MINED_INVARIANTS.md` — a structured analysis of 23+
-closed `Bug:` issues mapped to 15 coordination invariant clusters (A–O). Each
-cluster names the invariant, the bugs that motivated it, the Rocq model that
-will prove it, and the D-series issue tracking the work. Start here when
-investigating a coordination bug or planning a new model.
+**Survey:** `models/BUG_MINED_INVARIANTS.md` maps 23+ closed `Bug:` issues
+to 15 invariant clusters (A–O) — start there when investigating a
+coordination bug.
 
-## Task type system
+## Tasks
 
-Tasks have a mandatory `type` field (`TaskType` enum in `fido.types`):
+`TaskType`: `ci` | `thread` | `spec`. `TaskStatus`: `pending` | `completed` |
+`in_progress` | `blocked` | `skipped`. Picker priority: in-progress first,
+then `ci`, then first-in-list (thread = spec).
 
-| Value | Meaning |
-|-------|---------|
-| `ci` | CI failure fix |
-| `thread` | PR comment / review thread work |
-| `spec` | Planned spec task (default for setup) |
-
-Tasks also use `TaskStatus`: `pending`, `completed`, `in_progress`.
-
-CLI:
-
-```bash
-./fido task <work_dir> add <type> <title> [description]  # prints task JSON
-./fido task <work_dir> complete <task_id>                # complete by ID
-./fido task <work_dir> list                              # list as JSON
-```
-
-`_pick_next_task` priority: in-progress first, then `ci`, then first in list
-(thread and spec are equal).
-
-### Dynamic task reordering (rescoping)
-
-When a `thread`-type task is created (PR comment feedback), `create_task()`
-triggers a background Opus call via `reorder_tasks()` to reorder and rewrite
-the pending task list based on dependency analysis.
-
-- Only fires for `thread` tasks — `spec` tasks from setup are already ordered.
-- Double-read pattern: read before the Opus call (for the prompt), then re-read
-  inside the write lock (to pick up concurrent additions). Tasks added while
-  Opus thinks are preserved as `newly_added`, not dropped.
-- Pending tasks Opus omits are marked completed (not removed). In-progress
-  tasks omitted trigger `_on_inprogress_affected` so the worker aborts and
-  picks the new next task.
-- Thread tasks completed by rescoping or modified trigger a `comment_issue`
-  notification to the original commenter via `_notify_thread_change()`.
-- Prompt builder: `rescope_prompt()` in `prompts.py`; response parser:
-  `_parse_reorder_response()` in `tasks.py`.
+When a `thread` task is created from PR-comment feedback, `create_task()`
+triggers a background `reorder_tasks()` (Opus dependency analysis) to
+reorder/rewrite the pending list. Spec tasks from setup are already ordered
+and skip this. The reorder reads the task list before AND inside the write
+lock (so concurrent additions aren't dropped); omitted pending tasks are
+marked completed; in-progress omissions abort the worker; thread changes
+notify the original commenter via `_notify_thread_change()`.
 
 ## Conventions
 
-- **Strive for ontological correctness** — not "OOP models the real
-  world" (it doesn't).  Ontological correctness here means the code,
-  classes, and fields are factored so the relations between them are
-  *mechanically* clear.  You know you've got it right when the code
-  gets simpler, smaller, clearer, shorter, easier to review and test
-  — *and* the same effect ripples through every caller that consumes
-  it.  When a parameter list is "really" one object (e.g. `repo_cfg +
-  registry + repo_name + work_dir`), that's the factoring leaking —
-  collapse it and watch downstream signatures shed parameters in
-  sympathy.  When you find a class doing two unrelated things, split
-  it; both halves and every caller get easier.  Misfactored data is
-  the seed of every coordination bug; getting the factoring right
-  makes whole categories of race vanish before they're written.
-- **100% test coverage** — CI enforced, no exceptions.
-- **ruff** — lint + format on all Python.
-- **PRs required** — branch protection on main.
-- **Keep leaf issues reviewable** — one leaf issue should produce one small,
-  coherent PR that a reviewer can hold in their head. If the work needs a
-  prerequisite contract/codegen/test-harness change, split that into its own
-  earlier issue instead of mixing it with the behavior change. Do not combine
-  broad architecture movement, generated ABI/spec changes, performance
-  optimizations, UI behavior, and cleanup in one PR unless the issue explicitly
-  exists to connect those pieces.
-- **Stop and rescope when the diff fans out** — if implementation touches more
-  than three major boundaries, or a review comment would require edits across
-  unrelated layers, pause and file/subdivide follow-up issues before continuing.
-  Parent, release, and benchmark-gate issues should mostly order or verify
-  smaller leaves; they should not silently become large implementation PRs.
-- **Pre-commit hook** — blocks commits that fail format/lint/tests. Before
-  running a test suite or build step "as a good-citizen check", compare the
-  pre-commit hook against the GHA jobs marked required for a PR to `main`. If
-  they're reasonably similar, skip the standalone invocation and just attempt
-  the commit (without `--no-verify`). More reliable than guessing at the
-  build/test steps and avoids running the suite twice.
-- **Do a dedup pass before commit** — after the feature works, do one explicit
-  pass over the touched code to consolidate any new duplication. Don't stop at
-  green tests if the diff still contains obvious new duplicate logic that can
-  be merged cleanly.
-- **No hacks** — do not compensate for backend, extraction, generator, or
-  runtime bugs in models, generated files, or tests. Fix the layer that is
-  wrong rather than adding a workaround in a neighboring layer. In particular,
-  the Rocq extraction backend must emit Python that is already formatted — do
-  not add a post-extraction `ruff format` step in the `model-format` Dockerfile
-  stage to paper over output that does not pass the format check. If extracted
-  Python fails the format check, fix the pretty-printer in `python.ml`.
-- **No compatibility shims** — when replacing a path or interface, remove the
-  old one instead of preserving a parallel legacy path.
-- **Verify upstream facts** — when a fix depends on external or standard-library
-  behavior, check the primary source instead of guessing from memory.
-- **Local entry point** — use `./fido help`. Do not call host `uv` for normal
-  checks or server startup. The launcher owns buildx image selection, UID/GID
-  mapping, credentials mounts, and stdin passthrough.
-- **No `--no-cache` with docker buildx** — never pass `--no-cache` to `./fido
-  ci`, `./fido make-rocq`, or any other buildx-backed command. The flag
-  bypasses BuildKit's layer cache and destroys rebuild time.
-- **No `@staticmethod` on behavior-bearing code** — static methods can't be
-  patched via `self` and resist constructor-DI; see OO architecture below.
-- **Prefer explicit object boundaries; keep module-level code thin and
+### Code shape
+
+- **Strive for ontological correctness** — code, classes, and fields
+  factored so the relations between them are *mechanically* clear. You
+  know you've got it right when the code gets simpler, smaller, shorter
+  — AND the same effect ripples through every caller. When a parameter
+  list is "really" one object (e.g. `repo_cfg + registry + repo_name +
+  work_dir`), that's the factoring leaking — collapse it and watch
+  downstream signatures shed parameters in sympathy. Misfactored data
+  is the seed of every coordination bug.
+- **No `@staticmethod` on behavior-bearing code** — resists `self`-patching
+  and constructor-DI.
+- **Prefer explicit object boundaries; module-level code stays thin and
   delegated** — new behavior lives on injected objects, not free functions.
-- **Python target: 3.14t only** — free-threaded, no GIL. Don't add `from
-  __future__` imports or conditional code for older Python versions.
-- **Thread safety (Python 3.14t, free-threaded)** — do **not** rely on the GIL
-  for atomicity. Every shared mutable state (dicts, sets, lists, counters,
-  attribute mutations observed from other threads) must be guarded by an
-  explicit lock, or use a primitive that documents its own thread-safe
-  contract (`threading.Event`, `queue.Queue`, `threading.local`). In
-  particular, `dict.setdefault`, attribute reads, and integer increments are
-  **not** safe across threads without a lock. When in doubt, hold the lock.
-- **No `monkeypatch.setattr`** — banned and CI-enforced
-  (`tools/check_no_monkeypatch_setattr.py`). `monkeypatch.setattr` is
-  patching under another name; it reaches into module internals the same way
-  `unittest.mock.patch` does. Use constructor-DI and typed collaborators
-  instead (see #1773). The 14 existing dirty files carry temporary exemptions
-  and should be migrated over time.
-- **No `MagicMock`** — banned and CI-enforced via ruff TID251
-  (`pyproject.ruff.toml`). `MagicMock` is a generic dynamic mock — it hides
-  ownership and makes constructor-DI migrations look complete while tests still
-  depend on untyped behavior. Use hand-rolled mock classes, fakes, spies,
-  stubs, or typed collaborators instead (see #1773). The 29 existing dirty
-  files carry temporary `TID251` per-file-ignores and should be migrated over
-  time.
+- **No hacks** — fix the layer that's wrong, don't paper over its bug in a
+  neighboring layer. In particular: if Rocq extraction produces
+  unformatted Python, fix `python.ml`, don't add a post-extraction
+  `ruff format` step.
+- **No compatibility shims** — replacing a path or interface means removing
+  the old one; no parallel legacy paths.
+- **Verify upstream facts** — when a fix depends on standard-library or
+  external behavior, check the primary source. Don't guess from memory.
+- **Dedup pass before commit** — after green tests, walk the diff once for
+  obvious new duplication to consolidate.
 
-## OO + constructor-DI architecture
+### Scope discipline
 
-All behavior lives on classes with dependencies injected through the
-constructor. Module-level code is restricted to:
+- **One leaf issue → one small coherent PR** a reviewer can hold in their
+  head. Prerequisite contract/codegen/test-harness changes go in their own
+  earlier issue, not mixed with the behavior change. Parent/release/
+  benchmark-gate issues should mostly order/verify leaves, not silently
+  become large implementation PRs.
+- **Stop and rescope when the diff fans out** — touches >3 boundaries, or
+  a review comment would require edits across unrelated layers → pause and
+  file/subdivide follow-ups before continuing.
 
-- **Constants** and pure data (no side effects, no I/O)
-- **Value-only helpers** — pure functions that transform data and take no
-  collaborators (e.g. `parse_event_type(header)`)
-- **Dataclasses, enums, exceptions, Protocols** — type definitions only
-- **Thin `run()` / `main()` composition roots** — the *only* places that call
-  constructors with real collaborators and then delegate
+### Tooling
 
-A composition root assembles real objects in one place, then delegates:
+- **`./fido ci` is the commit path.** The pre-commit hook runs the same
+  thing as CI. Before manually running tests "as a good-citizen check",
+  just attempt the commit (no `--no-verify`) — more reliable and avoids
+  running the suite twice.
+- **100% test coverage** — CI enforced.
+- **ruff** — lint + format on all Python.
+- **PRs required** — branch protection on `main`.
+- **No `--no-cache` with docker buildx** — bypasses BuildKit's layer cache
+  and destroys rebuild time.
 
-```python
-def run(work_dir: Path) -> int:
-    return Worker(work_dir, GitHub()).run()  # assembles, then delegates
-```
+### Python runtime
 
-Collaborators are accepted via `__init__`, not instantiated internally. Tests
-construct `Worker(tmp_path, mock_gh)` directly instead of patching
-`fido.worker.GitHub`.
+- **Python target: 3.14t only** — free-threaded, no GIL. Don't add
+  `from __future__` imports or back-compat shims.
+- **Don't rely on the GIL for atomicity.** Every shared mutable state
+  (dicts, sets, lists, counters, observed-from-other-threads attributes)
+  must be guarded by an explicit lock or use a primitive that documents
+  thread-safety (`threading.Event`, `queue.Queue`, `threading.local`).
+  `dict.setdefault`, attribute reads, and integer increments are NOT safe.
 
-### Migration smells
+### Tests
 
-These patterns signal incomplete migration to constructor-DI. Don't introduce
-new instances; when you touch code that contains them, finish the job.
+- **No `monkeypatch.setattr`** — CI-enforced
+  (`tools/check_no_monkeypatch_setattr.py`). Reaches into module internals
+  the same way `unittest.mock.patch` does — use constructor-DI and typed
+  collaborators instead (#1773). 14 dirty files have temporary exemptions;
+  migrate over time.
+- **No `MagicMock`** — CI-enforced via ruff TID251. Generic dynamic mocks
+  hide ownership and let constructor-DI migrations look done while tests
+  still depend on untyped behavior. Use hand-rolled fakes / spies / stubs.
+  29 dirty files have temporary `TID251` ignores; migrate over time.
 
-- **Callable-slot DI** — attributes wired up as default-argument overrides
-  (`def __init__(self, ..., _run=subprocess.run): self._run = _run`) instead
-  of typed injected collaborators. Examples: `_run`, `_print_prompt`,
-  `_start`, `_fn_*` parameters on `Worker`, `Events`, `Tasks`.
+## OO + constructor-DI
+
+All behavior lives on classes with dependencies injected via `__init__`.
+Module-level code is restricted to: constants, value-only pure helpers,
+type definitions (dataclasses/enums/exceptions/Protocols), and thin
+`run()`/`main()` composition roots that assemble real collaborators and
+then delegate. Tests construct `Worker(tmp_path, mock_gh)` directly
+instead of patching `fido.worker.GitHub`.
+
+### Migration smells (finish the job when you touch them)
+
+- **Callable-slot DI** — default-argument overrides like
+  `_run=subprocess.run` instead of typed injected collaborators
+  (`_run`, `_print_prompt`, `_start`, `_fn_*` on `Worker`/`Events`/`Tasks`).
 - **Patch-heavy tests** — `@patch("fido.worker.subprocess.run")` decorators
-  override module-level names from outside. Replace with a hand-rolled fake
-  or typed collaborator passed in at construction time.
+  overriding module-level names from outside. Replace with hand-rolled
+  fakes passed at construction time.
 
 ## Coordination ethos
 
-The goal is **smaller coordination code with fewer timing branches** — not
-abstraction for its own sake. Every rule below exists because it eliminates a
-class of race.
+Goal: **smaller coordination code with fewer timing branches** — not
+abstraction for its own sake. Every rule below eliminates a class of race.
 
 ### Single-owner mutable state
 
-One object owns a mutable bucket. Other objects send commands to it; they
-never reach in and mutate its internals directly. The owner serializes all
-mutations through its own lock — callers never acquire the owner's lock
-themselves.
+One object owns a mutable bucket. Others send commands; they never reach
+in and mutate directly. The owner serializes all mutations through its own
+lock — callers never acquire the owner's lock themselves.
 
-```python
-class WorkerRegistry:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._workers: dict[str, Worker] = {}
-
-    def register(self, repo: str, worker: Worker) -> None:
-        with self._lock:
-            self._workers[repo] = worker
-```
-
-**Reviewer signal:** if you see a lock acquired *outside* the class that owns
-the data it protects, that's a reach-through. Push the lock inward.
+**Reviewer signal:** lock acquired *outside* the class that owns the data
+it protects = reach-through. Push the lock inward.
 
 ### Command translation at entry boundaries
 
-Webhook events and CLI inputs are translated into typed commands or tasks at
-the boundary. After that point, internal objects coordinate through those
-commands, not through ambient state mutations scattered across the handler.
+Webhook events and CLI inputs translate into typed commands/tasks at the
+boundary. Internal objects coordinate through those commands, not through
+ambient state mutations scattered across handlers. Translation is pure;
+the dispatcher decides what changes.
 
-```python
-def handle_webhook(payload: dict) -> None:
-    event = parse_event(payload)          # typed value, no side effects
-    self.dispatcher.dispatch(event)       # owner decides what to mutate
-```
-
-The translation layer is pure. The dispatcher is the single owner that decides
-what changes.
-
-**Reviewer signal:** if a webhook handler or CLI entry point mutates a dict,
-list, or counter that lives outside its own scope, that's an ambient state
-mutation. Translate first, dispatch second.
+**Reviewer signal:** a webhook handler or CLI entry mutating a dict/list/
+counter outside its own scope = ambient state mutation. Translate first,
+dispatch second.
 
 ### Durable outbox / store before acting
 
-When an intent must survive a crash or restart, write it to the durable store
-*before* acting on it. `tasks.json` with `flock` is the canonical example: a
-task is appended to the file (under lock) before the worker starts executing
-it. If Fido crashes mid-task, the task is still in the list on restart.
+Intents that must survive a crash get written to the durable store
+*before* the action fires. `tasks.json` with `flock` is canonical: append
+the task under lock, THEN start work. In-memory coordination handles the
+current run; the durable store handles across runs. Don't conflate them.
 
-In-memory coordination (queues, events, locks) handles the *current run*. The
-durable store handles *across runs*. Don't conflate them.
+**Reviewer signal:** action taken before its `tasks.json` record is
+written = wrong order.
 
-**Reviewer signal:** if an action is taken before the corresponding record is
-written to `tasks.json` (or another durable store), the order is wrong.
+### Rocq-modeled coordination boundary (#710)
 
-### Rocq-modeled coordination boundary
+Webhooks, CLI commands, provider callbacks, CI updates, and rescope results
+translate into typed commands/intents. ONE Rocq-modeled scheduler/reducer
+transition decides the durable state mutation; only after that commit may
+Python run outbox effects (replies, reactions, wakeups, preempt signals,
+pushes, task execution).
 
-Long-term coordination work under #710 must make the scheduler/reducer
-boundary authoritative. Webhooks, CLI commands, provider callbacks, CI updates,
-and rescope results should translate into typed commands or intents; one
-Rocq-modeled scheduler/reducer transition decides the durable state mutation;
-only after that commit may Python run outbox effects such as replies,
-reactions, wakeups, preempt signals, pushes, or task execution.
+Side-channel state outside the modeled transition defeats the proof. Avoid
+ad-hoc counters, background flags, worker-local snapshots, or direct lock
+choreography as sources of truth. If a mutation can change worker
+admission, command ordering, task status, provider-session ownership, CI
+failure state, rescope outcome, dedupe, or outbox visibility, it belongs
+behind the modeled transition with a runtime oracle.
 
-Rocq does not help if Python keeps side-channel coordination state outside the
-modeled transition. Avoid ad hoc counters, background flags, worker-local
-snapshots, or direct lock choreography as sources of truth. If a mutation can
-change worker admission, command ordering, task status, provider-session
-ownership, CI failure state, rescope outcome, dedupe, or outbox visibility, it
-belongs behind the modeled transition boundary with a runtime oracle or
-extracted reducer enforcing it.
-
-**Reviewer signal:** if coordination code mutates authoritative state without
-calling the scheduler/reducer transition, the proof is only covering the
+**Reviewer signal:** coordination code mutating authoritative state
+without calling the scheduler/reducer transition = the proof covers the
 clean model while races remain in the glue.
 
 ### When to write Rocq vs. plain Python
 
-All NEW coordination logic exists first and only in Rocq.  The extracted
+**All NEW coordination logic exists first and only in Rocq.** Extracted
 Python is the implementation; the Python adapter is data-shape glue
-(strings ↔ positives, dicts ↔ lists), not a parallel reimplementation.
-Logic that classifies, decides, or routes — including helper functions
-that distinguish op kinds, detect merge/split sequences, or apply
-precedence rules — belongs in the model, not in the adapter.
+(strings ↔ positives, dicts ↔ lists), not parallel reimplementation. Logic
+that classifies, decides, or routes — including helpers that distinguish
+op kinds, detect merge/split sequences, or apply precedence — belongs in
+the model.
 
 Existing oracles (where Python was tracked against a model via runtime
-divergence checks) have long proven equivalent.  The handwritten Python
-in those pairs should be removed; the extracted code is now the sole
-implementation.  An oracle whose Python sibling never gets deleted is
-half-done work.
+divergence) have long proven equivalent. The handwritten Python in those
+pairs should be deleted; an oracle whose Python sibling never gets
+deleted is half-done work.
 
-New oracles are a code smell **unless** they are being used to replace
-existing Python in the same change (or a tightly-scoped follow-up that
-deletes the Python).  They should not be long-lived as "model + parallel
-handwritten Python" pairs — that doubles the surface area, lets the two
-layers drift, and provides no oracle check that catches the drift.
-
-Use Rocq for:
-
-- Net-new coordination logic that has nontrivial structure (precedence
-  rules, multi-step decisions, ordering invariants).  Write it in the
-  model first; the extracted Python is what production calls.
-- Replacing existing Python rule sets — the model owns the rule, the
-  Python tower is deleted in the same change.
-- Properties (acyclicity, termination, totality, exhaustive case
-  coverage) that are natural in a model but awkward as tests.
+**New oracles are a code smell** unless they replace existing Python in the
+same change (or a tightly-scoped follow-up that deletes it). Long-lived
+"model + parallel handwritten Python" pairs double the surface area, let
+the two layers drift, and provide no oracle check that catches the drift.
 
 Default to plain Python only when:
+- Pure data-shape adapter (string ↔ int, dict ↔ list, parsing) with no
+  rule logic.
+- Rule is 1–2 lines with no foreseeable extension surface.
 
-- The work is pure data-shape adapter (string ↔ int mapping, dict ↔
-  list reshape, parsing/serialisation) with no rule logic.
-- The rule is one or two lines and has no foreseeable extension surface.
-
-**Reviewer signals:**
-
-- A PR that adds a brand-new Rocq model **and** keeps the handwritten
-  Python parallel to it (no deletion) — the oracle is half-done, the
-  Python should go.
-- A Python helper that classifies ops, decides outcomes, or applies
-  precedence — that's logic; it belongs in the model, not the adapter.
-- An existing oracle whose Python sibling hasn't been deleted long after
-  the runtime divergence check stopped firing — schedule the removal.
+**Reviewer signals:** brand-new Rocq model AND parallel handwritten Python
+(no deletion); Python helper that classifies/decides/applies precedence
+in the adapter; existing oracle whose Python sibling hasn't been deleted
+long after the divergence check stopped firing.
 
 ### FidoState is a SCADA display snapshot — not a data source
 
-`FidoState` and its `AtomicReader` face are exclusively for the status
-serialisation path (`/status.json` and `./fido status`).  No other code may
+`FidoState` and its `AtomicReader` face are EXCLUSIVELY for the status
+serialisation path (`/status.json` and `./fido status`). No other code may
 hold an `AtomicReader[FidoState]` or read from the snapshot.
 
-The reasoning: `FidoState` is a display projection of mutable class state.
-Classes own the authoritative mutable state and publish *copies* of the subset
-needed for display — the snapshot is not the source of truth.  If app logic
-reads from the snapshot, every `status.json` enhancement becomes a
-cross-cutting change instead of a localised one.
+`FidoState` is a display projection of mutable class state. Classes own the
+authoritative state and publish *copies* of the display subset. Reading
+app logic from the snapshot locks in the schema and makes every
+`status.json` enhancement a cross-cutting change.
 
-Concretely:
-- **`WorkerRegistry` holds only `AtomicUpdater[FidoState]`** — it writes new
-  values into the cell but never reads back.  The composition root (in
-  `server.py`) creates both faces via `create_fido_atomic()`, passes the updater
-  to `WorkerRegistry` (and `RateLimitMonitor`), and keeps the reader in the
-  composition root for the status path only.
-- **Thread references are never stored in `FidoState`** — `WorkerThread` is
-  mutable; a snapshot reader could reach through it and observe partial
-  mutations.  Thread lookups for command paths (`stop`, `wake`, `abort_task`,
-  …) go through a plain `_threads` dict on `WorkerRegistry`, not through the
-  snapshot.
+Concretely: `WorkerRegistry` holds only `AtomicUpdater[FidoState]` (writes
+new values, never reads back); thread references (mutable `WorkerThread`s)
+NEVER appear inside `FidoState` because a snapshot reader could observe
+partial mutations.
 
-**Reviewer signal:** if any class other than the status serialisation path
-holds or accepts an `AtomicReader[FidoState]`, or if any mutable object
-appears inside `FidoState`, that is a violation of this invariant.
+**Reviewer signal:** any class besides the status serialisation path
+holding `AtomicReader[FidoState]`, or any mutable object inside
+`FidoState`, violates this invariant.
 
 ### Patterns to reject in review
 
 | Pattern | Why it's wrong |
 |---------|----------------|
-| Module-level mutable dict/set/list used as coordination state | Any thread can mutate it; ownership is unclear; lock discipline is impossible to enforce |
-| Long-lived callable-slot seams (`_fn_start`, `_run=subprocess.run`) used to inject cross-thread callbacks | Callable slots hide ownership; the real fix is a typed collaborator with a clear owner |
-| Cross-thread reach-through (thread A reads/writes thread B's `_private` attribute directly) | Bypasses the owner's lock; creates invisible coupling; makes reasoning about state impossible |
-| Ambient global set/cleared across requests (`request_context`, `current_repo`) | Thread-local globals are invisible dependencies; translate at the boundary instead |
-| Any class other than the status serialisation path holding `AtomicReader[FidoState]` | The snapshot is a display projection, not a data source; app code that reads it locks in the schema and makes status enhancements cross-cutting |
-| Mutable object (e.g. `WorkerThread`) stored inside `FidoState` | A snapshot reader can reach through the mutable ref and observe partial mutations, breaking the immutability guarantee |
+| Module-level mutable dict/set/list as coordination state | Any thread can mutate it; ownership unclear; lock discipline unenforceable |
+| Long-lived callable-slot seams (`_fn_start`, `_run=subprocess.run`) for cross-thread callbacks | Callable slots hide ownership; fix is a typed collaborator with a clear owner |
+| Cross-thread reach-through (thread A reads/writes thread B's `_private`) | Bypasses owner's lock; invisible coupling; reasoning impossible |
+| Ambient global set/cleared across requests (`request_context`, `current_repo`) | Thread-local globals are invisible dependencies; translate at the boundary |
+| Non-status-path class holding `AtomicReader[FidoState]` | Snapshot is a display projection, not a data source |
+| Mutable object (e.g. `WorkerThread`) inside `FidoState` | Snapshot reader can observe partial mutations |
 
 ## Fail-fast / fail-closed
 
-Core runtime paths — webhook handler, worker loop, task engine, self-restart —
-must fail loudly and early. Silent recovery masks real bugs and turns
-transient errors into permanent state corruption.
+Core runtime paths — webhook handler, worker loop, task engine,
+self-restart — must fail loudly and early. Silent recovery masks bugs and
+turns transient errors into permanent state corruption.
 
-- **No broad catch-log-continue in authoritative runner paths.** A bare
-  `except Exception: log(...)` that lets the loop continue is almost always
-  wrong. If an exception means the current task or request is unrecoverable,
-  propagate it (or abort the task) rather than swallowing it.
-- **No synthetic success from real failures.** Don't convert a failure into an
-  empty string, `None`, a default value, or a fake-success return so the caller
-  never finds out. The caller needs to know.
+- **No broad catch-log-continue.** A bare `except Exception: log(...)` that
+  lets the loop continue is almost always wrong. Propagate or abort the
+  task.
+- **No synthetic success from real failures.** Don't convert failures into
+  empty strings / `None` / defaults / fake-success returns the caller
+  can't see.
 - **Subprocess failures must be explicit.** Always pass `check=True` to
-  `subprocess.run` / `check_output`, or check `returncode` explicitly and
-  raise. Ignoring a non-zero exit is the subprocess equivalent of
-  catch-log-continue.
-- **No `.get()` defaults for required keys.** If an external payload (GitHub
-  webhook JSON, Claude response JSON, tasks.json) is required to contain a
-  key, index it directly (`payload["action"]`) rather than `.get("action",
-  "")`. A `KeyError` is much easier to debug than a downstream `NoneType` error
-  or a silently skipped handler.
-- **Fail closed on startup precondition failures.** If Fido cannot verify a
-  required precondition at startup (missing secret file, bad config,
-  unreachable repo), exit rather than continue in a degraded state. A Fido
-  process that starts without a valid HMAC secret will silently accept forged
-  webhooks.
+  `subprocess.run`/`check_output`, or check `returncode` and raise.
+  Ignoring a non-zero exit is catch-log-continue in disguise.
+- **No `.get()` defaults for required keys.** External payloads (GitHub
+  webhook JSON, Claude response JSON, tasks.json) required to contain a
+  key get indexed directly (`payload["action"]`). A `KeyError` is much
+  easier to debug than a downstream `NoneType`.
+- **Fail closed on startup precondition failures.** Missing secret file,
+  bad config, unreachable repo → exit. A Fido that starts without a valid
+  HMAC secret silently accepts forged webhooks.
