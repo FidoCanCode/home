@@ -6332,6 +6332,107 @@ class TestSkipMarkerEndToEnd:
         titles = [t["title"] for t in result if t.get("status") == "pending"]
         assert "New" in titles
 
+    def test_task_creation_critic_exempts_skipped_marker_items(
+        self, tmp_path: Path
+    ) -> None:
+        """codex r3293399804 on PR #1932: HOL-6 synthetic SKIPPED marker
+        items (from ``no_op`` verdicts) are deterministic lineage
+        records, NOT Opus-proposed new work.  Sending them through the
+        critic risks ``duplicate_of`` or ``multi`` verdicts that drop
+        the marker — reintroducing the silent-drop pattern HOL-6
+        exists to close."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_critics
+        from fido.types import TaskStatus
+
+        critic_calls: list[dict] = []
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            critic_calls.append(proposed)
+            # Even if the critic WERE invoked, return a duplicate
+            # verdict — verifies that the exemption short-circuits
+            # before the critic gets called.
+            return TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id="any-id",
+            )
+
+        skipped_marker = {
+            "id": None,
+            "title": "Skipped: covered already",
+            "description": "no_op verdict marker",
+            "type": "spec",
+            "status": str(TaskStatus.SKIPPED),
+            "contributing_intents": [42],
+        }
+        items = [skipped_marker]
+        out = _apply_task_creation_critics(items, [], critic_fn=critic)
+        assert out == items
+        assert critic_calls == []
+
+    def test_task_creation_critic_ignores_hallucinated_duplicate_id(
+        self, tmp_path: Path
+    ) -> None:
+        """codex r3293399805 on PR #1932: ``duplicate_of_id`` comes from
+        model output and can be hallucinated.  Don't delete the new
+        task when the critic names a target id that isn't in the
+        pending queue — fail open and keep the new work."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_critics
+
+        existing = self._add(tmp_path, "Pre-existing")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "Legitimate new work",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id="not-in-queue-hallucination",
+            )
+
+        out = _apply_task_creation_critics(items, [existing], critic_fn=critic)
+        # Existing kept, new task NOT dropped despite the critic's
+        # duplicate verdict — hallucinated target id failed safe.
+        titles = [it.get("title") for it in out]
+        assert "Legitimate new work" in titles
+
+    def test_task_creation_critic_ignores_hallucinated_supersedes_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Same protection on the supersedes axis."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_critics
+
+        existing = self._add(tmp_path, "Pre-existing")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "Legitimate new work",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict(
+                relationship="supersedes",
+                supersedes_id="not-in-queue-hallucination",
+            )
+
+        out = _apply_task_creation_critics(items, [existing], critic_fn=critic)
+        titles = [it.get("title") for it in out]
+        assert "Legitimate new work" in titles
+
     def test_split_child_invariants_land_on_materialised_children(
         self, tmp_path: Path
     ) -> None:

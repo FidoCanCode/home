@@ -73,10 +73,12 @@ def _make_prompts(
     system: str = "sys",
     user: str = "user",
     followup_system: str = "followup-sys",
+    critic_system: str = "critic-sys",
 ) -> MagicMock:
     prompts = MagicMock()
     prompts.synthesis_system_prompt.return_value = system
     prompts.synthesis_followup_system_prompt.return_value = followup_system
+    prompts.critic_system_prompt.return_value = critic_system
     prompts.synthesis_prompt.return_value = user
     return prompts
 
@@ -760,34 +762,47 @@ class TestCallSynthesisVerificationTurn:
         goes off running unrelated tools (observed on PR #1842, 84-second
         turn before the reply landed).  The follow-up variant strips the
         JSON-only directive so ``startswith("no")`` actually works
-        (codex P1)."""
+        (codex P1).
+
+        Call order is now synth → critic → verify after HOL-15; verify
+        sits at index 2."""
         raw = _make_raw(reply_text="Looks fine.", change_request=None)
-        agent = _make_agent([raw, "Yes"])
+        agent = _make_agent([raw, _CRITIC_PASS, "Yes"])
         prompts = _make_prompts(
-            system="SYNTHESIS_JSON_ONLY", followup_system="SYNTHESIS_FOLLOWUP"
+            system="SYNTHESIS_JSON_ONLY",
+            followup_system="SYNTHESIS_FOLLOWUP",
+            critic_system="SYNTHESIS_CRITIC",
         )
 
         call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
 
-        # First turn: main synthesis with the JSON-only system prompt.
+        # Idx 0: main synthesis with the JSON-only system prompt.
         _, synth_kwargs = agent.run_turn.call_args_list[0]
         assert synth_kwargs.get("system_prompt") == "SYNTHESIS_JSON_ONLY"
-        # Second turn: verify with the follow-up system prompt.
-        _, verify_kwargs = agent.run_turn.call_args_list[1]
+        # Idx 1: HOL-15 critic with its own JSON-capable prompt.
+        _, critic_kwargs = agent.run_turn.call_args_list[1]
+        assert critic_kwargs.get("system_prompt") == "SYNTHESIS_CRITIC"
+        # Idx 2: legacy verify with the plain-text follow-up prompt.
+        _, verify_kwargs = agent.run_turn.call_args_list[2]
         assert verify_kwargs.get("system_prompt") == "SYNTHESIS_FOLLOWUP"
 
     def test_derive_turn_carries_followup_system_prompt(self) -> None:
         """#1850: the derive turn (after a No verify) must also carry the
-        follow-up synthesis system prompt — same plain-text framing."""
+        follow-up synthesis system prompt — same plain-text framing.
+
+        Call order is synth → critic → verify (No) → derive; derive
+        sits at index 3 after HOL-15."""
         raw = _make_raw(reply_text="Looks fine.", change_request=None)
-        agent = _make_agent([raw, "No", "Add missing tests"])
+        agent = _make_agent([raw, _CRITIC_PASS, "No", "Add missing tests"])
         prompts = _make_prompts(
-            system="SYNTHESIS_JSON_ONLY", followup_system="SYNTHESIS_FOLLOWUP"
+            system="SYNTHESIS_JSON_ONLY",
+            followup_system="SYNTHESIS_FOLLOWUP",
+            critic_system="SYNTHESIS_CRITIC",
         )
 
         call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
 
-        _, derive_kwargs = agent.run_turn.call_args_list[2]
+        _, derive_kwargs = agent.run_turn.call_args_list[3]
         assert derive_kwargs.get("system_prompt") == "SYNTHESIS_FOLLOWUP"
 
     def test_verify_turn_exception_returns_original_response(self) -> None:
@@ -1026,16 +1041,17 @@ class TestIntentCoverageCritic:
         # synthesis + critic only — no retry, no verify (change_request set).
         assert agent.run_turn.call_count == 2
 
-    def test_critic_uses_followup_system_prompt(self) -> None:
-        """Critic turn must run with the synthesis follow-up system
-        prompt (the plain-text-friendly variant), not the main
-        JSON-only one — same anchoring rule as the legacy verify
-        turn (#1850)."""
+    def test_critic_uses_critic_system_prompt(self) -> None:
+        """Critic turn must run with the JSON-capable critic system
+        prompt, NOT the follow-up plain-text prompt — the latter tells
+        the model "no JSON", which silently disables the gate (codex
+        r3293399801 on PR #1932)."""
         raw = _make_raw(reply_text="Done.", change_request="Fix it")
         agent = _make_agent([raw, _CRITIC_PASS])
         prompts = _make_prompts(
             system="MAIN-SYS",
             followup_system="FOLLOWUP-SYS",
+            critic_system="CRITIC-SYS",
         )
 
         call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
@@ -1043,9 +1059,9 @@ class TestIntentCoverageCritic:
         # First call: main synthesis with the main system prompt.
         _, synth_kw = agent.run_turn.call_args_list[0]
         assert synth_kw["system_prompt"] == "MAIN-SYS"
-        # Second call: critic with the followup system prompt.
+        # Second call: critic with the JSON-capable critic prompt.
         _, critic_kw = agent.run_turn.call_args_list[1]
-        assert critic_kw["system_prompt"] == "FOLLOWUP-SYS"
+        assert critic_kw["system_prompt"] == "CRITIC-SYS"
 
 
 # ---------------------------------------------------------------------------

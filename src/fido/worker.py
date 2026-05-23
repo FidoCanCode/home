@@ -3385,9 +3385,11 @@ class Worker:
             diff=diff,
             agent=self._provider_agent,
             prompts=prompts,
-            followup_system_prompt=prompts.synthesis_followup_system_prompt(
-                issue=None, pr=None
-            ),
+            # JSON-capable critic system prompt — using
+            # synthesis_followup_system_prompt would tell the model
+            # "no JSON" which silently disables the gate
+            # (codex r3293399801/r3293399806 on PR #1932).
+            critic_system_prompt=prompts.critic_system_prompt(issue=None, pr=None),
         )
 
     def _handle_task_completion_critic_failure(

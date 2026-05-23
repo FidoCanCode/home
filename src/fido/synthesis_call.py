@@ -305,7 +305,7 @@ def _run_intent_coverage_critic(
     comment_body: str,
     agent: ProviderAgent,
     prompts: Prompts,
-    followup_system_prompt: str,
+    critic_system_prompt: str,
 ) -> CriticVerdict:
     """Ask the model whether ``response`` faithfully covers ``comment_body``.
 
@@ -316,6 +316,12 @@ def _run_intent_coverage_critic(
     not the only one, so a flaky critic turn must not block a valid
     response from shipping.  ``ContextOverflowError`` / ``SessionLeakError``
     still propagate per project convention.
+
+    ``critic_system_prompt`` must be the JSON-capable variant
+    (:meth:`fido.prompts.Prompts.critic_system_prompt`) — passing the
+    plain-text follow-up prompt makes the model emit non-envelope
+    responses that ``extract_json_objects`` can't see, silently failing
+    open (codex r3293399801 on PR #1932).
     """
     prompt = prompts.intent_coverage_critic_prompt(
         comment_body=comment_body,
@@ -326,7 +332,7 @@ def _run_intent_coverage_critic(
         raw = agent.run_turn(
             prompt,
             allowed_tools=READ_ONLY_ALLOWED_TOOLS,
-            system_prompt=followup_system_prompt,
+            system_prompt=critic_system_prompt,
             retry_on_preempt=True,
         )
     except ContextOverflowError, SessionLeakError:
@@ -525,6 +531,12 @@ def call_synthesis(
     followup_system_prompt = prompts.synthesis_followup_system_prompt(
         issue=issue, pr=pr
     )
+    # HOL-15 critic needs a JSON-capable system prompt — the followup
+    # prompt above explicitly forbids JSON (it's for plain-text Yes/No
+    # turns), so wiring the critic through it makes the model emit
+    # non-envelope responses that ``extract_json_objects`` can't see,
+    # silently failing open (codex r3293399801 on PR #1932).
+    critic_system_prompt = prompts.critic_system_prompt(issue=issue, pr=pr)
     base_user_prompt = prompts.synthesis_prompt(
         comment_body, is_bot=is_bot, context=context
     )
@@ -586,7 +598,7 @@ def call_synthesis(
             comment_body=comment_body,
             agent=agent,
             prompts=prompts,
-            followup_system_prompt=followup_system_prompt,
+            critic_system_prompt=critic_system_prompt,
         )
         if not verdict.passed:
             last_error = ValueError(f"intent-coverage critic: {verdict.gap}")

@@ -945,6 +945,34 @@ class Prompts:
             "as asked: no JSON, no markdown, no preamble."
         )
 
+    def critic_system_prompt(
+        self,
+        issue: ActiveIssue | None = None,
+        pr: ActivePR | None = None,
+    ) -> str:
+        """Return the JSON-capable system prompt for Layer 2 critic turns
+        (HOL-15..HOL-19 / #1894).
+
+        Shares the persona and active-work framing with the main
+        synthesis turn so the agent stays anchored, but anti-instructs
+        the plain-text directive that
+        :meth:`synthesis_followup_system_prompt` carries — every
+        critic emits a JSON verdict envelope and the followup prompt's
+        "no JSON" rule directly contradicts that (codex r3293399801 /
+        r3293399806 on PR #1932: critics that used the followup prompt
+        silently failed open because the model honored "no JSON" and
+        the parser found no envelope).
+        """
+        return (
+            f"{self._synthesis_base_system_prompt(issue, pr)}"
+            "You are in a Layer 2 critic turn — a brief verdict on "
+            "an LLM emission (intent coverage, task creation, task "
+            "completion, reply prose, or insight filing).  Answer "
+            "with exactly ONE JSON object on one line matching the "
+            "envelope the user prompt names — no preamble, no markdown "
+            "fence, no trailing text."
+        )
+
     def _synthesis_base_system_prompt(
         self,
         issue: ActiveIssue | None,

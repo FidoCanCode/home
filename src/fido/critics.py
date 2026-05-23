@@ -289,7 +289,7 @@ def run_task_completion_critic(
     *,
     agent: ProviderAgent,
     prompts: Prompts,
-    followup_system_prompt: str,
+    critic_system_prompt: str,
 ) -> TaskCompletionVerdict:
     """Ask Opus to verdict the committed diff against the task invariant.
 
@@ -316,7 +316,7 @@ def run_task_completion_critic(
         raw = agent.run_turn(
             prompt,
             allowed_tools=READ_ONLY_ALLOWED_TOOLS,
-            system_prompt=followup_system_prompt,
+            system_prompt=critic_system_prompt,
             retry_on_preempt=True,
         )
     except ContextOverflowError, SessionLeakError:
@@ -350,7 +350,7 @@ def run_task_creation_critic(
     *,
     agent: ProviderAgent,
     prompts: Prompts,
-    followup_system_prompt: str,
+    critic_system_prompt: str,
 ) -> TaskCreationVerdict:
     """Ask Opus to verdict the proposed ``new`` task against the queue.
 
@@ -360,6 +360,11 @@ def run_task_creation_critic(
     task through unchanged, matching the legacy no-critic behaviour.
     ``ContextOverflowError`` / ``SessionLeakError`` still propagate per
     project convention.
+
+    ``critic_system_prompt`` must be the JSON-capable variant
+    (:meth:`fido.prompts.Prompts.critic_system_prompt`) — codex
+    r3293399806 on PR #1932 flagged that wiring the follow-up text-only
+    prompt here silently disabled the gate.
     """
     prompt = prompts.task_creation_critic_prompt(
         proposed_task=proposed_task,
@@ -369,7 +374,7 @@ def run_task_creation_critic(
         raw = agent.run_turn(
             prompt,
             allowed_tools=READ_ONLY_ALLOWED_TOOLS,
-            system_prompt=followup_system_prompt,
+            system_prompt=critic_system_prompt,
             retry_on_preempt=True,
         )
     except ContextOverflowError, SessionLeakError:

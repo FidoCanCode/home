@@ -374,7 +374,7 @@ class TestRunTaskCreationCritic:
             self._queue(),
             agent=agent,
             prompts=prompts,
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
 
         assert verdict.relationship == "distinct"
@@ -396,7 +396,7 @@ class TestRunTaskCreationCritic:
             self._queue(),
             agent=_FakeAgent(run_turn_responses=[raw]),
             prompts=_FakePrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert verdict.drops_proposal
         assert verdict.duplicate_of_id == "t-1"
@@ -416,7 +416,7 @@ class TestRunTaskCreationCritic:
             self._queue(),
             agent=_FakeAgent(run_turn_responses=[raw]),
             prompts=_FakePrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert verdict.drops_proposal
         assert verdict.supersedes_id == "t-1"
@@ -446,7 +446,7 @@ class TestRunTaskCreationCritic:
             self._queue(),
             agent=_FakeAgent(run_turn_responses=[raw]),
             prompts=_FakePrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert verdict.fans_out
         assert len(verdict.proposed_splits) == 2
@@ -459,7 +459,7 @@ class TestRunTaskCreationCritic:
             self._queue(),
             agent=agent,
             prompts=_FakePrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert verdict.relationship == "distinct"
         assert verdict.scope == "single"
@@ -470,7 +470,7 @@ class TestRunTaskCreationCritic:
             self._queue(),
             agent=_FakeAgent(run_turn_responses=["not json"]),
             prompts=_FakePrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert verdict.relationship == "distinct"
 
@@ -489,7 +489,7 @@ class TestRunTaskCreationCritic:
             self._queue(),
             agent=_FakeAgent(run_turn_responses=[raw]),
             prompts=_FakePrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert verdict.relationship == "duplicate_of"
         assert verdict.duplicate_of_id == "t-1"
@@ -501,11 +501,11 @@ class TestRunTaskCreationCritic:
             self._queue(),
             agent=_FakeAgent(run_turn_responses=[raw]),
             prompts=_FakePrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert verdict.relationship == "distinct"
 
-    def test_uses_followup_system_prompt(self) -> None:
+    def test_uses_critic_system_prompt(self) -> None:
         agent = _FakeAgent(
             run_turn_responses=[
                 '{"relationship": "distinct", "scope": "single", "proposed_splits": []}'
@@ -516,7 +516,7 @@ class TestRunTaskCreationCritic:
             self._queue(),
             agent=agent,
             prompts=_FakePrompts(),
-            followup_system_prompt="FOLLOWUP",
+            critic_system_prompt="FOLLOWUP",
         )
         assert len(agent.calls) == 1
         assert agent.calls[0].kwargs["system_prompt"] == "FOLLOWUP"
@@ -531,7 +531,7 @@ class TestRunTaskCreationCritic:
                 self._queue(),
                 agent=agent,
                 prompts=_FakePrompts(),
-                followup_system_prompt="followup",
+                critic_system_prompt="followup",
             )
 
     def test_session_leak_propagates(self) -> None:
@@ -544,7 +544,7 @@ class TestRunTaskCreationCritic:
                 self._queue(),
                 agent=agent,
                 prompts=_FakePrompts(),
-                followup_system_prompt="followup",
+                critic_system_prompt="followup",
             )
 
 
@@ -668,7 +668,7 @@ class TestRunTaskCompletionCritic:
             diff="diff --git a/x b/x\n+typed\n",
             agent=agent,
             prompts=_FakeCompletionPrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert verdict.passed
         assert verdict.rationale == "diff establishes the invariant"
@@ -687,7 +687,7 @@ class TestRunTaskCompletionCritic:
             diff="diff --git a/foo b/foo\n+unrelated\n",
             agent=_FakeAgent(run_turn_responses=[raw]),
             prompts=_FakeCompletionPrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert not verdict.passed
         assert "foo.py" in verdict.gap
@@ -710,7 +710,7 @@ class TestRunTaskCompletionCritic:
             diff="",
             agent=_FakeAgent(run_turn_responses=[raw]),
             prompts=_FakeCompletionPrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert not verdict.passed
 
@@ -722,7 +722,7 @@ class TestRunTaskCompletionCritic:
             diff="diff",
             agent=agent,
             prompts=_FakeCompletionPrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         # Fail-open default — pass through, don't block the commit.
         assert verdict.passed
@@ -734,7 +734,7 @@ class TestRunTaskCompletionCritic:
             diff="diff",
             agent=_FakeAgent(run_turn_responses=["not json at all"]),
             prompts=_FakeCompletionPrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert verdict.passed
 
@@ -745,7 +745,7 @@ class TestRunTaskCompletionCritic:
             diff="diff",
             agent=_FakeAgent(run_turn_responses=['{"verdict": "wat"}']),
             prompts=_FakeCompletionPrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert verdict.passed
 
@@ -759,12 +759,12 @@ class TestRunTaskCompletionCritic:
             diff="diff",
             agent=_FakeAgent(run_turn_responses=[raw]),
             prompts=_FakeCompletionPrompts(),
-            followup_system_prompt="followup",
+            critic_system_prompt="followup",
         )
         assert not verdict.passed
         assert verdict.gap == "scope-creep"
 
-    def test_uses_followup_system_prompt(self) -> None:
+    def test_uses_critic_system_prompt(self) -> None:
         agent = _FakeAgent(run_turn_responses=['{"passed": true}'])
         run_task_completion_critic(
             task_invariant="x",
@@ -772,7 +772,7 @@ class TestRunTaskCompletionCritic:
             diff="diff",
             agent=agent,
             prompts=_FakeCompletionPrompts(),
-            followup_system_prompt="FOLLOWUP",
+            critic_system_prompt="FOLLOWUP",
         )
         assert agent.calls[0].kwargs["system_prompt"] == "FOLLOWUP"
 
@@ -787,7 +787,7 @@ class TestRunTaskCompletionCritic:
                 diff="diff",
                 agent=agent,
                 prompts=_FakeCompletionPrompts(),
-                followup_system_prompt="followup",
+                critic_system_prompt="followup",
             )
 
     def test_session_leak_propagates(self) -> None:
@@ -801,5 +801,5 @@ class TestRunTaskCompletionCritic:
                 diff="diff",
                 agent=agent,
                 prompts=_FakeCompletionPrompts(),
-                followup_system_prompt="followup",
+                critic_system_prompt="followup",
             )

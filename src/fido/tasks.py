@@ -2549,6 +2549,7 @@ def _apply_task_creation_critics(
         for t in current
         if t.get("status") not in (str(TaskStatus.COMPLETED), str(TaskStatus.SKIPPED))
     ]
+    pending_queue_ids: set[str] = {str(t["id"]) for t in pending_queue if "id" in t}
     for item in ordered_items:
         if item.get("id") is not None:
             out.append(item)
@@ -2558,9 +2559,34 @@ def _apply_task_creation_critics(
             # ``_make_new_tasks_from_opus``; no need to ask the critic.
             out.append(item)
             continue
+        if item.get("status") == str(TaskStatus.SKIPPED):
+            # HOL-6 / #1900 synthetic SKIPPED markers (codex r3293399804
+            # on PR #1932): these are deterministic lineage records for
+            # ``no_op`` verdicts, not Opus-proposed new work.  Sending
+            # them through the critic risks ``duplicate_of`` or
+            # ``multi`` verdicts that would drop the marker and
+            # reintroduce the silent-drop pattern that HOL-6 exists to
+            # close.
+            out.append(item)
+            continue
         verdict = critic_fn(item, pending_queue)
         if verdict.drops_proposal:
             target_id = verdict.duplicate_of_id or verdict.supersedes_id
+            # codex r3293399805 on PR #1932: ``duplicate_of_id`` /
+            # ``supersedes_id`` come from model output and can be
+            # hallucinated.  Refuse to drop the proposal unless the
+            # target id actually names a task in the pending queue;
+            # treat a hallucinated id as fail-open so the new work
+            # isn't silently deleted.
+            if target_id is None or target_id not in pending_queue_ids:
+                log.warning(
+                    "task-creation critic %r references unknown target id "
+                    "%r — keeping proposed task to avoid silent deletion",
+                    verdict.relationship,
+                    target_id,
+                )
+                out.append(item)
+                continue
             log.info(
                 "task-creation critic dropped new task %r (%s of %s): %s",
                 item.get("title"),
@@ -3151,6 +3177,13 @@ def _apply_reorder(
     *,
     task_creation_critic_fn: "Callable[[dict[str, Any], list[dict[str, Any]]], TaskCreationVerdict] | None" = None,
 ) -> list[dict[str, Any]]:
+    """Pure apply path.
+
+    ``task_creation_critic_fn`` kept for back-compat with direct tests
+    that exercise the critic-mutate behaviour through ``_apply_reorder``
+    — production callers run the critic outside the flock via
+    :func:`_apply_task_creation_critics` and pass ``None`` here.
+    """
     """Apply Opus-synthesised items to the current task list.
 
     Rules (in priority order):
@@ -3613,6 +3646,36 @@ def reorder_tasks(
             break
         ordered_items = _operations_to_items(nudge_ops)
 
+    # HOL-16 / #1910: run the task-creation critic OUTSIDE the
+    # tasks.json flock (codex r3293399803 on PR #1932).  Each critic
+    # round makes an Opus call that can take seconds; holding the
+    # lock for that would block every concurrent webhook handler and
+    # worker reading/writing tasks.json.  Trade-off: a task added
+    # concurrently between this snapshot and the lock-acquire below
+    # is invisible to the critic, so a brand-new duplicate that
+    # arrived in that narrow window won't be caught here (the
+    # existing post-snapshot dedup in ``_make_new_tasks_from_opus``
+    # and the next rescope still catch it).
+    snapshot_for_critic = tasks.list()
+
+    def _task_creation_critic_fn(
+        proposed: dict[str, Any], queue: list[dict[str, Any]]
+    ) -> "TaskCreationVerdict":
+        from fido.critics import run_task_creation_critic
+
+        return run_task_creation_critic(
+            proposed,
+            queue,
+            agent=agent,
+            prompts=prompts,
+            # JSON-capable critic prompt — codex r3293399806.
+            critic_system_prompt=prompts.critic_system_prompt(issue=issue, pr=pr),
+        )
+
+    ordered_items = _apply_task_creation_critics(
+        ordered_items, snapshot_for_critic, critic_fn=_task_creation_critic_fn
+    )
+
     # Route the write through Tasks's public modify() — its on_mutate
     # hook (e.g. the SCADA snapshot publisher) fires automatically on
     # exit while the flock is still held, so concurrent writers
@@ -3645,32 +3708,14 @@ def reorder_tasks(
                 (t for t in current if t.get("status") == TaskStatus.IN_PROGRESS), None
             )
 
-            # HOL-16 / #1910: build the task-creation critic closure.
-            # The critic runs per new op inside ``_apply_reorder`` via
-            # ``_apply_task_creation_critics`` — dropping duplicates /
-            # supersedes proposals and fanning multi-invariant proposals
-            # into their proposed splits before materialisation.
-            def _task_creation_critic_fn(
-                proposed: dict[str, Any], queue: list[dict[str, Any]]
-            ) -> "TaskCreationVerdict":
-                from fido.critics import run_task_creation_critic
-
-                return run_task_creation_critic(
-                    proposed,
-                    queue,
-                    agent=agent,
-                    prompts=prompts,
-                    followup_system_prompt=prompts.synthesis_followup_system_prompt(
-                        issue=issue, pr=pr
-                    ),
-                )
-
+            # Critic already ran outside the lock above; ``_apply_reorder``
+            # gets the pre-filtered ``ordered_items`` and applies them
+            # under flock without further LLM calls.
             result = _apply_reorder(
                 current,
                 ordered_items,
                 original_ids,
                 intents=intents,
-                task_creation_critic_fn=_task_creation_critic_fn,
             )
             # HOL-8 / #1902: append narrative_chain entries for every
             # verdict that touched a task in the result.  Runs before

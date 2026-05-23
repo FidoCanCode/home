@@ -2203,3 +2203,39 @@ class TestTaskCompletionCriticPrompt:
         assert '"gap":' in result
         assert '"rationale":' in result
         assert "No other text" in result
+
+
+# ─── Critic system prompt (codex r3293399801 / r3293399806 on PR #1932) ────
+
+
+class TestCriticSystemPrompt:
+    """The JSON-capable system prompt that all Layer 2 critics use.
+    Distinct from ``synthesis_followup_system_prompt`` which explicitly
+    forbids JSON — wiring critics through the followup prompt silently
+    disables them (codex r3293399801 / r3293399806 on PR #1932)."""
+
+    def test_anchors_in_synthesis_base(self) -> None:
+        """Shares the persona/active-work framing with the main
+        synthesis prompt so the agent stays anchored."""
+        result = Prompts("PERSONA_TEXT").critic_system_prompt()
+        assert "PERSONA_TEXT" in result
+
+    def test_anti_instructs_against_no_json_rule(self) -> None:
+        """The critic must emit JSON; the followup prompt's "no JSON"
+        rule directly contradicts that.  This prompt's contract is
+        ONE JSON object on one line."""
+        result = Prompts("").critic_system_prompt()
+        assert "JSON" in result
+        assert "one line" in result.lower()
+
+    def test_active_context_included_when_provided(self) -> None:
+        """Same active-work framing as synthesis system prompt — issue
+        + PR context flows through so the critic reasons against the
+        same shared backdrop the original turn saw."""
+        from fido.types import ActiveIssue, ActivePR
+
+        issue = ActiveIssue(number=42, title="Fix the thing", body="long body")
+        pr = ActivePR(number=99, title="PR title", url="u", body="pr body")
+        result = Prompts("").critic_system_prompt(issue=issue, pr=pr)
+        assert "Fix the thing" in result
+        assert "PR title" in result
