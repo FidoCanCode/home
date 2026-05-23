@@ -1324,6 +1324,27 @@ class _RescopeOpNew:
     contributing_intents: _RescopeIntentIds
 
 
+@dataclass(frozen=True)
+class _RescopeOpSkip:
+    """Create a SKIPPED marker task for a ``no_op`` verdict (HOL-6 / #1900).
+
+    Synthesised internally by :func:`_skip_ops_for_no_op_verdicts` — NOT
+    a kind Opus can emit directly through the verdict envelope.  Keeping
+    the synthesis on the Python side means we never have to teach the
+    Opus prompt schema about ``"skipped"``; the ``no_op`` outcome IS the
+    instruction and the runtime materialises the marker.
+
+    Each entry produces one task with ``status=SKIPPED``, the verdict's
+    narrative as the description, and ``contributing_intents`` carrying
+    the originating intent's comment id.  See PR #1890 for the
+    no_op-silent-drop failure pattern this closes.
+    """
+
+    title: str
+    description: str
+    contributing_intents: _RescopeIntentIds
+
+
 _RescopeOp = (
     _RescopeOpKeep
     | _RescopeOpRewrite
@@ -1332,6 +1353,7 @@ _RescopeOp = (
     | _RescopeOpMerge
     | _RescopeOpSplit
     | _RescopeOpNew
+    | _RescopeOpSkip
 )
 
 
@@ -1656,6 +1678,63 @@ def _find_supersedence_cycle(
             seen.append(cursor)
             cursor = by_pointer.get(cursor)
     return None
+
+
+_SKIP_TITLE_PREFIX = "Skipped: "
+_SKIP_TITLE_MAX_BODY = 60
+
+
+def _skip_title_from_narrative(narrative: str) -> str:
+    """Build the title for a HOL-6 SKIPPED marker task.
+
+    The narrative is Opus's prose explanation of WHY the intent was
+    dropped.  The first non-empty line, truncated to
+    :data:`_SKIP_TITLE_MAX_BODY` characters, gives a queue-readable
+    one-liner.  Empty / all-whitespace narratives fall back to a bare
+    ``"Skipped"`` rather than producing an empty title (which
+    ``_make_new_tasks_from_opus`` would drop entirely).
+    """
+    first_line = next(
+        (line.strip() for line in narrative.splitlines() if line.strip()),
+        "",
+    )
+    if not first_line:
+        return _SKIP_TITLE_PREFIX.rstrip(": ")
+    body = first_line[:_SKIP_TITLE_MAX_BODY]
+    if len(first_line) > _SKIP_TITLE_MAX_BODY:
+        body += "…"
+    return f"{_SKIP_TITLE_PREFIX}{body}"
+
+
+def _skip_ops_for_no_op_verdicts(
+    verdicts: list[IntentVerdict],
+) -> list[_RescopeOpSkip]:
+    """Synthesise one :class:`_RescopeOpSkip` per ``no_op`` verdict (HOL-6 / #1900).
+
+    Each no_op verdict produces a marker task so the lineage is uniform:
+    every verdict terminates at a task (real for honored/reshaped/superseded,
+    SKIPPED marker for no_op).  Without this, no_op verdicts silently
+    dropped the intent — the PR #1890 failure pattern this slice exists
+    to close.
+
+    ``IntentVerdict`` already requires non-empty narrative on every
+    outcome (HOL-3 / #1897), so the synthesised marker always has a
+    real description; the title is derived from the narrative's first
+    line via :func:`_skip_title_from_narrative`.
+    """
+    out: list[_RescopeOpSkip] = []
+    for verdict in verdicts:
+        if verdict.outcome != "no_op":
+            continue
+        narrative = verdict.narrative or ""
+        out.append(
+            _RescopeOpSkip(
+                title=_skip_title_from_narrative(narrative),
+                description=narrative,
+                contributing_intents=[verdict.intent_comment_id],
+            )
+        )
+    return out
 
 
 def _flatten_verdicts_to_ops(
@@ -2023,7 +2102,9 @@ def _find_cross_op_errors(
                     _claim(src, index)
             case _RescopeOpSplit(id=tid):
                 _claim(tid, index)
-            case _RescopeOpNew():
+            case _RescopeOpNew() | _RescopeOpSkip():
+                # Neither claims an existing snapshot id — both create
+                # brand-new tasks (PENDING for New, SKIPPED for Skip).
                 pass
 
     for tid, count in claim_count.items():
@@ -2143,6 +2224,27 @@ def _operations_to_items(operations: list[_RescopeOp]) -> list[dict[str, Any]]:
                         "contributing_intents": list(intents),
                     }
                 )
+            case _RescopeOpSkip(
+                title=title, description=desc, contributing_intents=intents
+            ):
+                # HOL-6 / #1900: SKIPPED marker.  Same shape as a New
+                # item but with an explicit ``status`` so
+                # ``_make_new_tasks_from_opus`` materialises the task
+                # with ``TaskStatus.SKIPPED`` instead of PENDING.  Type
+                # is always ``spec`` — a skipped intent isn't CI work
+                # and doesn't anchor a comment thread by itself (the
+                # thread anchor still flows through ``contributing_intents``
+                # → ``_derive_thread_from_intents``).
+                items.append(
+                    {
+                        "id": None,
+                        "title": title,
+                        "description": desc,
+                        "type": "spec",
+                        "status": str(TaskStatus.SKIPPED),
+                        "contributing_intents": list(intents),
+                    }
+                )
     return items
 
 
@@ -2239,12 +2341,25 @@ def _make_new_tasks_from_opus(
             skipped += 1
             slots.append(None)
             continue
+        # HOL-6 / #1900: synthetic ``_RescopeOpSkip`` items carry an
+        # explicit ``status: "skipped"`` so the marker task lands with
+        # ``TaskStatus.SKIPPED`` instead of PENDING.  Opus-emitted
+        # ``new`` ops never carry ``status`` (``_parse_op_new`` doesn't
+        # read it), so the .get() defaults to PENDING for honest new
+        # tasks.  Only ``SKIPPED`` is honoured here — any other
+        # synthetic status would be a coding bug, not user input.
+        item_status = item.get("status")
+        status = (
+            str(TaskStatus.SKIPPED)
+            if item_status == str(TaskStatus.SKIPPED)
+            else str(TaskStatus.PENDING)
+        )
         task: dict[str, Any] = {
             "id": str(uuid.uuid7()),
             "title": title,
             "type": item.get("type") or "spec",
             "description": item.get("description") or "",
-            "status": str(TaskStatus.PENDING),
+            "status": status,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         # #1722: a brand-new task carries the originating intents the
@@ -3040,6 +3155,15 @@ def reorder_tasks(
                 flat_ops = _flatten_verdicts_to_ops(verdicts)
                 synthetic = json.dumps({"operations": flat_ops})
                 operations, parse_errors = _parse_rescope_operations(synthetic)
+                if not parse_errors:
+                    # HOL-6 / #1900: append synthetic SKIPPED-marker ops
+                    # for every no_op verdict.  Bypassing the parse path
+                    # is intentional — ``_RescopeOpSkip`` is not exposed
+                    # in ``_OP_PARSERS`` so Opus cannot fabricate one
+                    # via the verdict envelope.  Materialisation lands
+                    # in ``_make_new_tasks_from_opus`` via the explicit
+                    # ``status: "skipped"`` item field.
+                    operations.extend(_skip_ops_for_no_op_verdicts(verdicts))
         else:
             operations, parse_errors = _parse_rescope_operations(raw)
         if not parse_errors:

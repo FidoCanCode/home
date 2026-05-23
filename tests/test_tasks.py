@@ -5218,6 +5218,172 @@ class TestFlattenVerdictsToOps:
         assert flat[0]["contributing_intents"] == 0
 
 
+# ── _skip_ops_for_no_op_verdicts (HOL-6 / #1900) ─────────────────────────────
+
+
+class TestSkipOpsForNoOpVerdicts:
+    """HOL-6: every no_op verdict synthesises a SKIPPED marker op."""
+
+    def test_empty_verdicts_yields_no_skip_ops(self) -> None:
+        from fido.tasks import _skip_ops_for_no_op_verdicts
+
+        assert _skip_ops_for_no_op_verdicts([]) == []
+
+    def test_only_honored_verdicts_yields_no_skip_ops(self) -> None:
+        # No no_op verdicts in the batch → no marker tasks needed.
+        from fido.tasks import _skip_ops_for_no_op_verdicts
+        from fido.types import IntentVerdict
+
+        verdicts = [
+            IntentVerdict(intent_comment_id=1, outcome="honored", narrative="x"),
+            IntentVerdict(intent_comment_id=2, outcome="honored", narrative="y"),
+        ]
+        assert _skip_ops_for_no_op_verdicts(verdicts) == []
+
+    def test_no_op_verdict_produces_one_skip_op_per_intent(self) -> None:
+        from fido.tasks import _RescopeOpSkip, _skip_ops_for_no_op_verdicts
+        from fido.types import IntentVerdict
+
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=42,
+                outcome="no_op",
+                narrative="Already covered by an in-flight task.",
+            )
+        ]
+        result = _skip_ops_for_no_op_verdicts(verdicts)
+        assert len(result) == 1
+        op = result[0]
+        assert isinstance(op, _RescopeOpSkip)
+        assert op.contributing_intents == [42]
+        assert op.description == "Already covered by an in-flight task."
+        assert op.title.startswith("Skipped: ")
+
+    def test_mixed_batch_only_no_op_synthesises(self) -> None:
+        from fido.tasks import _skip_ops_for_no_op_verdicts
+        from fido.types import IntentVerdict
+
+        verdicts = [
+            IntentVerdict(intent_comment_id=1, outcome="honored", narrative="ok"),
+            IntentVerdict(intent_comment_id=2, outcome="no_op", narrative="drop A"),
+            IntentVerdict(
+                intent_comment_id=3,
+                outcome="reshaped",
+                ops=({"op": "rewrite", "id": "T1", "title": "z"},),
+                affected_task_ids=("T1",),
+                narrative="reshape",
+            ),
+            IntentVerdict(intent_comment_id=4, outcome="no_op", narrative="drop B"),
+        ]
+        result = _skip_ops_for_no_op_verdicts(verdicts)
+        assert [op.contributing_intents for op in result] == [[2], [4]]
+        assert [op.description for op in result] == ["drop A", "drop B"]
+
+    def test_title_truncated_with_ellipsis_when_long(self) -> None:
+        from fido.tasks import _skip_ops_for_no_op_verdicts
+        from fido.types import IntentVerdict
+
+        long_narrative = "x" * 200
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=1, outcome="no_op", narrative=long_narrative
+            )
+        ]
+        result = _skip_ops_for_no_op_verdicts(verdicts)
+        # Body capped at 60 chars + ellipsis ⇒ "Skipped: " + 60 + "…"
+        assert result[0].title == "Skipped: " + ("x" * 60) + "…"
+        # Full narrative still lives on the description for the reply-back.
+        assert result[0].description == long_narrative
+
+    def test_title_uses_first_non_blank_line(self) -> None:
+        # Multi-line narratives — title takes the first meaningful line.
+        from fido.tasks import _skip_ops_for_no_op_verdicts
+        from fido.types import IntentVerdict
+
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="no_op",
+                narrative="\n  \nFirst real line.\nSecond line.\n",
+            )
+        ]
+        result = _skip_ops_for_no_op_verdicts(verdicts)
+        assert result[0].title == "Skipped: First real line."
+
+    def test_skip_title_helper_falls_back_for_blank_narrative(self) -> None:
+        # Defensive fallback in ``_skip_title_from_narrative``: when the
+        # narrative is empty or all-whitespace, the title is bare
+        # "Skipped" rather than an empty title (which the materializer
+        # would drop entirely).  Unreachable from
+        # ``_skip_ops_for_no_op_verdicts`` because ``IntentVerdict``
+        # enforces non-empty narrative at the ctor (HOL-3 / #1897), but
+        # exercised here for coverage and to pin the contract for any
+        # future direct caller.
+        from fido.tasks import _skip_title_from_narrative
+
+        assert _skip_title_from_narrative("") == "Skipped"
+        assert _skip_title_from_narrative("   \n\t\n") == "Skipped"
+
+
+class TestSkipMarkerEndToEnd:
+    """HOL-6: integration through ``_apply_reorder``.
+
+    Verifies that a no_op verdict produces a SKIPPED marker task in
+    the resulting queue with the verdict narrative as description and
+    the intent comment id in contributing_intents — the data-layer
+    fix for PR #1890's silent-drop pattern.
+    """
+
+    def _add(self, tmp_path: Path, title: str) -> dict:
+        return Tasks(tmp_path).add(title=title, task_type=TaskType.SPEC)
+
+    def _response_verdicts(self, verdict_dicts: list[dict]) -> str:
+        # Build a verdict-envelope JSON response, the shape Opus emits.
+        import json as _json
+
+        return _json.dumps({"verdicts": verdict_dicts})
+
+    def test_no_op_verdict_lands_skipped_marker_task(self, tmp_path: Path) -> None:
+        # Reproduces PR #1890: comment-driven intent, no_op verdict.
+        # Before HOL-6 this silently produced NO task.  After HOL-6 the
+        # marker task lands with status=SKIPPED and the narrative
+        # carried into the description.
+        self._add(tmp_path, "Pre-existing")
+        intent = RescopeIntent(
+            change_request="Apply constructor-DI to fake classes",
+            comment_id=4490644973,
+            timestamp="2026-05-23T14:00:00+00:00",
+        )
+        raw = self._response_verdicts(
+            [
+                {
+                    "intent_comment_id": 4490644973,
+                    "outcome": "no_op",
+                    "narrative": (
+                        "Already covered by an in-flight task on the same area."
+                    ),
+                }
+            ]
+        )
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            intents=[intent],
+        )
+        result = Tasks(tmp_path).list()
+        skipped = [t for t in result if t.get("status") == "skipped"]
+        assert len(skipped) == 1
+        assert skipped[0]["title"].startswith("Skipped: ")
+        assert (
+            skipped[0]["description"]
+            == "Already covered by an in-flight task on the same area."
+        )
+        assert skipped[0]["contributing_intents"] == [4490644973]
+        # Pre-existing task untouched.
+        assert any(t["title"] == "Pre-existing" for t in result)
+
+
 # ── _build_op_inputs (INV-F adapter glue) ─────────────────────────────────────
 
 
