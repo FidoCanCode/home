@@ -5614,6 +5614,100 @@ class TestMergeLineageNarrativeChain:
         assert narratives.count("shared") == 1
         assert "src-only" in narratives
 
+    def test_split_children_inherit_parent_chain_snapshot(self, tmp_path: Path) -> None:
+        # HOL-10 / #1904: split children inherit a SNAPSHOT of the
+        # parent's narrative_chain at split time.  Each child gets the
+        # full pre-split chain so the rationale for why the parent
+        # task existed is preserved on every child.
+        prior_entry = {
+            "outcome": "honored",
+            "narrative": "parent-history",
+            "intent_comment_id": 99,
+            "ts": "2024-03-01T00:00:00Z",
+        }
+        parent = self._add_with_chain(tmp_path, "Parent task", [prior_entry])
+        raw = self._response(
+            [
+                {
+                    "op": "split",
+                    "id": parent["id"],
+                    "children": [
+                        {"title": "Child A", "description": "first half"},
+                        {"title": "Child B", "description": "second half"},
+                    ],
+                },
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        result = Tasks(tmp_path).list()
+        children = [t for t in result if t.get("title") in ("Child A", "Child B")]
+        assert len(children) == 2
+        for child in children:
+            chain = child.get("narrative_chain") or []
+            assert chain == [prior_entry]
+
+    def test_split_children_chains_are_independent_copies(self, tmp_path: Path) -> None:
+        # Each child gets its OWN copy of the parent's chain — mutating
+        # one child's chain dict must NOT bleed into siblings.  Pins
+        # the "shallow snapshot per child, not shared" contract.
+        prior_entry = {
+            "outcome": "reshaped",
+            "narrative": "shared-history",
+            "intent_comment_id": 7,
+            "ts": "2024-03-02T00:00:00Z",
+        }
+        parent = self._add_with_chain(tmp_path, "Parent", [prior_entry])
+        raw = self._response(
+            [
+                {
+                    "op": "split",
+                    "id": parent["id"],
+                    "children": [
+                        {"title": "Child A", "description": ""},
+                        {"title": "Child B", "description": ""},
+                    ],
+                },
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        children = [
+            t
+            for t in Tasks(tmp_path).list()
+            if t.get("title") in ("Child A", "Child B")
+        ]
+        chain_a = next(c for c in children if c["title"] == "Child A")[
+            "narrative_chain"
+        ]
+        chain_b = next(c for c in children if c["title"] == "Child B")[
+            "narrative_chain"
+        ]
+        # Same content, different list objects, different entry dicts.
+        assert chain_a == chain_b == [prior_entry]
+        assert chain_a is not chain_b
+        assert chain_a[0] is not chain_b[0]
+
+    def test_split_with_no_parent_chain_children_have_no_chain(
+        self, tmp_path: Path
+    ) -> None:
+        # Parent without a chain ⇒ children have no chain (no empty
+        # list pollution).  Matches the "omit when empty" contract of
+        # the prompt renderer (HOL-8).
+        parent = self._add_with_chain(tmp_path, "Parent", None)
+        raw = self._response(
+            [
+                {
+                    "op": "split",
+                    "id": parent["id"],
+                    "children": [
+                        {"title": "Child", "description": ""},
+                    ],
+                },
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        child = next(t for t in Tasks(tmp_path).list() if t.get("title") == "Child")
+        assert "narrative_chain" not in child
+
     def test_merge_target_without_prior_chain_inherits_source_chain(
         self, tmp_path: Path
     ) -> None:

@@ -564,6 +564,18 @@ def _split_child_synthetic_task(
     source_thread = source_task.get("thread")
     if isinstance(source_thread, dict):
         child["thread"] = dict(source_thread)
+    # HOL-10 / #1904: split children inherit a snapshot of the parent's
+    # ``narrative_chain`` at split time.  Each child gets its OWN copy
+    # of the list (not a shared reference) so subsequent rescope
+    # appends on one child don't bleed into siblings.  After the split
+    # the children's chains diverge — they accumulate independent
+    # post-split history while sharing the pre-split prefix.  Without
+    # this, the rationale for why the parent task existed in the first
+    # place would be lost on every split, weakening the per-task
+    # history Opus reads on the next rescope.
+    source_chain = source_task.get("narrative_chain") or []
+    if source_chain:
+        child["narrative_chain"] = [dict(entry) for entry in source_chain]
     return child
 
 
