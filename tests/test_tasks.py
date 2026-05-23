@@ -2870,6 +2870,61 @@ class TestMakeNewTasksFromOpus:
         # positional alignment for later new tasks.
         assert result == [None], "covered intent must drop the duplicate (#1337)"
 
+    def test_skipped_marker_exempt_from_post_snapshot_dedup(self) -> None:
+        """Rob review on PR #1932: HOL-6 SKIPPED markers are the
+        DURABLE record of an intent's no_op disposition.  If a
+        concurrent thread task happens to cover the same intent's
+        lineage, the dedup must NOT drop the marker — that's exactly
+        the silent-drop pattern HOL-6 exists to close."""
+        snapshot_ids = frozenset({"orig-1"})
+        current = [
+            {"id": "orig-1", "title": "Original", "status": "pending"},
+            # post-snapshot thread task whose lineage covers intent 99
+            {
+                "id": "post-snapshot-2",
+                "title": "Concurrent thread task",
+                "status": "in_progress",
+                "type": "thread",
+                "thread": {
+                    "comment_id": 99,
+                    "lineage_comment_ids": [99],
+                },
+            },
+        ]
+        intents = [
+            RescopeIntent(
+                comment_id=99,
+                change_request="something",
+                timestamp="2026-05-23T15:00:00+00:00",
+            ),
+        ]
+        # SKIPPED marker for intent 99, AND another normal null-id item.
+        items = [
+            {"id": "orig-1", "title": "Original"},
+            {
+                "title": "Skipped: covered by another task",
+                "description": "marker",
+                "status": "skipped",
+                "contributing_intents": [99],
+            },
+            {
+                "title": "Other genuine new task",
+                "description": "regular new work",
+            },
+        ]
+        result = _make_new_tasks_from_opus(
+            items, snapshot_ids, current=current, intents=intents
+        )
+        # 2 null-id items, both keep their slots in result.
+        assert len(result) == 2
+        # SKIPPED marker survives even though intent 99 is covered.
+        skipped = result[0]
+        assert skipped is not None
+        assert skipped["status"] == "skipped"
+        # The OTHER null-id item gets dropped (one dedup quota used by
+        # the covered intent, applied to the first NON-skipped item).
+        assert result[1] is None
+
     def test_does_not_dedup_when_lineage_does_not_match_intent(self) -> None:
         """When no post-snapshot thread task covers the intent, Opus's null-id
         item is genuinely new and must be kept."""
@@ -3337,6 +3392,45 @@ class TestValidateRescopeBatch:
         assert any(
             "merging into a completed task is contradictory" in e and "already on" in e
             for e in errors
+        )
+
+    def test_merge_into_skipped_marker_target_is_rejected(self) -> None:
+        """Rob review on PR #1932: SKIPPED tasks are terminal lineage
+        records (HOL-6 no_op markers) — merging into them would
+        corrupt the marker and the oracle treats them as completed
+        anyway.  Validator must reject the shape so the corruption
+        never lands."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        items = [
+            {"id": "target", "title": "T", "merge_sources": ["source"]},
+            {"id": "source", "title": "S", "status": "completed"},
+        ]
+        current = [target, self._t("source")]
+        errors = _validate_rescope_batch(current, items)
+        assert any(
+            "SKIPPED marker" in e and "merging into it would corrupt" in e
+            for e in errors
+        )
+
+    def test_split_skipped_marker_target_is_rejected(self) -> None:
+        """Same defense for split — splitting a SKIPPED marker loses
+        the no_op record."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        items = [
+            {
+                "id": "target",
+                "title": "T",
+                "split_targets": [
+                    {"title": "A", "description": ""},
+                    {"title": "B", "description": ""},
+                ],
+            },
+        ]
+        errors = _validate_rescope_batch([target], items)
+        assert any(
+            "SKIPPED marker" in e and "splitting it would lose" in e for e in errors
         )
 
     def test_empty_merge_sources_on_completed_target_is_harmless(self) -> None:
@@ -6432,6 +6526,50 @@ class TestSkipMarkerEndToEnd:
         out = _apply_task_creation_critics(items, [existing], critic_fn=critic)
         titles = [it.get("title") for it in out]
         assert "Legitimate new work" in titles
+
+    def test_task_creation_critic_drop_revalidated_against_current_queue(
+        self, tmp_path: Path
+    ) -> None:
+        """Rob review on PR #1932: the critic verdict is gathered
+        OUTSIDE the tasks.json flock, but the actual drop decision
+        must re-validate the target against the CURRENT queue inside
+        the lock.  If the named duplicate_of target was deleted
+        between gather and lock, the proposed task must be KEPT —
+        not silently dropped against a stale target reference."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import (
+            _apply_task_creation_verdicts,
+            _gather_task_creation_verdicts,
+        )
+
+        existing = self._add(tmp_path, "Snapshot-time target")
+        items = [
+            {
+                "id": None,
+                "title": "Proposed new",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id=existing["id"],
+            )
+
+        # Phase 1 (outside lock): gather verdicts against snapshot.
+        verdicts = _gather_task_creation_verdicts(items, [existing], critic_fn=critic)
+        assert verdicts[0] is not None
+        assert verdicts[0].duplicate_of_id == existing["id"]
+
+        # Phase 2 (inside lock): apply against CURRENT queue, which is
+        # now EMPTY (target deleted concurrently).
+        current: list[dict] = []
+        result = _apply_task_creation_verdicts(items, verdicts, current)
+        titles = [it.get("title") for it in result]
+        assert "Proposed new" in titles
 
     def test_split_child_invariants_land_on_materialised_children(
         self, tmp_path: Path

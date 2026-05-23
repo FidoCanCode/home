@@ -2509,79 +2509,97 @@ def _derive_thread_from_intents(
     return None
 
 
-def _apply_task_creation_critics(
+def _pending_queue_ids(current: list[dict[str, Any]]) -> set[str]:
+    """Pending-only id set from a task list — terminal tasks (COMPLETED,
+    SKIPPED) don't represent live scope competition for the critic's
+    duplicate_of/supersedes target check."""
+    return {
+        str(t["id"])
+        for t in current
+        if "id" in t
+        and t.get("status") not in (str(TaskStatus.COMPLETED), str(TaskStatus.SKIPPED))
+    }
+
+
+def _gather_task_creation_verdicts(
     ordered_items: list[dict[str, Any]],
-    current: list[dict[str, Any]],
+    snapshot_queue: list[dict[str, Any]],
     *,
-    critic_fn: "Callable[[dict[str, Any], list[dict[str, Any]]], TaskCreationVerdict] | None" = None,
-) -> list[dict[str, Any]]:
-    """HOL-16 / #1910: run the task-creation critic over every ``new`` op.
+    critic_fn: "Callable[[dict[str, Any], list[dict[str, Any]]], TaskCreationVerdict] | None",
+) -> list["TaskCreationVerdict | None"]:
+    """Run the HOL-16 critic over every ``new`` op and return a verdict
+    list aligned with ``ordered_items`` (one entry per item).
 
-    Walks ``ordered_items`` and, for each null-id item (a ``new`` op),
-    asks ``critic_fn`` to verdict it against the current queue.  Mutates
-    the item list per verdict:
+    A verdict is ``None`` when the critic was NOT asked (item has an
+    id, item has a blank title, item is a synthetic SKIPPED marker,
+    or ``critic_fn`` itself is None).  These items must always pass
+    through unchanged in the apply step.
 
-      * ``distinct`` + ``single`` — keep item unchanged.
-      * ``duplicate_of`` / ``supersedes`` — drop the item (logged).
-        Supersedes is treated as a drop today; a follow-up leaf will
-        fold it into a rewrite op so the existing task is updated.
-      * ``multi`` — replace the item with one new-op per proposed split,
-        each carrying its own title/description/invariant.  The split
-        children inherit the original item's ``contributing_intents``
-        so reply-back paths still attribute correctly.
-
-    ``critic_fn`` is optional; when ``None`` the function is a pass-through
-    (legacy no-critic behaviour).  Production wiring injects the critic
-    via :func:`fido.critics.run_task_creation_critic`.
-
-    Returns the mutated item list — caller passes it to
-    ``_make_new_tasks_from_opus`` as if it came from the parser directly.
+    Designed to be called OUTSIDE the tasks.json flock (codex
+    r3293399803 on PR #1932) — each verdict is a slow LLM call and
+    holding the lock for that blocks every concurrent webhook handler.
+    The companion :func:`_apply_task_creation_verdicts` runs inside
+    the lock and re-validates each drop against the current queue
+    (Rob review on PR #1932 — addresses the race where a drop target
+    is deleted between the unlocked verdict and the locked apply).
     """
     if critic_fn is None:
-        return ordered_items
-    out: list[dict[str, Any]] = []
-    # Pending-only view of the queue — completed and skipped tasks are
-    # terminal and don't represent live "scope competition" for a new
-    # task.  The critic's "duplicate_of"/"supersedes" verdicts should
-    # only target tasks the new one could genuinely overlap with.
+        return [None] * len(ordered_items)
     pending_queue = [
         t
-        for t in current
+        for t in snapshot_queue
         if t.get("status") not in (str(TaskStatus.COMPLETED), str(TaskStatus.SKIPPED))
     ]
-    pending_queue_ids: set[str] = {str(t["id"]) for t in pending_queue if "id" in t}
+    verdicts: list[TaskCreationVerdict | None] = []
     for item in ordered_items:
-        if item.get("id") is not None:
+        if (
+            item.get("id") is not None
+            or not (item.get("title") or "").strip()
+            or item.get("status") == str(TaskStatus.SKIPPED)
+        ):
+            verdicts.append(None)
+            continue
+        verdicts.append(critic_fn(item, pending_queue))
+    return verdicts
+
+
+def _apply_task_creation_verdicts(
+    ordered_items: list[dict[str, Any]],
+    verdicts: list["TaskCreationVerdict | None"],
+    current: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply pre-gathered task-creation verdicts against the CURRENT
+    queue, dropping/fanning items per verdict.
+
+    Re-validates drop targets against ``current`` at apply time so a
+    concurrent deletion of the target task between the unlocked
+    critic call and the locked apply doesn't silently delete the
+    proposed task (Rob review on PR #1932).  When the named
+    duplicate_of/supersedes target is no longer in the queue, the
+    proposed task is KEPT — fail-open just like the hallucinated-id
+    case.
+    """
+    assert len(ordered_items) == len(verdicts), (
+        f"verdict/item count mismatch: {len(ordered_items)} items vs "
+        f"{len(verdicts)} verdicts"
+    )
+    out: list[dict[str, Any]] = []
+    pending_queue_ids = _pending_queue_ids(current)
+    for item, verdict in zip(ordered_items, verdicts, strict=True):
+        if verdict is None:
             out.append(item)
             continue
-        if not (item.get("title") or "").strip():
-            # Blank-title items already get dropped by
-            # ``_make_new_tasks_from_opus``; no need to ask the critic.
-            out.append(item)
-            continue
-        if item.get("status") == str(TaskStatus.SKIPPED):
-            # HOL-6 / #1900 synthetic SKIPPED markers (codex r3293399804
-            # on PR #1932): these are deterministic lineage records for
-            # ``no_op`` verdicts, not Opus-proposed new work.  Sending
-            # them through the critic risks ``duplicate_of`` or
-            # ``multi`` verdicts that would drop the marker and
-            # reintroduce the silent-drop pattern that HOL-6 exists to
-            # close.
-            out.append(item)
-            continue
-        verdict = critic_fn(item, pending_queue)
         if verdict.drops_proposal:
             target_id = verdict.duplicate_of_id or verdict.supersedes_id
-            # codex r3293399805 on PR #1932: ``duplicate_of_id`` /
-            # ``supersedes_id`` come from model output and can be
-            # hallucinated.  Refuse to drop the proposal unless the
-            # target id actually names a task in the pending queue;
-            # treat a hallucinated id as fail-open so the new work
-            # isn't silently deleted.
+            # codex r3293399805 (hallucinated id) + Rob review (target
+            # deleted between unlocked critic and locked apply): same
+            # safe behaviour — when the target is no longer in the
+            # current pending queue, KEEP the proposed task instead of
+            # silently dropping legitimate work.
             if target_id is None or target_id not in pending_queue_ids:
                 log.warning(
-                    "task-creation critic %r references unknown target id "
-                    "%r — keeping proposed task to avoid silent deletion",
+                    "task-creation critic %r references target id %r not "
+                    "in current pending queue — keeping proposed task",
                     verdict.relationship,
                     target_id,
                 )
@@ -2621,6 +2639,27 @@ def _apply_task_creation_critics(
         # distinct + single: pass through.
         out.append(item)
     return out
+
+
+def _apply_task_creation_critics(
+    ordered_items: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+    *,
+    critic_fn: "Callable[[dict[str, Any], list[dict[str, Any]]], TaskCreationVerdict] | None" = None,
+) -> list[dict[str, Any]]:
+    """Combined gather+apply wrapper for the HOL-16 critic.
+
+    Convenience entry point for tests and any caller that doesn't need
+    the two-phase outside-lock / inside-lock split.  Production wiring
+    in ``reorder_tasks`` calls :func:`_gather_task_creation_verdicts`
+    and :func:`_apply_task_creation_verdicts` separately so the slow
+    LLM verdict calls happen outside the tasks.json flock while the
+    apply still revalidates drop targets against the live queue.
+    """
+    verdicts = _gather_task_creation_verdicts(
+        ordered_items, current, critic_fn=critic_fn
+    )
+    return _apply_task_creation_verdicts(ordered_items, verdicts, current)
 
 
 def _make_new_tasks_from_opus(
@@ -2679,7 +2718,14 @@ def _make_new_tasks_from_opus(
         if not title:
             slots.append(None)
             continue
-        if skipped < covered_intents:
+        # HOL-6 / #1900 SKIPPED markers must be exempt from this
+        # post-snapshot dedup (Rob review on PR #1932).  The marker IS
+        # the durable record that an intent's no_op verdict landed —
+        # dropping it because some other thread task covers the same
+        # intent reintroduces the silent-drop pattern HOL-6 closes.
+        item_status = item.get("status")
+        is_skipped_marker = item_status == str(TaskStatus.SKIPPED)
+        if not is_skipped_marker and skipped < covered_intents:
             log.info(
                 "rescope: dropping duplicate new task %r — already serviced "
                 "by a post-snapshot thread task (#1337)",
@@ -2695,11 +2741,10 @@ def _make_new_tasks_from_opus(
         # read it), so the .get() defaults to PENDING for honest new
         # tasks.  Only ``SKIPPED`` is honoured here — any other
         # synthetic status would be a coding bug, not user input.
-        item_status = item.get("status")
+        # (``item_status`` and ``is_skipped_marker`` were already
+        # computed above for the dedup-exemption check.)
         status = (
-            str(TaskStatus.SKIPPED)
-            if item_status == str(TaskStatus.SKIPPED)
-            else str(TaskStatus.PENDING)
+            str(TaskStatus.SKIPPED) if is_skipped_marker else str(TaskStatus.PENDING)
         )
         task: dict[str, Any] = {
             "id": str(uuid.uuid7()),
@@ -2806,6 +2851,17 @@ def _validate_rescope_batch(
         for t in current
         if "id" in t and t.get("status") == str(TaskStatus.BLOCKED)
     }
+    # SKIPPED tasks are terminal lineage records — they project to
+    # StatusCompleted at the rescope oracle (HOL-5), so merge/split/
+    # rewrite/remove ops targeting them would silently lose the no_op
+    # marker without any user-visible effect (Rob review on PR #1932).
+    # Treat SKIPPED with the same merge/split rejection shape as
+    # COMPLETED.
+    currently_skipped_ids = {
+        t["id"]
+        for t in current
+        if "id" in t and t.get("status") == str(TaskStatus.SKIPPED)
+    }
     # Kind classification is title-prefix driven (ASK:/DEFER:/CI FAILURE:),
     # so a split that copies child titles literally would silently
     # reclassify an ASK/DEFER source's children to executable spec
@@ -2907,6 +2963,13 @@ def _validate_rescope_batch(
                     "disk); merging into a completed task is contradictory "
                     "(no MergeTasks would run; the source's lineage would "
                     "be silently lost)"
+                )
+            elif merge_sources and item_id in currently_skipped_ids:
+                errors.append(
+                    f"item[{index}].merge_sources on {item_id!r}: target "
+                    "is a SKIPPED marker (HOL-6 no_op lineage record); "
+                    "merging into it would corrupt the marker and is "
+                    "treated as terminal by the oracle anyway"
                 )
             elif merge_sources and item_id in currently_blocked_ids:
                 # codex on #1738: a blocked target accepts the merge,
@@ -3054,6 +3117,13 @@ def _validate_rescope_batch(
                 "is blocked; the SplitTask op would close it but blocked-"
                 "target semantics for split aren't defined yet (#1247 "
                 "territory)"
+            )
+        if item_id in currently_skipped_ids:
+            errors.append(
+                f"item[{index}].split_targets on {item_id!r}: target "
+                "is a SKIPPED marker (HOL-6 no_op lineage record); "
+                "splitting it would lose the no_op record and the "
+                "oracle treats it as terminal anyway"
             )
         if item_id in non_splittable_source_ids:
             # Kind classification is title-prefix driven, so a split
@@ -3650,12 +3720,17 @@ def reorder_tasks(
     # tasks.json flock (codex r3293399803 on PR #1932).  Each critic
     # round makes an Opus call that can take seconds; holding the
     # lock for that would block every concurrent webhook handler and
-    # worker reading/writing tasks.json.  Trade-off: a task added
-    # concurrently between this snapshot and the lock-acquire below
-    # is invisible to the critic, so a brand-new duplicate that
-    # arrived in that narrow window won't be caught here (the
-    # existing post-snapshot dedup in ``_make_new_tasks_from_opus``
-    # and the next rescope still catch it).
+    # worker reading/writing tasks.json.
+    #
+    # Verdict gathering and verdict APPLICATION are split (Rob review
+    # on PR #1932): the slow LLM calls run here against a snapshot,
+    # but the actual drop/fan-out decisions happen INSIDE the lock
+    # below against the CURRENT queue.  Without that split, a drop
+    # target that gets deleted between snapshot and lock acquisition
+    # would silently delete the proposed task even though its named
+    # target no longer exists.  ``_apply_task_creation_verdicts``
+    # re-checks drop targets against ``current`` and keeps the proposal
+    # when the target is gone.
     snapshot_for_critic = tasks.list()
 
     def _task_creation_critic_fn(
@@ -3672,8 +3747,10 @@ def reorder_tasks(
             critic_system_prompt=prompts.critic_system_prompt(issue=issue, pr=pr),
         )
 
-    ordered_items = _apply_task_creation_critics(
-        ordered_items, snapshot_for_critic, critic_fn=_task_creation_critic_fn
+    task_creation_verdicts = _gather_task_creation_verdicts(
+        ordered_items,
+        snapshot_for_critic,
+        critic_fn=_task_creation_critic_fn,
     )
 
     # Route the write through Tasks's public modify() — its on_mutate
@@ -3692,6 +3769,14 @@ def reorder_tasks(
         # back the same content, so the durable list is unchanged.
         # Partial commits aren't safe: they'd leave tasks.json in a
         # state Opus didn't propose, breaking snapshot/replay reasoning.
+        # Apply the pre-gathered task-creation verdicts against the
+        # CURRENT queue (not the snapshot above) so drop targets that
+        # got deleted between gather and lock acquisition cause the
+        # proposed task to be KEPT, not silently dropped (Rob review
+        # on PR #1932).
+        ordered_items = _apply_task_creation_verdicts(
+            ordered_items, task_creation_verdicts, current
+        )
         validation_errors = _validate_rescope_batch(current, ordered_items)
         if validation_errors:
             rejected = True

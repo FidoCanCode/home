@@ -2328,3 +2328,23 @@ class TestReplyProseClaimGroundingPrompt:
         assert '"passed": false' in result
         assert '"gap":' in result
         assert "No other text" in result
+
+    def test_axes_pass_by_default_when_ground_truth_silent(self) -> None:
+        """Rob review on PR #1932: when the caller hasn't gathered
+        ground truth for a given axis (commit / issue-PR / file), that
+        axis must pass by default — otherwise normal replies that
+        mention a real ``#NN`` get rejected just because the caller
+        didn't populate ``open_issue_numbers``."""
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state={},
+        )
+        # commit and issue/PR axes both need explicit "passes by
+        # default when silent" so Opus reads it as a pass condition,
+        # not a fail condition.
+        commit_block = result.split("commit claims:", 1)[1].split(
+            "issue/PR claims:", 1
+        )[0]
+        assert "passes by default" in commit_block
+        issue_block = result.split("issue/PR claims:", 1)[1].split("file claims:", 1)[0]
+        assert "passes by default" in issue_block
