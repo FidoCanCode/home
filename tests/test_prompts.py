@@ -768,10 +768,13 @@ class TestRescopePromptVerdicts:
         result = Prompts("").rescope_prompt_verdicts(
             [self._task()], "", intents=[self._intent(1)]
         )
-        # honored / no_op explicitly do NOT warrant reply-back
+        # honored explicitly does NOT warrant reply-back
         assert "no follow-up" in result
-        # reshaped / superseded are material → narrative required
-        assert "Narrative MUST be non-empty" in result
+        # HOL-3 / #1897: narrative is REQUIRED on every outcome —
+        # honored / reshaped / superseded / no_op all carry one.
+        assert "Narrative REQUIRED" in result
+        # The no_op narrative IS the reply-back reason (PR #1890 fix).
+        assert "PR #1890" in result
 
     def test_supersedence_constraints_stated(self) -> None:
         result = Prompts("").rescope_prompt_verdicts(

@@ -18,14 +18,20 @@ _ = (Iterator, Any)  # keep imports for type hints inside test bodies
 
 class TestIntentVerdictShape:
     def test_minimal_construction_with_outcome_honored(self) -> None:
-        """A fully-honored intent: just the intent id + outcome."""
-        v = IntentVerdict(intent_comment_id=42, outcome="honored")
+        """A fully-honored intent: id + outcome + narrative.
+
+        HOL-3 (#1897): narrative is required on every outcome — without
+        it the per-task narrative chain (#1894 HOL-8) loses history.
+        """
+        v = IntentVerdict(
+            intent_comment_id=42, outcome="honored", narrative="As requested."
+        )
         assert v.intent_comment_id == 42
         assert v.outcome == "honored"
         assert v.ops == ()
         assert v.affected_task_ids == ()
         assert v.by_intent_comment_id is None
-        assert v.narrative is None
+        assert v.narrative == "As requested."
 
     def test_construction_with_all_fields(self) -> None:
         v = IntentVerdict(
@@ -80,6 +86,7 @@ class TestIntentVerdictShape:
                 outcome="honored",
                 ops=(),
                 affected_task_ids=("T-fix-all",),
+                narrative="Jointly honored by the consolidated task.",
             )
             for cid in (1, 2, 3, 4)
         )
@@ -88,16 +95,23 @@ class TestIntentVerdictShape:
 
     def test_no_op_outcome(self) -> None:
         # Acknowledgement / "request already covered" verdict.  No ops,
-        # no affected tasks, no narrative needed.
-        v = IntentVerdict(intent_comment_id=999, outcome="no_op")
+        # no affected tasks — but narrative IS required (HOL-3 / #1897)
+        # because no_op is the requestor's "your ask was dropped"
+        # signal; without a reason the user has no idea what happened.
+        v = IntentVerdict(
+            intent_comment_id=999,
+            outcome="no_op",
+            narrative="Already covered by an in-flight task.",
+        )
         assert v.outcome == "no_op"
         assert v.ops == ()
         assert v.affected_task_ids == ()
+        assert v.narrative == "Already covered by an in-flight task."
 
     def test_frozen(self) -> None:
         # Verdict shape is frozen — once Opus emits it, the runtime
         # must not mutate.  Catches accidental in-place edits.
-        v = IntentVerdict(intent_comment_id=1, outcome="honored")
+        v = IntentVerdict(intent_comment_id=1, outcome="honored", narrative="x")
         try:
             v.outcome = "reshaped"  # type: ignore[misc]
         except dataclasses.FrozenInstanceError:
@@ -109,7 +123,7 @@ class TestIntentVerdictShape:
         # codex P1 on #1802: deep immutability — ops as a list lets
         # callers ``verdict.ops.append(...)`` past the frozen guard.
         # Tuple makes the in-place mutation a TypeError at boundary.
-        v = IntentVerdict(intent_comment_id=1, outcome="honored")
+        v = IntentVerdict(intent_comment_id=1, outcome="honored", narrative="x")
         assert isinstance(v.ops, tuple)
         assert isinstance(v.affected_task_ids, tuple)
 
@@ -153,8 +167,8 @@ class TestIntentVerdictShape:
         # Tuples are immutable so two verdicts sharing the default
         # empty tuple is safe (no foot-gun like a shared default
         # ``[]`` would have been).
-        a = IntentVerdict(intent_comment_id=1, outcome="honored")
-        b = IntentVerdict(intent_comment_id=2, outcome="honored")
+        a = IntentVerdict(intent_comment_id=1, outcome="honored", narrative="x")
+        b = IntentVerdict(intent_comment_id=2, outcome="honored", narrative="x")
         assert a.ops == b.ops == ()
         assert a.affected_task_ids == b.affected_task_ids == ()
 
@@ -183,9 +197,8 @@ class TestIntentVerdictValidation:
             )
 
     def test_reshaped_outcome_requires_narrative(self) -> None:
-        # codex P2 on #1802: reshaped means material change → reply-back
-        # fires → reply needs prose.  Empty narrative is a contract
-        # violation at the boundary.
+        # reshaped means material change → reply-back fires → reply
+        # needs prose.  Empty narrative is a contract violation.
         with pytest.raises(ValueError, match="narrative"):
             IntentVerdict(
                 intent_comment_id=10,
@@ -215,15 +228,30 @@ class TestIntentVerdictValidation:
                 narrative="   ",
             )
 
-    def test_honored_outcome_allows_blank_narrative(self) -> None:
-        # honored never warrants reply-back; narrative is optional.
-        v = IntentVerdict(intent_comment_id=10, outcome="honored")
-        assert v.narrative is None
+    def test_honored_outcome_requires_narrative(self) -> None:
+        # HOL-3 / #1897: narrative is required on EVERY outcome (not
+        # just reshaped/superseded).  The per-task narrative chain
+        # (#1894 HOL-8) accumulates one entry per verdict; without a
+        # honored-narrative, future rescopes can't reason about WHY a
+        # task got the work it has.
+        with pytest.raises(ValueError, match="narrative"):
+            IntentVerdict(intent_comment_id=10, outcome="honored")
 
-    def test_no_op_outcome_allows_blank_narrative(self) -> None:
-        # no_op same as honored — never warrants reply-back.
-        v = IntentVerdict(intent_comment_id=10, outcome="no_op")
-        assert v.narrative is None
+    def test_no_op_outcome_requires_narrative(self) -> None:
+        # HOL-3 / #1897: no_op without narrative is the PR #1890 bug
+        # — Rob's intent silently dropped.  The narrative IS the
+        # reply-back reason ("why am I skipping this?").
+        with pytest.raises(ValueError, match="narrative"):
+            IntentVerdict(intent_comment_id=10, outcome="no_op")
+
+    def test_honored_whitespace_only_narrative_rejected(self) -> None:
+        # Same substantively-non-empty rule as reshaped/superseded.
+        with pytest.raises(ValueError, match="narrative"):
+            IntentVerdict(intent_comment_id=10, outcome="honored", narrative="  ")
+
+    def test_no_op_whitespace_only_narrative_rejected(self) -> None:
+        with pytest.raises(ValueError, match="narrative"):
+            IntentVerdict(intent_comment_id=10, outcome="no_op", narrative="\t\n")
 
     def test_by_intent_comment_id_rejected_on_honored(self) -> None:
         # codex P2 round 2 on #1802: only ``superseded`` carries a
@@ -388,6 +416,7 @@ class TestIntentVerdictTypeChecks:
             intent_comment_id=1,
             outcome="honored",
             affected_task_ids=ids_gen(),  # type: ignore[arg-type]
+            narrative="x",
         )
         assert v.affected_task_ids == ("T1", "T2")
 
@@ -401,6 +430,7 @@ class TestIntentVerdictTypeChecks:
                 intent_comment_id=1,
                 outcome="no_op",
                 ops=({"op": "rewrite", "id": "T1"},),
+                narrative="x",
             )
 
     def test_no_op_rejects_non_empty_affected_task_ids(self) -> None:
@@ -409,4 +439,5 @@ class TestIntentVerdictTypeChecks:
                 intent_comment_id=1,
                 outcome="no_op",
                 affected_task_ids=("T1",),
+                narrative="x",
             )
