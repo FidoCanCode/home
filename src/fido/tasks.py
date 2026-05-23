@@ -785,7 +785,21 @@ def _materialize_rescope_oracle_result(
         task["title"] = row.title
         task["description"] = row.description
         if isinstance(row.status, rescope_oracle.StatusCompleted):
-            task["status"] = str(TaskStatus.COMPLETED)
+            # HOL-5 round-trip (codex r3293249256 on PR #1932): a SKIPPED
+            # row projects to StatusCompleted on the way INTO the rescope
+            # oracle (both are terminal for the picker — see
+            # ``_rescope_task_status_for_oracle``), so on the way back we
+            # must preserve the original SKIPPED marker.  Without this
+            # branch, the next rescope pass rewrites every no_op-derived
+            # task to plain ``"completed"`` and the HOL-6 dedicated
+            # rendering + lineage behaviour silently decay.  Only the
+            # original-status path is restored — a fresh remove op that
+            # the oracle just promoted to StatusCompleted (input status:
+            # pending) still serialises to COMPLETED.
+            if task.get("status") in (str(TaskStatus.SKIPPED), TaskStatus.SKIPPED):
+                task["status"] = str(TaskStatus.SKIPPED)
+            else:
+                task["status"] = str(TaskStatus.COMPLETED)
         elif isinstance(row.status, rescope_oracle.StatusBlocked):
             task["status"] = str(TaskStatus.BLOCKED)
         else:

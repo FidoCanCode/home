@@ -5845,6 +5845,59 @@ class TestSkipMarkerEndToEnd:
         # Pre-existing task untouched.
         assert any(t["title"] == "Pre-existing" for t in result)
 
+    def test_skipped_survives_subsequent_rescope_pass(self, tmp_path: Path) -> None:
+        """codex r3293249256 on PR #1932: SKIPPED projects to
+        StatusCompleted at the oracle boundary (both terminal), so the
+        round-trip through ``_materialize_rescope_oracle_result`` must
+        re-stamp SKIPPED rather than collapsing to plain ``"completed"``.
+        Without the lift-back guard, the next rescope pass after a
+        ``no_op`` verdict silently erases the HOL-6 dedicated rendering
+        and lineage semantics."""
+        # First pass: no_op verdict lands a SKIPPED marker.
+        self._add(tmp_path, "Pre-existing")
+        intent = RescopeIntent(
+            change_request="A change-request to acknowledge but not act on",
+            comment_id=4490644974,
+            timestamp="2026-05-23T15:00:00+00:00",
+        )
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(
+                self._response_verdicts(
+                    [
+                        {
+                            "intent_comment_id": 4490644974,
+                            "outcome": "no_op",
+                            "narrative": "covered already, no-op",
+                        }
+                    ]
+                )
+            ),
+            intents=[intent],
+        )
+        before = Tasks(tmp_path).list()
+        skipped_before = [t for t in before if t.get("status") == "skipped"]
+        assert len(skipped_before) == 1
+        skipped_id = skipped_before[0]["id"]
+
+        # Second pass: rescope with no intents (the no-intent path uses
+        # the operations envelope, not verdicts).  Opus emits ``keep`` on
+        # every snapshot id including the SKIPPED marker; the materialise
+        # path must re-stamp ``"skipped"`` on the way back, not
+        # ``"completed"``.
+        pending_ids = [t["id"] for t in before if t.get("status") != "completed"]
+        keep_ops = [{"op": "keep", "id": tid} for tid in pending_ids]
+        raw_ops = '{"operations": ' + str(keep_ops).replace("'", '"') + "}"
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw_ops),
+        )
+        after = Tasks(tmp_path).list()
+        skipped_after = next(t for t in after if t["id"] == skipped_id)
+        assert skipped_after["status"] == "skipped"
+
 
 # ── _build_op_inputs (INV-F adapter glue) ─────────────────────────────────────
 
