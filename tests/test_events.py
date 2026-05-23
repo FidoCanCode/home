@@ -6550,6 +6550,44 @@ class TestGitHubInsightFiler:
         gh.create_issue.assert_not_called()
         gh.comment_issue.assert_not_called()
 
+    def test_critic_duplicate_marker_write_failure_falls_open(self) -> None:
+        """Codex on PR #1932: the marker write is best-effort
+        bookkeeping at an external-system boundary.  A transient
+        GitHub failure (rate limit, network blip, target issue
+        closed/transferred between the critic's lookup and our
+        comment) must NOT crash dispatch — the critic's primary
+        decision (skip filing the duplicate) is already honoured by
+        the early return, so the worst case is losing the
+        replay-durability marker, not corrupting state."""
+        gh = MagicMock()
+        gh.search_issues.side_effect = [
+            [],
+            [
+                {
+                    "title": "x",
+                    "body": "y",
+                    "html_url": "https://github.com/FidoCanCode/home/issues/42",
+                }
+            ],
+        ]
+        # Marker write blows up — must be caught and logged, not raised.
+        gh.comment_issue.side_effect = RuntimeError("GitHub 503")
+        filer = self._make_critic_filer(
+            gh,
+            agent_response=(
+                '{"is_duplicate": true, '
+                '"duplicate_url": "https://github.com/FidoCanCode/home/issues/42", '
+                '"rationale": "dup"}'
+            ),
+        )
+
+        # Should NOT raise.  Filing still skipped (critic decision
+        # honoured), marker write attempted-and-failed-quietly.
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        gh.create_issue.assert_not_called()
+        gh.comment_issue.assert_called_once()
+
     def test_critic_distinct_does_not_post_marker_comment(self) -> None:
         """When the critic passes the insight is filed normally — no
         marker comment on any prior issue."""

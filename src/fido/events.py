@@ -242,7 +242,26 @@ class _GitHubInsightFiler:
             return
         source_link = _insight_source_link(target)
         body = f"Also covered: {source_link}\n\n{marker}"
-        self._gh.comment_issue(_INSIGHT_REPO, number, body)
+        # Codex on PR #1932: this marker write is best-effort
+        # bookkeeping at an external-system boundary — a transient
+        # GitHub failure (rate limit, network blip, the target issue
+        # was closed/transferred between the critic's lookup and now,
+        # etc.) must not abort the whole comment-processing flow.
+        # The critic's primary decision (skip filing the duplicate)
+        # is already honoured by the early return above; only the
+        # replay-durability marker is at risk.  Log and continue.
+        try:
+            self._gh.comment_issue(_INSIGHT_REPO, number, body)
+        except Exception as exc:
+            log.warning(
+                "insight-dedup skip-marker write failed (%s) — falling "
+                "open: comment_id=%d, target issue=%s#%d.  Replay could "
+                "still file a duplicate if the critic later fails open.",
+                exc,
+                target.comment_id,
+                _INSIGHT_REPO,
+                number,
+            )
 
     def _dedup_critic_verdict(self, insight: Insight) -> InsightDedupVerdict:
         """Run the HOL-19 critic when the agent/prompts collaborators
