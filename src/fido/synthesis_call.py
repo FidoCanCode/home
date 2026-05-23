@@ -353,6 +353,12 @@ def _run_intent_coverage_critic(
     # leads with an unrelated ``{}`` followed by a real verdict would
     # otherwise be treated as malformed and fail open — silently letting
     # an intent-coverage failure ship.
+    # codex r3293424368 on PR #1932: a malformed early envelope
+    # (e.g. ``{"passed": false}`` without a gap) must NOT short-circuit
+    # the scan — a later object may carry the real verdict with its
+    # gap.  Track the first malformed-fail we saw; only return its
+    # fail-open verdict after the whole scan finds no usable envelope.
+    saw_malformed_fail = False
     for obj in objs:
         if obj.get("passed") is True:
             return CriticVerdict(passed=True)
@@ -360,17 +366,17 @@ def _run_intent_coverage_critic(
             gap = obj.get("gap")
             if isinstance(gap, str) and gap.strip():
                 return CriticVerdict(passed=False, gap=gap.strip())
-            # Critic said "failed" but gave no gap — fail open per the
-            # same "don't block a valid response on a flaky critic" rule
-            # above.  Don't try later objects: this object self-identified
-            # as the verdict envelope.
-            log.warning("intent-coverage critic failed without a gap — failing open")
-            return CriticVerdict(passed=True)
-    log.warning(
-        "intent-coverage critic returned no envelope-shaped JSON in %d "
-        "objects — failing open",
-        len(objs),
-    )
+            # Critic claimed fail but gave no gap — remember and keep
+            # scanning in case a later object has the real verdict.
+            saw_malformed_fail = True
+    if saw_malformed_fail:
+        log.warning("intent-coverage critic failed without a gap — failing open")
+    else:
+        log.warning(
+            "intent-coverage critic returned no envelope-shaped JSON in %d "
+            "objects — failing open",
+            len(objs),
+        )
     return CriticVerdict(passed=True)
 
 

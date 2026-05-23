@@ -3435,6 +3435,16 @@ class Worker:
                 live_task["description"] = appended
                 live_task["status"] = str(TaskStatus.IN_PROGRESS)
                 break
+        # codex r3293424367 on PR #1932: clear ``current_task_id``
+        # after re-parking.  Otherwise a stale "active task" marker
+        # lets ``_maybe_abort_for_new_task`` fire on unrelated incoming
+        # work, which routes through ``_cleanup_aborted_task`` and
+        # calls ``git_clean()`` — destroying the staged changes we
+        # just preserved for the worker's retry turn.  The task is
+        # marked IN_PROGRESS so the picker still resumes it first
+        # next cycle.
+        with self._state.modify() as state:
+            state.pop("current_task_id", None)
 
     def _finish_task(
         self,

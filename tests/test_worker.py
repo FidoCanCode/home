@@ -12620,6 +12620,56 @@ class TestExecuteTask:
         )
         assert "Wire retry on the network layer." in affected["description"]
 
+    def test_task_completion_critic_failure_clears_current_task_id(
+        self, tmp_path: Path
+    ) -> None:
+        """codex r3293424367 on PR #1932: after the critic fails and
+        we re-park, ``current_task_id`` must be cleared.  Otherwise
+        ``_maybe_abort_for_new_task`` may fire on incoming higher-
+        priority work, which routes through ``_cleanup_aborted_task``
+        and calls ``git_clean()`` — destroying the staged changes
+        we just preserved for the retry turn."""
+        import subprocess as _subprocess
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "transient failures retry up to 3 times"
+        task["status"] = "in_progress"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [task]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+        # Seed durable state with current_task_id pointing at our task
+        # — that's the marker the bug leaves stale.
+        with worker._state.modify() as state:
+            state["current_task_id"] = task["id"]
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": false, "gap": "scope-creep"}'
+        )
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            stdout = (
+                "diff --git a/x b/x\n+changed\n"
+                if args[:2] == ["show", "--no-color"]
+                else ""
+            )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout=stdout, stderr=""
+            )
+
+        worker._git = git_stub
+        worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        # After the critic-failure re-park, the durable state must not
+        # carry a stale current_task_id pointer that could later route
+        # to git_clean and destroy the preserved staged work.
+        with worker._state.modify() as state:
+            assert state.get("current_task_id") is None
+
     def test_task_completion_critic_pass_pushes_and_completes(
         self, tmp_path: Path
     ) -> None:

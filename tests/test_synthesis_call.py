@@ -1027,6 +1027,27 @@ class TestIntentCoverageCritic:
         assert result.change_request == "Add tests"
         assert agent.run_turn.call_count == 4
 
+    def test_critic_recovers_real_fail_after_malformed_early_envelope(
+        self,
+    ) -> None:
+        """codex r3293424368 on PR #1932: if the critic emits
+        ``{"passed": false}`` with no gap followed by a real
+        ``{"passed": false, "gap": "..."}``, we must use the real
+        verdict instead of failing open on the first malformed one.
+        Otherwise an early malformed envelope masks a legitimate
+        intent-coverage failure and lets it ship."""
+        raw_v1 = _make_raw(reply_text="Promise.", change_request=None)
+        raw_v2 = _make_raw(reply_text="Tests added.", change_request="Add tests")
+        critic_response = '{"passed": false} {"passed": false, "gap": "missing tests"}'
+        agent = _make_agent([raw_v1, critic_response, raw_v2, _CRITIC_PASS])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        # Real verdict was picked up — synthesis retried.
+        assert result.change_request == "Add tests"
+        assert agent.run_turn.call_count == 4
+
     def test_critic_scans_past_leading_unrelated_json_pass_case(self) -> None:
         """Symmetric to the fail-case test: a leading unrelated object
         followed by ``{"passed": true}`` must still resolve as a pass
