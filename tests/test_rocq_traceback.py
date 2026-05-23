@@ -147,15 +147,11 @@ class TestTracebackCLI:
         assert exit_code == 0
         assert "Rocq source: source_maps.v:12:4" in stdout.getvalue()
 
-    def test_main_uses_process_streams(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_main_uses_process_streams(self) -> None:
         stdin = StringIO("plain text")
         stdout = StringIO()
         stderr = StringIO()
-        monkeypatch.setattr(rocq_traceback.sys, "argv", ["traceback"])
-        monkeypatch.setattr(rocq_traceback.sys, "stdin", stdin)
-        monkeypatch.setattr(rocq_traceback.sys, "stdout", stdout)
-        monkeypatch.setattr(rocq_traceback.sys, "stderr", stderr)
 
-        assert rocq_traceback.main() == 0
+        assert rocq_traceback.main([], stdin=stdin, stdout=stdout, stderr=stderr) == 0
         assert stdout.getvalue() == "plain text"
         assert stderr.getvalue() == ""

@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from fido import provider
 from fido.copilotcli import CopilotCLIClient, CopilotCLISession
 from fido.provider import ThreadKind
@@ -83,13 +81,11 @@ def test_hold_for_handler_does_not_fire_runtime_cancel_when_free(
 
 
 def test_hold_for_handler_preempt_fires_runtime_cancel_on_worker_holder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """Webhook caller + worker currently holding (per talker registry)
     → runtime cancel fires once via preempt-always semantics in
     ``__enter__`` (#637)."""
-    session = _session(tmp_path)
-    assert isinstance(session._runtime, FakeRuntime)
 
     def fake_talker(_repo: str) -> provider.SessionTalker:
         return provider.SessionTalker(
@@ -101,7 +97,17 @@ def test_hold_for_handler_preempt_fires_runtime_cancel_on_worker_holder(
             started_at=provider.talker_now(),
         )
 
-    monkeypatch.setattr(provider, "get_talker", fake_talker)
+    sys_file = tmp_path / "persona.md"
+    sys_file.write_text("")
+    session = CopilotCLISession(
+        sys_file,
+        work_dir=tmp_path,
+        model=CopilotCLIClient.work_model,
+        runtime=FakeRuntime(),
+        repo_name="owner/repo",
+        talker_resolver=fake_talker,
+    )
+    assert isinstance(session._runtime, FakeRuntime)
     provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():

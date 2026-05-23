@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import IO
+from typing import IO, Any
 
 from fido.rocq_pymap import PyMap, PyMapError
 
@@ -180,10 +180,16 @@ class ReferenceInvocation:
 
 
 class ModelLoader:
-    def __init__(self, repo_root: Path, stderr: IO[str]) -> None:
+    def __init__(
+        self,
+        repo_root: Path,
+        stderr: IO[str],
+        importer: Callable[[Path], ModuleType] | None = None,
+    ) -> None:
         self._repo_root = repo_root
         self._stderr = stderr
         self._generated_dir = repo_root / "src" / "fido" / "rocq"
+        self._importer = importer
 
     def load(self, source: Path) -> LoadedModel:
         resolved = self._resolve_source(source)
@@ -238,6 +244,8 @@ class ModelLoader:
         return marker in path.read_text()
 
     def _import_module(self, path: Path) -> ModuleType:
+        if self._importer is not None:
+            return self._importer(path)
         module_name = f"fido.rocq.{path.stem}"
         return importlib.import_module(module_name)
 
@@ -462,12 +470,23 @@ class RocqRepl:
         stdin: IO[str],
         stdout: IO[str],
         stderr: IO[str],
+        *,
+        reference_factory: Callable[[Path, LoadedModel, IO[str]], Any] | None = None,
+        console_factory: Callable[[dict[str, object]], Any] | None = None,
     ) -> None:
         self._repo_root = repo_root
         self._stdin = stdin
         self._stdout = stdout
         self._stderr = stderr
         self._normalizer = ValueNormalizer()
+        self._reference_factory: Callable[[Path, LoadedModel, IO[str]], Any] = (
+            reference_factory if reference_factory is not None else OcamlReference
+        )
+        self._console_factory: Callable[[dict[str, object]], Any] = (
+            console_factory
+            if console_factory is not None
+            else lambda ns: code.InteractiveConsole(locals=ns)
+        )
 
     def run(self, argv: list[str]) -> int:
         parser = argparse.ArgumentParser(
@@ -535,9 +554,9 @@ class RocqRepl:
             if not callable(target):
                 raise RocqReplError(f"Rocq symbol is not callable: {invocation.symbol}")
             python_result = self._normalizer.normalize(target(*invocation.args))
-        ocaml_result = OcamlReference(self._repo_root, model, self._stderr).evaluate(
-            invocation
-        )
+        ocaml_result = self._reference_factory(
+            self._repo_root, model, self._stderr
+        ).evaluate(invocation)
         return CompareResult(
             expression=invocation.expression,
             python_result=python_result,
@@ -560,7 +579,7 @@ class RocqRepl:
             f"Bound symbols: {', '.join(sorted(model.namespace))}\n"
             "Helpers: rocq_symbols(), rocq_source(name), rocq_compare(symbol, *args)"
         )
-        console = code.InteractiveConsole(locals=model.namespace)
+        console = self._console_factory(model.namespace)
         console.interact(banner=banner, exitmsg="")
 
 
@@ -568,8 +587,10 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def main() -> int:
-    return RocqRepl(repo_root(), sys.stdin, sys.stdout, sys.stderr).run(sys.argv[1:])
+def main(argv: list[str] | None = None) -> int:
+    return RocqRepl(repo_root(), sys.stdin, sys.stdout, sys.stderr).run(
+        argv if argv is not None else sys.argv[1:]
+    )
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 """Provider construction."""
 
 import threading
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
@@ -21,8 +23,14 @@ from fido.provider import (
 class DefaultProviderFactory:
     """Create repo-configured provider instances."""
 
-    def __init__(self, *, session_system_file: Path) -> None:
+    def __init__(
+        self,
+        *,
+        session_system_file: Path,
+        claude_session_factory: Callable[..., Any] | None = None,
+    ) -> None:
         self._session_system_file = session_system_file
+        self._claude_session_factory = claude_session_factory
         self._api_lock = threading.Lock()
         self._apis: dict[ProviderID, ProviderAPI] = {}
 
@@ -61,6 +69,7 @@ class DefaultProviderFactory:
                         repo_name=repo_name,
                         session=session,
                         state_updater=state_updater,
+                        session_factory=self._claude_session_factory,
                     )
                 )
             case ProviderID.COPILOT_CLI:

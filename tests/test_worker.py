@@ -259,7 +259,8 @@ class Worker(_WorkerBase):
             kwargs["nudges"] = Nudges()
         if "provider_factory" not in kwargs:
             kwargs["provider_factory"] = DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md"
+                session_system_file=default_sub_dir() / "persona.md",
+                claude_session_factory=_no_spawn_session_factory,
             )
         if "prompt_builder" not in kwargs:
             kwargs["prompt_builder"] = worker_module._DEFAULT_PROMPT_BUILDER  # pyright: ignore[reportPrivateUsage]
@@ -309,13 +310,61 @@ class WorkerThread(_WorkerThreadBase):
             )
         if "provider_factory" not in kwargs:
             kwargs["provider_factory"] = DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md"
+                session_system_file=default_sub_dir() / "persona.md",
+                claude_session_factory=_no_spawn_session_factory,
             )
         if "issue_cache" not in kwargs:
             kwargs["issue_cache"] = IssueCache(repo_name)
         if "dispatcher" not in kwargs:
             kwargs["dispatcher"] = _FakeDispatcher()
         super().__init__(work_dir, repo_name, gh, *args, **kwargs)
+
+
+def _no_spawn_session_factory(*_args: object, **_kwargs: object) -> MagicMock:
+    """Return a MagicMock session; injected as ``claude_session_factory`` so no
+    real subprocess is spawned when tests call ``Worker.run()`` or run the
+    ``WorkerThread`` loop.  Replaces the old autouse ``_no_claude_session_spawn``
+    monkeypatch.setattr fixture."""
+    return MagicMock()
+
+
+class _SpySessionFactory:
+    """Spy callable replacing ``ClaudeSession`` for ``create_session`` tests.
+
+    Injected as ``claude_session_factory`` via ``DefaultProviderFactory`` so
+    tests can verify the factory was called with the expected args without
+    patching ``claude.ClaudeSession`` at the module level.
+    """
+
+    def __init__(self, return_value: object = None) -> None:
+        self._return_value: object = (
+            return_value if return_value is not None else MagicMock()
+        )
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append((args, kwargs))
+        return self._return_value
+
+    @property
+    def return_value(self) -> object:
+        return self._return_value
+
+    @return_value.setter
+    def return_value(self, val: object) -> None:
+        self._return_value = val
+
+    def assert_called_once(self) -> None:
+        assert len(self._calls) == 1, f"Expected 1 call, got {len(self._calls)}"
+
+    @property
+    def call_args(self) -> tuple[tuple[object, ...], dict[str, object]]:
+        assert self._calls, "No calls recorded"
+        return self._calls[-1]
+
+    @property
+    def call_count(self) -> int:
+        return len(self._calls)
 
 
 class _FakeWorker:
@@ -335,26 +384,6 @@ class _FakeWorker:
 
     def run(self) -> int:
         return self._run_fn(self)
-
-
-@pytest.fixture(autouse=True)
-def _patch_worker_classes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(worker_module, "Worker", Worker)
-    monkeypatch.setattr(worker_module, "WorkerThread", WorkerThread)
-
-
-@pytest.fixture(autouse=True)
-def _no_claude_session_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch ClaudeSession for every test in this module.
-
-    Worker.run() now creates a ClaudeSession on entry.  Without this fixture
-    every test that calls worker.run() would try to spawn a real claude
-    subprocess.  The mock is a MagicMock so all attribute and method accesses
-    (stop, send, iter_events, …) work without raising AttributeError.
-    """
-    from fido import claude
-
-    monkeypatch.setattr(claude, "ClaudeSession", MagicMock(return_value=MagicMock()))
 
 
 def _client(return_value: str = "", *, side_effect: object = None) -> MagicMock:
@@ -1171,44 +1200,62 @@ class TestWorker:
     # --- create_session / stop_session ---
 
     def test_create_session_instantiates_claude_session(self, tmp_path: Path) -> None:
-        from fido import claude
-
+        spy = _SpySessionFactory()
         worker = Worker(
-            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+            tmp_path,
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            provider_factory=DefaultProviderFactory(
+                session_system_file=default_sub_dir() / "persona.md",
+                claude_session_factory=spy,
+            ),
         )
         worker.create_session()
-        claude.ClaudeSession.assert_called_once()
+        spy.assert_called_once()
 
     def test_create_session_passes_work_dir(self, tmp_path: Path) -> None:
-        from fido import claude
-
+        spy = _SpySessionFactory()
         worker = Worker(
-            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+            tmp_path,
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            provider_factory=DefaultProviderFactory(
+                session_system_file=default_sub_dir() / "persona.md",
+                claude_session_factory=spy,
+            ),
         )
         worker.create_session()
-        _, kwargs = claude.ClaudeSession.call_args
+        _, kwargs = spy.call_args
         assert kwargs.get("work_dir") == tmp_path
 
     def test_create_session_switches_to_opus(self, tmp_path: Path) -> None:
-        from fido import claude
-
         mock_session = MagicMock()
-        claude.ClaudeSession.return_value = mock_session
+        spy = _SpySessionFactory(return_value=mock_session)
         worker = Worker(
-            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+            tmp_path,
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            provider_factory=DefaultProviderFactory(
+                session_system_file=default_sub_dir() / "persona.md",
+                claude_session_factory=spy,
+            ),
         )
         worker.create_session()
-        _, kwargs = claude.ClaudeSession.call_args
+        _, kwargs = spy.call_args
         assert kwargs.get("model") == "claude-opus-4-6"
         mock_session.switch_model.assert_not_called()
 
     def test_create_session_stores_on_self(self, tmp_path: Path) -> None:
-        from fido import claude
-
         mock_session = MagicMock()
-        claude.ClaudeSession.return_value = mock_session
+        spy = _SpySessionFactory(return_value=mock_session)
         worker = Worker(
-            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
+            tmp_path,
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            provider_factory=DefaultProviderFactory(
+                session_system_file=default_sub_dir() / "persona.md",
+                claude_session_factory=spy,
+            ),
         )
         worker.create_session()
         assert worker._provider.agent.session is mock_session  # pyright: ignore[reportPrivateUsage]
@@ -7090,8 +7137,6 @@ class TestFinalizeSetupWithNoTasks:
             )
         ]
         gh.fetch_closed_sub_issues.return_value = subs
-
-        from fido.worker import Worker
 
         worker = Worker(
             tmp_path,
@@ -15846,7 +15891,7 @@ class TestWorkerThread:
         """_create_worker returns a real Worker wrapping the thread's collaborators."""
         wt = self._make_thread(tmp_path)
         worker = wt._create_worker(None, None, None)  # pyright: ignore[reportPrivateUsage]
-        assert isinstance(worker, Worker)
+        assert isinstance(worker, _WorkerBase)
 
     # ── loop behaviour ────────────────────────────────────────────────────
 
@@ -16550,19 +16595,18 @@ class TestWorkerThread:
         # Only the clean second iteration (result 0) triggers a wait.
         wt._wake.wait.assert_called_once()
 
-    def test_run_halts_on_claude_leak_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_run_halts_on_claude_leak_error(self, tmp_path: Path) -> None:
         """SessionLeakError in the worker loop calls os._exit(3)."""
-        from fido import worker as worker_module
-
         wt = self._make_thread(tmp_path)
         exits: list[int] = []
-        monkeypatch.setattr(worker_module.os, "_exit", exits.append)
-        # Force the loop to raise a leak error on the first iteration.
-        wt._registry = MagicMock()
-        wt._registry.report_activity.side_effect = provider.SessionLeakError("leak")
-        wt.run()
+        WorkerThread._fn_exit = exits.append  # type: ignore[assignment]
+        try:
+            # Force the loop to raise a leak error on the first iteration.
+            wt._registry = MagicMock()
+            wt._registry.report_activity.side_effect = provider.SessionLeakError("leak")
+            wt.run()
+        finally:
+            del WorkerThread._fn_exit
         assert exits == [3]
 
     # ── config / repo_cfg injection ───────────────────────────────────────

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import cast
+from typing import IO, cast
 from unittest.mock import Mock
 
 import pytest
@@ -32,7 +32,7 @@ def fake_module(**values: object) -> ModuleType:
     return module
 
 
-def fake_import_module(_loader: ModelLoader, _path: Path) -> ModuleType:
+def fake_import_module(_path: Path) -> ModuleType:
     return fake_module(toy=1)
 
 
@@ -49,9 +49,7 @@ def test_model_loader_binds_session_lock_symbols() -> None:
     assert model.symbols["transition"].location().startswith("session_lock.v:")
 
 
-def test_model_loader_falls_back_to_source_comments(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_model_loader_falls_back_to_source_comments(tmp_path: Path) -> None:
     generated = tmp_path / "src" / "fido" / "rocq"
     generated.mkdir(parents=True)
     (tmp_path / "models").mkdir()
@@ -59,15 +57,16 @@ def test_model_loader_falls_back_to_source_comments(
     source.write_text("Definition toy := 1.\n")
     module = generated / "toy.py"
     module.write_text("# From toy.v:1:0\n")
-    monkeypatch.setattr(ModelLoader, "_import_module", fake_import_module)
 
-    model = ModelLoader(tmp_path, StringIO()).load(Path("models/toy.v"))
+    model = ModelLoader(tmp_path, StringIO(), importer=fake_import_module).load(
+        Path("models/toy.v")
+    )
 
     assert model.namespace["toy"] == 1
 
 
 def test_model_loader_warns_on_bad_map_and_uses_comment_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     generated = tmp_path / "src" / "fido" / "rocq"
     generated.mkdir(parents=True)
@@ -78,9 +77,8 @@ def test_model_loader_warns_on_bad_map_and_uses_comment_fallback(
     module.write_text("# From toy.v:1:0\n")
     module.with_suffix(".pymap").write_text("{")
     err = StringIO()
-    monkeypatch.setattr(ModelLoader, "_import_module", fake_import_module)
 
-    ModelLoader(tmp_path, err).load(Path("models/toy.v"))
+    ModelLoader(tmp_path, err, importer=fake_import_module).load(Path("models/toy.v"))
 
     assert "could not parse" in err.getvalue()
 
@@ -241,27 +239,24 @@ def test_ocaml_reference_strips_python_pragmas_and_writes_eval(tmp_path: Path) -
     assert "OwnedByWorker()" in eval_source
 
 
-def test_ocaml_reference_evaluate_runs_reference_toolchain(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ref = OcamlReference(REPO, load_session_model(), StringIO())
+def test_ocaml_reference_evaluate_runs_reference_toolchain(tmp_path: Path) -> None:
     calls: list[tuple[list[str], Path]] = []
 
-    def fake_prepare(work: Path) -> tuple[str, str]:
-        calls.append((["prepare"], work))
-        return "session_lock_ocaml_ref", "Session_lock_ocaml_ref"
+    class SpyReference(OcamlReference):
+        def _prepare_reference(self, work: Path) -> tuple[str, str]:
+            calls.append((["prepare"], work))
+            return "session_lock_ocaml_ref", "Session_lock_ocaml_ref"
 
-    def fake_write(work: Path, module_name: str, expression: str) -> None:
-        calls.append((["write", module_name, expression], work))
+        def _write_eval(self, work: Path, module_name: str, expression: str) -> None:
+            calls.append((["write", module_name, expression], work))
 
-    def fake_run(argv: list[str], cwd: Path) -> SimpleNamespace:
-        calls.append((argv, cwd))
-        return SimpleNamespace(returncode=0, stdout="OwnedByWorker()\n", stderr="")
+        def _run_checked(  # pyright: ignore[reportIncompatibleMethodOverride]
+            self, argv: list[str], cwd: Path
+        ) -> SimpleNamespace:
+            calls.append((argv, cwd))
+            return SimpleNamespace(returncode=0, stdout="OwnedByWorker()\n", stderr="")
 
-    monkeypatch.setattr(ref, "_prepare_reference", fake_prepare)
-    monkeypatch.setattr(ref, "_write_eval", fake_write)
-    monkeypatch.setattr(ref, "_run_checked", fake_run)
-
+    ref = SpyReference(REPO, load_session_model(), StringIO())
     invocation, _ = ReferenceInvocation.from_expression(
         load_session_model(), "transition(Free(), WorkerAcquire())"
     )
@@ -354,10 +349,10 @@ def test_cli_eval_without_compare() -> None:
     assert stdout.getvalue() == "python: OwnedByWorker()\n"
 
 
-def test_cli_eval_with_compare(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_eval_with_compare() -> None:
     class FakeReference:
         def __init__(
-            self, repo_root: Path, model: LoadedModel, stderr: StringIO
+            self, repo_root: Path, model: LoadedModel, stderr: IO[str]
         ) -> None:
             self.repo_root = repo_root
             self.model = model
@@ -367,24 +362,21 @@ def test_cli_eval_with_compare(monkeypatch: pytest.MonkeyPatch) -> None:
             assert invocation.symbol == "transition"
             return "OwnedByWorker()"
 
-    monkeypatch.setattr(rocq_repl, "OcamlReference", FakeReference)
     stdout = StringIO()
 
-    exit_code = RocqRepl(REPO, StringIO(), stdout, StringIO()).run(
-        ["--eval", "transition(Free(), WorkerAcquire())", "models/session_lock.v"]
-    )
+    exit_code = RocqRepl(
+        REPO, StringIO(), stdout, StringIO(), reference_factory=FakeReference
+    ).run(["--eval", "transition(Free(), WorkerAcquire())", "models/session_lock.v"])
 
     assert exit_code == 0
     assert "ocaml: OwnedByWorker()" in stdout.getvalue()
     assert "match: yes" in stdout.getvalue()
 
 
-def test_compare_can_compute_python_result_from_invocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_compare_can_compute_python_result_from_invocation() -> None:
     class FakeReference:
         def __init__(
-            self, repo_root: Path, model: LoadedModel, stderr: StringIO
+            self, repo_root: Path, model: LoadedModel, stderr: IO[str]
         ) -> None:
             self.repo_root = repo_root
             self.model = model
@@ -394,15 +386,14 @@ def test_compare_can_compute_python_result_from_invocation(
             assert invocation.symbol == "transition"
             return "OwnedByWorker()"
 
-    monkeypatch.setattr(rocq_repl, "OcamlReference", FakeReference)
     model = load_session_model()
     invocation, _ = ReferenceInvocation.from_expression(
         model, "transition(Free(), WorkerAcquire())"
     )
 
-    result = RocqRepl(REPO, StringIO(), StringIO(), StringIO())._compare(
-        model, invocation
-    )
+    result = RocqRepl(
+        REPO, StringIO(), StringIO(), StringIO(), reference_factory=FakeReference
+    )._compare(model, invocation)
 
     assert result.matches
 
@@ -420,10 +411,10 @@ def test_compare_rejects_noncallable_invocation_target() -> None:
         RocqRepl(REPO, StringIO(), StringIO(), StringIO())._compare(model, invocation)
 
 
-def test_cli_installs_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_installs_helpers() -> None:
     class FakeReference:
         def __init__(
-            self, repo_root: Path, model: LoadedModel, stderr: StringIO
+            self, repo_root: Path, model: LoadedModel, stderr: IO[str]
         ) -> None:
             self.repo_root = repo_root
             self.model = model
@@ -455,13 +446,15 @@ def test_cli_installs_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
             assert "Bound symbols:" in banner
             assert exitmsg == ""
 
-    monkeypatch.setattr(rocq_repl, "OcamlReference", FakeReference)
-    monkeypatch.setattr(rocq_repl.code, "InteractiveConsole", FakeConsole)
-
     assert (
-        RocqRepl(REPO, StringIO(), StringIO(), StringIO()).run(
-            ["models/session_lock.v"]
-        )
+        RocqRepl(
+            REPO,
+            StringIO(),
+            StringIO(),
+            StringIO(),
+            reference_factory=FakeReference,
+            console_factory=FakeConsole,
+        ).run(["models/session_lock.v"])
         == 0
     )
 
@@ -486,7 +479,5 @@ def test_source_map_symbols_ignore_entries_without_symbol(tmp_path: Path) -> Non
     assert ModelLoader(REPO, StringIO())._symbols_from_map(path) == {}
 
 
-def test_main_uses_process_streams(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(rocq_repl.sys, "argv", ["repl", "models/missing.v"])
-
-    assert rocq_repl.main() == 1
+def test_main_uses_process_streams() -> None:
+    assert rocq_repl.main(["models/missing.v"]) == 1

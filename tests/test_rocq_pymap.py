@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pytest
 
-from fido import rocq_pymap
 from fido.rocq_pymap import PyMap, PyMapEntry, PyMapError
 
 _HEADER = (
@@ -69,17 +68,12 @@ def test_pymap_allows_extra_columns_for_open_stability(tmp_path: Path) -> None:
     assert PyMap.load(path).entries[0].symbol == "x"
 
 
-def test_pymap_wraps_csv_errors(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_pymap_wraps_csv_errors(tmp_path: Path) -> None:
     path = tmp_path / "x.pymap"
     path.write_text(_HEADER)
 
     def fail_dict_reader(_: object) -> object:
         raise csv.Error("bad csv")
 
-    monkeypatch.setattr(rocq_pymap.csv, "DictReader", fail_dict_reader)
-
     with pytest.raises(PyMapError, match="bad source map CSV"):
-        PyMap.load(path)
+        PyMap.load(path, dict_reader=fail_dict_reader)

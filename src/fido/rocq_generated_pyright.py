@@ -4,10 +4,15 @@ import argparse
 import json
 import os
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 
-def main() -> None:
+def main(
+    argv: list[str] | None = None,
+    *,
+    execvp: Callable[[str, list[str]], None] = os.execvp,
+) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("generated_dir", type=Path)
     parser.add_argument(
@@ -15,7 +20,7 @@ def main() -> None:
         type=Path,
         default=Path("rocq-python-extraction/test"),
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     generated_dir = args.generated_dir
     checks = sorted(args.checks_dir.glob("pyright_*_check.py"))
@@ -33,7 +38,7 @@ def main() -> None:
     config_path = generated_dir / "pyrightconfig.json"
     config_path.write_text(json.dumps(config, indent=2) + "\n")
 
-    os.execvp("pyright", ["pyright", "-p", str(config_path)])
+    execvp("pyright", ["pyright", "-p", str(config_path)])
     raise RuntimeError("pyright exec failed")
 
 

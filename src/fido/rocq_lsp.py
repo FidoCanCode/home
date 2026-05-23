@@ -5,6 +5,7 @@ import json
 import re
 import sys
 from ast import AnnAssign, Assign, AsyncFunctionDef, ClassDef, FunctionDef, Name, parse
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
@@ -1304,20 +1305,37 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def main_cli() -> int:
-    return RocqLspCli(repo_root(), sys.stdout, sys.stderr).run(sys.argv[1:])
+def main_cli(
+    argv: list[str] | None = None,
+    *,
+    cli_factory: Callable[[Path, IO[str], IO[str]], Any] | None = None,
+) -> int:
+    factory = cli_factory if cli_factory is not None else RocqLspCli
+    return factory(repo_root(), sys.stdout, sys.stderr).run(
+        argv if argv is not None else sys.argv[1:]
+    )
 
 
-def main_lsp() -> int:
-    return RocqLspServer(RocqLanguageService(repo_root()), sys.stdin, sys.stdout).run()
+def main_lsp(
+    *,
+    server_factory: Callable[[RocqLanguageService, IO[str], IO[str]], Any]
+    | None = None,
+) -> int:
+    factory = server_factory if server_factory is not None else RocqLspServer
+    return factory(RocqLanguageService(repo_root()), sys.stdin, sys.stdout).run()
 
 
-def main() -> int:
-    if len(sys.argv) > 1 and sys.argv[1] == "--stdio":
-        return RocqLspServer(
-            RocqLanguageService(repo_root()), sys.stdin, sys.stdout
-        ).run()
-    return RocqLspCli(repo_root(), sys.stdout, sys.stderr).run(sys.argv[1:])
+def main(
+    argv: list[str] | None = None,
+    *,
+    cli_factory: Callable[[Path, IO[str], IO[str]], Any] | None = None,
+    server_factory: Callable[[RocqLanguageService, IO[str], IO[str]], Any]
+    | None = None,
+) -> int:
+    actual_argv = argv if argv is not None else sys.argv[1:]
+    if len(actual_argv) > 0 and actual_argv[0] == "--stdio":
+        return main_lsp(server_factory=server_factory)
+    return main_cli(actual_argv, cli_factory=cli_factory)
 
 
 if __name__ == "__main__":

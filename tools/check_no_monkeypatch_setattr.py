@@ -17,24 +17,7 @@ from pathlib import Path
 # Temporary exemptions — existing monkeypatch.setattr sites pending
 # constructor-DI migration under #1773.  Do not add new files here; fix the
 # root cause instead.
-_EXEMPTIONS: frozenset[str] = frozenset(
-    {
-        "tests/test_cli.py",
-        "tests/test_claude.py",
-        "tests/test_claude_hold_for_handler.py",
-        "tests/test_copilot_hold_for_handler.py",
-        "tests/test_rocq_generated_pyright.py",
-        "tests/test_rocq_lsp.py",
-        "tests/test_rocq_pymap.py",
-        "tests/test_rocq_repl.py",
-        "tests/test_rocq_traceback.py",
-        "tests/test_server.py",
-        "tests/test_session_lock_watchdog.py",
-        "tests/test_status_provider.py",
-        "tests/test_worker.py",
-        "tests/test_worker_persist_session_id.py",
-    }
-)
+_EXEMPTIONS: frozenset[str] = frozenset()
 
 _PATTERN: re.Pattern[str] = re.compile(r"\.setattr\s*\(")
 
