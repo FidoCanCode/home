@@ -26,7 +26,6 @@ _EXEMPTIONS: frozenset[str] = frozenset(
         "tests/test_rocq_lsp.py",
         "tests/test_rocq_pymap.py",
         "tests/test_rocq_repl.py",
-        "tests/test_rocq_traceback.py",
         "tests/test_server.py",
         "tests/test_status_provider.py",
         "tests/test_worker.py",

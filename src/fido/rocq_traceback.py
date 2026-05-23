@@ -132,8 +132,18 @@ class TracebackCLI:
         return tuple(Path(path).read_text() for path in paths)
 
 
-def main() -> int:
-    return TracebackCLI(sys.stdin, sys.stdout, sys.stderr).run(sys.argv[1:])
+def main(
+    argv: list[str] | None = None,
+    *,
+    stdin: IO[str] | None = None,
+    stdout: IO[str] | None = None,
+    stderr: IO[str] | None = None,
+) -> int:
+    return TracebackCLI(
+        stdin if stdin is not None else sys.stdin,
+        stdout if stdout is not None else sys.stdout,
+        stderr if stderr is not None else sys.stderr,
+    ).run(argv if argv is not None else sys.argv[1:])
 
 
 if __name__ == "__main__":  # pragma: no cover
