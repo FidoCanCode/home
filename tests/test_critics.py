@@ -7,12 +7,15 @@ from typing import Any
 import pytest
 
 from fido.critics import (
+    ReplyProseVerdict,
     TaskCompletionVerdict,
     TaskCreationProposedSplit,
     TaskCreationVerdict,
     _parse_proposed_splits,
+    _parse_reply_prose_verdict,
     _parse_task_completion_verdict,
     _parse_task_creation_verdict,
+    run_reply_prose_critic,
     run_task_completion_critic,
     run_task_creation_critic,
 )
@@ -802,4 +805,249 @@ class TestRunTaskCompletionCritic:
                 agent=agent,
                 prompts=_FakeCompletionPrompts(),
                 critic_system_prompt="followup",
+            )
+
+
+# ---------------------------------------------------------------------------
+# HOL-18 / #1912 — reply-prose claim-grounding critic
+# ---------------------------------------------------------------------------
+
+
+class TestReplyProseVerdictDefaults:
+    def test_default_passes(self) -> None:
+        v = ReplyProseVerdict()
+        assert v.passed is True
+        assert v.gap == ""
+        assert v.rationale == ""
+
+    def test_pass_with_rationale_constructs(self) -> None:
+        v = ReplyProseVerdict(passed=True, rationale="claims all map")
+        assert v.passed
+
+
+class TestReplyProseVerdictConstructorInvariants:
+    def test_fail_requires_gap(self) -> None:
+        with pytest.raises(ValueError, match="gap is required"):
+            ReplyProseVerdict(passed=False)
+
+    def test_fail_rejects_blank_gap(self) -> None:
+        with pytest.raises(ValueError, match="gap is required"):
+            ReplyProseVerdict(passed=False, gap=" \t \n")
+
+    def test_fail_with_gap_constructs(self) -> None:
+        v = ReplyProseVerdict(
+            passed=False,
+            gap='prose claims "commit deadbee" but no such SHA',
+        )
+        assert not v.passed
+
+
+class TestParseReplyProseVerdict:
+    def test_parses_passed_true(self) -> None:
+        v = _parse_reply_prose_verdict(
+            {"passed": True, "rationale": "no falsifiable specifics"}
+        )
+        assert v is not None
+        assert v.passed
+        assert v.rationale == "no falsifiable specifics"
+
+    def test_parses_passed_false_with_gap(self) -> None:
+        v = _parse_reply_prose_verdict(
+            {
+                "passed": False,
+                "gap": 'prose claims "commit deadbee" not in repo',
+                "rationale": "checked git log",
+            }
+        )
+        assert v is not None
+        assert not v.passed
+        assert "deadbee" in v.gap
+
+    def test_missing_passed_returns_none(self) -> None:
+        assert _parse_reply_prose_verdict({"rationale": "x"}) is None
+
+    def test_non_bool_passed_returns_none(self) -> None:
+        assert _parse_reply_prose_verdict({"passed": "yes"}) is None
+
+    def test_fail_without_gap_returns_none(self) -> None:
+        """No-gap fail can't drive a meaningful retry — caller fails open."""
+        assert _parse_reply_prose_verdict({"passed": False}) is None
+
+
+@dataclass
+class _FakeReplyProsePrompts:
+    """Hand-rolled Prompts stand-in for the reply-prose critic."""
+
+    prompt_value: str = "reply-prose-critic-prompt"
+    calls: list[tuple] = field(default_factory=list)
+
+    def reply_prose_claim_grounding_prompt(
+        self,
+        reply_text: str,
+        structured_state: dict[str, Any],
+    ) -> str:
+        self.calls.append(("reply_prose", reply_text, structured_state))
+        return self.prompt_value
+
+
+class TestRunReplyProseCritic:
+    """End-to-end: critic catches PR #1858's "the work is in commit ABC"
+    pattern + #1855's "I filed an issue" without-URL pattern."""
+
+    def _state(self) -> dict[str, Any]:
+        return {
+            "recent_commit_shas": ["abc1234567"],
+            "open_issue_numbers": [101, 102],
+            "filed_insights": [],
+            "referenced_files": ["src/fido/tasks.py"],
+        }
+
+    def test_pass_through_on_grounded_prose(self) -> None:
+        raw = json.dumps(
+            {"passed": True, "rationale": "all SHAs/numbers map to ground truth"}
+        )
+        verdict = run_reply_prose_critic(
+            reply_text="Pushed the fix in commit abc1234567 — see #101.",
+            structured_state=self._state(),
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeReplyProsePrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert verdict.passed
+
+    def test_catches_nonexistent_commit_claim(self) -> None:
+        """PR #1858 regression — prose claims a SHA that's not in the repo."""
+        raw = json.dumps(
+            {
+                "passed": False,
+                "gap": 'prose claims "commit deadbeef" not in recent_commit_shas',
+                "rationale": "Only abc1234567 was committed this turn.",
+            }
+        )
+        verdict = run_reply_prose_critic(
+            reply_text="Fixed it in commit deadbeef.",
+            structured_state=self._state(),
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeReplyProsePrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert not verdict.passed
+        assert "deadbeef" in verdict.gap
+
+    def test_catches_nonexistent_issue_claim(self) -> None:
+        """#1855 regression — prose claims a filed issue with no URL anchor."""
+        raw = json.dumps(
+            {
+                "passed": False,
+                "gap": 'prose says "filed issue #999" but #999 not in open_issue_numbers',
+                "rationale": "Insight filing presumably failed silently.",
+            }
+        )
+        verdict = run_reply_prose_critic(
+            reply_text="I filed issue #999 to track this.",
+            structured_state=self._state(),
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeReplyProsePrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert not verdict.passed
+        assert "999" in verdict.gap
+
+    def test_transport_error_fails_open(self) -> None:
+        agent = _FakeAgent(run_turn_exception=RuntimeError("transport"))
+        verdict = run_reply_prose_critic(
+            reply_text="x",
+            structured_state={},
+            agent=agent,
+            prompts=_FakeReplyProsePrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert verdict.passed
+
+    def test_unparseable_json_fails_open(self) -> None:
+        verdict = run_reply_prose_critic(
+            reply_text="x",
+            structured_state={},
+            agent=_FakeAgent(run_turn_responses=["not json at all"]),
+            prompts=_FakeReplyProsePrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert verdict.passed
+
+    def test_malformed_verdict_fails_open(self) -> None:
+        verdict = run_reply_prose_critic(
+            reply_text="x",
+            structured_state={},
+            agent=_FakeAgent(run_turn_responses=['{"verdict": "wat"}']),
+            prompts=_FakeReplyProsePrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert verdict.passed
+
+    def test_fail_without_gap_alone_fails_open(self) -> None:
+        """A response that's ONLY ``{"passed": false}`` (no gap, no
+        following valid object) must fail open — the loop scans the
+        whole list, finds nothing usable, and returns the default
+        pass-through verdict.  Covers the saw_malformed_fail log path."""
+        verdict = run_reply_prose_critic(
+            reply_text="x",
+            structured_state={},
+            agent=_FakeAgent(run_turn_responses=['{"passed": false}']),
+            prompts=_FakeReplyProsePrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert verdict.passed
+
+    def test_scans_past_malformed_early_envelope(self) -> None:
+        """Same defense as the intent-coverage critic (codex r3293424368):
+        ``{"passed": false}`` early must not mask a later real verdict."""
+        raw = (
+            '{"passed": false} '
+            '{"passed": false, "gap": "real complaint", "rationale": "x"}'
+        )
+        verdict = run_reply_prose_critic(
+            reply_text="x",
+            structured_state={},
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeReplyProsePrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert not verdict.passed
+        assert verdict.gap == "real complaint"
+
+    def test_uses_critic_system_prompt(self) -> None:
+        agent = _FakeAgent(run_turn_responses=['{"passed": true}'])
+        run_reply_prose_critic(
+            reply_text="x",
+            structured_state={},
+            agent=agent,
+            prompts=_FakeReplyProsePrompts(),
+            critic_system_prompt="CRITIC-SYSTEM",
+        )
+        assert agent.calls[0].kwargs["system_prompt"] == "CRITIC-SYSTEM"
+
+    def test_context_overflow_propagates(self) -> None:
+        from fido.provider import ContextOverflowError
+
+        agent = _FakeAgent(run_turn_exception=ContextOverflowError("overflow"))
+        with pytest.raises(ContextOverflowError):
+            run_reply_prose_critic(
+                reply_text="x",
+                structured_state={},
+                agent=agent,
+                prompts=_FakeReplyProsePrompts(),
+                critic_system_prompt="critic-sys",
+            )
+
+    def test_session_leak_propagates(self) -> None:
+        from fido.provider import SessionLeakError
+
+        agent = _FakeAgent(run_turn_exception=SessionLeakError("leak"))
+        with pytest.raises(SessionLeakError):
+            run_reply_prose_critic(
+                reply_text="x",
+                structured_state={},
+                agent=agent,
+                prompts=_FakeReplyProsePrompts(),
+                critic_system_prompt="critic-sys",
             )

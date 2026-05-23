@@ -29,9 +29,11 @@ from fido.synthesis_call import extract_json_objects
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "ReplyProseVerdict",
     "TaskCompletionVerdict",
     "TaskCreationProposedSplit",
     "TaskCreationVerdict",
+    "run_reply_prose_critic",
     "run_task_completion_critic",
     "run_task_creation_critic",
 ]
@@ -404,3 +406,124 @@ def run_task_creation_critic(
         len(objs),
     )
     return TaskCreationVerdict()
+
+
+# ---------------------------------------------------------------------------
+# Reply-prose claim-grounding critic (HOL-18 / #1912)
+# ---------------------------------------------------------------------------
+#
+# Fires at every reply prose emission (triage, material-divergence, terminal
+# aggregate).  Verifies that every specific claim in the prose (commit SHAs,
+# issue/PR numbers, file paths, "I filed", "the work is in") maps to ground
+# truth the caller has gathered.  Catches PR #1858's "work is in a recent
+# commit" lies and closes #1855 at the prose-verification layer.
+
+
+@dataclass(frozen=True)
+class ReplyProseVerdict:
+    """Critic verdict for one reply prose emission.
+
+    Default (no critic wired, or critic failed open) is "passed, no
+    rationale" so the prose ships unchanged — matches the legacy
+    no-critic behaviour.
+
+    ``passed=True`` → ship the prose.  ``passed=False`` → regenerate
+    with ``gap`` as the nudge so the next prose addresses the specific
+    unverified claim.
+    """
+
+    passed: bool = True
+    gap: str = ""
+    rationale: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.passed and not self.gap.strip():
+            raise ValueError(
+                "ReplyProseVerdict.gap is required when passed=False — "
+                "the gap names the unverified claim the next prose attempt "
+                "must address"
+            )
+
+
+def _parse_reply_prose_verdict(
+    obj: dict[str, Any],
+) -> ReplyProseVerdict | None:
+    """Parse a verdict envelope dict into :class:`ReplyProseVerdict`.
+
+    Returns ``None`` when the envelope is malformed — caller treats as
+    fail-open (default verdict: ``passed=True``).
+    """
+    passed = obj.get("passed")
+    if not isinstance(passed, bool):
+        return None
+    rationale_raw = obj.get("rationale", "")
+    rationale = rationale_raw.strip() if isinstance(rationale_raw, str) else ""
+    if passed:
+        return ReplyProseVerdict(passed=True, rationale=rationale)
+    gap = obj.get("gap")
+    if not isinstance(gap, str) or not gap.strip():
+        return None
+    return ReplyProseVerdict(passed=False, gap=gap.strip(), rationale=rationale)
+
+
+def run_reply_prose_critic(
+    reply_text: str,
+    structured_state: dict[str, Any],
+    *,
+    agent: ProviderAgent,
+    prompts: Prompts,
+    critic_system_prompt: str,
+) -> ReplyProseVerdict:
+    """Ask Opus whether ``reply_text``'s specific claims are grounded.
+
+    Returns the parsed :class:`ReplyProseVerdict`.  Fail-open on
+    transport errors, malformed responses, or unparseable verdicts —
+    the default verdict (``passed=True``) preserves the legacy
+    no-critic behaviour.  ``ContextOverflowError`` /
+    ``SessionLeakError`` still propagate per project convention.
+
+    Like the sibling critics, scans every extracted JSON object and
+    accepts the first that parses as the verdict envelope; a malformed
+    early envelope (``{"passed": false}`` without a gap) does NOT
+    short-circuit the scan.
+    """
+    prompt = prompts.reply_prose_claim_grounding_prompt(
+        reply_text=reply_text,
+        structured_state=structured_state,
+    )
+    try:
+        raw = agent.run_turn(
+            prompt,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            system_prompt=critic_system_prompt,
+            retry_on_preempt=True,
+        )
+    except ContextOverflowError, SessionLeakError:
+        raise
+    except Exception as exc:
+        log.warning(
+            "reply-prose critic transport failure (%s) — failing open",
+            exc,
+        )
+        return ReplyProseVerdict()
+
+    objs = extract_json_objects(raw or "")
+    if not objs:
+        log.warning("reply-prose critic returned no parseable JSON — failing open")
+        return ReplyProseVerdict()
+    saw_malformed_fail = False
+    for obj in objs:
+        verdict = _parse_reply_prose_verdict(obj)
+        if verdict is not None:
+            return verdict
+        if obj.get("passed") is False:
+            saw_malformed_fail = True
+    if saw_malformed_fail:
+        log.warning("reply-prose critic claimed fail without a gap — failing open")
+    else:
+        log.warning(
+            "reply-prose critic returned no envelope-shaped JSON in %d "
+            "objects — failing open",
+            len(objs),
+        )
+    return ReplyProseVerdict()

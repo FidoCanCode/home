@@ -2239,3 +2239,92 @@ class TestCriticSystemPrompt:
         result = Prompts("").critic_system_prompt(issue=issue, pr=pr)
         assert "Fix the thing" in result
         assert "PR title" in result
+
+
+# ─── HOL-18 / #1912 — reply-prose claim-grounding critic prompt ────────────
+
+
+class TestReplyProseClaimGroundingPrompt:
+    """Layer 2 critic that verifies specific claims in reply prose
+    against caller-gathered ground truth.  Catches PR #1858's
+    nonexistent-commit lies and closes #1855 at the prose layer."""
+
+    def _state(self) -> dict[str, Any]:
+        return {
+            "recent_commit_shas": ["abc1234567"],
+            "open_issue_numbers": [101, 102],
+            "filed_insights": [{"title": "T", "number": 999, "url": "https://x/999"}],
+            "referenced_files": ["src/fido/tasks.py"],
+        }
+
+    def test_includes_reply_prose(self) -> None:
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="Fixed it in commit abc1234567.",
+            structured_state=self._state(),
+        )
+        assert "Fixed it in commit abc1234567." in result
+
+    def test_renders_ground_truth_sections(self) -> None:
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state=self._state(),
+        )
+        assert "recent_commit_shas" in result
+        assert "abc1234567" in result
+        assert "open_issue_numbers" in result
+        assert "101" in result
+        assert "filed_insights" in result
+        assert "referenced_files" in result
+        assert "src/fido/tasks.py" in result
+
+    def test_empty_state_renders_none_per_section(self) -> None:
+        """A state where every key is empty/missing must render ``(none)``
+        for each section — distinct sentinel from "field missing"."""
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state={},
+        )
+        # All four sections present, all rendered as (none).
+        for section in (
+            "recent_commit_shas",
+            "open_issue_numbers",
+            "filed_insights",
+            "referenced_files",
+        ):
+            assert section in result
+        assert result.count("(none)") == 4
+
+    def test_three_axes_documented(self) -> None:
+        """The pass rule must enumerate commit/issue-PR/file axes so
+        Opus reasons about each."""
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state=self._state(),
+        )
+        assert "commit claims" in result
+        assert "issue/PR claims" in result
+        assert "file claims" in result
+        # Reference the closing-bug context.
+        assert "PR #1858" in result
+        assert "#1855" in result
+
+    def test_generic_claims_explicitly_pass(self) -> None:
+        """A response with only qualitative prose (no SHAs, no #NN, no
+        file paths) must pass — the critic catches falsifiable
+        specifics, not opinionated prose."""
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state=self._state(),
+        )
+        assert "Generic claims" in result
+        assert "pass" in result.lower()
+
+    def test_response_schema_is_verdict_envelope(self) -> None:
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state=self._state(),
+        )
+        assert '"passed": true' in result
+        assert '"passed": false' in result
+        assert '"gap":' in result
+        assert "No other text" in result

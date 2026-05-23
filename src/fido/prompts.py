@@ -1303,6 +1303,93 @@ class Prompts:
             "No other text before or after the JSON."
         )
 
+    def reply_prose_claim_grounding_prompt(
+        self,
+        reply_text: str,
+        structured_state: dict[str, Any],
+    ) -> str:
+        """Build the HOL-18 / #1912 critic prompt.
+
+        Fires at every reply prose emission — triage replies,
+        material-divergence replies, terminal aggregate replies — to
+        verify the prose's specific claims (commit SHAs, issue/PR
+        numbers, file paths, "I filed issue #N", "the work is in
+        commit ABC") match the structured state the caller knows is
+        true.
+
+        Closes #1855 at the prose-verification layer (insights filed
+        with no URL claimed) and PR #1858's "the work is in a recent
+        commit" lies (prose claiming a SHA that wasn't in git).
+
+        ``structured_state`` is a dict of ground-truth references the
+        caller has gathered.  Recognised keys:
+
+          * ``recent_commit_shas``: list[str] of SHAs known to exist in
+            the local repo.
+          * ``open_issue_numbers``: list[int] of issue/PR numbers known
+            to exist in the repo.
+          * ``filed_insights``: list[{title, number, url}] of insights
+            filed in this turn (#1855's anchor).
+          * ``referenced_files``: list[str] of file paths the LLM may
+            cite as touched/created/modified by the work.
+
+        Verdict JSON shape::
+
+            {"passed": true, "rationale": "<one-line>"}
+            OR
+            {"passed": false,
+             "gap": "<one-line description of the unverified claim>",
+             "rationale": "<longer prose>"}
+        """
+
+        def _fmt(value: object) -> str:
+            if isinstance(value, list) and not value:
+                return "(none)"
+            return json.dumps(value, indent=2)
+
+        recent_shas = structured_state.get("recent_commit_shas", [])
+        open_issues = structured_state.get("open_issue_numbers", [])
+        filed_insights = structured_state.get("filed_insights", [])
+        referenced_files = structured_state.get("referenced_files", [])
+        ground_truth_block = (
+            "GROUND TRUTH (every claim must map to one of these):\n"
+            f"  recent_commit_shas: {_fmt(recent_shas)}\n"
+            f"  open_issue_numbers: {_fmt(open_issues)}\n"
+            f"  filed_insights: {_fmt(filed_insights)}\n"
+            f"  referenced_files: {_fmt(referenced_files)}"
+        )
+        return (
+            "You wrote a reply.  Verify every specific claim in the "
+            "prose against the ground truth below.\n\n"
+            f"REPLY PROSE:\n{reply_text}\n\n"
+            f"{ground_truth_block}\n\n"
+            "QUESTION: Does every specific claim in the prose — every "
+            "commit SHA, every ``#NN`` issue/PR reference, every "
+            "``commit ABC``, every ``I filed`` / ``the work is in`` "
+            "claim, every file path the prose attributes to this work "
+            "— map to an entry in the ground truth above?\n\n"
+            "A pass requires ALL of:\n"
+            "  - commit claims: every SHA the prose names appears in "
+            "``recent_commit_shas`` (catches PR #1858's empty-commit "
+            "lies).\n"
+            "  - issue/PR claims: every ``#NN`` or ``filed issue`` "
+            "claim appears in ``open_issue_numbers`` or "
+            "``filed_insights`` (closes #1855 at the prose-verification "
+            "layer).\n"
+            "  - file claims: file paths the prose attributes to this "
+            "work appear in ``referenced_files`` (or, if the structured "
+            "state is silent on files, this axis passes by default).\n\n"
+            "Generic claims (no specific SHA / number / path) pass — "
+            "this critic only catches falsifiable specifics, not "
+            "qualitative prose.\n\n"
+            "Reply with ONLY one JSON object on one line:\n"
+            '  {"passed": true, "rationale": "<one-line>"}\n'
+            "OR\n"
+            '  {"passed": false, "gap": "<the unverified claim>", '
+            '"rationale": "<longer>"}\n\n'
+            "No other text before or after the JSON."
+        )
+
     def synthesis_failure_explanation_prompt(self, comment_body: str) -> str:
         """Build the fallback prompt for when synthesis exhausts retries.
 
