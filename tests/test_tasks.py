@@ -3498,16 +3498,17 @@ class TestValidateRescopeBatch:
     def test_keep_skipped_marker_with_empty_op_sentinels_is_allowed(
         self,
     ) -> None:
-        """``merge_sources=[]`` and ``split_targets=[]`` are the
-        documented "no merge" / "no split" sentinels — a caller that
-        always emits both keys with empty lists isn't actually
-        mutating the row, so the SKIPPED guard must NOT flag them."""
+        """Empty ``merge_sources`` / ``split_targets`` /
+        ``contributing_intents`` are the documented sentinels (no
+        merge, no split, no new intents) — a caller that always emits
+        these keys with empty lists isn't actually mutating the row,
+        so the SKIPPED guard must NOT flag them."""
         target = self._t("target")
         target["status"] = "skipped"
         items = [
             {
                 "id": "target",
-                "contributing_intents": [42],
+                "contributing_intents": [],
                 "merge_sources": [],
                 "split_targets": [],
             },
@@ -3516,20 +3517,37 @@ class TestValidateRescopeBatch:
         assert not any("SKIPPED marker" in e for e in errors)
 
     def test_keep_skipped_marker_target_is_allowed(self) -> None:
-        """The cheap ``keep`` no-op shape (``{id, contributing_intents}``
-        only) must NOT be rejected — that's exactly the right semantic
-        for a terminal lineage record on every rescope pass, and it
-        keeps the SKIPPED row in the projected output where the
-        materialise pass can re-stamp ``"skipped"`` instead of
-        ``"completed"``.  Pins the boundary of the generic
-        SKIPPED-guard added above."""
+        """The cheap ``keep`` no-op shape (bare ``{id}``) must NOT be
+        rejected — that's exactly the right semantic for a terminal
+        lineage record on every rescope pass, and it keeps the
+        SKIPPED row in the projected output where the materialise
+        pass can re-stamp ``"skipped"`` instead of ``"completed"``.
+        Pins the boundary of the generic SKIPPED-guard above."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        items = [
+            {"id": "target"},
+        ]
+        errors = _validate_rescope_batch([target], items)
+        assert not any("SKIPPED marker" in e for e in errors)
+
+    def test_keep_skipped_marker_with_non_empty_intents_is_rejected(
+        self,
+    ) -> None:
+        """Codex on PR #1932: ``_rescope_releases_for_oracle`` unions
+        the op's ``contributing_intents`` into the persisted task at
+        ``src/fido/tasks.py:650``, so a "keep" item carrying NEW
+        intents would silently expand the SKIPPED marker's lineage
+        metadata — contradicting the terminal-record invariant.  The
+        generic SKIPPED-guard must treat non-empty
+        ``contributing_intents`` as a mutation."""
         target = self._t("target")
         target["status"] = "skipped"
         items = [
             {"id": "target", "contributing_intents": [42]},
         ]
         errors = _validate_rescope_batch([target], items)
-        assert not any("SKIPPED marker" in e for e in errors)
+        assert any("SKIPPED marker" in e and "any op on it" in e for e in errors)
 
     def test_remove_skipped_marker_target_is_rejected(self) -> None:
         """Codex on PR #1932: status='completed' on a SKIPPED row would

@@ -292,21 +292,39 @@ class _GitHubInsightFiler:
         return out
 
 
-_INSIGHT_URL_NUMBER_RE = re.compile(r"/issues/(\d+)(?:[#/?].*)?$")
+_INSIGHT_URL_RE = re.compile(
+    r"^https://github\.com/(?P<owner_repo>[^/]+/[^/]+)/issues/"
+    r"(?P<number>\d+)(?:[#/?].*)?$"
+)
 
 
 def _parse_insight_issue_number(url: str) -> int | None:
-    """Extract the issue number from a duplicate insight URL.
+    """Extract the issue number from a duplicate insight URL that
+    targets :data:`_INSIGHT_REPO`.
 
-    Returns ``None`` when the URL doesn't end in ``/issues/{NN}`` —
-    the critic may have hallucinated a non-GitHub URL or pointed at a
-    PR/discussion path we can't comment on.  Caller treats ``None`` as
-    "skip the durable record" rather than crashing dispatch.
+    Returns ``None`` when the URL doesn't end in ``/issues/{NN}`` on
+    that repo specifically (codex on PR #1932: a previous version
+    accepted any ``/issues/{NN}`` URL, so a critic that returned a
+    valid issue URL from a different repo would land the replay
+    marker on the wrong issue in ``FidoCanCode/home``).
+
+    Rejects:
+
+    - non-GitHub URLs (hallucinated by a flaky critic)
+    - PR URLs (``/pull/N``) — we don't comment on PRs from this path
+    - issue URLs targeting any other ``owner/repo``
+    - plain garbage
+
+    Caller treats ``None`` as "skip the durable record" rather than
+    crashing dispatch — the critic's primary decision (skip the
+    filing) is still honoured.
     """
-    match = _INSIGHT_URL_NUMBER_RE.search(url.strip())
+    match = _INSIGHT_URL_RE.match(url.strip())
     if match is None:
         return None
-    return int(match.group(1))
+    if match.group("owner_repo") != _INSIGHT_REPO:
+        return None
+    return int(match.group("number"))
 
 
 def _insight_source_link(target: CommentTarget) -> str:

@@ -6565,9 +6565,10 @@ class TestGitHubInsightFiler:
         gh.create_issue.assert_called_once()
         gh.comment_issue.assert_not_called()
 
-    def test_parse_insight_issue_number_accepts_issue_url(self) -> None:
+    def test_parse_insight_issue_number_accepts_insight_repo_url(self) -> None:
         """The URL extractor accepts the canonical
-        ``.../issues/{N}`` shape and ignores trailing anchors."""
+        ``https://github.com/FidoCanCode/home/issues/{N}`` shape and
+        ignores trailing anchors."""
         from fido.events import _parse_insight_issue_number
 
         assert (
@@ -6576,19 +6577,49 @@ class TestGitHubInsightFiler:
         )
         assert (
             _parse_insight_issue_number(
-                "https://github.com/foo/bar/issues/1234#issuecomment-555"
+                "https://github.com/FidoCanCode/home/issues/1234#issuecomment-555"
             )
             == 1234
         )
 
+    def test_parse_insight_issue_number_rejects_other_repo_url(self) -> None:
+        """Codex on PR #1932: a critic that returned a valid issue URL
+        from a DIFFERENT repo (``rhencke/confusio/issues/5``)
+        previously got accepted, so the replay marker landed on issue
+        #5 of FidoCanCode/home — almost certainly the wrong issue.
+        The parser must reject URLs targeting any repo besides
+        ``_INSIGHT_REPO``."""
+        from fido.events import _parse_insight_issue_number
+
+        assert (
+            _parse_insight_issue_number("https://github.com/rhencke/confusio/issues/5")
+            is None
+        )
+        assert (
+            _parse_insight_issue_number(
+                "https://github.com/foo/bar/issues/1234#issuecomment-555"
+            )
+            is None
+        )
+
     def test_parse_insight_issue_number_rejects_non_issue_url(self) -> None:
-        """PR URLs, discussion URLs, and plain garbage all return None
+        """PR URLs, non-GitHub hosts, and plain garbage all return None
         so the caller skips the marker step instead of crashing."""
         from fido.events import _parse_insight_issue_number
 
-        assert _parse_insight_issue_number("https://github.com/foo/bar/pull/42") is None
+        assert (
+            _parse_insight_issue_number("https://github.com/FidoCanCode/home/pull/42")
+            is None
+        )
         assert _parse_insight_issue_number("not a URL") is None
         assert _parse_insight_issue_number("") is None
+        # Non-github hosts are rejected even when the path looks right.
+        assert (
+            _parse_insight_issue_number(
+                "https://example.com/FidoCanCode/home/issues/42"
+            )
+            is None
+        )
 
     def test_recent_insights_capped(self) -> None:
         """Caller-supplied search may return more than the cap — the

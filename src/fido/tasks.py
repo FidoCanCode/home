@@ -2808,28 +2808,35 @@ def _make_new_tasks_from_opus(
     return slots
 
 
-_SKIPPED_KEEP_FIELDS = frozenset({"id", "contributing_intents"})
+_SKIPPED_KEEP_FIELDS = frozenset({"id"})
 
 
 def _mutates_skipped_row(item: dict[str, Any]) -> bool:
     """True when ``item`` would change the SKIPPED row's content.
 
-    A bare ``{id, contributing_intents}`` item is the ``keep`` no-op
-    shape — preserves the row exactly, the right semantic for a
-    terminal lineage record on every rescope pass.  Any other field
-    (title, description, status, merge_sources, split_targets,
-    anchor_comment_id, …) signals a mutating op the SKIPPED guard
-    must reject.
+    A bare ``{id}`` item is the ``keep`` no-op shape — preserves the
+    row exactly, the right semantic for a terminal lineage record on
+    every rescope pass.  Any other field (title, description, status,
+    merge_sources, split_targets, anchor_comment_id, …) signals a
+    mutating op the SKIPPED guard must reject.
 
-    ``merge_sources=[]`` / ``split_targets=[]`` are the documented
-    "no merge" / "no split" sentinels — treated as absent for this
-    check so a wrapper that always emits both keys with empty lists
-    isn't falsely flagged.
+    Empty-list sentinels (``merge_sources=[]``, ``split_targets=[]``,
+    ``contributing_intents=[]``) are treated as absent so a wrapper
+    that always emits these keys with empty lists isn't falsely
+    flagged.  Non-empty ``contributing_intents`` IS a mutation —
+    ``_rescope_releases_for_oracle`` unions those intents into the
+    persisted task (codex on PR #1932:
+    ``src/fido/tasks.py:650``), so a "keep" item carrying new
+    intents would silently expand the SKIPPED marker's lineage
+    metadata, contradicting the terminal-record invariant.
     """
     for key, value in item.items():
         if key in _SKIPPED_KEEP_FIELDS:
             continue
-        if key in ("merge_sources", "split_targets") and value == []:
+        if (
+            key in ("merge_sources", "split_targets", "contributing_intents")
+            and value == []
+        ):
             continue
         return True
     return False
