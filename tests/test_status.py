@@ -10,7 +10,6 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
 
 from fido.appstate import (
     _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
@@ -66,6 +65,151 @@ from fido.status import (
     repo_status,
     running_repo_configs,
 )
+
+# ── typed fakes ───────────────────────────────────────────────────────────────
+
+
+class _FakeRunResult:
+    """Minimal subprocess result — exposes only the ``stdout`` attribute."""
+
+    def __init__(self, stdout: str = "") -> None:
+        self.stdout = stdout
+
+
+class _FakeRun:
+    """Callable subprocess.run replacement: records calls and supports side_effect."""
+
+    def __init__(
+        self,
+        stdout: str = "",
+        *,
+        side_effect: BaseException | type[BaseException] | None = None,
+    ) -> None:
+        self._result = _FakeRunResult(stdout)
+        self._side_effect = side_effect
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> _FakeRunResult:
+        self._calls.append((args, kwargs))
+        if self._side_effect is not None:
+            if isinstance(self._side_effect, type):
+                raise self._side_effect()
+            raise self._side_effect
+        return self._result
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
+        actual_args, actual_kwargs = self._calls[0]
+        assert actual_args == args, f"args: {actual_args!r} != {args!r}"
+        assert actual_kwargs == kwargs, f"kwargs: {actual_kwargs!r} != {kwargs!r}"
+
+
+class _FakeHTTPResponse:
+    """Minimal HTTP response context manager — returns fixed bytes from read()."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def __enter__(self) -> "_FakeHTTPResponse":
+        return self
+
+    def __exit__(self, *args: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._data
+
+
+class _FakeURLOpen:
+    """Callable urlopen replacement — records calls and returns _FakeHTTPResponse."""
+
+    def __init__(
+        self,
+        data: bytes = b"",
+        *,
+        side_effect: BaseException | None = None,
+    ) -> None:
+        self._data = data
+        self._side_effect = side_effect
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> _FakeHTTPResponse:
+        self._calls.append((args, kwargs))
+        if self._side_effect is not None:
+            raise self._side_effect
+        return _FakeHTTPResponse(self._data)
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
+        actual_args, actual_kwargs = self._calls[0]
+        assert actual_args == args, f"args: {actual_args!r} != {args!r}"
+        assert actual_kwargs == kwargs, f"kwargs: {actual_kwargs!r} != {kwargs!r}"
+
+
+class _FakeCallRecorder:
+    """Generic recording callable — supports return_value, side_effect (list or
+    exception), and assertion helpers."""
+
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value: object = return_value
+        self._side_effect: object = None
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    @property
+    def side_effect(self) -> object:
+        return self._side_effect
+
+    @side_effect.setter
+    def side_effect(self, value: object) -> None:
+        self._side_effect = iter(value) if isinstance(value, list) else value
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append((args, kwargs))
+        se = self._side_effect
+        if se is not None:
+            if isinstance(se, type) and issubclass(se, BaseException):
+                raise se()
+            if isinstance(se, BaseException):
+                raise se
+            if hasattr(se, "__next__"):
+                val = next(se)  # type: ignore[call-overload]
+                if isinstance(val, BaseException):
+                    raise val
+                return val
+            if callable(se):
+                return se(*args, **kwargs)
+        return self.return_value
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
+        actual_args, actual_kwargs = self._calls[0]
+        assert actual_args == args, f"args: {actual_args!r} != {args!r}"
+        assert actual_kwargs == kwargs, f"kwargs: {actual_kwargs!r} != {kwargs!r}"
+
+    def assert_any_call(self, *args: object, **kwargs: object) -> None:
+        for actual_args, actual_kwargs in self._calls:
+            if actual_args == args and actual_kwargs == kwargs:
+                return
+        raise AssertionError(f"no matching call in {self._calls!r}")
+
+
+class _FakeProviderAPI:
+    """Minimal provider-API stub whose get_limit_snapshot returns a fixed snapshot."""
+
+    def __init__(self, snapshot: ProviderLimitSnapshot) -> None:
+        self.get_limit_snapshot: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=snapshot
+        )
+
+
+class _FakeProviderFactory:
+    """Minimal provider-factory stub with a recording create_api method."""
+
+    def __init__(self) -> None:
+        self.create_api: _FakeCallRecorder = _FakeCallRecorder()
+
+
+# ── test helpers ──────────────────────────────────────────────────────────────
 
 
 class RepoConfig(_RepoConfig):
@@ -193,27 +337,27 @@ class TestFidoRunning:
 
 class TestPgrep:
     def test_returns_pids(self) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="12345\n67890\n"))
+        mock_run = _FakeRun(stdout="12345\n67890\n")
         assert _pgrep("some pattern", _run=mock_run) == [12345, 67890]
 
     def test_strips_whitespace(self) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="  42  \n"))
+        mock_run = _FakeRun(stdout="  42  \n")
         assert _pgrep("pattern", _run=mock_run) == [42]
 
     def test_empty_output(self) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout=""))
+        mock_run = _FakeRun(stdout="")
         assert _pgrep("pattern", _run=mock_run) == []
 
     def test_skips_non_integer_lines(self) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="123\nnot-a-pid\n456\n"))
+        mock_run = _FakeRun(stdout="123\nnot-a-pid\n456\n")
         assert _pgrep("pattern", _run=mock_run) == [123, 456]
 
     def test_oserror_returns_empty(self) -> None:
-        mock_run = MagicMock(side_effect=OSError("no pgrep"))
+        mock_run = _FakeRun(side_effect=OSError("no pgrep"))
         assert _pgrep("pattern", _run=mock_run) == []
 
     def test_passes_pattern_to_pgrep(self) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout=""))
+        mock_run = _FakeRun(stdout="")
         _pgrep("fido --port", _run=mock_run)
         mock_run.assert_called_once_with(
             ["pgrep", "-f", "fido --port"],
@@ -245,20 +389,16 @@ class TestProviderStatusesForRepoConfigs:
             work_dir=tmp_path / "c",
             provider=ProviderID.COPILOT_CLI,
         )
-        factory = MagicMock()
-        first = MagicMock()
-        second = MagicMock()
-        first.get_limit_snapshot.return_value = ProviderLimitSnapshot(
-            provider=ProviderID.CLAUDE_CODE
+        first = _FakeProviderAPI(ProviderLimitSnapshot(provider=ProviderID.CLAUDE_CODE))
+        second = _FakeProviderAPI(
+            ProviderLimitSnapshot(provider=ProviderID.COPILOT_CLI)
         )
-        second.get_limit_snapshot.return_value = ProviderLimitSnapshot(
-            provider=ProviderID.COPILOT_CLI
-        )
+        factory = _FakeProviderFactory()
         factory.create_api.side_effect = [first, second]
 
         statuses = provider_statuses_for_repo_configs(
             [claude_a, claude_b, copilot],
-            _provider_factory=factory,
+            _provider_factory=factory,  # type: ignore[arg-type]
         )
 
         assert list(statuses) == [ProviderID.CLAUDE_CODE, ProviderID.COPILOT_CLI]
@@ -267,11 +407,14 @@ class TestProviderStatusesForRepoConfigs:
 
     def test_single_repo_with_injected_factory(self, tmp_path: Path) -> None:
         repo = RepoConfig(name="owner/repo", work_dir=tmp_path)
-        factory = MagicMock()
-        factory.create_api.return_value.get_limit_snapshot.return_value = (
+        factory = _FakeProviderFactory()
+        factory.create_api.return_value = _FakeProviderAPI(
             ProviderLimitSnapshot(provider=ProviderID.CLAUDE_CODE)
         )
-        statuses = provider_statuses_for_repo_configs([repo], _provider_factory=factory)
+        statuses = provider_statuses_for_repo_configs(
+            [repo],
+            _provider_factory=factory,  # type: ignore[arg-type]
+        )
         assert list(statuses) == [ProviderID.CLAUDE_CODE]
 
     def test_uses_real_default_factory_for_empty_repo_list(self) -> None:
@@ -284,23 +427,27 @@ class TestProviderStatusesForRepoConfigs:
         repo = RepoConfig(
             name="owner/repo", work_dir=tmp_path, provider=ProviderID.CODEX
         )
-        factory = MagicMock()
-        api = MagicMock()
-        api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
-            provider=ProviderID.CODEX,
-            windows=(
-                ProviderLimitWindow(
-                    name="codex_primary",
-                    used=25,
-                    limit=100,
-                    resets_at=_EPOCH,
-                    unit="",
+        api = _FakeProviderAPI(
+            ProviderLimitSnapshot(
+                provider=ProviderID.CODEX,
+                windows=(
+                    ProviderLimitWindow(
+                        name="codex_primary",
+                        used=25,
+                        limit=100,
+                        resets_at=_EPOCH,
+                        unit="",
+                    ),
                 ),
-            ),
+            )
         )
+        factory = _FakeProviderFactory()
         factory.create_api.return_value = api
 
-        statuses = provider_statuses_for_repo_configs([repo], _provider_factory=factory)
+        statuses = provider_statuses_for_repo_configs(
+            [repo],
+            _provider_factory=factory,  # type: ignore[arg-type]
+        )
 
         assert statuses[ProviderID.CODEX].provider == ProviderID.CODEX
         assert statuses[ProviderID.CODEX].percent_used == 25
@@ -309,23 +456,23 @@ class TestProviderStatusesForRepoConfigs:
 
 class TestProcessUptimeSeconds:
     def test_returns_elapsed_time(self) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="  3742  "))
+        mock_run = _FakeRun(stdout="  3742  ")
         assert _process_uptime_seconds(12345, _run=mock_run) == 3742
 
     def test_none_when_no_output(self) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout=""))
+        mock_run = _FakeRun(stdout="")
         assert _process_uptime_seconds(99, _run=mock_run) is None
 
     def test_none_on_oserror(self) -> None:
-        mock_run = MagicMock(side_effect=OSError)
+        mock_run = _FakeRun(side_effect=OSError)
         assert _process_uptime_seconds(99, _run=mock_run) is None
 
     def test_none_on_value_error(self) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="not-a-number"))
+        mock_run = _FakeRun(stdout="not-a-number")
         assert _process_uptime_seconds(99, _run=mock_run) is None
 
     def test_calls_ps_with_pid(self) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="100"))
+        mock_run = _FakeRun(stdout="100")
         _process_uptime_seconds(42, _run=mock_run)
         mock_run.assert_called_once_with(
             ["ps", "-p", "42", "-o", "etimes="],
@@ -629,12 +776,8 @@ class TestCollectWebhookPropagation:
 
 
 class TestFetchActivities:
-    def _make_urlopen(self, data: bytes) -> MagicMock:
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = data
-        return MagicMock(return_value=mock_resp)
+    def _make_urlopen(self, data: bytes) -> _FakeURLOpen:
+        return _FakeURLOpen(data)
 
     def _wrap(self, activities: list) -> bytes:
         """Wrap an activities list in the new ``/status.json`` envelope."""
@@ -831,7 +974,7 @@ class TestFetchActivities:
         )
 
     def test_returns_empty_on_exception(self) -> None:
-        mock_urlopen = MagicMock(side_effect=OSError("refused"))
+        mock_urlopen = _FakeURLOpen(side_effect=OSError("refused"))
         assert _fetch_activities(9000, _urlopen=mock_urlopen) == ({}, None)
 
     def test_skips_items_without_repo_name(self) -> None:
@@ -951,19 +1094,19 @@ class TestClaudePid:
 
 class TestGitDir:
     def test_returns_path(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="/repo/.git\n"))
+        mock_run = _FakeRun(stdout="/repo/.git\n")
         assert _git_dir(tmp_path, _run=mock_run) == Path("/repo/.git")
 
     def test_strips_whitespace(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="  /a/b/.git  \n"))
+        mock_run = _FakeRun(stdout="  /a/b/.git  \n")
         assert _git_dir(tmp_path, _run=mock_run) == Path("/a/b/.git")
 
     def test_returns_none_on_called_process_error(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, "git"))
+        mock_run = _FakeRun(side_effect=subprocess.CalledProcessError(128, "git"))
         assert _git_dir(tmp_path, _run=mock_run) is None
 
     def test_returns_none_when_git_not_found(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(side_effect=FileNotFoundError("git not found"))
+        mock_run = _FakeRun(side_effect=FileNotFoundError("git not found"))
         assert _git_dir(tmp_path, _run=mock_run) is None
 
 
@@ -3197,12 +3340,8 @@ class TestFetchActivitiesRateLimit:
     def _wrap(self, activities: list, rate_limit: dict | None) -> bytes:
         return json.dumps({"activities": activities, "rate_limit": rate_limit}).encode()
 
-    def _make_urlopen(self, data: bytes) -> MagicMock:
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.read.return_value = data
-        return MagicMock(return_value=mock_resp)
+    def _make_urlopen(self, data: bytes) -> _FakeURLOpen:
+        return _FakeURLOpen(data)
 
     def test_returns_none_when_rate_limit_missing(self) -> None:
         data = self._wrap([], None)

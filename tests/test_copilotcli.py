@@ -10,7 +10,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 from acp.exceptions import RequestError
@@ -46,6 +45,144 @@ from fido.provider import (
     ThreadKind,
     TurnSessionMode,
 )
+
+# ── typed fakes ───────────────────────────────────────────────────────────────
+
+
+class _FakeCallRecorder:
+    """Generic recording callable — supports return_value, side_effect (exception,
+    list, or callable), call_count, and assertion helpers."""
+
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value: object = return_value
+        self._side_effect: object = None
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self._calls)
+
+    @property
+    def side_effect(self) -> object:
+        return self._side_effect
+
+    @side_effect.setter
+    def side_effect(self, value: object) -> None:
+        self._side_effect = iter(value) if isinstance(value, list) else value
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append((args, kwargs))
+        se = self._side_effect
+        if se is not None:
+            if isinstance(se, type) and issubclass(se, BaseException):
+                raise se()
+            if isinstance(se, BaseException):
+                raise se
+            if hasattr(se, "__next__"):
+                val = next(se)  # type: ignore[call-overload]
+                if isinstance(val, BaseException):
+                    raise val
+                return val
+            if callable(se):
+                return se(*args, **kwargs)
+        return self.return_value
+
+    def assert_called_once(self) -> None:
+        assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
+        actual_args, actual_kwargs = self._calls[0]
+        assert actual_args == args, f"args: {actual_args!r} != {args!r}"
+        assert actual_kwargs == kwargs, f"kwargs: {actual_kwargs!r} != {kwargs!r}"
+
+    def assert_not_called(self) -> None:
+        assert not self._calls, f"expected no calls, got {len(self._calls)}"
+
+    def assert_any_call(self, *args: object, **kwargs: object) -> None:
+        for actual_args, actual_kwargs in self._calls:
+            if actual_args == args and actual_kwargs == kwargs:
+                return
+        raise AssertionError(f"no matching call in {self._calls!r}")
+
+
+class _FakeCallArgs:
+    """Holds call arguments for ``runner.call_args.args[0]`` inspection."""
+
+    def __init__(self, args: tuple[object, ...], kwargs: dict[str, object]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _FakeRunner:
+    """Callable returning a fixed CompletedProcess; exposes ``call_args``."""
+
+    def __init__(self, result: subprocess.CompletedProcess[str]) -> None:
+        self._result = result
+        self.call_args: _FakeCallArgs | None = None
+
+    def __call__(
+        self, args: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        self.call_args = _FakeCallArgs((args,), kwargs)
+        return self._result
+
+
+class _FakeACPRuntime:
+    """Minimal ACP runtime stub — records ``record_session_update`` and ``log_info``."""
+
+    def __init__(self) -> None:
+        self.record_session_update: _FakeCallRecorder = _FakeCallRecorder()
+        self.log_info: _FakeCallRecorder = _FakeCallRecorder()
+
+
+class _FakeTerminals:
+    """Minimal terminal-manager stub with configurable return values."""
+
+    def __init__(self) -> None:
+        self.create: _FakeCallRecorder = _FakeCallRecorder(return_value="term-1")
+        self.output: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=("out", False, 0, None)
+        )
+        self.wait: _FakeCallRecorder = _FakeCallRecorder(return_value=(0, None))
+        self.kill: _FakeCallRecorder = _FakeCallRecorder()
+        self.release: _FakeCallRecorder = _FakeCallRecorder()
+
+
+class _FakeSession:
+    """Minimal CopilotCLISession-compatible stub for CopilotCLIClient tests."""
+
+    def __init__(
+        self,
+        *,
+        owner: str | None = None,
+        pid: int | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        self.owner: str | None = owner
+        self.pid: int | None = pid
+        self.session_id: str | None = session_id
+        self.last_turn_cancelled: bool = False
+        self.prompt: _FakeCallRecorder = _FakeCallRecorder()
+        self.recover: _FakeCallRecorder = _FakeCallRecorder()
+        self.reset: _FakeCallRecorder = _FakeCallRecorder()
+        self.switch_model: _FakeCallRecorder = _FakeCallRecorder()
+        self.stop: _FakeCallRecorder = _FakeCallRecorder()
+        self.is_alive: _FakeCallRecorder = _FakeCallRecorder(return_value=True)
+
+
+class _FakeAgent:
+    """Minimal provider-agent stub; records ``attach_session`` calls."""
+
+    def __init__(self) -> None:
+        self.attach_session: _FakeCallRecorder = _FakeCallRecorder()
+
+
+class _FakeAPI:
+    """Bare API stub — used only for identity checks in CopilotCLI tests."""
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 
 def _completed(
@@ -360,9 +497,10 @@ class TestHelpers:
         )
 
     def test_normalize_passthrough_is_used_by_cli_prompt(self, tmp_path: Path) -> None:
-        runner = MagicMock(return_value=_completed(_copilot_output()))
+        runner = _FakeRunner(_completed(_copilot_output()))
         client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
         client._run_cli_prompt("body", model="gpt-5", timeout=1)
+        assert runner.call_args is not None
         assert "gpt-5" in runner.call_args.args[0]
 
 
@@ -542,9 +680,10 @@ class TestTerminalManager:
                 self.closed = True
 
         stream = EmptyStream()
-        record = SimpleNamespace(append=MagicMock())
+        _append = _FakeCallRecorder()
+        record = SimpleNamespace(append=_append)
         manager._read_stream(record, stream)  # pyright: ignore[reportPrivateUsage]
-        record.append.assert_not_called()
+        _append.assert_not_called()
         assert stream.closed is True
 
     def test_terminal_record_handles_signal_exit(self) -> None:
@@ -645,12 +784,9 @@ class TestTerminalManager:
 
 class TestCopilotACPClient:
     def test_file_terminal_permission_and_updates(self, tmp_path: Path) -> None:
-        runtime = MagicMock()
-        terminals = MagicMock()
-        terminals.create.return_value = "term-1"
-        terminals.output.return_value = ("out", False, 0, None)
-        terminals.wait.return_value = (0, None)
-        client = _CopilotACPClient(runtime, terminals=terminals)
+        runtime = _FakeACPRuntime()
+        terminals = _FakeTerminals()
+        client = _CopilotACPClient(runtime, terminals=terminals)  # type: ignore[arg-type]
 
         path = tmp_path / "file.txt"
         path.write_text("a\nb\nc")
@@ -678,14 +814,14 @@ class TestCopilotACPClient:
             client.request_permission(
                 [SimpleNamespace(kind="allow_once", option_id="yes")],
                 "sess",
-                MagicMock(),
+                object(),
             )
         )
         deny = asyncio.run(
             client.request_permission(
                 [SimpleNamespace(kind="reject_once", option_id="no")],
                 "sess",
-                MagicMock(),
+                object(),
             )
         )
         assert allow.outcome.option_id == "yes"
@@ -698,9 +834,9 @@ class TestCopilotACPClient:
         runtime.record_session_update.assert_called_once_with("sess", update)
 
     def test_on_connect_is_noop(self) -> None:
-        runtime = MagicMock()
-        client = _CopilotACPClient(runtime)
-        assert client.on_connect(MagicMock()) is None
+        runtime = _FakeACPRuntime()
+        client = _CopilotACPClient(runtime)  # type: ignore[arg-type]
+        assert client.on_connect(object()) is None
         runtime.log_info.assert_called_once_with("copilot system: connected")
 
 
@@ -1229,9 +1365,9 @@ class TestCopilotCLISession:
         )
         boom = BrokenPipeError("copilot pipe gone")
         boom.cancel_observed = True  # type: ignore[attr-defined]
-        session._prompt_inner = MagicMock(  # type: ignore[method-assign]
-            side_effect=boom
-        )
+        _inner = _FakeCallRecorder()
+        _inner.side_effect = boom
+        session._prompt_inner = _inner  # type: ignore[method-assign]
         with pytest.raises(BrokenPipeError) as exc_info:
             session.prompt("hi")
         assert exc_info.value.cancel_observed is True
@@ -1251,9 +1387,9 @@ class TestCopilotCLISession:
             model=CopilotCLIClient.work_model,
             runtime=runtime,
         )
-        session._prompt_inner = MagicMock(  # type: ignore[method-assign]
-            side_effect=RuntimeError("enter failed")
-        )
+        _inner2 = _FakeCallRecorder()
+        _inner2.side_effect = RuntimeError("enter failed")
+        session._prompt_inner = _inner2  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="enter failed") as exc_info:
             session.prompt("hi")
         assert exc_info.value.cancel_observed is False
@@ -1674,9 +1810,9 @@ class TestCopilotCLIAPI:
 
 class TestCopilotCLIClient:
     def test_default_session_resolver_uses_current_repo(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.prompt.return_value = "ok"
-        provider.set_session_resolver(lambda repo: session)
+        provider.set_session_resolver(lambda repo: session)  # type: ignore[arg-type]
         provider.set_thread_repo("owner/repo")
         try:
             client = CopilotCLIClient()
@@ -1686,10 +1822,8 @@ class TestCopilotCLIClient:
             provider.set_session_resolver(None)
 
     def test_session_attachment_and_properties(self) -> None:
-        attached = MagicMock(owner="worker-home")
-        attached.is_alive.return_value = True
-        attached.pid = 12
-        client = CopilotCLIClient(session=attached)
+        attached = _FakeSession(owner="worker-home", pid=12)
+        client = CopilotCLIClient(session=attached)  # type: ignore[arg-type]
         assert client.session is attached
         assert client.session_owner == "worker-home"
         assert client.session_alive is True
@@ -1699,9 +1833,9 @@ class TestCopilotCLIClient:
         assert client.session is None
 
     def test_attach_session_sets_session(self) -> None:
-        attached = MagicMock()
+        attached = _FakeSession()
         client = CopilotCLIClient()
-        client.attach_session(attached)
+        client.attach_session(attached)  # type: ignore[arg-type]
         assert client.session is attached
 
     def test_supports_no_commit_reset_is_false(self) -> None:
@@ -1761,10 +1895,10 @@ class TestCopilotCLIClient:
             )
 
     def test_ensure_fresh_stop_noop_branches(self, tmp_path: Path) -> None:
-        session = MagicMock()
-        session_factory = MagicMock(return_value=session)
+        session = _FakeSession()
+        session_factory = _FakeCallRecorder(return_value=session)
         client = CopilotCLIClient(
-            session_factory=session_factory,
+            session_factory=session_factory,  # type: ignore[arg-type]
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
@@ -1793,18 +1927,18 @@ class TestCopilotCLIClient:
         session.stop.assert_called_once_with()
 
     def test_ensure_session_switches_model_when_session_exists(self) -> None:
-        session = MagicMock()
-        client = CopilotCLIClient(session=session)
+        session = _FakeSession()
+        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
         client.ensure_session(client.voice_model)
         session.switch_model.assert_called_once_with(client.voice_model)
 
     def test_fresh_session_mode_spawns_when_session_missing(
         self, tmp_path: Path
     ) -> None:
-        session = MagicMock()
-        session_factory = MagicMock(return_value=session)
+        session = _FakeSession()
+        session_factory = _FakeCallRecorder(return_value=session)
         client = CopilotCLIClient(
-            session_factory=session_factory,
+            session_factory=session_factory,  # type: ignore[arg-type]
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
@@ -1829,8 +1963,7 @@ class TestCopilotCLIClient:
         session.reset.assert_not_called()
 
     def test_run_turn_retries_after_preempt(self) -> None:
-        session = MagicMock()
-        session.last_turn_cancelled = False
+        session = _FakeSession()
         prompts = iter(["partial", "done"])
 
         def prompt(*args: object, **kwargs: object) -> str:
@@ -1839,44 +1972,43 @@ class TestCopilotCLIClient:
             return result
 
         session.prompt.side_effect = prompt
-        client = CopilotCLIClient(session=session)
+        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
         assert client.run_turn("fetch", retry_on_preempt=True) == "done"
 
     def test_run_turn_recovers_and_retries_after_connection_loss(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.prompt.side_effect = [
             RuntimeError("Copilot ACP connection is not available"),
             "done",
         ]
-        client = CopilotCLIClient(session=session)
+        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
         assert client.run_turn("fetch", model=client.voice_model) == "done"
         assert session.prompt.call_count == 2
         session.recover.assert_called_once_with()
 
     def test_run_turn_recovers_and_retries_after_line_limit_overrun(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.prompt.side_effect = [
             ValueError("Separator is found, but chunk is longer than limit"),
             "done",
         ]
-        client = CopilotCLIClient(session=session)
+        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
         assert client.run_turn("fetch", model=client.voice_model) == "done"
         assert session.prompt.call_count == 2
         session.recover.assert_called_once_with()
 
     def test_run_turn_recovers_after_empty_result_from_dead_session(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.prompt.side_effect = ["", "done"]
-        session.last_turn_cancelled = False
         session.is_alive.side_effect = [False, True]
-        client = CopilotCLIClient(session=session)
+        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
         assert client.run_turn("fetch", model=client.voice_model) == "done"
         session.recover.assert_called_once_with()
 
     def test_run_turn_runtime_stopped_still_raises(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.prompt.side_effect = RuntimeError("Copilot ACP runtime is stopped")
-        client = CopilotCLIClient(session=session)
+        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="runtime is stopped"):
             client.run_turn("fetch", model=client.voice_model)
         session.recover.assert_not_called()
@@ -1884,31 +2016,30 @@ class TestCopilotCLIClient:
     def test_run_turn_connection_loss_raises_when_session_cannot_recover(
         self,
     ) -> None:
+        _prompt = _FakeCallRecorder()
+        _prompt.side_effect = RuntimeError("Copilot ACP connection is not available")
         session = SimpleNamespace(
-            prompt=MagicMock(
-                side_effect=RuntimeError("Copilot ACP connection is not available")
-            ),
+            prompt=_prompt,
             is_alive=lambda: False,
         )
-        client = CopilotCLIClient(session=session)
+        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="connection is not available"):
             client.run_turn("fetch", model=client.voice_model)
 
     def test_run_turn_dead_empty_result_raises_after_one_recovery(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.prompt.side_effect = ["", ""]
-        session.last_turn_cancelled = False
         session.is_alive.side_effect = [False, False]
-        client = CopilotCLIClient(session=session)
+        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="session died during prompt"):
             client.run_turn("fetch", model=client.voice_model)
         session.recover.assert_called_once_with()
 
     def test_quota_error_records_on_api_and_is_not_retried(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.prompt.side_effect = RuntimeError("rate limit exceeded")
         api = CopilotCLIAPI()
-        client = CopilotCLIClient(session=session, api=api)
+        client = CopilotCLIClient(session=session, api=api)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="rate limit exceeded"):
             client.run_turn("fetch", model=client.voice_model)
         # The error was recorded — snapshot now shows 100% pressure.
@@ -1919,27 +2050,29 @@ class TestCopilotCLIClient:
         session.recover.assert_not_called()
 
     def test_quota_error_without_api_still_raises(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.prompt.side_effect = RuntimeError("rate limit exceeded")
-        client = CopilotCLIClient(session=session)  # no api injected
+        client = CopilotCLIClient(
+            session=session
+        )  # no api injected  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="rate limit exceeded"):
             client.run_turn("fetch", model=client.voice_model)
 
     def test_non_quota_error_still_retried_with_api_wired(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.prompt.side_effect = [
             ValueError("Separator is found, but chunk is longer than limit"),
             "done",
         ]
         api = CopilotCLIAPI()
-        client = CopilotCLIClient(session=session, api=api)
+        client = CopilotCLIClient(session=session, api=api)  # type: ignore[arg-type]
         assert client.run_turn("fetch", model=client.voice_model) == "done"
         session.recover.assert_called_once_with()
         # Non-quota error did not poison the snapshot.
         assert api.get_limit_snapshot().windows == ()
 
     def test_json_and_one_shot_helpers(self, tmp_path: Path) -> None:
-        runner = MagicMock(return_value=_completed(_copilot_output("line1\nline2")))
+        runner = _FakeRunner(_completed(_copilot_output("line1\nline2")))
         system_file = tmp_path / "system"
         prompt_file = tmp_path / "prompt"
         system_file.write_text("system")
@@ -1954,14 +2087,14 @@ class TestCopilotCLIClient:
             system_file, prompt_file, client.work_model
         ) == _copilot_output("line1\nline2")
         assert client.resume_session("sess-1", prompt_file, client.brief_model)
+        assert runner.call_args is not None
         cmd = runner.call_args.args[0]
         assert "--model" in cmd
         # brief_model is gpt-5-mini per #1206 (was gpt-5.4 before).
         assert "gpt-5-mini" in cmd
 
     def test_shared_helpers_delegate_to_run_turn(self) -> None:
-        session = MagicMock()
-        session.session_id = "sess-1"
+        session = _FakeSession(session_id="sess-1")
         session.prompt.side_effect = [
             "reply text",
             "branch-name\nextra",
@@ -1970,7 +2103,7 @@ class TestCopilotCLIClient:
             "status text",
             "resumed text",
         ]
-        client = CopilotCLIClient(session=session)
+        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
         assert client.generate_reply("reply", client.voice_model) == "reply text"
         assert (
             client.generate_branch_name("branch", client.brief_model) == "branch-name"
@@ -1990,25 +2123,25 @@ class TestCopilotCLIClient:
     def test_generate_status_emoji_handles_empty_or_malformed_json(
         self, tmp_path: Path
     ) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.prompt.side_effect = ["", "not json"]
-        client = CopilotCLIClient(session=session)
+        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
         assert client.generate_status_emoji("q", "sys", client.voice_model) == ""
         assert client.generate_status_emoji("q", "sys", client.voice_model) == ""
 
-        bad_session = MagicMock(session_id="other")
-        client = CopilotCLIClient(session=bad_session)
+        bad_session = _FakeSession(session_id="other")
+        client = CopilotCLIClient(session=bad_session)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="matching live session"):
             client.resume_status("sess", "status", client.voice_model)
 
-        runner = MagicMock(return_value=_completed("", returncode=1))
+        runner = _FakeRunner(_completed("", returncode=1))
         client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
         assert client._run_cli_prompt("body", model="claude-opus-4-6", timeout=1) == ""
 
     def test_cli_prompt_logs_transcript(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        runner = MagicMock(return_value=_completed(_copilot_output("cli result")))
+        runner = _FakeRunner(_completed(_copilot_output("cli result")))
         client = CopilotCLIClient(
             runner=runner,
             work_dir=tmp_path,
@@ -2023,22 +2156,22 @@ class TestCopilotCLIClient:
 
 class TestCopilotCLI:
     def test_default_provider_id_and_injected_components(self) -> None:
-        api = MagicMock()
-        agent = MagicMock()
-        provider = CopilotCLI(api=api, agent=agent)
+        api = _FakeAPI()
+        agent = _FakeAgent()
+        provider = CopilotCLI(api=api, agent=agent)  # type: ignore[arg-type]
         assert provider.provider_id == ProviderID.COPILOT_CLI
         assert provider.api is api
         assert provider.agent is agent
 
     def test_default_agent_receives_session(self) -> None:
-        session = MagicMock()
-        provider = CopilotCLI(session=session)
+        session = _FakeSession()
+        provider = CopilotCLI(session=session)  # type: ignore[arg-type]
         assert provider.agent.session is session
 
     def test_injected_agent_receives_session(self) -> None:
-        agent = MagicMock()
-        session = MagicMock()
-        CopilotCLI(agent=agent, session=session)
+        agent = _FakeAgent()
+        session = _FakeSession()
+        CopilotCLI(agent=agent, session=session)  # type: ignore[arg-type]
         agent.attach_session.assert_called_once_with(session)
 
     def test_default_construction_wires_api_to_default_agent(self) -> None:
