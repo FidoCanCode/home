@@ -660,26 +660,31 @@ class Prompts:
             '    "ops": [<op record>, ...],\n'
             '    "affected_task_ids": ["<task-id>", ...],\n'
             '    "by_intent_comment_id": <int | null>,\n'
-            '    "narrative": "<prose explanation>" | null\n'
+            '    "narrative": "<prose explanation>"   // REQUIRED on every outcome (HOL-3 / #1897)\n'
             "  }\n\n"
             "Outcome semantics (drives whether INV-E posts a follow-up "
             "reply-back):\n"
             "  honored    — ops fulfill the intent as asked.  Triage "
-            "already replied, no follow-up.\n"
+            "already replied, no follow-up.  Narrative still REQUIRED — "
+            "it lands in the per-task narrative chain so future rescopes "
+            "see why each task got the work it has.\n"
             "  reshaped   — ops fulfill part of the intent, framing "
             "changed (e.g. split into prereq + feature).  Material — "
-            "reply-back required.  Narrative MUST be non-empty.\n"
+            "reply-back required.  Narrative REQUIRED.\n"
             "  superseded — another intent in this batch overrode this "
             "one in whole or part.  Set ``by_intent_comment_id`` to "
             "the winning intent's comment id.  Material when authors "
             "differ; self-correction (no reply) when same author.  "
-            "Narrative MUST be non-empty.  ``ops`` may be non-empty "
+            "Narrative REQUIRED.  ``ops`` may be non-empty "
             'for *partial* supersedence (e.g. "paint and make it '
             'red" → "no, green": keep the paint op, supersede only '
             "the color component).\n"
             "  no_op      — intent acknowledged but produces no task "
             "changes (chat ack, or request already satisfied).  ``ops`` "
-            "and ``affected_task_ids`` MUST be empty.\n\n"
+            "and ``affected_task_ids`` MUST be empty.  Narrative "
+            "REQUIRED — the user's request is being dropped, so the "
+            "reason has to land in the reply-back; without a narrative "
+            "we'd silently drop the ask (PR #1890 / HOL-3).\n\n"
             "Op schema (each entry of a verdict's ``ops`` array):\n"
             '  {"op": "keep", "id": "<existing-id>"}\n'
             "      — leave the task unchanged\n"
@@ -753,8 +758,7 @@ class Prompts:
             '    "ops": [<op>, ...],\n'
             '    "affected_task_ids": ["<task-id>", ...],\n'
             '    "by_intent_comment_id": <int | null — only when superseded>,\n'
-            '    "narrative": "<prose>" | null '
-            "(required when reshaped/superseded)\n"
+            '    "narrative": "<prose>"                 // REQUIRED on every outcome\n'
             "  }\n\n"
             "Op schema (recap):\n"
             '  {"op": "keep", "id": "<existing-id>"}\n'

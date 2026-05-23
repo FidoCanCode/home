@@ -1121,7 +1121,10 @@ def _intent(
 
 class TestParseRescopeVerdicts:
     def test_minimal_honored_verdict(self) -> None:
-        raw = '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored"}]}'
+        raw = (
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored", '
+            '"narrative": "as asked"}]}'
+        )
         verdicts, errors = _parse_rescope_verdicts(raw, [_intent(1)])
         assert errors == []
         assert len(verdicts) == 1
@@ -1151,7 +1154,8 @@ class TestParseRescopeVerdicts:
             '{"intent_comment_id": 1, "outcome": "superseded", '
             '"by_intent_comment_id": 2, '
             '"narrative": "color overridden"},'
-            '{"intent_comment_id": 2, "outcome": "honored"}'
+            '{"intent_comment_id": 2, "outcome": "honored", '
+            '"narrative": "winning color request honored"}'
             "]}"
         )
         verdicts, errors = _parse_rescope_verdicts(raw, [_intent(1), _intent(2)])
@@ -1193,8 +1197,8 @@ class TestParseRescopeVerdicts:
     def test_duplicate_intent_comment_id_in_verdicts(self) -> None:
         raw = (
             '{"verdicts": ['
-            '{"intent_comment_id": 1, "outcome": "honored"},'
-            '{"intent_comment_id": 1, "outcome": "no_op"}'
+            '{"intent_comment_id": 1, "outcome": "honored", "narrative": "x"},'
+            '{"intent_comment_id": 1, "outcome": "no_op", "narrative": "y"}'
             "]}"
         )
         _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
@@ -1272,7 +1276,7 @@ class TestParseRescopeVerdicts:
             ' "by_intent_comment_id": 2, "narrative": "x"},'
             '{"intent_comment_id": 2, "outcome": "superseded", '
             ' "by_intent_comment_id": 3, "narrative": "y"},'
-            '{"intent_comment_id": 3, "outcome": "honored"}'
+            '{"intent_comment_id": 3, "outcome": "honored", "narrative": "z"}'
             "]}"
         )
         verdicts, errors = _parse_rescope_verdicts(
@@ -1326,7 +1330,10 @@ class TestParseRescopeVerdicts:
     def test_absent_ops_defaults_to_empty(self) -> None:
         # Absent ``ops`` field is the documented "no ops" case —
         # default ``()`` is the right value, not an error.
-        raw = '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored"}]}'
+        raw = (
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored", '
+            '"narrative": "x"}]}'
+        )
         verdicts, errors = _parse_rescope_verdicts(raw, [_intent(1)])
         assert errors == []
         assert verdicts[0].ops == ()
@@ -4752,7 +4759,15 @@ class TestReorderTasksVerdictWiring:
         ]
         bad_raw = '{"operations": []}'  # ops envelope, not verdicts
         valid_raw = json.dumps(
-            {"verdicts": [{"intent_comment_id": 101, "outcome": "no_op"}]}
+            {
+                "verdicts": [
+                    {
+                        "intent_comment_id": 101,
+                        "outcome": "no_op",
+                        "narrative": "nothing to do",
+                    }
+                ]
+            }
         )
         agent = _client()
         agent.run_turn.side_effect = [bad_raw, valid_raw]
@@ -4865,6 +4880,7 @@ class TestReorderTasksVerdictWiring:
                         "intent_comment_id": 20,
                         "outcome": "honored",
                         "affected_task_ids": [t1["id"]],
+                        "narrative": "joint-honored sibling",
                     },
                 ]
             }
@@ -5015,6 +5031,7 @@ class TestFlattenVerdictsToOps:
                 outcome="honored",
                 ops=({"op": "keep", "id": "A"},),
                 affected_task_ids=("A",),
+                narrative="x",
             ),
             IntentVerdict(
                 intent_comment_id=2,
@@ -5024,6 +5041,7 @@ class TestFlattenVerdictsToOps:
                     {"op": "remove", "id": "C"},
                 ),
                 affected_task_ids=("B", "C"),
+                narrative="x",
             ),
         ]
         flat = _flatten_verdicts_to_ops(verdicts)
@@ -5052,6 +5070,7 @@ class TestFlattenVerdictsToOps:
                 },
             ),
             affected_task_ids=("T1",),
+            narrative="x",
         )
         flat = _flatten_verdicts_to_ops([v])
         # Malformed value passed through; verdict id NOT injected.
@@ -5068,6 +5087,7 @@ class TestFlattenVerdictsToOps:
             outcome="honored",
             ops=({"op": "keep", "id": "T1", "contributing_intents": ""},),
             affected_task_ids=("T1",),
+            narrative="x",
         )
         flat = _flatten_verdicts_to_ops([v])
         assert flat[0]["contributing_intents"] == ""
@@ -5089,6 +5109,7 @@ class TestFlattenVerdictsToOps:
                 },
             ),
             affected_task_ids=("T1",),
+            narrative="x",
         )
         flat = _flatten_verdicts_to_ops([v])
         assert flat[0]["contributing_intents"] == {"10": "x"}
@@ -5111,6 +5132,7 @@ class TestFlattenVerdictsToOps:
                 },
             ),
             affected_task_ids=("T1",),
+            narrative="x",
         )
         flat = _flatten_verdicts_to_ops([v])
         # After IntentVerdict's deep_freeze, the list became a tuple.
@@ -5134,6 +5156,7 @@ class TestFlattenVerdictsToOps:
                 },
             ),
             affected_task_ids=("T1",),
+            narrative="x",
         )
         flat = _flatten_verdicts_to_ops([v])
         # After deep_freeze, list → tuple; bool-containing → passed through.
@@ -5150,6 +5173,7 @@ class TestFlattenVerdictsToOps:
             outcome="honored",
             ops=({"op": "keep", "id": "T1", "contributing_intents": 0},),
             affected_task_ids=("T1",),
+            narrative="x",
         )
         flat = _flatten_verdicts_to_ops([v])
         assert flat[0]["contributing_intents"] == 0

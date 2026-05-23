@@ -1461,7 +1461,7 @@ def _parse_rescope_verdicts(
             "ops": [<op record>, ...],            // optional, default []
             "affected_task_ids": ["T1", ...],     // optional, default []
             "by_intent_comment_id": <int | null>, // optional, null default
-            "narrative": "..." | null             // optional, null default
+            "narrative": "..."                    // REQUIRED on every outcome (HOL-3 / #1897)
           },
           ...
         ]}
