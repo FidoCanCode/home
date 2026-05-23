@@ -163,13 +163,23 @@ class _GitHubInsightFiler:
 
         Skips creation when EITHER:
         - The same-comment idempotency marker is already on record (a
-          replay of this exact comment).
+          replay of this exact comment) — looked up in BOTH issue
+          bodies and comments so dedup-skip markers (see below) count.
         - The HOL-19 critic verdicts the insight as a near-duplicate
           of a recent filed insight (catches cross-comment duplicates
           the marker can't see).
+
+        When the dedup critic skips, a durable marker is recorded as a
+        comment on the duplicate-of issue (codex on PR #1932: without
+        this, a later replay + fail-open critic could file the
+        duplicate after all — the marker lookup needs a record of
+        every comment_id we considered, not just the ones we actually
+        filed).
         """
         marker = f"<!-- insight-source: {target.comment_id} -->"
-        existing = self._gh.search_issues(_INSIGHT_REPO, f'"{marker}" in:body is:issue')
+        existing = self._gh.search_issues(
+            _INSIGHT_REPO, f'"{marker}" in:body,comments is:issue'
+        )
         if existing:
             log.info(
                 "insight already filed for comment %d — skipping: %s",
@@ -179,6 +189,7 @@ class _GitHubInsightFiler:
             return
         verdict = self._dedup_critic_verdict(insight)
         if verdict.is_duplicate:
+            self._record_dedup_skip_marker(verdict, marker, target)
             log.info(
                 "insight-dedup critic verdicted near-duplicate of %s — "
                 "skipping filing for comment %d: %s",
@@ -192,6 +203,46 @@ class _GitHubInsightFiler:
         body = f"{insight.hook}\n\n{insight.why}\n\nSource: {source_link}\n\n{marker}"
         url = self._gh.create_issue(_INSIGHT_REPO, title, body, labels=[_INSIGHT_LABEL])
         log.info("filed insight issue for comment %d: %s", target.comment_id, url)
+
+    def _record_dedup_skip_marker(
+        self,
+        verdict: InsightDedupVerdict,
+        marker: str,
+        target: CommentTarget,
+    ) -> None:
+        """Post a comment carrying ``marker`` on the duplicate-of issue
+        named by ``verdict.duplicate_url``.
+
+        Without this record, a future webhook replay of the SAME
+        comment + a fail-open critic outcome would find no marker and
+        file the duplicate insight that the critic just rejected.  The
+        comment-body marker plus the ``in:body,comments`` search above
+        closes that race.
+
+        The comment is human-readable too: the GitHub UI shows "Also
+        covered: <source-link>" so a human reviewing the duplicate-of
+        issue can trace back to every source comment that surfaced
+        this insight.
+
+        URL parsing failures are logged and swallowed — we'd rather
+        skip the durable record than crash the synthesis dispatch on
+        a malformed critic URL (the cheap marker check still prevents
+        the next dispatch from filing it; only an actual fail-open
+        replay loses durability).
+        """
+        number = _parse_insight_issue_number(verdict.duplicate_url)
+        if number is None:
+            log.warning(
+                "insight-dedup critic returned non-parseable duplicate_url %r — "
+                "skipping marker record for comment %d (replay could still "
+                "file a duplicate if the critic later fails open)",
+                verdict.duplicate_url,
+                target.comment_id,
+            )
+            return
+        source_link = _insight_source_link(target)
+        body = f"Also covered: {source_link}\n\n{marker}"
+        self._gh.comment_issue(_INSIGHT_REPO, number, body)
 
     def _dedup_critic_verdict(self, insight: Insight) -> InsightDedupVerdict:
         """Run the HOL-19 critic when the agent/prompts collaborators
@@ -239,6 +290,23 @@ class _GitHubInsightFiler:
                 }
             )
         return out
+
+
+_INSIGHT_URL_NUMBER_RE = re.compile(r"/issues/(\d+)(?:[#/?].*)?$")
+
+
+def _parse_insight_issue_number(url: str) -> int | None:
+    """Extract the issue number from a duplicate insight URL.
+
+    Returns ``None`` when the URL doesn't end in ``/issues/{NN}`` —
+    the critic may have hallucinated a non-GitHub URL or pointed at a
+    PR/discussion path we can't comment on.  Caller treats ``None`` as
+    "skip the durable record" rather than crashing dispatch.
+    """
+    match = _INSIGHT_URL_NUMBER_RE.search(url.strip())
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 def _insight_source_link(target: CommentTarget) -> str:

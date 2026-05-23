@@ -2808,6 +2808,33 @@ def _make_new_tasks_from_opus(
     return slots
 
 
+_SKIPPED_KEEP_FIELDS = frozenset({"id", "contributing_intents"})
+
+
+def _mutates_skipped_row(item: dict[str, Any]) -> bool:
+    """True when ``item`` would change the SKIPPED row's content.
+
+    A bare ``{id, contributing_intents}`` item is the ``keep`` no-op
+    shape — preserves the row exactly, the right semantic for a
+    terminal lineage record on every rescope pass.  Any other field
+    (title, description, status, merge_sources, split_targets,
+    anchor_comment_id, …) signals a mutating op the SKIPPED guard
+    must reject.
+
+    ``merge_sources=[]`` / ``split_targets=[]`` are the documented
+    "no merge" / "no split" sentinels — treated as absent for this
+    check so a wrapper that always emits both keys with empty lists
+    isn't falsely flagged.
+    """
+    for key, value in item.items():
+        if key in _SKIPPED_KEEP_FIELDS:
+            continue
+        if key in ("merge_sources", "split_targets") and value == []:
+            continue
+        return True
+    return False
+
+
 def _validate_rescope_batch(
     current: list[dict[str, Any]],
     ordered_items: list[Any],
@@ -2952,6 +2979,25 @@ def _validate_rescope_batch(
                 f"item[{index}].id={item_id!r}: duplicate (already appears earlier)"
             )
         seen_ids.add(item_id)
+        # codex on PR #1932: SKIPPED is terminal — the marker is the
+        # durable record that an intent's no_op verdict landed.  The
+        # earlier merge/split-only guard caught two op shapes but
+        # rewrite (mutated title/description against the same id),
+        # status changes (remove/demote), merge, and split would
+        # silently corrupt the marker too.  Reject ANY MUTATING op
+        # targeting a SKIPPED row; the cheap ``keep`` no-op shape
+        # (bare ``{id, contributing_intents}``) stays allowed because
+        # it's just "this row is still here, no change" — exactly the
+        # right semantic for a terminal lineage record on every
+        # rescope pass.
+        if item_id in currently_skipped_ids and _mutates_skipped_row(item):
+            errors.append(
+                f"item[{index}].id={item_id!r}: target is a SKIPPED "
+                "marker (HOL-6 no_op lineage record); SKIPPED is "
+                "terminal and any op on it (rewrite, status change, "
+                "merge, split) would corrupt the no_op record"
+            )
+            continue
         if item.get("status") == str(TaskStatus.COMPLETED):
             explicitly_completed_ids.add(item_id)
         merge_sources = item.get("merge_sources")
@@ -2989,13 +3035,6 @@ def _validate_rescope_batch(
                     "disk); merging into a completed task is contradictory "
                     "(no MergeTasks would run; the source's lineage would "
                     "be silently lost)"
-                )
-            elif merge_sources and item_id in currently_skipped_ids:
-                errors.append(
-                    f"item[{index}].merge_sources on {item_id!r}: target "
-                    "is a SKIPPED marker (HOL-6 no_op lineage record); "
-                    "merging into it would corrupt the marker and is "
-                    "treated as terminal by the oracle anyway"
                 )
             elif merge_sources and item_id in currently_blocked_ids:
                 # codex on #1738: a blocked target accepts the merge,
@@ -3143,13 +3182,6 @@ def _validate_rescope_batch(
                 "is blocked; the SplitTask op would close it but blocked-"
                 "target semantics for split aren't defined yet (#1247 "
                 "territory)"
-            )
-        if item_id in currently_skipped_ids:
-            errors.append(
-                f"item[{index}].split_targets on {item_id!r}: target "
-                "is a SKIPPED marker (HOL-6 no_op lineage record); "
-                "splitting it would lose the no_op record and the "
-                "oracle treats it as terminal anyway"
             )
         if item_id in non_splittable_source_ids:
             # Kind classification is title-prefix driven, so a split

@@ -6466,6 +6466,130 @@ class TestGitHubInsightFiler:
         assert gh.search_issues.call_count == 1
         gh.create_issue.assert_not_called()
 
+    def test_critic_duplicate_records_skip_marker_on_dup_issue(self) -> None:
+        """Codex on PR #1932: when the dedup critic skips, the new
+        comment_id must still get a durable marker — otherwise a
+        replay + fail-open critic could file the duplicate later.
+        Marker is recorded as a comment on the duplicate-of issue."""
+        gh = MagicMock()
+        gh.search_issues.side_effect = [
+            [],  # marker lookup empty
+            [  # recent insights for the critic
+                {
+                    "title": "Previously filed",
+                    "body": "Same lesson.",
+                    "html_url": "https://github.com/FidoCanCode/home/issues/42",
+                }
+            ],
+        ]
+        filer = self._make_critic_filer(
+            gh,
+            agent_response=(
+                '{"is_duplicate": true, '
+                '"duplicate_url": "https://github.com/FidoCanCode/home/issues/42", '
+                '"rationale": "same lesson"}'
+            ),
+        )
+
+        filer.file_insight(self._make_insight(), self._make_target(comment_id=777))
+
+        # No NEW issue filed.
+        gh.create_issue.assert_not_called()
+        # Marker comment posted on the duplicate-of issue.
+        gh.comment_issue.assert_called_once()
+        repo_arg, number_arg, body_arg = gh.comment_issue.call_args.args
+        assert repo_arg == _INSIGHT_REPO
+        assert number_arg == 42
+        assert "<!-- insight-source: 777 -->" in body_arg
+
+    def test_critic_duplicate_marker_uses_in_body_comments_search(self) -> None:
+        """The marker search must include comments — otherwise the
+        marker we just wrote on the duplicate-of issue (as a comment,
+        not in the body) wouldn't be found on a future replay."""
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/12"
+        filer = _GitHubInsightFiler(gh)
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        query = gh.search_issues.call_args.args[1]
+        # Query MUST include ``in:body,comments`` so the dedup-skip
+        # markers (posted as comments) are searchable on replay.
+        assert "in:body,comments" in query
+
+    def test_critic_duplicate_with_unparseable_url_skips_marker(self) -> None:
+        """A critic that returns a non-GitHub or otherwise non-parseable
+        ``duplicate_url`` must NOT crash dispatch — we log and skip
+        the marker recording.  The filing is still skipped (the
+        critic's primary decision is honoured)."""
+        gh = MagicMock()
+        gh.search_issues.side_effect = [
+            [],
+            [
+                {
+                    "title": "x",
+                    "body": "y",
+                    "html_url": "https://x/issues/1",
+                }
+            ],
+        ]
+        filer = self._make_critic_filer(
+            gh,
+            agent_response=(
+                '{"is_duplicate": true, '
+                '"duplicate_url": "not a real URL at all", '
+                '"rationale": "x"}'
+            ),
+        )
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        # No new issue filed (critic decision honoured) AND no comment
+        # posted (URL couldn't be parsed).
+        gh.create_issue.assert_not_called()
+        gh.comment_issue.assert_not_called()
+
+    def test_critic_distinct_does_not_post_marker_comment(self) -> None:
+        """When the critic passes the insight is filed normally — no
+        marker comment on any prior issue."""
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/13"
+        filer = self._make_critic_filer(
+            gh, agent_response='{"is_duplicate": false, "rationale": "distinct"}'
+        )
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        gh.create_issue.assert_called_once()
+        gh.comment_issue.assert_not_called()
+
+    def test_parse_insight_issue_number_accepts_issue_url(self) -> None:
+        """The URL extractor accepts the canonical
+        ``.../issues/{N}`` shape and ignores trailing anchors."""
+        from fido.events import _parse_insight_issue_number
+
+        assert (
+            _parse_insight_issue_number("https://github.com/FidoCanCode/home/issues/42")
+            == 42
+        )
+        assert (
+            _parse_insight_issue_number(
+                "https://github.com/foo/bar/issues/1234#issuecomment-555"
+            )
+            == 1234
+        )
+
+    def test_parse_insight_issue_number_rejects_non_issue_url(self) -> None:
+        """PR URLs, discussion URLs, and plain garbage all return None
+        so the caller skips the marker step instead of crashing."""
+        from fido.events import _parse_insight_issue_number
+
+        assert _parse_insight_issue_number("https://github.com/foo/bar/pull/42") is None
+        assert _parse_insight_issue_number("not a URL") is None
+        assert _parse_insight_issue_number("") is None
+
     def test_recent_insights_capped(self) -> None:
         """Caller-supplied search may return more than the cap — the
         filer trims to :data:`_INSIGHT_RECENT_LIMIT` before passing to

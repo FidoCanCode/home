@@ -3438,10 +3438,10 @@ class TestValidateRescopeBatch:
 
     def test_merge_into_skipped_marker_target_is_rejected(self) -> None:
         """Rob review on PR #1932: SKIPPED tasks are terminal lineage
-        records (HOL-6 no_op markers) — merging into them would
-        corrupt the marker and the oracle treats them as completed
-        anyway.  Validator must reject the shape so the corruption
-        never lands."""
+        records (HOL-6 no_op markers).  Codex follow-up: the rejection
+        is now a single generic guard at the top of the per-item loop —
+        ANY op targeting a SKIPPED row is rejected, not just merge /
+        split.  This test pins the merge variant of that broader rule."""
         target = self._t("target")
         target["status"] = "skipped"
         items = [
@@ -3451,13 +3451,13 @@ class TestValidateRescopeBatch:
         current = [target, self._t("source")]
         errors = _validate_rescope_batch(current, items)
         assert any(
-            "SKIPPED marker" in e and "merging into it would corrupt" in e
+            "SKIPPED marker" in e and "terminal" in e and "any op on it" in e
             for e in errors
         )
 
     def test_split_skipped_marker_target_is_rejected(self) -> None:
-        """Same defense for split — splitting a SKIPPED marker loses
-        the no_op record."""
+        """Split variant of the generic SKIPPED-guard rule (see the merge
+        test above)."""
         target = self._t("target")
         target["status"] = "skipped"
         items = [
@@ -3472,8 +3472,77 @@ class TestValidateRescopeBatch:
         ]
         errors = _validate_rescope_batch([target], items)
         assert any(
-            "SKIPPED marker" in e and "splitting it would lose" in e for e in errors
+            "SKIPPED marker" in e and "terminal" in e and "any op on it" in e
+            for e in errors
         )
+
+    def test_rewrite_skipped_marker_target_is_rejected(self) -> None:
+        """Codex on PR #1932: the earlier merge/split-only guard missed
+        the rewrite shape — an item targeting a SKIPPED id with no
+        merge/split arms (just a new title/description) would silently
+        mutate the marker's title while preserving skipped status,
+        corrupting the no_op lineage record."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        target["title"] = "Original SKIPPED marker"
+        items = [
+            {
+                "id": "target",
+                "title": "Rewritten — would overwrite the marker",
+                "description": "and the description too",
+            },
+        ]
+        errors = _validate_rescope_batch([target], items)
+        assert any("SKIPPED marker" in e and "any op on it" in e for e in errors)
+
+    def test_keep_skipped_marker_with_empty_op_sentinels_is_allowed(
+        self,
+    ) -> None:
+        """``merge_sources=[]`` and ``split_targets=[]`` are the
+        documented "no merge" / "no split" sentinels — a caller that
+        always emits both keys with empty lists isn't actually
+        mutating the row, so the SKIPPED guard must NOT flag them."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        items = [
+            {
+                "id": "target",
+                "contributing_intents": [42],
+                "merge_sources": [],
+                "split_targets": [],
+            },
+        ]
+        errors = _validate_rescope_batch([target], items)
+        assert not any("SKIPPED marker" in e for e in errors)
+
+    def test_keep_skipped_marker_target_is_allowed(self) -> None:
+        """The cheap ``keep`` no-op shape (``{id, contributing_intents}``
+        only) must NOT be rejected — that's exactly the right semantic
+        for a terminal lineage record on every rescope pass, and it
+        keeps the SKIPPED row in the projected output where the
+        materialise pass can re-stamp ``"skipped"`` instead of
+        ``"completed"``.  Pins the boundary of the generic
+        SKIPPED-guard added above."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        items = [
+            {"id": "target", "contributing_intents": [42]},
+        ]
+        errors = _validate_rescope_batch([target], items)
+        assert not any("SKIPPED marker" in e for e in errors)
+
+    def test_remove_skipped_marker_target_is_rejected(self) -> None:
+        """Codex on PR #1932: status='completed' on a SKIPPED row would
+        demote the marker out of SKIPPED — the no_op record disappears
+        into the regular completed tasks block.  Same generic guard
+        catches it."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        items = [
+            {"id": "target", "title": "T", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch([target], items)
+        assert any("SKIPPED marker" in e and "any op on it" in e for e in errors)
 
     def test_empty_merge_sources_on_completed_target_is_harmless(self) -> None:
         # codex on #1738 (low): an empty merge_sources is the

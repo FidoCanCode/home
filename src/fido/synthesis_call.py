@@ -602,6 +602,21 @@ def call_synthesis(
             )
             continue
 
+        # Legacy ``_check_and_promote`` (#1218) backstop fires FIRST so
+        # any derived ``change_request`` is part of the response the
+        # critics see (codex on PR #1932: previously the critics ran
+        # on the pre-promote response, then ``_check_and_promote``
+        # could mutate ``change_request`` post-critic — a hallucinated
+        # or over-broad derivation bypassed every gate).  Reordering
+        # costs at most ``_check_and_promote``'s two extra LLM turns
+        # per attempt on retry paths; the correctness win is that
+        # what ships is exactly what was critiqued.  A follow-up leaf
+        # removes ``_check_and_promote`` once the HOL-15 critic has
+        # earned its keep.
+        response = _check_and_promote(
+            response, agent, followup_system_prompt=followup_system_prompt
+        )
+
         # HOL-15 / #1909: intent-coverage critic gate.  Fires for every
         # parsed response and can demand a retry with a specific gap.
         # Fails open on transport/parse problems (see
@@ -654,13 +669,7 @@ def call_synthesis(
 
         if attempt > 0:
             log.info("synthesis: succeeded on attempt %d/%d", attempt + 1, MAX_RETRIES)
-        # Legacy ``_check_and_promote`` (#1218) still fires as the
-        # "missing change_request" backstop.  Removed in a follow-up
-        # once the HOL-15 critic has earned its keep across enough
-        # production turns to retire the bare Yes/No fallback.
-        return _check_and_promote(
-            response, agent, followup_system_prompt=followup_system_prompt
-        )
+        return response
 
     raise SynthesisExhaustedError(
         f"synthesis exhausted {MAX_RETRIES} retries without a valid CommentResponse "
