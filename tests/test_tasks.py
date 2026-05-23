@@ -213,6 +213,48 @@ class TestTaskStoreOracleAdapter:
         assert "- ⊘ Skipped: drop A <!-- type:spec -->" in queue
         assert "- ⊘ Skipped: drop B <!-- type:spec -->" in queue
 
+    def test_format_work_queue_encodes_skipped_description(self) -> None:
+        """Rob review on PR #1932: the SKIPPED block previously rendered
+        only the title — the per-skip narrative carried in
+        ``description`` was lost.  When ``seed_tasks_from_pr_body``
+        rehydrates tasks from the PR body after a restart, that
+        narrative needs to be roundtripped.  The formatter encodes it
+        as base64 inside an HTML comment (``<!-- desc:BASE64 -->``) so
+        the inner ``-->`` of any markdown payload can't terminate the
+        comment early.  Decoder lives in ``seed_tasks_from_pr_body``."""
+        import base64
+
+        task_list = [
+            {
+                "title": "Skipped: drop A",
+                "status": "skipped",
+                "type": "spec",
+                "description": "Rescope verdict: duplicate of #1234.",
+            },
+            {
+                "title": "Skipped: drop B",
+                "status": "skipped",
+                "type": "spec",
+                # Empty description must NOT emit the comment — keeps
+                # the rendered line identical to the pre-roundtrip
+                # shape when there's nothing to carry.
+                "description": "",
+            },
+        ]
+
+        queue = _format_work_queue(task_list)
+
+        # Non-empty description encoded into the desc HTML comment.
+        encoded_a = base64.b64encode(b"Rescope verdict: duplicate of #1234.").decode(
+            "ascii"
+        )
+        assert f"<!-- desc:{encoded_a} -->" in queue
+        # Empty description path emits the bare line — no desc comment.
+        assert "- ⊘ Skipped: drop B <!-- type:spec -->" in queue
+        # And the bare line for B has no trailing desc comment.
+        b_line = next(line for line in queue.splitlines() if "Skipped: drop B" in line)
+        assert "desc:" not in b_line
+
     def test_format_work_queue_no_skipped_block_when_none(self) -> None:
         # The "Skipped" block only appears when at least one skipped
         # task exists.  Otherwise the rendering matches the pre-HOL-7

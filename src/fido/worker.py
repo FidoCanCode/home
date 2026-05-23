@@ -3437,6 +3437,7 @@ class Worker:
             str(TaskStatus.PENDING),
             str(TaskStatus.IN_PROGRESS),
         )
+        reparked = False
         repark_target_found = False
         with self._tasks.modify() as live:
             for live_task in live:
@@ -3447,8 +3448,7 @@ class Worker:
                 if current_status not in nonterminal:
                     log.warning(
                         "task-completion critic re-park skipped for %s: "
-                        "concurrent rescope moved it to %r — staged changes "
-                        "stay on disk but task status not touched",
+                        "concurrent rescope moved it to %r",
                         task["id"],
                         current_status,
                     )
@@ -3459,6 +3459,7 @@ class Worker:
                 )
                 live_task["description"] = appended
                 live_task["status"] = str(TaskStatus.IN_PROGRESS)
+                reparked = True
                 break
         if not repark_target_found:
             log.warning(
@@ -3466,6 +3467,23 @@ class Worker:
                 "longer in queue (concurrent rescope removed it)",
                 task["id"],
             )
+        # Rob follow-up review on PR #1932: when re-park is skipped
+        # (terminal status OR row removed), the soft-reset above left
+        # the rolled-back commit's changes staged.  Without that
+        # context this becomes an orphan staged diff the NEXT task
+        # would inherit — silently picking up work from a task the
+        # queue no longer intends to run.  Discard it.  ``git reset
+        # --hard HEAD`` resets working tree + index to match the
+        # post-soft-reset HEAD, dropping every change we just rolled
+        # back.  Only fires on the no-repark branches — the normal
+        # re-park path preserves the staged changes for the retry.
+        if not reparked:
+            log.warning(
+                "discarding orphan staged changes from rolled-back commit "
+                "(rescope already moved task %s)",
+                task["id"],
+            )
+            self._git(["reset", "--hard", "HEAD"])
         # codex r3293424367 on PR #1932: clear ``current_task_id``
         # after re-parking.  Otherwise a stale "active task" marker
         # lets ``_maybe_abort_for_new_task`` fire on unrelated incoming
@@ -4484,7 +4502,9 @@ class Worker:
         )
         if not match:
             return
-        parsed: list[tuple[str, TaskType, TaskStatus]] = []
+        import base64 as _base64
+
+        parsed: list[tuple[str, TaskType, TaskStatus, str]] = []
         for line in match.group(1).splitlines():
             check = re.match(r"^- (\[( |x)\]|⊘) (.+)$", line)
             if not check:
@@ -4503,11 +4523,28 @@ class Worker:
                 continue
             raw_type = type_match.group(1)
             task_type = TaskType(raw_type)
+            # Rob review on PR #1932: skipped markers carry the no_op
+            # rationale in description via a ``<!-- desc:base64 -->``
+            # comment so PR-body round-trip preserves the "why this
+            # intent was dropped" record.  Only SKIPPED lines have
+            # this comment (the format renderer only emits it for
+            # SKIPPED) but the parser is permissive and accepts it
+            # on any line.
+            description = ""
+            desc_match = re.search(r"<!-- desc:([A-Za-z0-9+/=]*) -->", rest)
+            if desc_match:
+                try:
+                    description = _base64.b64decode(
+                        desc_match.group(1), validate=True
+                    ).decode("utf-8")
+                except ValueError, UnicodeDecodeError:
+                    description = ""
             title = re.sub(r"\s*<!-- type:\w+ -->\s*", "", rest)
+            title = re.sub(r"\s*<!-- desc:[A-Za-z0-9+/=]* -->\s*", "", title)
             title = re.sub(r"\s*\*\*→ next\*\*\s*", "", title).strip()
             if not title:
                 continue
-            parsed.append((title, task_type, status))
+            parsed.append((title, task_type, status, description))
         if not parsed:
             return
         counts: dict[TaskStatus, int] = {
@@ -4515,8 +4552,17 @@ class Worker:
             TaskStatus.COMPLETED: 0,
             TaskStatus.SKIPPED: 0,
         }
-        for title, task_type, status in parsed:
-            self._tasks.add(title, task_type, status=status)
+        for title, task_type, status, description in parsed:
+            # Pass description only when non-empty so legacy seed paths
+            # (no desc comment on the line) call ``add()`` with the
+            # same shape they always did — keeps callers' .assert_called_with
+            # patterns from breaking on the new keyword.
+            if description:
+                self._tasks.add(
+                    title, task_type, description=description, status=status
+                )
+            else:
+                self._tasks.add(title, task_type, status=status)
             counts[status] = counts.get(status, 0) + 1
         log.info(
             "seeded %d tasks from PR body (%d pending, %d completed, %d skipped)",

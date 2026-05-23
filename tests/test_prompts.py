@@ -2348,3 +2348,26 @@ class TestReplyProseClaimGroundingPrompt:
         assert "passes by default" in commit_block
         issue_block = result.split("issue/PR claims:", 1)[1].split("file claims:", 1)[0]
         assert "passes by default" in issue_block
+
+    def test_commit_claims_accept_prefix_match(self) -> None:
+        """Rob review on PR #1932: git abbreviates SHAs to different
+        lengths depending on repo size, and our ground-truth list
+        carries the full 40-char ``%H`` form (plus the repo's ``%h``).
+        A strict "must appear in the list" rule would reject any prose
+        that uses an abbreviation git chose at composition time but
+        whose length doesn't match the rendered form.  The prompt must
+        instruct PREFIX matching: any 4-to-40 hex prefix that uniquely
+        identifies a listed full SHA passes."""
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state=self._state(),
+        )
+        commit_block = result.split("commit claims:", 1)[1].split(
+            "issue/PR claims:", 1
+        )[0]
+        # The new rule explicitly names PREFIX matching and the legal
+        # length window, so a regenerated reply with a short SHA still
+        # passes the critic.
+        assert "PREFIX" in commit_block
+        assert "4-to-40" in commit_block
+        assert "hex prefix" in commit_block

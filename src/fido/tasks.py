@@ -1100,12 +1100,21 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
     completed (no work happened, only a narrative explaining why the
     intent was dropped).  Each line includes a ``<!-- type:X -->``
     HTML comment for round-tripping.
+
+    Skipped lines additionally carry the no_op rationale as a
+    base64-encoded ``<!-- desc:... -->`` comment so PR-body reseeding
+    (``seed_tasks_from_pr_body``) can recover the "why this intent was
+    dropped" prose — for skipped markers, the description IS the
+    durable record (Rob review on PR #1932).
     """
+    import base64 as _base64
+
     store, tasks_by_oracle_id = _task_store_for_oracle(task_list)
     projected_rows = task_store_oracle.project_task_store(store)
     pending: list[tuple[str, str]] = []
     completed: list[tuple[str, str]] = []
-    skipped: list[tuple[str, str]] = []
+    # Skipped entries carry (display, task_type, encoded_description).
+    skipped: list[tuple[str, str, str]] = []
 
     def _fmt(row: task_store_oracle.PRBodyRow) -> tuple[str, str]:
         task = tasks_by_oracle_id[row.task]
@@ -1117,16 +1126,22 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
 
     for row in projected_rows:
         task = tasks_by_oracle_id[row.task]
-        display = _fmt(row)
         # HOL-7: the oracle projects SKIPPED → StatusCompleted (both are
         # terminal for picker purposes — HOL-5 mapping), so distinguish
         # via the underlying task dict's status field.
         if task.get("status") == str(TaskStatus.SKIPPED):
-            skipped.append(display)
+            display, task_type = _fmt(row)
+            description = task.get("description") or ""
+            encoded_desc = (
+                _base64.b64encode(description.encode("utf-8")).decode("ascii")
+                if description
+                else ""
+            )
+            skipped.append((display, task_type, encoded_desc))
         elif isinstance(row.status, task_store_oracle.PRCompleted):
-            completed.append(display)
+            completed.append(_fmt(row))
         else:
-            pending.append(display)
+            pending.append(_fmt(row))
 
     lines: list[str] = []
     for i, (display, task_type) in enumerate(pending):
@@ -1145,13 +1160,24 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
         lines.append("")
         lines.append(f"<details><summary>Skipped ({len(skipped)})</summary>")
         lines.append("")
-        for display, task_type in skipped:
+        for display, task_type, encoded_desc in skipped:
             # Skipped-marker rendering uses the unicode ⊘ "circled
             # division slash" as the checkbox glyph so the line is
             # visually distinct from both pending ``[ ]`` and completed
             # ``[x]`` at a glance.  ASCII ``[~]`` would also work but
             # would conflict with the existing IN_PROGRESS marker.
-            lines.append(f"- ⊘ {display} <!-- type:{task_type} -->")
+            #
+            # Description rides in a ``<!-- desc:base64 -->`` comment
+            # (only when non-empty) so PR-body reseed can recover the
+            # no_op rationale — for skipped markers, the description
+            # IS the durable record of why the intent was dropped.
+            # Base64 avoids embedded ``-->`` / control-character /
+            # multi-line escape issues that plaintext-in-comment would
+            # need to handle.
+            line = f"- ⊘ {display} <!-- type:{task_type} -->"
+            if encoded_desc:
+                line += f" <!-- desc:{encoded_desc} -->"
+            lines.append(line)
         lines.append("</details>")
 
     return "\n".join(lines)
