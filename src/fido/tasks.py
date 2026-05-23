@@ -60,7 +60,13 @@ def _task_kind_for_oracle(task: dict[str, Any]) -> task_store_oracle.TaskKind:
 
 def _task_status_for_oracle(task: dict[str, Any]) -> task_store_oracle.TaskStatus:
     match task.get("status", TaskStatus.PENDING):
-        case TaskStatus.COMPLETED | "completed":
+        case TaskStatus.COMPLETED | "completed" | TaskStatus.SKIPPED | "skipped":
+            # SKIPPED (HOL-5 / #1899) projects to StatusCompleted at the
+            # oracle boundary: both are terminal for the picker (never
+            # selected, never block).  The SKIPPED-vs-COMPLETED
+            # distinction matters only for UI rendering (HOL-7) and
+            # reply-back narrative; the oracle's terminal predicate
+            # treats them identically.
             return task_store_oracle.StatusCompleted()
         case TaskStatus.BLOCKED | "blocked":
             return task_store_oracle.StatusBlocked()
@@ -79,7 +85,11 @@ def _thread_task_status_for_oracle(
     task: dict[str, Any],
 ) -> thread_resolve_oracle.TaskStatus:
     match task.get("status", TaskStatus.PENDING):
-        case TaskStatus.COMPLETED | "completed":
+        case TaskStatus.COMPLETED | "completed" | TaskStatus.SKIPPED | "skipped":
+            # SKIPPED (HOL-5 / #1899) projects to StatusCompleted: a
+            # skipped marker task doesn't block thread auto-resolve any
+            # more than a completed task does (auto-resolve already
+            # treats both as terminal via this projection).
             return thread_resolve_oracle.StatusCompleted()
         case TaskStatus.BLOCKED | "blocked":
             return thread_resolve_oracle.StatusBlocked()
@@ -354,7 +364,10 @@ def _rescope_task_status_for_oracle(
     task: dict[str, Any],
 ) -> rescope_oracle.TaskStatus:
     match task.get("status", TaskStatus.PENDING):
-        case TaskStatus.COMPLETED | "completed":
+        case TaskStatus.COMPLETED | "completed" | TaskStatus.SKIPPED | "skipped":
+            # SKIPPED (HOL-5 / #1899) projects to StatusCompleted: the
+            # rescope oracle's snapshot order treats both as terminal
+            # (already-handled tasks the rescope shouldn't re-touch).
             return rescope_oracle.StatusCompleted()
         case TaskStatus.BLOCKED | "blocked":
             return rescope_oracle.StatusBlocked()
@@ -2669,7 +2682,11 @@ def _inprogress_was_demoted(
       — the picker filters them; the magic-prefix smell that motivates
       this duplication is #1848.
     """
-    skip_statuses = (str(TaskStatus.COMPLETED), str(TaskStatus.BLOCKED))
+    skip_statuses = (
+        str(TaskStatus.COMPLETED),
+        str(TaskStatus.BLOCKED),
+        str(TaskStatus.SKIPPED),  # HOL-5 / #1899
+    )
     inprogress_id = inprogress_row.get("id")
     for task in result:
         if task.get("status") in skip_statuses:

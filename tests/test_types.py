@@ -441,3 +441,40 @@ class TestIntentVerdictTypeChecks:
                 affected_task_ids=("T1",),
                 narrative="x",
             )
+
+
+# ── TaskStatus.SKIPPED (HOL-5 / #1899) ───────────────────────────────────────
+
+
+class TestTaskStatusSkipped:
+    """HOL-5 (#1899): SKIPPED enum value for no_op marker tasks.
+
+    Pinned at the type layer; the projections into the per-oracle
+    TaskStatus types are exercised by tests/test_tasks.py and
+    tests/test_worker.py — there's no extra wiring to test here other
+    than membership + value.
+    """
+
+    def test_skipped_member_present(self) -> None:
+        from fido.types import TaskStatus
+
+        assert hasattr(TaskStatus, "SKIPPED")
+
+    def test_skipped_string_value(self) -> None:
+        from fido.types import TaskStatus
+
+        # Wire-format value is the lowercase string we write into
+        # tasks.json — same convention as the other members.
+        assert str(TaskStatus.SKIPPED) == "skipped"
+
+    def test_skipped_distinct_from_completed_and_blocked(self) -> None:
+        # The whole point of SKIPPED is to be distinguishable from
+        # COMPLETED for UI/lineage purposes, and from BLOCKED because
+        # SKIPPED is terminal (never picked, never unblockable) while
+        # BLOCKED is pending-but-paused.
+        from fido.types import TaskStatus
+
+        assert TaskStatus.SKIPPED != TaskStatus.COMPLETED
+        assert TaskStatus.SKIPPED != TaskStatus.BLOCKED
+        assert TaskStatus.SKIPPED != TaskStatus.PENDING
+        assert TaskStatus.SKIPPED != TaskStatus.IN_PROGRESS

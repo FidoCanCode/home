@@ -10422,6 +10422,19 @@ class TestPickNextTask:
         pending = self._task("Pending task")
         assert _pick_next_task([completed, pending]) is pending
 
+    def test_ignores_skipped_when_selecting(self) -> None:
+        # HOL-5 / #1899: SKIPPED is terminal — picker walks past it
+        # the same way it walks past completed.  Skipped marker tasks
+        # (from no_op rescope verdicts) must never become work.
+        skipped = self._task("Dropped ask", status="skipped")
+        pending = self._task("Real work")
+        assert _pick_next_task([skipped, pending]) is pending
+
+    def test_returns_none_when_only_skipped(self) -> None:
+        # An all-skipped queue has no work — never pick.
+        skipped = self._task("Dropped ask", status="skipped")
+        assert _pick_next_task([skipped]) is None
+
     def test_task_with_spec_type_not_prioritised(self) -> None:
         """A task with spec type is not treated as thread-originated."""
         spec = self._task("Regular task", task_type="spec")
