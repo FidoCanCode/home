@@ -370,6 +370,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     _fn_after_do_post = staticmethod(_noop_after_post)
     _fn_runner_dir = staticmethod(_runner_dir)
     _fn_kill_active_children = staticmethod(kill_active_children)
+    _fn_exit: Callable[[int], None] = os._exit  # type: ignore[assignment]
     # Per-process ingress deduplication oracle (webhook_ingress_dedupe.v).
     # Shared across all handler instances via the class attribute so every
     # request on every thread sees the same delivery-ID table.  Created once
@@ -671,7 +672,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "claude leak detected in webhook handler for %s — halting",
                 repo_cfg.name,
             )
-            os._exit(3)
+            type(self)._fn_exit(3)
         finally:
             log.info(
                 "webhook handler: EXIT repo=%s tid=%d",

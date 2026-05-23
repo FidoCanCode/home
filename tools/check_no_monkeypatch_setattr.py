@@ -19,16 +19,7 @@ from pathlib import Path
 # root cause instead.
 _EXEMPTIONS: frozenset[str] = frozenset(
     {
-        "tests/test_cli.py",
         "tests/test_claude_hold_for_handler.py",
-        "tests/test_copilot_hold_for_handler.py",
-        "tests/test_rocq_lsp.py",
-        "tests/test_rocq_pymap.py",
-        "tests/test_rocq_repl.py",
-        "tests/test_server.py",
-        "tests/test_status_provider.py",
-        "tests/test_worker.py",
-        "tests/test_worker_persist_session_id.py",
     }
 )
 

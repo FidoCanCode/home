@@ -1233,7 +1233,11 @@ class CopilotCLISession(OwnedSession):
             # so the worker's turn aborts and releases promptly rather than
             # being waited out (#637).  Webhook-on-webhook still queues
             # FIFO with no cancel.
-            provider.try_preempt_worker(self._repo_name, self._fire_worker_cancel)
+            provider.try_preempt_worker(
+                self._repo_name,
+                self._fire_worker_cancel,
+                self._talker_resolver,
+            )
             self._fsm_acquire_handler()
         self._bump_entry_depth()
         if self._repo_name is not None:

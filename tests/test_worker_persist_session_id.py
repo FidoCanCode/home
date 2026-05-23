@@ -2,8 +2,10 @@
 
 import json
 import subprocess
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Never
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,6 +14,7 @@ from fido.config import RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.issue_cache import IssueCache
 from fido.provider_factory import DefaultProviderFactory
+from fido.state import State
 from fido.worker import WorkerThread
 from tests.fakes import _FakeDispatcher
 
@@ -63,18 +66,15 @@ def test_load_persisted_session_id_none_when_not_a_git_repo(tmp_path: Path) -> N
     assert thread._load_persisted_session_id() is None
 
 
-def test_load_persisted_session_id_handles_state_load_oserror(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_load_persisted_session_id_handles_state_load_oserror(tmp_path: Path) -> None:
     fido_dir = _init_git_repo(tmp_path)
     (fido_dir / "state.json").write_text(json.dumps({"session_id": "abc"}))
-    thread = _make_thread(tmp_path)
-    from fido import state as state_mod
 
-    def boom(self: object) -> Never:
-        raise OSError("permission denied")
+    class ErrorLoadState(State):
+        def load(self) -> dict[str, Any]:
+            raise OSError("permission denied")
 
-    monkeypatch.setattr(state_mod.State, "load", boom)
+    thread = _make_thread(tmp_path, _state=ErrorLoadState(fido_dir))
     assert thread._load_persisted_session_id() is None
 
 
@@ -152,26 +152,25 @@ def test_persist_session_id_noop_when_fido_dir_unresolvable(tmp_path: Path) -> N
 
 
 def test_persist_session_id_swallows_state_modify_oserror(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     import logging
 
-    _init_git_repo(tmp_path)
+    fido_dir = _init_git_repo(tmp_path)
     session = MagicMock()
     session.session_id = "sid"
     provider = MagicMock()
     provider.agent.session = session
-    thread = _make_thread(tmp_path, provider=provider)
-    from contextlib import contextmanager
 
-    from fido import state as state_mod
+    class ErrorModifyState(State):
+        @contextmanager
+        def modify(self) -> Generator[Any, None, None]:
+            raise OSError("state.json locked by another process")
+            yield  # type: ignore[misc]
 
-    @contextmanager
-    def boom(self: object) -> object:
-        raise OSError("state.json locked by another process")
-        yield  # unreachable
-
-    monkeypatch.setattr(state_mod.State, "modify", boom)
+    thread = _make_thread(
+        tmp_path, provider=provider, _state=ErrorModifyState(fido_dir)
+    )
     with caplog.at_level(logging.WARNING, logger="fido"):
         thread._persist_session_id()
     assert "failed to persist session_id" in caplog.text
@@ -256,22 +255,19 @@ def test_retire_poisoned_session_noop_when_no_session(tmp_path: Path) -> None:
 
 
 def test_retire_poisoned_session_swallows_state_modify_oserror(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     import logging
-    from contextlib import contextmanager
 
-    from fido import state as state_mod
+    fido_dir = _init_git_repo(tmp_path)
 
-    _init_git_repo(tmp_path)
-    thread = _make_thread(tmp_path)
+    class ErrorModifyState(State):
+        @contextmanager
+        def modify(self) -> Generator[Any, None, None]:
+            raise OSError("state.json locked")
+            yield  # type: ignore[misc]
 
-    @contextmanager
-    def boom(self: object) -> object:
-        raise OSError("state.json locked")
-        yield  # unreachable
-
-    monkeypatch.setattr(state_mod.State, "modify", boom)
+    thread = _make_thread(tmp_path, _state=ErrorModifyState(fido_dir))
     with caplog.at_level(logging.WARNING, logger="fido"):
         thread._retire_poisoned_session()  # pyright: ignore[reportPrivateUsage]
     assert "failed to clear session_id after context overflow" in caplog.text

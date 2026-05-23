@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -89,8 +90,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None, *, _GitHub: type[GitHub] = GitHub) -> None:
-    parser = build_parser()
+def main(
+    argv: list[str] | None = None,
+    *,
+    _GitHub: type[GitHub] = GitHub,
+    _build_parser: Callable[[], argparse.ArgumentParser] = build_parser,
+) -> None:
+    parser = _build_parser()
     args = parser.parse_args(argv)
     cmd = Cmd(github=_GitHub())
 

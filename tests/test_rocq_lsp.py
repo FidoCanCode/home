@@ -342,14 +342,14 @@ def test_cli_outputs_json_for_each_command() -> None:
         assert json.loads(out.getvalue()) is not None
 
 
-def test_cli_reports_os_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(_self: RocqLspCli, _service: RocqLanguageService, _args: object) -> object:
-        raise OSError("nope")
+def test_cli_reports_os_errors() -> None:
+    class FailingCli(RocqLspCli):
+        def _run_command(self, service: RocqLanguageService, args: object) -> object:
+            raise OSError("nope")
 
-    monkeypatch.setattr(RocqLspCli, "_run_command", boom)
     err = StringIO()
 
-    result = RocqLspCli(REPO, StringIO(), err).run(
+    result = FailingCli(REPO, StringIO(), err).run(
         ["diagnostics", "missing.v", "--json"]
     )
 
@@ -633,9 +633,7 @@ def test_semantic_token_edge_cases() -> None:
     assert encoded[-1] == 2
 
 
-def test_helpers_cover_comments_strings_uris_and_main(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_helpers_cover_comments_strings_uris_and_main(tmp_path: Path) -> None:
     text = (
         'Definition keep := "escaped \\" keep". (* outer (* nested keep *) keep *)\n'
         "Definition keep := keep.\n"
@@ -693,16 +691,11 @@ def test_helpers_cover_comments_strings_uris_and_main(
             called.append("server-run")
             return 8
 
-    monkeypatch.setattr(rocq_lsp, "RocqLspCli", FakeCli)
-    monkeypatch.setattr(rocq_lsp, "RocqLspServer", FakeServer)
-    monkeypatch.setattr(rocq_lsp.sys, "argv", ["prog", "diagnostics"])
-    assert rocq_lsp.main_cli() == 7
+    assert rocq_lsp.main_cli(["diagnostics"], cli_factory=FakeCli) == 7
     assert "diagnostics" in called
-    assert rocq_lsp.main_lsp() == 8
-    monkeypatch.setattr(rocq_lsp.sys, "argv", ["prog", "--stdio"])
-    assert rocq_lsp.main() == 8
-    monkeypatch.setattr(rocq_lsp.sys, "argv", ["prog", "diagnostics"])
-    assert rocq_lsp.main() == 7
+    assert rocq_lsp.main_lsp(server_factory=FakeServer) == 8
+    assert rocq_lsp.main(["--stdio"], server_factory=FakeServer) == 8
+    assert rocq_lsp.main(["diagnostics"], cli_factory=FakeCli) == 7
 
 
 def test_index_symbol_at_falls_back_to_source_token_lookup(tmp_path: Path) -> None:

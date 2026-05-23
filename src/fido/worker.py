@@ -4971,10 +4971,10 @@ class WorkerThread(threading.Thread):
     """Daemon thread that repeatedly calls :class:`Worker` for one repo.
 
     Loop semantics:
-    - ``Worker.run()`` returns 1 → did work, loop immediately.
-    - ``Worker.run()`` returns 0 → idle, wait up to ``_IDLE_TIMEOUT``.
-    - ``Worker.run()`` returns 2 → lock held, wait up to ``_RETRY_TIMEOUT``.
-    - Unexpected exception → propagates, killing the thread (watchdog restarts).
+    - ``Worker.run()`` returns 1 -> did work, loop immediately.
+    - ``Worker.run()`` returns 0 -> idle, wait up to ``_IDLE_TIMEOUT``.
+    - ``Worker.run()`` returns 2 -> lock held, wait up to ``_RETRY_TIMEOUT``.
+    - Unexpected exception -> propagates, killing the thread (watchdog restarts).
 
     Call :meth:`wake` to interrupt any wait early (e.g. when a webhook arrives).
     Call :meth:`stop` to request a clean shutdown.
@@ -4993,10 +4993,16 @@ class WorkerThread(threading.Thread):
     WorkerThread-level crashes.
 
     Neither ``_provider`` nor ``_session_issue`` survive a full fido restart
-    — ``os.execvp`` replaces the process, so a new ``WorkerThread`` starts
+    -- ``os.execvp`` replaces the process, so a new ``WorkerThread`` starts
     with no provider-attached session and creates a fresh session on its first
     iteration.
+
+    ``_fn_exit`` is a class-level injectable: override it on a test subclass to
+    intercept the ``SessionLeakError`` halt path instead of actually calling
+    ``os._exit``.
     """
+
+    _fn_exit: Callable[[int], None] = os._exit  # type: ignore[assignment]
 
     def __init__(
         self,
@@ -5015,6 +5021,7 @@ class WorkerThread(threading.Thread):
         provider_factory: DefaultProviderFactory,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
+        _state: State | None = None,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
         self.work_dir = work_dir
@@ -5044,9 +5051,13 @@ class WorkerThread(threading.Thread):
         # through the publishing-aware on_mutate hook (#1696).  Tests
         # without a registry get a bare State with no-op on_mutate.
         self._state: State = (
-            registry.state_for(repo_name)
-            if registry is not None and repo_name
-            else State(work_dir / ".git" / "fido")
+            _state
+            if _state is not None
+            else (
+                registry.state_for(repo_name)
+                if registry is not None and repo_name
+                else State(work_dir / ".git" / "fido")
+            )
         )
         self._provider: Provider | None
         if provider is not None:
@@ -5440,7 +5451,7 @@ class WorkerThread(threading.Thread):
                 "claude leak detected in worker thread for %s — halting",
                 self._repo_name,
             )
-            os._exit(3)
+            type(self)._fn_exit(3)
         except Exception as exc:
             self.crash_error = f"{type(exc).__name__}: {exc}"
             log.exception("WorkerThread %s: unexpected error", self.name)

@@ -1,9 +1,10 @@
 """Reader for Rocq extraction source maps."""
 
 import csv
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 _FIELDNAMES = (
     "stability",
@@ -80,10 +81,14 @@ class PyMap:
     entries: tuple[PyMapEntry, ...]
 
     @classmethod
-    def load(cls, path: Path) -> Self:
+    def load(
+        cls,
+        path: Path,
+        dict_reader: Callable[..., Any] = csv.DictReader,
+    ) -> Self:
         try:
             with path.open(newline="") as handle:
-                reader = csv.DictReader(handle)
+                reader = dict_reader(handle)
                 fieldnames = tuple(reader.fieldnames or ())
                 if fieldnames[: len(_FIELDNAMES) - 1] != _FIELDNAMES[:-1]:
                     raise PyMapError(f"bad source map header in {path}")
