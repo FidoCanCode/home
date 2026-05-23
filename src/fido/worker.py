@@ -3424,10 +3424,35 @@ class Worker:
         # Append the critic gap to the task description so the next
         # worker turn reads it as guidance.  Markdown bullet under a
         # CRITIC: header keeps existing description content intact.
+        #
+        # Rob review on PR #1932: if a concurrent rescope closed, split,
+        # merged, or removed this task while the critic was running, we
+        # must NOT force the stale row back to in_progress — that would
+        # silently overwrite the rescope's decision.  Only re-park when
+        # the row still exists AND is in a non-terminal status (the
+        # rescope hasn't moved it).  Terminal statuses (COMPLETED,
+        # SKIPPED, BLOCKED) mean the row was claimed by concurrent
+        # work; leave it alone and log the no-op.
+        nonterminal = (
+            str(TaskStatus.PENDING),
+            str(TaskStatus.IN_PROGRESS),
+        )
+        repark_target_found = False
         with self._tasks.modify() as live:
             for live_task in live:
                 if live_task["id"] != task["id"]:
                     continue
+                repark_target_found = True
+                current_status = live_task.get("status")
+                if current_status not in nonterminal:
+                    log.warning(
+                        "task-completion critic re-park skipped for %s: "
+                        "concurrent rescope moved it to %r — staged changes "
+                        "stay on disk but task status not touched",
+                        task["id"],
+                        current_status,
+                    )
+                    break
                 existing = (live_task.get("description") or "").rstrip()
                 appended = (
                     f"{existing}\n\nCRITIC: {gap}" if existing else f"CRITIC: {gap}"
@@ -3435,6 +3460,12 @@ class Worker:
                 live_task["description"] = appended
                 live_task["status"] = str(TaskStatus.IN_PROGRESS)
                 break
+        if not repark_target_found:
+            log.warning(
+                "task-completion critic re-park skipped for %s: task no "
+                "longer in queue (concurrent rescope removed it)",
+                task["id"],
+            )
         # codex r3293424367 on PR #1932: clear ``current_task_id``
         # after re-parking.  Otherwise a stale "active task" marker
         # lets ``_maybe_abort_for_new_task`` fire on unrelated incoming
@@ -4320,6 +4351,19 @@ class Worker:
                         if not completion_verdict.passed:
                             self._handle_task_completion_critic_failure(
                                 task, completion_verdict.gap
+                            )
+                            # Rob review on PR #1932: the rolled-back turn
+                            # may have leaked top-level PR comments via the
+                            # LLM's tool calls; delete them on the way out
+                            # so the user doesn't see ghost comments from
+                            # a commit that never shipped.  Same cleanup
+                            # the push-and-complete + BLOCKED-push-failed
+                            # branches already do.
+                            self._delete_leaked_task_comments(
+                                repo_ctx.repo,
+                                pr_number,
+                                repo_ctx.gh_user,
+                                leak_before_ids,
                             )
                             return True
                         # Task complete: push and advance the queue.

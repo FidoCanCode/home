@@ -869,13 +869,19 @@ def _gather_claim_grounding_state(work_dir: Path) -> dict[str, Any]:
     """HOL-18 / #1912: gather ground-truth state for the reply-prose
     claim-grounding critic.
 
-    Currently populates ``recent_commit_shas`` from the last 20 commits
-    on the current branch — enough to catch PR #1858's "the work is in
-    commit ABC" lies where prose claims a SHA that was never committed.
-    Returns an empty dict when the work tree isn't a git repo or git
-    fails for any reason; the critic treats empty state as "skip" so
-    the caller's reply ships unchanged in that degraded case (matches
-    the no-state legacy path).
+    Populates ``recent_commit_shas`` from the last 20 commits on the
+    current branch.  Both the full 40-char form (``%H``) AND the
+    7-char abbreviated form (``%h``) are included because replies
+    routinely cite short SHAs (``commit abc1234``) — the critic needs
+    to find a match for either form (Rob review on PR #1932).
+
+    Returns an empty dict when git is unavailable for any reason —
+    ``OSError`` (and every subclass: FileNotFoundError when git isn't
+    installed, NotADirectoryError when work_dir is a file,
+    PermissionError on locked paths, etc.) is swallowed alongside
+    CalledProcessError (Rob review on PR #1932: the original narrow
+    catch crashed dispatch on the other subclasses instead of
+    degrading).
 
     Future leaves can extend the returned dict with
     ``open_issue_numbers`` / ``filed_insights`` / ``referenced_files``
@@ -883,15 +889,19 @@ def _gather_claim_grounding_state(work_dir: Path) -> dict[str, Any]:
     """
     try:
         result = subprocess.run(
-            ["git", "log", "--pretty=format:%H", "-n", "20"],
+            ["git", "log", "--pretty=format:%H %h", "-n", "20"],
             cwd=work_dir,
             capture_output=True,
             text=True,
             check=True,
         )
-    except subprocess.CalledProcessError, FileNotFoundError, NotADirectoryError:
+    except subprocess.CalledProcessError, OSError:
         return {}
-    shas = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    shas: list[str] = []
+    for line in result.stdout.splitlines():
+        for token in line.split():
+            if token:
+                shas.append(token)
     return {"recent_commit_shas": shas}
 
 

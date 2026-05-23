@@ -180,6 +180,14 @@ def _parse_task_creation_verdict(
     scope = obj.get("scope")
     if scope not in ("single", "multi"):
         return None
+    # Rob review on PR #1932: ``duplicate_of`` / ``supersedes`` mean
+    # "drop this proposal" — combining either with ``scope="multi"``
+    # is contradictory (the apply path handles drops BEFORE fan-out
+    # so a malformed envelope of that shape would silently delete
+    # legitimate new work).  Reject the contradictory combo at parse
+    # time; caller treats the None return as fail-open.
+    if relationship in ("duplicate_of", "supersedes") and scope == "multi":
+        return None
 
     duplicate_of_id: str | None = None
     if relationship == "duplicate_of":

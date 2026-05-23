@@ -12670,6 +12670,168 @@ class TestExecuteTask:
         with worker._state.modify() as state:
             assert state.get("current_task_id") is None
 
+    def test_task_completion_critic_failure_skips_repark_when_concurrently_completed(
+        self, tmp_path: Path
+    ) -> None:
+        """Rob review on PR #1932: if a webhook-triggered rescope
+        moved this task to COMPLETED while the critic was running,
+        the failure handler must NOT force the row back to
+        IN_PROGRESS — that would silently overwrite the rescope
+        decision.  Leave the task alone and log the no-op."""
+        import subprocess as _subprocess
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "transient failures retry up to 3 times"
+        task["status"] = "in_progress"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        # Pre-mark the task as COMPLETED to simulate a concurrent
+        # rescope having closed it during the critic LLM call.
+        completed_clone = dict(task)
+        completed_clone["status"] = "completed"
+        worker._tasks._task_list = [completed_clone]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+        # Need the picker to still pick this task — pre-mark it
+        # IN_PROGRESS first so the picker selects it, then flip to
+        # COMPLETED via a custom modify before the failure handler.
+        # Simpler: stub agent.run_turn to fail critic, and check
+        # that the post-handler status is still COMPLETED.
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": false, "gap": "scope-creep"}'
+        )
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            stdout = (
+                "diff --git a/x b/x\n+changed\n"
+                if args[:2] == ["show", "--no-color"]
+                else ""
+            )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout=stdout, stderr=""
+            )
+
+        worker._git = git_stub
+
+        # Use a task already in IN_PROGRESS so the picker selects it.
+        worker._tasks._task_list = [task]
+        # Patch _handle_task_completion_critic_failure to flip the
+        # in-place task to COMPLETED before calling the real handler —
+        # simulates a rescope landing between the critic turn and the
+        # re-park logic.
+        real_handler = worker._handle_task_completion_critic_failure
+
+        def racing_handler(t: dict, gap: str) -> None:
+            # Concurrent rescope arrives "now".
+            worker._tasks._task_list[0]["status"] = "completed"
+            real_handler(t, gap)
+
+        worker._handle_task_completion_critic_failure = racing_handler
+        worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        # The task must still be COMPLETED — not forced back to
+        # IN_PROGRESS.
+        assert worker._tasks._task_list[0]["status"] == "completed"
+
+    def test_task_completion_critic_failure_skips_repark_when_task_removed(
+        self, tmp_path: Path
+    ) -> None:
+        """Rob review (companion to the concurrent-completion case):
+        if a concurrent rescope REMOVED the task entirely (not just
+        moved it to a terminal status), the failure handler must not
+        crash trying to mutate a missing row.  Log the no-op and move
+        on."""
+        import subprocess as _subprocess
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "x"
+        task["status"] = "in_progress"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [task]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": false, "gap": "scope-creep"}'
+        )
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            stdout = (
+                "diff --git a/x b/x\n+changed\n"
+                if args[:2] == ["show", "--no-color"]
+                else ""
+            )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout=stdout, stderr=""
+            )
+
+        worker._git = git_stub
+        real_handler = worker._handle_task_completion_critic_failure
+
+        def racing_handler(t: dict, gap: str) -> None:
+            # Concurrent rescope removed the task entirely.
+            worker._tasks._task_list.clear()
+            real_handler(t, gap)
+
+        worker._handle_task_completion_critic_failure = racing_handler
+        # Should not crash; task simply gone from the list afterward.
+        worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert worker._tasks._task_list == []
+
+    def test_task_completion_critic_failure_cleans_up_leaked_comments(
+        self, tmp_path: Path
+    ) -> None:
+        """Rob review on PR #1932: the rolled-back turn may have leaked
+        top-level PR comments via the LLM's tool calls.  The
+        critic-failure return must clean them up before exiting,
+        matching the push-and-complete + BLOCKED-push-failed branches
+        that already do this."""
+        import subprocess as _subprocess
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "transient failures retry up to 3 times"
+        task["status"] = "in_progress"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [task]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+        # Spy on the leak-cleanup helper.
+        worker._delete_leaked_task_comments = MagicMock()
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": false, "gap": "scope-creep"}'
+        )
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            stdout = (
+                "diff --git a/x b/x\n+changed\n"
+                if args[:2] == ["show", "--no-color"]
+                else ""
+            )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout=stdout, stderr=""
+            )
+
+        worker._git = git_stub
+        worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        # _delete_leaked_task_comments must have been called on the
+        # critic-failure exit path so ghost comments from the
+        # rolled-back turn don't stay visible.
+        worker._delete_leaked_task_comments.assert_called_once()
+
     def test_task_completion_critic_pass_pushes_and_completes(
         self, tmp_path: Path
     ) -> None:

@@ -6420,11 +6420,22 @@ class TestGatherClaimGroundingState:
 
         state = _gather_claim_grounding_state(tmp_path)
         assert "recent_commit_shas" in state
-        # 3 commits, all 40-char SHAs.
-        assert len(state["recent_commit_shas"]) == 3
-        for sha in state["recent_commit_shas"]:
-            assert len(sha) == 40
+        # 3 commits, both full (40-char) AND short (7-char) forms per
+        # codex on PR #1932 — replies routinely cite either form, so
+        # the grounding list must contain both so the critic can match.
+        shas = state["recent_commit_shas"]
+        assert len(shas) == 6
+        full_shas = [s for s in shas if len(s) == 40]
+        short_shas = [s for s in shas if len(s) == 7]
+        assert len(full_shas) == 3
+        assert len(short_shas) == 3
+        for sha in shas:
             assert all(c in "0123456789abcdef" for c in sha)
+        # Each short SHA must be a prefix of one of the full SHAs —
+        # that's the property the critic relies on when prose cites
+        # the short form.
+        for short in short_shas:
+            assert any(full.startswith(short) for full in full_shas)
 
     def test_non_git_directory_returns_empty(self, tmp_path: Path) -> None:
         """A non-git work_dir must return ``{}`` so the caller (and the
@@ -6440,4 +6451,26 @@ class TestGatherClaimGroundingState:
         from fido.events import _gather_claim_grounding_state
 
         state = _gather_claim_grounding_state(tmp_path / "does-not-exist")
+        assert state == {}
+
+    def test_arbitrary_os_error_returns_empty(self, tmp_path: Path) -> None:
+        """Rob review on PR #1932: the original narrow ``(CalledProcess
+        Error, FileNotFoundError, NotADirectoryError)`` catch let other
+        OSError subclasses (PermissionError, etc.) crash dispatch.  The
+        broadened ``(CalledProcessError, OSError)`` catch must swallow
+        every OSError subclass and degrade to empty state."""
+        import subprocess as _subprocess
+
+        from fido.events import _gather_claim_grounding_state
+
+        original_run = _subprocess.run
+
+        def boom(*args: object, **kwargs: object) -> object:
+            raise PermissionError("simulated lock-down")
+
+        _subprocess.run = boom  # type: ignore[assignment]
+        try:
+            state = _gather_claim_grounding_state(tmp_path)
+        finally:
+            _subprocess.run = original_run
         assert state == {}

@@ -273,6 +273,49 @@ class TestParseTaskCreationVerdict:
         assert v.scope == "multi"
         assert len(v.proposed_splits) == 2
 
+    def test_rejects_duplicate_of_with_multi_scope(self) -> None:
+        """Rob review on PR #1932: ``duplicate_of`` + ``scope=multi``
+        is contradictory — the apply path drops before fanning out, so
+        the malformed envelope would silently delete legitimate new
+        work.  Reject at parse time (fail-open to default verdict)."""
+        assert (
+            _parse_task_creation_verdict(
+                {
+                    "relationship": "duplicate_of",
+                    "duplicate_of_id": "t-1",
+                    "scope": "multi",
+                    "proposed_splits": [
+                        {
+                            "title": "A",
+                            "description": "",
+                            "invariant": "inv-A",
+                        },
+                    ],
+                }
+            )
+            is None
+        )
+
+    def test_rejects_supersedes_with_multi_scope(self) -> None:
+        """Same defense on the supersedes axis."""
+        assert (
+            _parse_task_creation_verdict(
+                {
+                    "relationship": "supersedes",
+                    "supersedes_id": "t-1",
+                    "scope": "multi",
+                    "proposed_splits": [
+                        {
+                            "title": "A",
+                            "description": "",
+                            "invariant": "inv-A",
+                        },
+                    ],
+                }
+            )
+            is None
+        )
+
     def test_unknown_relationship_returns_none(self) -> None:
         assert (
             _parse_task_creation_verdict(
