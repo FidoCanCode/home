@@ -10,9 +10,9 @@ module.
 
 import io
 import queue
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Never
-from unittest.mock import MagicMock
 
 import pytest
 from frozendict import frozendict
@@ -35,6 +35,407 @@ from fido.tasks import (
 )
 
 # ---------------------------------------------------------------------------
+# Typed test fakes
+# ---------------------------------------------------------------------------
+
+
+class _FakeCallArgs:
+    """Stores positional and keyword arguments from a single recorded call."""
+
+    def __init__(self, args: tuple[object, ...], kwargs: dict[str, object]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _FakeCallRecorder:
+    """Hand-rolled callable that records calls and supports return values /
+    side-effects.  Replaces MagicMock call-recording in this file."""
+
+    def __init__(
+        self,
+        return_value: object = None,
+        side_effect: BaseException | Callable[..., object] | list[object] | None = None,
+    ) -> None:
+        self.return_value = return_value
+        self.side_effect = side_effect
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        self._side_effect_iter: Iterator[object] | None = (
+            iter(side_effect) if isinstance(side_effect, list) else None
+        )
+
+    @property
+    def call_count(self) -> int:
+        return len(self._calls)
+
+    @property
+    def called(self) -> bool:
+        return len(self._calls) > 0
+
+    @property
+    def call_args(self) -> _FakeCallArgs | None:
+        if not self._calls:
+            return None
+        args, kwargs = self._calls[-1]
+        return _FakeCallArgs(args, kwargs)
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append((args, kwargs))
+        if self._side_effect_iter is not None:
+            return next(self._side_effect_iter)
+        if isinstance(self.side_effect, BaseException):
+            raise self.side_effect
+        if callable(self.side_effect):
+            return self.side_effect(*args, **kwargs)
+        return self.return_value
+
+    def assert_not_called(self) -> None:
+        assert self.call_count == 0, f"Expected no calls, got {self.call_count}"
+
+    def assert_called(self) -> None:
+        assert self.call_count > 0, "Expected at least one call, got 0"
+
+    def assert_called_once(self) -> None:
+        assert self.call_count == 1, f"Expected exactly 1 call, got {self.call_count}"
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        self.assert_called_once()
+        call_args, call_kwargs = self._calls[0]
+        assert call_args == args, f"args mismatch: {call_args!r} != {args!r}"
+        assert call_kwargs == kwargs, f"kwargs mismatch: {call_kwargs!r} != {kwargs!r}"
+
+    def assert_called_with(self, *args: object, **kwargs: object) -> None:
+        assert self._calls, "Expected at least one call"
+        call_args, call_kwargs = self._calls[-1]
+        assert call_args == args, f"args mismatch: {call_args!r} != {args!r}"
+        assert call_kwargs == kwargs, f"kwargs mismatch: {call_kwargs!r} != {kwargs!r}"
+
+
+class _FakeNoOpThreadFactory:
+    """Minimal thread factory for WorkerRegistry construction — never spawns."""
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        return object()
+
+
+class _FakeSubprocessResult:
+    """Typed result for fake git subprocess runners."""
+
+    def __init__(self, *, returncode: int, stdout: str, stderr: str) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class _FakeGitHub:
+    """Minimal GitHub fake for Worker / events tests.
+
+    Each method is a :class:`_FakeCallRecorder` so tests can configure return
+    values and side-effects and later assert on call history.
+    """
+
+    def __init__(
+        self,
+        *,
+        get_pr_return: dict | None = None,
+        view_issue_return: dict | None = None,
+        find_closed_prs_as_context_return: list | None = None,
+        get_issue_comments_return: list | None = None,
+        get_issue_comments_side_effect: BaseException | None = None,
+        comment_issue_side_effect: BaseException | None = None,
+        is_thread_resolved_for_comment_return: bool = False,
+        fetch_comment_thread_return: list | None = None,
+    ) -> None:
+        self.get_pr = _FakeCallRecorder(
+            return_value=(
+                get_pr_return
+                if get_pr_return is not None
+                else {"title": "", "body": ""}
+            )
+        )
+        self.view_issue = _FakeCallRecorder(
+            return_value=(
+                view_issue_return
+                if view_issue_return is not None
+                else {"title": "", "body": "", "state": "OPEN"}
+            )
+        )
+        self.find_closed_prs_as_context = _FakeCallRecorder(
+            return_value=find_closed_prs_as_context_return or []
+        )
+        self.get_issue_comments = _FakeCallRecorder(
+            return_value=(
+                get_issue_comments_return
+                if get_issue_comments_return is not None
+                else []
+            ),
+            side_effect=get_issue_comments_side_effect,
+        )
+        self.comment_issue = _FakeCallRecorder(side_effect=comment_issue_side_effect)
+        self.is_thread_resolved_for_comment = _FakeCallRecorder(
+            return_value=is_thread_resolved_for_comment_return
+        )
+        self.fetch_comment_thread = _FakeCallRecorder(
+            return_value=(
+                fetch_comment_thread_return
+                if fetch_comment_thread_return is not None
+                else []
+            )
+        )
+
+
+class _FakeRuntime:
+    """Minimal Copilot runtime stub (ensure_session + pid)."""
+
+    def __init__(self) -> None:
+        self.pid = 4321
+        self.ensure_session = _FakeCallRecorder(return_value="sess-1")
+
+
+class _FakeTalker:
+    """Minimal SessionTalker-like struct for ownership tests."""
+
+    def __init__(self, *, kind: str, thread_id: int) -> None:
+        self.kind = kind
+        self.thread_id = thread_id
+
+
+class _FakeRepoConfigForProvider:
+    """Minimal RepoConfig stub used by TestProviderFactoryUnsupported."""
+
+    provider = "no-such-provider"
+
+
+class _FakeMembership:
+    """Minimal RepoMembership stub."""
+
+    collaborators: frozenset[str] = frozenset()
+
+
+class _FakeRepoConfigForEvents:
+    """Minimal RepoConfig stub for events / dispatcher tests."""
+
+    def __init__(self, *, work_dir: Path, name: str = "test/repo") -> None:
+        self.name = name
+        self.work_dir = work_dir
+        self.membership = _FakeMembership()
+
+
+class _FakeConfigForEvents:
+    """Minimal fido.Config stub for events tests."""
+
+    allowed_bots: frozenset[str] = frozenset()
+    sub_dir: Path = Path("/nonexistent-sub-dir-for-tests")
+
+
+class _FakeEventRegistry:
+    """Minimal WorkerRegistry stub for events tests — records untriaged calls."""
+
+    def __init__(self) -> None:
+        self.enter_untriaged = _FakeCallRecorder()
+        self.exit_untriaged = _FakeCallRecorder()
+        self.set_rescoping = _FakeCallRecorder()
+
+
+class _FakeTasksForDispatcher:
+    """Minimal Tasks stub for dispatcher tests — records add calls."""
+
+    def __init__(self, add_return: dict | None = None) -> None:
+        self.add = _FakeCallRecorder(
+            return_value=add_return or {"id": "task-1", "title": "p"}
+        )
+
+
+class _FakeStore:
+    """Minimal store stub for worker tests."""
+
+    def __init__(self, *, prepare_reply_return: object = None) -> None:
+        self.prepare_reply = _FakeCallRecorder(return_value=prepare_reply_return)
+        self.complete_pr_comment = _FakeCallRecorder()
+
+
+class _FakeRepoCtx:
+    """Minimal repo-context stub for worker tests."""
+
+    def __init__(self, *, repo: str) -> None:
+        self.repo = repo
+
+
+class _FakeAction:
+    """Minimal action stub for worker._handle_queued_comment tests."""
+
+    def __init__(self, *, comment_id: int = 42) -> None:
+        self.thread: dict = {"comment_id": comment_id}
+        self.reply_to: dict = {"comment_id": comment_id}
+        self.context: object = None
+
+
+class _FakePromise:
+    """Minimal promise stub for events outbox tests."""
+
+    promise_id = "promise-1"
+    anchor_comment_id = 42
+
+
+class _FakeDeliveredEffect:
+    """Outbox-effect stub whose state is 'delivered'."""
+
+    state = "delivered"
+
+
+class _FakeClaudeStdin:
+    """Minimal stdin stub for ClaudeSession tests."""
+
+    def __init__(self, *, write_side_effect: BaseException | None = None) -> None:
+        self.closed = False
+        self._write_side_effect = write_side_effect
+
+    def write(self, data: object) -> None:  # noqa: ARG002
+        if self._write_side_effect is not None:
+            raise self._write_side_effect
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeClaudeStdout:
+    """Minimal stdout stub for ClaudeSession tests."""
+
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = list(lines) + [""]
+        self._idx = 0
+
+    def readline(self) -> str:
+        if self._idx < len(self._lines):
+            line = self._lines[self._idx]
+            self._idx += 1
+            return line
+        return ""
+
+
+class _FakeClaudeStderr:
+    """Minimal stderr stub for ClaudeSession tests."""
+
+    def __init__(self, *, iter_side_effect: BaseException | None = None) -> None:
+        self._iter_side_effect = iter_side_effect
+
+    def __iter__(self) -> Iterator[str]:
+        if self._iter_side_effect is not None:
+            raise self._iter_side_effect
+        return iter([])
+
+
+class _FakeClaudeProc:
+    """Minimal subprocess fake for ClaudeSession tests."""
+
+    def __init__(
+        self,
+        stdout_lines: list[str] | None = None,
+        *,
+        pid: int = 12345,
+        stderr_iter_side_effect: BaseException | None = None,
+        stdin_write_side_effect: BaseException | None = None,
+        poll_return: int | None = None,
+    ) -> None:
+        self.pid = pid
+        self.returncode = 0
+        self.stdin = _FakeClaudeStdin(write_side_effect=stdin_write_side_effect)
+        self.stdout = _FakeClaudeStdout(stdout_lines or [])
+        self.stderr = _FakeClaudeStderr(iter_side_effect=stderr_iter_side_effect)
+        self._poll_return = poll_return
+        self.kill = _FakeCallRecorder()
+        self.wait = _FakeCallRecorder(return_value=0)
+
+    def poll(self) -> int | None:
+        return self._poll_return
+
+
+class _FakePopen:
+    """Callable that returns a pre-built process object."""
+
+    def __init__(self, proc: object) -> None:
+        self._proc = proc
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        return self._proc
+
+
+class _FakeSelector:
+    """Callable selector that always returns a fixed select result."""
+
+    def __init__(self, result: tuple) -> None:
+        self._result = result
+
+    def __call__(self, *args: object, **kwargs: object) -> tuple:
+        return self._result
+
+
+class _FakeStreamingProcess:
+    """Process fake for CodexAppServerClient tests.
+
+    stdout is injected (usually a streaming fake); terminate, wait, and kill
+    are :class:`_FakeCallRecorder` instances so tests can assert on them.
+    """
+
+    def __init__(self, stdout: object) -> None:
+        self.pid = 100
+        self.stdin = io.StringIO()
+        self.stdout = stdout
+        self.stderr = io.StringIO("")
+        self._returncode: int | None = None
+        self.terminate = _FakeCallRecorder()
+        self.wait = _FakeCallRecorder(return_value=0)
+        self.kill = _FakeCallRecorder()
+
+    def poll(self) -> int | None:
+        return self._returncode
+
+
+class _FakeCodexSession:
+    """Empty session stub for CodexClient construction in coverage tests."""
+
+
+class _FakeProviderAgent:
+    """Empty provider agent stub — returned by fake provider factories."""
+
+
+class _FakeWorkerCollaboratorAgent:
+    """Minimal provider-agent stub — exposes just enough for Worker.__init__."""
+
+    session = None
+
+
+class _FakeWorkerCollaborator:
+    """Empty stub for Worker collaborators not exercised in a specific test."""
+
+    agent = _FakeWorkerCollaboratorAgent()
+
+
+class _FixedRequestServer:
+    """AppServer stub whose request() always returns a fixed response value."""
+
+    def __init__(self, response: object) -> None:
+        self._response = response
+
+    def request(self, *args: object, **kwargs: object) -> object:  # noqa: ARG002
+        return self._response
+
+    def is_alive(self) -> bool:
+        return True
+
+    def stop(self) -> None:
+        pass
+
+    def notify(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def wait_notification(self, *args: object, **kwargs: object) -> object:
+        raise TimeoutError("no notifications")
+
+
+# ---------------------------------------------------------------------------
 # provider_factory.py — fallback ValueError branches
 # ---------------------------------------------------------------------------
 
@@ -45,18 +446,16 @@ class TestProviderFactoryUnsupported:
     """
 
     def test_create_api_raises_for_unsupported_provider(self, tmp_path: Path) -> None:
-        repo_cfg = MagicMock()
-        repo_cfg.provider = "no-such-provider"
+        repo_cfg = _FakeRepoConfigForProvider()
         factory = DefaultProviderFactory(session_system_file=tmp_path / "sys.md")
         with pytest.raises(ValueError, match="unsupported provider"):
-            factory.create_api(repo_cfg)
+            factory.create_api(repo_cfg)  # type: ignore[arg-type]
 
     def test_create_agent_raises_for_unsupported_provider(self, tmp_path: Path) -> None:
-        repo_cfg = MagicMock()
-        repo_cfg.provider = "no-such-provider"
+        repo_cfg = _FakeRepoConfigForProvider()
         factory = DefaultProviderFactory(session_system_file=tmp_path / "sys.md")
         with pytest.raises(ValueError, match="unsupported provider"):
-            factory.create_agent(repo_cfg, work_dir=tmp_path, repo_name="owner/repo")
+            factory.create_agent(repo_cfg, work_dir=tmp_path, repo_name="owner/repo")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +474,7 @@ class TestWorkerRegistryPreemptionHelpers:
                 process_started_at=_EPOCH,
             )
         )
-        return WorkerRegistry(MagicMock(), updater)
+        return WorkerRegistry(_FakeNoOpThreadFactory(), updater)
 
     def test_note_provider_interrupt_requested(self) -> None:
         registry = self._registry()
@@ -174,7 +573,7 @@ class TestProviderTryPreemptWorker:
         try:
             fired, _kind = provider.try_preempt_worker(
                 repo_name="owner/repo",
-                cancel_fn=MagicMock(),
+                cancel_fn=_FakeCallRecorder(),
                 talker_resolver=lambda r: None,
             )
             assert fired is False
@@ -184,7 +583,7 @@ class TestProviderTryPreemptWorker:
     def test_returns_false_when_no_current_holder(self) -> None:
         provider.set_thread_kind("webhook")
         try:
-            cancel = MagicMock()
+            cancel = _FakeCallRecorder()
             fired, kind = provider.try_preempt_worker(
                 repo_name="owner/repo",
                 cancel_fn=cancel,
@@ -1000,16 +1399,7 @@ class TestCodexAppServerErrorPaths:
                 next_line = lines.get()
                 return "" if next_line is None else next_line
 
-        process = MagicMock()
-        process.pid = 100
-        process.stdin = io.StringIO()
-        process.stdout = _StreamingStdout()
-        process.stderr = io.StringIO("")
-        process._returncode = None
-        process.poll = lambda: process._returncode
-        process.terminate = MagicMock()
-        process.wait = MagicMock(return_value=0)
-        process.kill = MagicMock()
+        process = _FakeStreamingProcess(stdout=_StreamingStdout())
 
         class _FixedSpawner:
             def spawn(self, *, cwd: object = None) -> object:  # noqa: ARG002
@@ -1095,15 +1485,8 @@ class TestCodexSessionLeafBranches:
 
         system_file = tmp_path / "system.md"
         system_file.write_text("base")
-        fake = MagicMock()
-        fake.request.return_value = {
-            "thread": {"id": "thread-1"},
-            "threadId": "thread-1",
-        }
-        fake.is_alive.return_value = True
-        fake.pid = 1234
         defaults: dict = {
-            "client_factory": _FixedAppServerFactory(fake),
+            "client_factory": _FixedAppServerFactory(_FakeAppServerForCoverage()),
             "model": ProviderModel("gpt-5", "medium"),
         }
         defaults.update(kwargs)
@@ -1128,25 +1511,14 @@ class TestClaudeDefensivePaths:
     def _session(self, tmp_path: Path, *, stdout_lines: list[str]) -> object:
         from fido.claude import ClaudeSession
 
-        proc = MagicMock()
-        proc.pid = 12345
-        proc.stdin = MagicMock()
-        proc.stdin.closed = False
-        proc.stdout = MagicMock()
-        proc.stdout.readline = MagicMock(side_effect=stdout_lines + [""])
-        proc.stderr = MagicMock()
-        proc.stderr.__iter__ = MagicMock(return_value=iter([]))
-        proc.poll = MagicMock(return_value=None)
-        proc.wait = MagicMock(return_value=0)
-        proc.returncode = 0
-
+        proc = _FakeClaudeProc(stdout_lines)
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         return ClaudeSession(
             system_file,
             work_dir=tmp_path,
-            popen=MagicMock(return_value=proc),
-            selector=MagicMock(return_value=([proc.stdout], [], [])),
+            popen=_FakePopen(proc),
+            selector=_FakeSelector(([proc.stdout], [], [])),
             repo_name="owner/repo",
             model="claude-opus-4-6",
         )
@@ -1174,25 +1546,15 @@ class TestClaudeDefensivePaths:
         Cover by handing the session a stderr whose iteration raises."""
         from fido.claude import ClaudeSession
 
-        proc = MagicMock()
-        proc.pid = 12345
-        proc.stdin = MagicMock()
-        proc.stdin.closed = False
-        proc.stdout = MagicMock()
-        proc.stdout.readline = MagicMock(return_value="")
-        proc.stderr = MagicMock()
-        proc.stderr.__iter__ = MagicMock(side_effect=ValueError("closed"))
-        proc.poll = MagicMock(return_value=None)
-        proc.wait = MagicMock(return_value=0)
-        proc.returncode = 0
+        proc = _FakeClaudeProc(stderr_iter_side_effect=ValueError("closed"))
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
 
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
-            popen=MagicMock(return_value=proc),
-            selector=MagicMock(return_value=([], [], [])),
+            popen=_FakePopen(proc),
+            selector=_FakeSelector(([], [], [])),
             repo_name="owner/repo",
             model="claude-opus-4-6",
         )
@@ -1311,14 +1673,11 @@ class TestCopilotCLIOwnerMore:
     def _build_session(tmp_path: Path, repo_name: str | None = "test/repo") -> object:
         from fido.copilotcli import CopilotCLISession
 
-        runtime = MagicMock()
-        runtime.ensure_session.return_value = "sess-1"
-        runtime.pid = 4321
         return CopilotCLISession(
             tmp_path / "sys.md",
             work_dir=tmp_path,
             model="gpt-5",
-            runtime=runtime,
+            runtime=_FakeRuntime(),
             repo_name=repo_name,
         )
 
@@ -1331,17 +1690,12 @@ class TestCopilotCLIOwnerMore:
         # copilotcli.py:978-981 — talker.kind == worker but thread_id absent.
         from fido.copilotcli import CopilotCLISession
 
-        fake_talker = MagicMock()
-        fake_talker.kind = "worker"
-        fake_talker.thread_id = -1
-        runtime = MagicMock()
-        runtime.ensure_session.return_value = "sess-1"
-        runtime.pid = 4321
+        fake_talker = _FakeTalker(kind="worker", thread_id=-1)
         session = CopilotCLISession(
             tmp_path / "sys.md",
             work_dir=tmp_path,
             model="gpt-5",
-            runtime=runtime,
+            runtime=_FakeRuntime(),
             repo_name="test/repo",
             talker_resolver=lambda r: fake_talker,
         )
@@ -1356,17 +1710,12 @@ class TestCopilotCLIOwnerMore:
         from fido.copilotcli import CopilotCLISession
 
         current = threading.current_thread()
-        fake_talker = MagicMock()
-        fake_talker.kind = "worker"
-        fake_talker.thread_id = current.ident
-        runtime = MagicMock()
-        runtime.ensure_session.return_value = "sess-1"
-        runtime.pid = 4321
+        fake_talker = _FakeTalker(kind="worker", thread_id=current.ident or -1)
         session = CopilotCLISession(
             tmp_path / "sys.md",
             work_dir=tmp_path,
             model="gpt-5",
-            runtime=runtime,
+            runtime=_FakeRuntime(),
             repo_name="test/repo",
             talker_resolver=lambda r: fake_talker,
         )
@@ -1382,13 +1731,11 @@ class TestCopilotCLIOwner:
 
         # Use a no-op stub for runtime so the real ACP client doesn't
         # spawn.  Repo_name=None forces the early-return branch.
-        runtime = MagicMock()
-        runtime.ensure_session.return_value = "sess-1"
         session = CopilotCLISession(
             tmp_path / "sys.md",
             work_dir=tmp_path,
             model="gpt-5",
-            runtime=runtime,
+            runtime=_FakeRuntime(),
             repo_name=None,
         )
         assert session.owner is None
@@ -1630,9 +1977,7 @@ class TestCodexSessionMoreBranches:
         # None when no thread.ident matches talker.thread_id.
         fake = _FakeAppServerForCoverage()
         # Talker.kind == "worker" but thread_id won't match any live thread.
-        fake_talker = MagicMock()
-        fake_talker.kind = "worker"
-        fake_talker.thread_id = -1  # no real thread has this ident
+        fake_talker = _FakeTalker(kind="worker", thread_id=-1)
         ta = _RecordingTalkerAccess(get_talker_result=fake_talker)
         session = self._build_session(
             tmp_path, fake, talker_access=ta, repo_name="test/repo"
@@ -1678,7 +2023,7 @@ class TestCodexSessionMoreBranches:
         # codex.py:1178 — dead prompt error message constant on CodexClient.
         from fido.codex import CodexClient
 
-        client = CodexClient(session=MagicMock())
+        client = CodexClient(session=_FakeCodexSession())  # type: ignore[arg-type]
         assert "died" in client._dead_prompt_error_message()  # type: ignore[attr-defined]
 
 
@@ -1779,12 +2124,11 @@ class TestWorkerHandleQueuedComment:
         # worker.py:2424-2425 — RuntimeError if config/repo_cfg are None.
         from tests.test_worker import Worker
 
-        worker = Worker(tmp_path, MagicMock())
+        worker = Worker(tmp_path, _FakeGitHub())
         # Force config to None via the underlying attribute.
         worker._config = None  # type: ignore[attr-defined]
-        store = MagicMock()
-        repo_ctx = MagicMock()
-        repo_ctx.repo = "test/repo"
+        store = _FakeStore()
+        repo_ctx = _FakeRepoCtx(repo="test/repo")
         with pytest.raises(RuntimeError, match="explicit config"):
             worker._handle_queued_comment(  # type: ignore[attr-defined]
                 store, self._make_queued_record(), repo_ctx
@@ -1794,22 +2138,17 @@ class TestWorkerHandleQueuedComment:
         # worker.py:2445-2447 — promise None → complete_pr_comment + return.
         from tests.test_worker import Worker
 
-        gh = MagicMock()
-        gh.get_pr.return_value = {"title": "T", "body": "B"}
-        worker = Worker(tmp_path, gh)
-        # Wire config + repo_cfg as MagicMocks so the early-return guard
+        worker = Worker(
+            tmp_path, _FakeGitHub(get_pr_return={"title": "T", "body": "B"})
+        )
+        # Wire config + repo_cfg as plain objects so the early-return guard
         # (config is None or repo_cfg is None) doesn't trigger.
-        worker._config = MagicMock()  # type: ignore[attr-defined]
-        worker._repo_cfg = MagicMock()  # type: ignore[attr-defined]
-        store = MagicMock()
-        store.prepare_reply.return_value = None  # forces the promise None branch
-        repo_ctx = MagicMock()
-        repo_ctx.repo = "test/repo"
+        worker._config = object()  # type: ignore[attr-defined]
+        worker._repo_cfg = object()  # type: ignore[attr-defined]
+        store = _FakeStore(prepare_reply_return=None)
+        repo_ctx = _FakeRepoCtx(repo="test/repo")
         # Patch _queued_comment_action so it returns a non-None action.
-        action_stub = MagicMock()
-        action_stub.thread = {"comment_id": 42}
-        action_stub.reply_to = {"comment_id": 42}
-        action_stub.context = None
+        action_stub = _FakeAction(comment_id=42)
         worker._queued_comment_action = lambda *a, **kw: action_stub  # type: ignore[attr-defined]
         worker._handle_queued_comment(  # type: ignore[attr-defined]
             store, self._make_queued_record(), repo_ctx
@@ -1824,13 +2163,17 @@ class TestWorkerEmptyPrComment:
         self, tmp_path: Path
     ) -> None:
         # worker.py:2735-2743 — gh.get_issue_comments raises → log+return.
-        import requests
+
+        import requests as _requests
 
         from tests.test_worker import Worker
 
-        gh = MagicMock()
-        gh.get_issue_comments.side_effect = requests.RequestException("boom")
-        worker = Worker(tmp_path, gh)
+        worker = Worker(
+            tmp_path,
+            _FakeGitHub(
+                get_issue_comments_side_effect=_requests.RequestException("boom")
+            ),
+        )
         # Should not raise — just log and return.
         worker._post_empty_pr_comment_once("test/repo", 1)  # type: ignore[attr-defined]
 
@@ -1838,14 +2181,17 @@ class TestWorkerEmptyPrComment:
         self, tmp_path: Path
     ) -> None:
         # worker.py:2754-2762 — gh.comment_issue raises → log+continue.
-        import requests
+        import requests as _requests
 
         from tests.test_worker import Worker
 
-        gh = MagicMock()
-        gh.get_issue_comments.return_value = []
-        gh.comment_issue.side_effect = requests.RequestException("boom")
-        worker = Worker(tmp_path, gh)
+        worker = Worker(
+            tmp_path,
+            _FakeGitHub(
+                get_issue_comments_return=[],
+                comment_issue_side_effect=_requests.RequestException("boom"),
+            ),
+        )
         worker._post_empty_pr_comment_once("test/repo", 1)  # type: ignore[attr-defined]
 
 
@@ -1857,7 +2203,7 @@ class TestWorkerLeafBranches:
         """Construct a Worker via the test scaffolding in tests/test_worker.py."""
         from tests.test_worker import Worker
 
-        return Worker(tmp_path, MagicMock())
+        return Worker(tmp_path, _FakeGitHub())
 
     def test_task_still_current_returns_false_when_state_mismatches(
         self, tmp_path: Path
@@ -1885,18 +2231,11 @@ class TestEventsCreateTaskExitUntriaged:
         from fido.events import Dispatcher
 
         # Build a config + repo_cfg minimal enough to exercise the path.
-        repo_cfg = MagicMock()
-        repo_cfg.name = "test/repo"
-        repo_cfg.work_dir = tmp_path
-        repo_cfg.membership = MagicMock()
-        repo_cfg.membership.collaborators = frozenset()
-        config = MagicMock()
-        config.allowed_bots = frozenset()
-        gh = MagicMock()
-        gh.is_thread_resolved_for_comment.return_value = False
-        registry = MagicMock()
-        tasks = MagicMock()
-        tasks.add.return_value = {"id": "task-1", "title": "p"}
+        repo_cfg = _FakeRepoConfigForEvents(work_dir=tmp_path)
+        config = _FakeConfigForEvents()
+        gh = _FakeGitHub(is_thread_resolved_for_comment_return=False)
+        registry = _FakeEventRegistry()
+        tasks = _FakeTasksForDispatcher()
         thread = {
             "repo": "test/repo",
             "pr": 1,
@@ -1908,12 +2247,12 @@ class TestEventsCreateTaskExitUntriaged:
 
         class _FakeFactory:
             def create_agent(self, *args: object, **kwargs: object) -> object:
-                return MagicMock()
+                return _FakeProviderAgent()
 
         dispatcher = Dispatcher(
-            config,
-            repo_cfg,
-            gh,
+            config,  # type: ignore[arg-type]
+            repo_cfg,  # type: ignore[arg-type]
+            gh,  # type: ignore[arg-type]
             get_commit_summary_fn=lambda wd: "summary",
             thread_start_fn=boom,
             reorder_coalesce_state={},
@@ -1924,8 +2263,8 @@ class TestEventsCreateTaskExitUntriaged:
             dispatcher.create_task(
                 "prompt",
                 thread=thread,
-                registry=registry,
-                _tasks=tasks,
+                registry=registry,  # type: ignore[arg-type]
+                _tasks=tasks,  # type: ignore[arg-type]
             )
         registry.enter_untriaged.assert_called_once_with("test/repo")
         # reorder_tasks_background releases the untriaged hold it was given
@@ -1975,10 +2314,7 @@ class TestWorkerExecuteTaskBranches:
         )
 
         fake_tasks = TestWorkerExecuteTaskBranches._FakeTasks(task_list or [])
-        gh = MagicMock()
-        gh.find_closed_prs_as_context.return_value = []
-        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
-        gh.get_pr.return_value = {"title": "", "body": ""}
+        gh = _FakeGitHub()
         worker = Worker(
             tmp_path,
             gh,
@@ -2020,16 +2356,15 @@ class TestWorkerExecuteTaskBranches:
     def _git_with_new_commits() -> object:
         shas = iter(["aaa", "bbb"])
 
-        def side_effect(args: object, **_kw: object) -> object:
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = next(shas, "bbb") if args == ["rev-parse", "HEAD"] else ""
-            result.stderr = ""
-            return result
+        class _Runner:
+            def __call__(self, args: object, **_kw: object) -> _FakeSubprocessResult:
+                return _FakeSubprocessResult(
+                    returncode=0,
+                    stdout=next(shas, "bbb") if args == ["rev-parse", "HEAD"] else "",  # type: ignore[comparison-overlap]
+                    stderr="",
+                )
 
-        m = MagicMock()
-        m.side_effect = side_effect
-        return m
+        return _Runner()
 
     def test_admit_worker_turn_false_resets_task_to_pending(
         self, tmp_path: Path
@@ -2088,16 +2423,15 @@ class TestWorkerExecuteTaskBranches:
         """Fake _git so rev-parse HEAD always returns the SAME SHA — drives
         the retry loop where head_before == head_after."""
 
-        def side_effect(args: object, **_kw: object) -> object:
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = "aaa" if args == ["rev-parse", "HEAD"] else ""
-            result.stderr = ""
-            return result
+        class _Runner:
+            def __call__(self, args: object, **_kw: object) -> _FakeSubprocessResult:
+                return _FakeSubprocessResult(
+                    returncode=0,
+                    stdout="aaa" if args == ["rev-parse", "HEAD"] else "",  # type: ignore[comparison-overlap]
+                    stderr="",
+                )
 
-        m = MagicMock()
-        m.side_effect = side_effect
-        return m
+        return _Runner()
 
     def _setup_retry_loop(self, tmp_path: Path) -> object:
         """Common setup for tests that exercise the head_before == head_after
@@ -2171,7 +2505,7 @@ class TestWorkerExecuteTaskBranches:
             _FakeProviderRunner,
         )
 
-        mock_build = MagicMock()
+        mock_build = _FakeCallRecorder()
         fake_pb = _FakePromptBuilder()
         fake_pb.build_prompt = mock_build
         fake_runner = _FakeProviderRunner()
@@ -2246,30 +2580,19 @@ class TestClaudeIterEventsCancelPaths:
     def _build_session_in_turn(self, tmp_path: Path) -> object:
         """Build a ClaudeSession whose FSM is in AwaitingReply (i.e.
         in_turn=True) so the cancel branch fires."""
-        import subprocess
-        from unittest.mock import MagicMock
-
         from fido.claude import ClaudeSession
         from fido.rocq import claude_session as stream_fsm
 
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
 
-        proc = MagicMock(spec=subprocess.Popen)
-        proc.pid = 99999
-        proc.stdin = MagicMock()
-        proc.stdin.closed = False
-        proc.stdin.write.side_effect = BrokenPipeError("test pipe broken")
-        proc.stdout = MagicMock()
-        proc.stdout.readline = MagicMock(return_value="")  # always EOF
-        proc.stderr = MagicMock()
-        # poll=None keeps the process "alive" so the loop runs the
-        # cancel-drain-timeout branch instead of breaking on process exit.
-        proc.poll = MagicMock(return_value=None)
-        proc.kill = MagicMock()
-        proc.wait = MagicMock(return_value=0)
-        proc.returncode = 0
-
+        proc = _FakeClaudeProc(
+            pid=99999,
+            stdin_write_side_effect=BrokenPipeError("test pipe broken"),
+            # poll=None keeps the process "alive" so the loop runs the
+            # cancel-drain-timeout branch instead of breaking on process exit.
+            poll_return=None,
+        )
         session_ref: list[ClaudeSession] = []
 
         def selector_that_cancels(*_a: object, **_kw: object) -> object:
@@ -2278,7 +2601,7 @@ class TestClaudeIterEventsCancelPaths:
 
         session = ClaudeSession(
             system_file,
-            popen=MagicMock(return_value=proc),
+            popen=_FakePopen(proc),
             selector=selector_that_cancels,
         )
         session_ref.append(session)
@@ -2292,8 +2615,6 @@ class TestClaudeIterEventsCancelPaths:
         # claude.py:1383-1391 — type=result arrives after cancel was fired
         # but no control_response ack was seen → kill + recover + raise.
         import json
-        import subprocess
-        from unittest.mock import MagicMock
 
         from fido.claude import ClaudeSession, ClaudeStreamError
         from fido.rocq import claude_session as stream_fsm
@@ -2307,17 +2628,11 @@ class TestClaudeIterEventsCancelPaths:
         # is still False.
         result_line = json.dumps({"type": "result", "result": "ok"}) + "\n"
 
-        proc = MagicMock(spec=subprocess.Popen)
-        proc.pid = 99999
-        proc.stdin = MagicMock()
-        proc.stdin.closed = False
-        proc.stdout = MagicMock()
-        proc.stdout.readline = MagicMock(side_effect=[result_line, ""])
-        proc.stderr = MagicMock()
-        proc.poll = MagicMock(return_value=None)
-        proc.kill = MagicMock()
-        proc.wait = MagicMock(return_value=0)
-        proc.returncode = 0
+        proc = _FakeClaudeProc(
+            stdout_lines=[result_line],
+            pid=99999,
+            poll_return=None,
+        )
 
         session_ref: list[ClaudeSession] = []
         # First selector call: arm cancel and return no fds → loop iterates
@@ -2341,11 +2656,11 @@ class TestClaudeIterEventsCancelPaths:
 
         session = ClaudeSession(
             system_file,
-            popen=MagicMock(return_value=proc),
+            popen=_FakePopen(proc),
             selector=selector_that_cancels,
         )
         session_ref.append(session)
-        session.recover = MagicMock()  # type: ignore[method-assign]
+        session.recover = _FakeCallRecorder()  # type: ignore[method-assign]
         session._stream_state = stream_fsm.AwaitingReply()  # type: ignore[attr-defined]
 
         with pytest.raises(ClaudeStreamError):
@@ -2367,7 +2682,7 @@ class TestClaudeIterEventsCancelPaths:
         _claude_mod._CANCEL_DRAIN_TIMEOUT = 0.05
         try:
             session, proc = self._build_session_in_turn(tmp_path)
-            session.recover = MagicMock()  # type: ignore[method-assign]
+            session.recover = _FakeCallRecorder()  # type: ignore[method-assign]
             # The drain timeout will fire and raise ClaudeStreamError
             # AFTER line 1283-1287 has been executed.
             with pytest.raises(ClaudeStreamError):
@@ -2419,15 +2734,9 @@ class TestEventsClaimReplyOutboxEffectsDelivered:
     def test_raises_when_existing_effect_is_delivered(self, tmp_path: Path) -> None:
         from fido import events
 
-        repo_cfg = MagicMock()
-        repo_cfg.work_dir = tmp_path
-
-        promise = MagicMock()
-        promise.promise_id = "promise-1"
-        promise.anchor_comment_id = 42
-
-        existing = MagicMock()
-        existing.state = "delivered"
+        repo_cfg = _FakeRepoConfigForEvents(work_dir=tmp_path)
+        promise = _FakePromise()
+        existing = _FakeDeliveredEffect()
 
         class _StoreStub:
             def __init__(self, *_a: object, **_kw: object) -> None:
@@ -2475,18 +2784,18 @@ class TestEventsThreadResolved:
         # events.py:2703-2704 — None comment_id → return True (stale).
         from fido.events import _thread_task_is_stale_resolved
 
-        gh = MagicMock()
-        result = _thread_task_is_stale_resolved(gh, {"repo": "test/repo", "pr": 1})
+        gh = _FakeGitHub()
+        result = _thread_task_is_stale_resolved(gh, {"repo": "test/repo", "pr": 1})  # type: ignore[arg-type]
         assert result is True
 
     def test_returns_true_when_no_comments_fetched(self) -> None:
         # events.py:2706-2708 — empty comments list → return True (stale).
         from fido.events import _thread_task_is_stale_resolved
 
-        gh = MagicMock()
-        gh.fetch_comment_thread.return_value = []
+        gh = _FakeGitHub(fetch_comment_thread_return=[])
         result = _thread_task_is_stale_resolved(
-            gh, {"repo": "test/repo", "pr": 1, "comment_id": 42}
+            gh,
+            {"repo": "test/repo", "pr": 1, "comment_id": 42},  # type: ignore[arg-type]
         )
         assert result is True
 
@@ -2704,9 +3013,7 @@ class TestCodexLeafBranches:
         # Use the running test thread's ident so threading.enumerate()
         # finds a match.
         current = threading.current_thread()
-        fake_talker = MagicMock()
-        fake_talker.kind = "worker"
-        fake_talker.thread_id = current.ident
+        fake_talker = _FakeTalker(kind="worker", thread_id=current.ident or -1)
 
         class _FakeTalkerAccessForOwner:
             def get_talker(self, repo_name: object) -> object:  # noqa: ARG002
@@ -2762,9 +3069,9 @@ class TestCodexAPIBranches:
         # so an unexpected API response shape crashes loudly.
         from fido.codex import CodexAPI
 
-        bad_client = MagicMock()
-        bad_client.request.return_value = "not-a-dict"
-        api = CodexAPI(client_factory=_FixedAppServerFactory(bad_client))
+        api = CodexAPI(
+            client_factory=_FixedAppServerFactory(_FixedRequestServer("not-a-dict"))
+        )
         with pytest.raises(
             ValueError, match="Codex rate limit response must be a JSON object"
         ):
@@ -3165,10 +3472,10 @@ class TestWorkerSleep:
         # Pass provider= directly so the factory is not invoked.
         worker = _Worker(
             tmp_path,
-            MagicMock(),
-            provider=MagicMock(),
-            issue_cache=MagicMock(),
-            dispatcher=MagicMock(),
+            _FakeGitHub(),
+            provider=_FakeWorkerCollaborator(),
+            issue_cache=_FakeWorkerCollaborator(),
+            dispatcher=_FakeWorkerCollaborator(),
             clock=_FakeClock(),
         )
         worker._sleep(0.001)
