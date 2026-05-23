@@ -102,6 +102,11 @@ def render_active_context(
         "in_progress": "[~]",
         "pending": "[ ]",
         "blocked": "[!]",
+        # HOL-5/HOL-6 marker matches the PR-body ⊘ glyph (HOL-7) so the
+        # worker context surface treats SKIPPED as terminal too rather
+        # than falling back to "[ ]" and appearing pending (Rob review
+        # on PR #1932).
+        "skipped": "[⊘]",
     }
     parts: list[str] = []
 
@@ -402,7 +407,13 @@ class Prompts:
         malformation in one pass and feeds them back via
         :meth:`rescope_parse_nudge` for retries.
         """
-        pending = [t for t in task_list if t.get("status") != "completed"]
+        # SKIPPED tasks are terminal (HOL-5/HOL-6 marker lineage records)
+        # and must NOT be sent to Opus as "pending" — that lets later
+        # rescopes rewrite or remove the no_op lineage and reintroduces
+        # the silent-drop pattern HOL-6 closes (Rob review on PR #1932).
+        pending = [
+            t for t in task_list if t.get("status") not in ("completed", "skipped")
+        ]
         completed = [t for t in task_list if t.get("status") == "completed"]
 
         def _fmt(t: dict[str, Any]) -> dict[str, Any]:
@@ -608,7 +619,12 @@ class Prompts:
         Parses via :func:`fido.tasks._parse_rescope_verdicts`; on
         errors, retries via :meth:`rescope_verdicts_parse_nudge`.
         """
-        pending = [t for t in task_list if t.get("status") != "completed"]
+        # Same SKIPPED exclusion as the operations-envelope rescope
+        # above — SKIPPED markers are terminal lineage records, not
+        # active work for Opus to re-process (Rob review on PR #1932).
+        pending = [
+            t for t in task_list if t.get("status") not in ("completed", "skipped")
+        ]
         completed = [t for t in task_list if t.get("status") == "completed"]
 
         def _fmt(t: dict[str, Any]) -> dict[str, Any]:

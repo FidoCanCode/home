@@ -865,6 +865,36 @@ def _is_allowed(user: str, repo_cfg: RepoConfig, config: Config) -> bool:
     return user in repo_cfg.membership.collaborators or user in config.allowed_bots
 
 
+def _gather_claim_grounding_state(work_dir: Path) -> dict[str, Any]:
+    """HOL-18 / #1912: gather ground-truth state for the reply-prose
+    claim-grounding critic.
+
+    Currently populates ``recent_commit_shas`` from the last 20 commits
+    on the current branch — enough to catch PR #1858's "the work is in
+    commit ABC" lies where prose claims a SHA that was never committed.
+    Returns an empty dict when the work tree isn't a git repo or git
+    fails for any reason; the critic treats empty state as "skip" so
+    the caller's reply ships unchanged in that degraded case (matches
+    the no-state legacy path).
+
+    Future leaves can extend the returned dict with
+    ``open_issue_numbers`` / ``filed_insights`` / ``referenced_files``
+    as those sources of ground truth become cheap to gather here.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "--pretty=format:%H", "-n", "20"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError, FileNotFoundError, NotADirectoryError:
+        return {}
+    shas = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return {"recent_commit_shas": shas}
+
+
 class Dispatcher:
     """Typed collaborator that owns the dispatch, backfill, and sync logic.
 
@@ -1634,6 +1664,10 @@ class Dispatcher:
                 pr=pr_ctx,
                 agent=agent,
                 prompts=prompts,
+                # HOL-18 / #1912: ground-truth state for the
+                # reply-prose claim-grounding critic so it can catch
+                # PR #1858's "in commit ABC" lies against actual git.
+                claim_grounding_state=_gather_claim_grounding_state(repo_cfg.work_dir),
             )
         except SynthesisExhaustedError:
             log.warning(
@@ -1879,6 +1913,10 @@ class Dispatcher:
                 pr=pr_ctx,
                 agent=agent,
                 prompts=prompts,
+                # HOL-18 / #1912: ground-truth state for the
+                # reply-prose claim-grounding critic so it can catch
+                # PR #1858's "in commit ABC" lies against actual git.
+                claim_grounding_state=_gather_claim_grounding_state(repo_cfg.work_dir),
             )
         except SynthesisExhaustedError:
             log.warning(

@@ -502,6 +502,7 @@ def call_synthesis(
     pr: ActivePR | None = None,
     agent: ProviderAgent,
     prompts: Prompts,
+    claim_grounding_state: dict[str, Any] | None = None,
 ) -> CommentResponse:
     """Run the unified comment-handling synthesis turn.
 
@@ -532,6 +533,14 @@ def call_synthesis(
         LLM agent with a ``run_turn(content, *, system_prompt)`` method.
     prompts:
         Prompt builder (``Prompts`` instance).
+    claim_grounding_state:
+        HOL-18 / #1912 — ground-truth references the caller has gathered
+        (``recent_commit_shas`` / ``open_issue_numbers`` / etc.).  When
+        non-empty, the reply-prose claim-grounding critic fires after
+        intent-coverage and gates the response on falsifiable specifics
+        (PR #1858's empty-commit lies, #1855's no-URL filed-issue
+        claims).  ``None`` or empty dict skips the critic — preserves
+        legacy callers that haven't gathered structured state yet.
     """
     system_prompt = prompts.synthesis_system_prompt(issue=issue, pr=pr)
     followup_system_prompt = prompts.synthesis_followup_system_prompt(
@@ -616,6 +625,32 @@ def call_synthesis(
                 verdict.gap,
             )
             continue
+
+        # HOL-18 / #1912: reply-prose claim-grounding critic.  Fires
+        # only when the caller has gathered ground-truth state (commit
+        # SHAs, issue/PR numbers, etc.) so legacy callers that haven't
+        # wired structured_state yet keep their existing behaviour.
+        # Same gap-drives-retry shape as the intent-coverage critic.
+        if claim_grounding_state:
+            from fido.critics import run_reply_prose_critic
+
+            prose_verdict = run_reply_prose_critic(
+                reply_text=response.reply_text,
+                structured_state=claim_grounding_state,
+                agent=agent,
+                prompts=prompts,
+                critic_system_prompt=critic_system_prompt,
+            )
+            if not prose_verdict.passed:
+                last_error = ValueError(f"reply-prose critic: {prose_verdict.gap}")
+                last_critic_gap = prose_verdict.gap
+                log.warning(
+                    "synthesis attempt %d/%d reply-prose gap — %s",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    prose_verdict.gap,
+                )
+                continue
 
         if attempt > 0:
             log.info("synthesis: succeeded on attempt %d/%d", attempt + 1, MAX_RETRIES)

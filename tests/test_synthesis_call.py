@@ -1027,6 +1027,74 @@ class TestIntentCoverageCritic:
         assert result.change_request == "Add tests"
         assert agent.run_turn.call_count == 4
 
+    def test_reply_prose_critic_fires_when_grounding_state_provided(
+        self,
+    ) -> None:
+        """HOL-18 / #1912: when the caller passes
+        ``claim_grounding_state``, the reply-prose critic runs after
+        intent-coverage and gates the response on grounded claims.
+        Order in the loop: synthesis → intent-coverage critic →
+        reply-prose critic → verify."""
+        raw_v1 = _make_raw(
+            reply_text="Fixed in commit deadbeef.",
+            change_request="Fix it",
+        )
+        raw_v2 = _make_raw(
+            reply_text="Fixed in commit abc1234.",
+            change_request="Fix it",
+        )
+        prose_fail = json.dumps(
+            {
+                "passed": False,
+                "gap": "commit deadbeef not in recent_commit_shas",
+                "rationale": "checked git log",
+            }
+        )
+        prose_pass = json.dumps({"passed": True, "rationale": "grounded"})
+        # synth-v1 + intent-pass + prose-fail + synth-v2 + intent-pass +
+        # prose-pass = 6 turns (no verify since change_request is set).
+        agent = _make_agent(
+            [raw_v1, _CRITIC_PASS, prose_fail, raw_v2, _CRITIC_PASS, prose_pass]
+        )
+        prompts = _make_prompts()
+        # Also stub the reply-prose prompt method on the MagicMock
+        # so the critic's prompt-build doesn't blow up.
+        prompts.reply_prose_claim_grounding_prompt.return_value = "reply-prose-prompt"
+
+        result = call_synthesis(
+            "comment",
+            is_bot=False,
+            agent=agent,
+            prompts=prompts,
+            claim_grounding_state={"recent_commit_shas": ["abc1234"]},
+        )
+
+        # Real grounded reply shipped.
+        assert "abc1234" in result.reply_text
+        assert agent.run_turn.call_count == 6
+
+    def test_reply_prose_critic_skipped_when_grounding_state_empty(
+        self,
+    ) -> None:
+        """When no ground-truth state is available, the prose critic
+        must not fire — the legacy single-critic flow ships unchanged.
+        Verifies the default-None / empty-dict back-compat."""
+        raw = _make_raw(reply_text="Done.", change_request="Fix it")
+        agent = _make_agent([raw, _CRITIC_PASS])
+        prompts = _make_prompts()
+
+        call_synthesis(
+            "comment",
+            is_bot=False,
+            agent=agent,
+            prompts=prompts,
+            claim_grounding_state=None,
+        )
+
+        # Only synth + intent-coverage critic ran (no prose critic, no
+        # verify since change_request is set).
+        assert agent.run_turn.call_count == 2
+
     def test_critic_recovers_real_fail_after_malformed_early_envelope(
         self,
     ) -> None:

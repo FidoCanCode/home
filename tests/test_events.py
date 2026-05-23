@@ -6390,3 +6390,54 @@ class TestDispatcher:
         d.launch_sync()
         assert len(sync_calls) == 1
         assert sync_calls[0] == (repo_cfg.work_dir, mock_gh)
+
+
+# ─── HOL-18 / #1912 — _gather_claim_grounding_state ────────────────────────
+
+
+class TestGatherClaimGroundingState:
+    """Helper that collects ground-truth references for the reply-prose
+    critic.  Current shape: ``recent_commit_shas`` from ``git log -20``."""
+
+    def test_real_git_repo_returns_recent_shas(self, tmp_path: Path) -> None:
+        """In a real git repo with commits, every recent SHA shows up
+        in ``recent_commit_shas`` — that's what gates PR #1858's
+        empty-commit lies."""
+        import subprocess as _subprocess
+
+        from fido.events import _gather_claim_grounding_state
+
+        # Bootstrap a tiny repo with 3 commits.
+        for cmd in (
+            ["git", "init", "-q"],
+            ["git", "config", "user.email", "fido@example.com"],
+            ["git", "config", "user.name", "Fido"],
+            ["git", "commit", "--allow-empty", "-q", "-m", "first"],
+            ["git", "commit", "--allow-empty", "-q", "-m", "second"],
+            ["git", "commit", "--allow-empty", "-q", "-m", "third"],
+        ):
+            _subprocess.run(cmd, cwd=tmp_path, check=True)
+
+        state = _gather_claim_grounding_state(tmp_path)
+        assert "recent_commit_shas" in state
+        # 3 commits, all 40-char SHAs.
+        assert len(state["recent_commit_shas"]) == 3
+        for sha in state["recent_commit_shas"]:
+            assert len(sha) == 40
+            assert all(c in "0123456789abcdef" for c in sha)
+
+    def test_non_git_directory_returns_empty(self, tmp_path: Path) -> None:
+        """A non-git work_dir must return ``{}`` so the caller (and the
+        critic) treat it as "no ground truth available" and skip the
+        critic — better than crashing."""
+        from fido.events import _gather_claim_grounding_state
+
+        state = _gather_claim_grounding_state(tmp_path)
+        assert state == {}
+
+    def test_nonexistent_path_returns_empty(self, tmp_path: Path) -> None:
+        """Even an entirely missing path fails open to empty state."""
+        from fido.events import _gather_claim_grounding_state
+
+        state = _gather_claim_grounding_state(tmp_path / "does-not-exist")
+        assert state == {}
