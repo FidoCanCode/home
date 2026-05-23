@@ -22,7 +22,6 @@ _EXEMPTIONS: frozenset[str] = frozenset(
         "tests/test_cli.py",
         "tests/test_claude_hold_for_handler.py",
         "tests/test_copilot_hold_for_handler.py",
-        "tests/test_rocq_generated_pyright.py",
         "tests/test_rocq_lsp.py",
         "tests/test_rocq_pymap.py",
         "tests/test_rocq_repl.py",

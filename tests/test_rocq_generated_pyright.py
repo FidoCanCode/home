@@ -1,5 +1,4 @@
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -28,21 +27,13 @@ def test_writes_pyright_config_and_execs_pyright(
     def fake_execvp(file: str, args: list[str]) -> None:
         raise ExecCalled(file, args)
 
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "generated-pyright",
-            str(generated_dir),
-            "--checks-dir",
-            str(checks_dir),
-        ],
-    )
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(rocq_generated_pyright.os, "execvp", fake_execvp)
 
     with pytest.raises(ExecCalled) as exc_info:
-        rocq_generated_pyright.main()
+        rocq_generated_pyright.main(
+            [str(generated_dir), "--checks-dir", str(checks_dir)],
+            execvp=fake_execvp,
+        )
 
     copied_check = generated_dir / "pyright_generated_check.py"
     config_path = generated_dir / "pyrightconfig.json"
@@ -61,29 +52,17 @@ def test_writes_pyright_config_and_execs_pyright(
     }
 
 
-def test_raises_if_exec_returns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_raises_if_exec_returns(tmp_path: Path) -> None:
     generated_dir = tmp_path / "generated"
     checks_dir = tmp_path / "checks"
     generated_dir.mkdir()
     checks_dir.mkdir()
 
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "generated-pyright",
-            str(generated_dir),
-            "--checks-dir",
-            str(checks_dir),
-        ],
-    )
-
     def fake_execvp(file: str, args: list[str]) -> None:
         return None
 
-    monkeypatch.setattr(rocq_generated_pyright.os, "execvp", fake_execvp)
-
     with pytest.raises(RuntimeError, match="pyright exec failed"):
-        rocq_generated_pyright.main()
+        rocq_generated_pyright.main(
+            [str(generated_dir), "--checks-dir", str(checks_dir)],
+            execvp=fake_execvp,
+        )
