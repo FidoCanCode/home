@@ -2371,3 +2371,92 @@ class TestReplyProseClaimGroundingPrompt:
         assert "PREFIX" in commit_block
         assert "4-to-40" in commit_block
         assert "hex prefix" in commit_block
+
+
+class TestInsightDedupCriticPrompt:
+    """HOL-19 / #1913: insight-filing critic prompt — catches cross-comment
+    near-duplicates the per-comment idempotency marker can't see."""
+
+    def _proposed(self) -> dict[str, str]:
+        return {
+            "title": "Mocking the network masks contract drift",
+            "hook": "Tests passed in CI but the migration failed in prod.",
+            "why": "Mock/prod divergence is a recurring class of bug.",
+        }
+
+    def _recent(self) -> list[dict[str, str]]:
+        return [
+            {
+                "title": "Old: drift between mocks and prod",
+                "body": "Long body about mocks leaking real assumptions.",
+                "url": "https://github.com/FidoCanCode/home/issues/42",
+            },
+            {
+                "title": "Unrelated insight",
+                "body": "Different lesson entirely.",
+                "url": "https://github.com/FidoCanCode/home/issues/77",
+            },
+        ]
+
+    def test_includes_proposed_insight_fields(self) -> None:
+        result = Prompts("").insight_dedup_critic_prompt(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+        )
+        assert "Mocking the network masks contract drift" in result
+        assert "Tests passed in CI but the migration failed in prod." in result
+        assert "Mock/prod divergence is a recurring class of bug." in result
+
+    def test_includes_recent_insights_block(self) -> None:
+        result = Prompts("").insight_dedup_critic_prompt(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+        )
+        for entry in self._recent():
+            assert entry["title"] in result
+            assert entry["url"] in result
+
+    def test_empty_recent_list_renders_sentinel(self) -> None:
+        result = Prompts("").insight_dedup_critic_prompt(
+            proposed_insight=self._proposed(),
+            recent_insights=[],
+        )
+        assert "(none — no recent insights to compare against)" in result
+
+    def test_long_body_is_truncated(self) -> None:
+        """A single oversized insight body must not crowd out the rest of
+        the comparison set — the formatter caps it at 400 chars."""
+        long_body = "x" * 600
+        result = Prompts("").insight_dedup_critic_prompt(
+            proposed_insight=self._proposed(),
+            recent_insights=[
+                {
+                    "title": "Big one",
+                    "body": long_body,
+                    "url": "https://x/issues/1",
+                }
+            ],
+        )
+        assert "x" * 400 + "…" in result
+        assert "x" * 600 not in result
+
+    def test_response_schema_is_verdict_envelope(self) -> None:
+        result = Prompts("").insight_dedup_critic_prompt(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+        )
+        assert '"is_duplicate": false' in result
+        assert '"is_duplicate": true' in result
+        assert '"duplicate_url":' in result
+        assert "No other text" in result
+
+    def test_question_names_near_duplicate_criteria(self) -> None:
+        """The prompt must define 'near-duplicate' so Opus doesn't reject
+        only on exact wording match (the per-comment marker already
+        catches exact replays)."""
+        result = Prompts("").insight_dedup_critic_prompt(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+        )
+        assert "near-duplicate" in result
+        assert "same core claim" in result.lower() or "SAME core claim" in result

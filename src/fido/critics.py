@@ -29,10 +29,12 @@ from fido.synthesis_call import extract_json_objects
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "InsightDedupVerdict",
     "ReplyProseVerdict",
     "TaskCompletionVerdict",
     "TaskCreationProposedSplit",
     "TaskCreationVerdict",
+    "run_insight_dedup_critic",
     "run_reply_prose_critic",
     "run_task_completion_critic",
     "run_task_creation_critic",
@@ -535,3 +537,137 @@ def run_reply_prose_critic(
             len(objs),
         )
     return ReplyProseVerdict()
+
+
+# ---------------------------------------------------------------------------
+# Insight-filing critic (HOL-19 / #1913)
+# ---------------------------------------------------------------------------
+#
+# Runs once per proposed insight at filing time, AFTER the cheap
+# per-comment idempotency marker check in
+# ``_GitHubInsightFiler.file_insight`` has already cleared the
+# same-comment-replay path.  The critic catches what the marker can't:
+# cross-comment near-duplicates — an insight whose core claim was
+# already filed against a different comment.  Returns a verdict the
+# caller uses to skip filing (with a log link to the existing
+# duplicate) or proceed.
+
+
+@dataclass(frozen=True)
+class InsightDedupVerdict:
+    """Critic verdict for one proposed insight filing.
+
+    Default (no critic wired, or critic failed open) is "not a
+    duplicate, no rationale" so the insight files unchanged — matches
+    the legacy no-critic behaviour.
+
+    ``is_duplicate=True`` requires ``duplicate_url`` so the filer can
+    log a pointer to the existing insight; the validator in
+    :meth:`__post_init__` rejects malformed verdicts at construction
+    time rather than at the call site.
+    """
+
+    is_duplicate: bool = False
+    duplicate_url: str = ""
+    rationale: str = ""
+
+    def __post_init__(self) -> None:
+        if self.is_duplicate and not self.duplicate_url.strip():
+            raise ValueError(
+                "InsightDedupVerdict.duplicate_url is required when "
+                "is_duplicate=True — the URL points at the existing "
+                "insight so the filer can log a pointer rather than "
+                "silently dropping the proposed insight"
+            )
+
+
+def _parse_insight_dedup_verdict(
+    obj: dict[str, Any],
+) -> InsightDedupVerdict | None:
+    """Parse a verdict envelope dict into :class:`InsightDedupVerdict`.
+
+    Returns ``None`` when the envelope is malformed — caller treats as
+    fail-open (default verdict: ``is_duplicate=False``).
+    """
+    is_duplicate = obj.get("is_duplicate")
+    if not isinstance(is_duplicate, bool):
+        return None
+    rationale_raw = obj.get("rationale", "")
+    rationale = rationale_raw.strip() if isinstance(rationale_raw, str) else ""
+    if not is_duplicate:
+        return InsightDedupVerdict(is_duplicate=False, rationale=rationale)
+    url = obj.get("duplicate_url")
+    if not isinstance(url, str) or not url.strip():
+        return None
+    return InsightDedupVerdict(
+        is_duplicate=True,
+        duplicate_url=url.strip(),
+        rationale=rationale,
+    )
+
+
+def run_insight_dedup_critic(
+    proposed_insight: dict[str, str],
+    recent_insights: list[dict[str, str]],
+    *,
+    agent: ProviderAgent,
+    prompts: Prompts,
+    critic_system_prompt: str,
+) -> InsightDedupVerdict:
+    """Ask Opus whether ``proposed_insight`` near-duplicates any of
+    ``recent_insights``.
+
+    Returns the parsed :class:`InsightDedupVerdict`.  Fail-open on
+    transport errors, malformed responses, or unparseable verdicts —
+    the default verdict (``is_duplicate=False``) preserves the legacy
+    no-critic behaviour so a flaky critic cannot block legitimate
+    insight filing.  ``ContextOverflowError`` / ``SessionLeakError``
+    still propagate per project convention.
+
+    Like the sibling critics, scans every extracted JSON object and
+    accepts the first that parses as the verdict envelope; a malformed
+    early envelope (``{"is_duplicate": true}`` without a URL) does NOT
+    short-circuit the scan.
+    """
+    prompt = prompts.insight_dedup_critic_prompt(
+        proposed_insight=proposed_insight,
+        recent_insights=recent_insights,
+    )
+    try:
+        raw = agent.run_turn(
+            prompt,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            system_prompt=critic_system_prompt,
+            retry_on_preempt=True,
+        )
+    except ContextOverflowError, SessionLeakError:
+        raise
+    except Exception as exc:
+        log.warning(
+            "insight-dedup critic transport failure (%s) — failing open",
+            exc,
+        )
+        return InsightDedupVerdict()
+
+    objs = extract_json_objects(raw or "")
+    if not objs:
+        log.warning("insight-dedup critic returned no parseable JSON — failing open")
+        return InsightDedupVerdict()
+    saw_malformed_dup = False
+    for obj in objs:
+        verdict = _parse_insight_dedup_verdict(obj)
+        if verdict is not None:
+            return verdict
+        if obj.get("is_duplicate") is True:
+            saw_malformed_dup = True
+    if saw_malformed_dup:
+        log.warning(
+            "insight-dedup critic claimed duplicate without a URL — failing open"
+        )
+    else:
+        log.warning(
+            "insight-dedup critic returned no envelope-shaped JSON in %d "
+            "objects — failing open",
+            len(objs),
+        )
+    return InsightDedupVerdict()

@@ -7,14 +7,17 @@ from typing import Any
 import pytest
 
 from fido.critics import (
+    InsightDedupVerdict,
     ReplyProseVerdict,
     TaskCompletionVerdict,
     TaskCreationProposedSplit,
     TaskCreationVerdict,
+    _parse_insight_dedup_verdict,
     _parse_proposed_splits,
     _parse_reply_prose_verdict,
     _parse_task_completion_verdict,
     _parse_task_creation_verdict,
+    run_insight_dedup_critic,
     run_reply_prose_critic,
     run_task_completion_critic,
     run_task_creation_critic,
@@ -1092,5 +1095,268 @@ class TestRunReplyProseCritic:
                 structured_state={},
                 agent=agent,
                 prompts=_FakeReplyProsePrompts(),
+                critic_system_prompt="critic-sys",
+            )
+
+
+# ---------------------------------------------------------------------------
+# InsightDedupVerdict — HOL-19 / #1913
+# ---------------------------------------------------------------------------
+
+
+class TestInsightDedupVerdictDefaults:
+    """Default verdict is "not a duplicate, no rationale" so a no-critic
+    code path or a fail-open result lets the insight file unchanged."""
+
+    def test_defaults_to_not_duplicate(self) -> None:
+        v = InsightDedupVerdict()
+        assert v.is_duplicate is False
+        assert v.duplicate_url == ""
+        assert v.rationale == ""
+
+
+class TestInsightDedupVerdictConstructorInvariants:
+    """is_duplicate=True requires duplicate_url — without it the filer
+    has nothing to log and the verdict can't be acted on meaningfully."""
+
+    def test_duplicate_without_url_raises(self) -> None:
+        with pytest.raises(ValueError, match="duplicate_url is required"):
+            InsightDedupVerdict(is_duplicate=True, duplicate_url="")
+
+    def test_duplicate_with_whitespace_only_url_raises(self) -> None:
+        with pytest.raises(ValueError, match="duplicate_url is required"):
+            InsightDedupVerdict(is_duplicate=True, duplicate_url="   ")
+
+    def test_duplicate_with_url_accepted(self) -> None:
+        v = InsightDedupVerdict(
+            is_duplicate=True,
+            duplicate_url="https://github.com/FidoCanCode/home/issues/9",
+            rationale="same lesson as #9",
+        )
+        assert v.is_duplicate
+        assert v.duplicate_url.endswith("/9")
+
+
+class TestParseInsightDedupVerdict:
+    """Parser round-trips well-formed envelopes and returns None on every
+    malformed shape so callers fail open."""
+
+    def test_parses_clean_pass(self) -> None:
+        verdict = _parse_insight_dedup_verdict(
+            {"is_duplicate": False, "rationale": "distinct"}
+        )
+        assert verdict is not None
+        assert verdict.is_duplicate is False
+        assert verdict.rationale == "distinct"
+
+    def test_parses_clean_duplicate(self) -> None:
+        verdict = _parse_insight_dedup_verdict(
+            {
+                "is_duplicate": True,
+                "duplicate_url": "https://x/issues/42",
+                "rationale": "covers same invariant",
+            }
+        )
+        assert verdict is not None
+        assert verdict.is_duplicate
+        assert verdict.duplicate_url == "https://x/issues/42"
+
+    def test_missing_is_duplicate_returns_none(self) -> None:
+        assert _parse_insight_dedup_verdict({}) is None
+
+    def test_non_bool_is_duplicate_returns_none(self) -> None:
+        assert _parse_insight_dedup_verdict({"is_duplicate": "yes"}) is None
+
+    def test_duplicate_without_url_returns_none(self) -> None:
+        assert _parse_insight_dedup_verdict({"is_duplicate": True}) is None
+
+    def test_duplicate_with_whitespace_url_returns_none(self) -> None:
+        assert (
+            _parse_insight_dedup_verdict({"is_duplicate": True, "duplicate_url": "  "})
+            is None
+        )
+
+    def test_rationale_non_string_treated_as_empty(self) -> None:
+        verdict = _parse_insight_dedup_verdict({"is_duplicate": False, "rationale": 42})
+        assert verdict is not None
+        assert verdict.rationale == ""
+
+
+@dataclass
+class _FakeInsightDedupPrompts:
+    """Hand-rolled Prompts stand-in for the insight-dedup critic."""
+
+    prompt_value: str = "insight-dedup-critic-prompt"
+    calls: list[tuple] = field(default_factory=list)
+
+    def insight_dedup_critic_prompt(
+        self,
+        proposed_insight: dict[str, str],
+        recent_insights: list[dict[str, str]],
+    ) -> str:
+        self.calls.append(("insight_dedup", proposed_insight, recent_insights))
+        return self.prompt_value
+
+
+class TestRunInsightDedupCritic:
+    """End-to-end: HOL-19 critic catches cross-comment near-duplicates
+    that the per-comment idempotency marker can't see."""
+
+    def _proposed(self) -> dict[str, str]:
+        return {
+            "title": "Mocking the network masks contract drift",
+            "hook": "Tests passed in CI but the migration failed in prod.",
+            "why": "Mock/prod divergence is a recurring class of bug.",
+        }
+
+    def _recent(self) -> list[dict[str, str]]:
+        return [
+            {
+                "title": "Some other insight",
+                "body": "Unrelated story.",
+                "url": "https://github.com/FidoCanCode/home/issues/100",
+            }
+        ]
+
+    def test_pass_through_on_distinct_insight(self) -> None:
+        raw = json.dumps({"is_duplicate": False, "rationale": "distinct lesson"})
+        verdict = run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert not verdict.is_duplicate
+
+    def test_catches_cross_comment_near_duplicate(self) -> None:
+        """HOL-19 acceptance: same core lesson filed against a different
+        comment is detected as near-duplicate."""
+        raw = json.dumps(
+            {
+                "is_duplicate": True,
+                "duplicate_url": "https://github.com/FidoCanCode/home/issues/42",
+                "rationale": "same mock/prod divergence lesson as #42",
+            }
+        )
+        verdict = run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert verdict.is_duplicate
+        assert verdict.duplicate_url.endswith("/42")
+
+    def test_transport_error_fails_open(self) -> None:
+        agent = _FakeAgent(run_turn_exception=RuntimeError("transport"))
+        verdict = run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=agent,
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert not verdict.is_duplicate
+
+    def test_unparseable_json_fails_open(self) -> None:
+        verdict = run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=_FakeAgent(run_turn_responses=["not json"]),
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert not verdict.is_duplicate
+
+    def test_malformed_verdict_fails_open(self) -> None:
+        verdict = run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=_FakeAgent(run_turn_responses=['{"verdict": "wat"}']),
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert not verdict.is_duplicate
+
+    def test_duplicate_without_url_alone_fails_open(self) -> None:
+        """``{"is_duplicate": true}`` with no URL must NOT short-circuit
+        the scan; the loop finishes, finds no envelope, and returns the
+        default pass-through verdict.  Covers the saw_malformed_dup log."""
+        verdict = run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=_FakeAgent(run_turn_responses=['{"is_duplicate": true}']),
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert not verdict.is_duplicate
+
+    def test_scans_past_malformed_early_envelope(self) -> None:
+        """Mirrors the reply-prose scan: an early ``is_duplicate=true``
+        without a URL must not mask a later well-formed verdict."""
+        raw = (
+            '{"is_duplicate": true} '
+            '{"is_duplicate": true, "duplicate_url": "https://x/issues/7", '
+            '"rationale": "real dup"}'
+        )
+        verdict = run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert verdict.is_duplicate
+        assert verdict.duplicate_url == "https://x/issues/7"
+
+    def test_uses_critic_system_prompt(self) -> None:
+        agent = _FakeAgent(run_turn_responses=['{"is_duplicate": false}'])
+        run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=agent,
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="CRITIC-SYSTEM",
+        )
+        assert agent.calls[0].kwargs["system_prompt"] == "CRITIC-SYSTEM"
+
+    def test_empty_recent_list_passes(self) -> None:
+        """The first insight ever filed has no recent peers to compare
+        against — the critic correctly returns pass."""
+        raw = json.dumps({"is_duplicate": False, "rationale": "no peers to compare"})
+        verdict = run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=[],
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert not verdict.is_duplicate
+
+    def test_context_overflow_propagates(self) -> None:
+        from fido.provider import ContextOverflowError
+
+        agent = _FakeAgent(run_turn_exception=ContextOverflowError("overflow"))
+        with pytest.raises(ContextOverflowError):
+            run_insight_dedup_critic(
+                proposed_insight=self._proposed(),
+                recent_insights=self._recent(),
+                agent=agent,
+                prompts=_FakeInsightDedupPrompts(),
+                critic_system_prompt="critic-sys",
+            )
+
+    def test_session_leak_propagates(self) -> None:
+        from fido.provider import SessionLeakError
+
+        agent = _FakeAgent(run_turn_exception=SessionLeakError("leak"))
+        with pytest.raises(SessionLeakError):
+            run_insight_dedup_critic(
+                proposed_insight=self._proposed(),
+                recent_insights=self._recent(),
+                agent=agent,
+                prompts=_FakeInsightDedupPrompts(),
                 critic_system_prompt="critic-sys",
             )

@@ -6343,6 +6343,182 @@ class TestGitHubInsightFiler:
         body = gh.create_issue.call_args.args[2]
         assert "https://github.com/org/proj/pull/10#discussion_r555" in body
 
+    # ── HOL-19 / #1913: cross-comment near-duplicate critic ──────────
+
+    def _make_critic_filer(
+        self,
+        gh: object,
+        agent_response: str,
+    ) -> _GitHubInsightFiler:
+        """Build a critic-enabled filer wired with a hand-rolled agent
+        + prompts pair.  Each canned response is one JSON envelope the
+        critic will see."""
+        from dataclasses import dataclass, field
+
+        @dataclass
+        class _Agent:
+            response: str
+            calls: list[object] = field(default_factory=list)
+
+            def run_turn(self, *args: object, **kwargs: object) -> str:
+                self.calls.append((args, kwargs))
+                return self.response
+
+        @dataclass
+        class _Prompts:
+            def insight_dedup_critic_prompt(
+                self,
+                proposed_insight: dict[str, str],
+                recent_insights: list[dict[str, str]],
+            ) -> str:
+                return "critic-prompt"
+
+        return _GitHubInsightFiler(
+            gh,
+            agent=_Agent(response=agent_response),  # type: ignore[arg-type]
+            prompts=_Prompts(),  # type: ignore[arg-type]
+            critic_system_prompt="critic-sys",
+        )
+
+    def test_critic_disabled_when_collaborators_omitted(self) -> None:
+        """Legacy two-arg construction (no agent) preserves the pre-HOL-19
+        behaviour exactly — marker-only dedup, no critic call, no
+        ``search_issues`` for recent insights."""
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/8"
+        filer = _GitHubInsightFiler(gh)
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        # Only the marker query — no second search_issues for the
+        # recent-insights critic input.
+        assert gh.search_issues.call_count == 1
+        gh.create_issue.assert_called_once()
+
+    def test_critic_distinct_proceeds_to_file(self) -> None:
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/9"
+        filer = self._make_critic_filer(
+            gh, agent_response='{"is_duplicate": false, "rationale": "distinct"}'
+        )
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        gh.create_issue.assert_called_once()
+
+    def test_critic_duplicate_skips_filing(self) -> None:
+        """HOL-19 acceptance: a near-duplicate insight filed against a
+        different comment is NOT filed again."""
+        gh = MagicMock()
+        # First search (marker check): empty.  Second search (recent
+        # insights): returns one prior insight.
+        gh.search_issues.side_effect = [
+            [],
+            [
+                {
+                    "title": "Previously filed",
+                    "body": "Same core lesson.",
+                    "html_url": "https://github.com/FidoCanCode/home/issues/42",
+                }
+            ],
+        ]
+        filer = self._make_critic_filer(
+            gh,
+            agent_response=(
+                '{"is_duplicate": true, '
+                '"duplicate_url": "https://github.com/FidoCanCode/home/issues/42", '
+                '"rationale": "covers same lesson"}'
+            ),
+        )
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        gh.create_issue.assert_not_called()
+
+    def test_critic_failure_proceeds_to_file(self) -> None:
+        """Fail-open: a transport / parse failure must not block legitimate
+        insight filing.  The marker check still prevents exact replays."""
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/10"
+        filer = self._make_critic_filer(gh, agent_response="not parseable JSON at all")
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        gh.create_issue.assert_called_once()
+
+    def test_marker_short_circuits_before_critic_runs(self) -> None:
+        """The per-comment idempotency marker is the cheap path — when it
+        hits, the (expensive) critic must NOT fire and recent insights
+        must NOT be fetched.  Pins the order so a future refactor can't
+        accidentally invert it."""
+        gh = MagicMock()
+        gh.search_issues.return_value = [
+            {"html_url": f"https://github.com/{_INSIGHT_REPO}/issues/5"}
+        ]
+        filer = self._make_critic_filer(gh, agent_response='{"is_duplicate": false}')
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        # Only the marker search ran; no recent-insights search.
+        assert gh.search_issues.call_count == 1
+        gh.create_issue.assert_not_called()
+
+    def test_recent_insights_capped(self) -> None:
+        """Caller-supplied search may return more than the cap — the
+        filer trims to :data:`_INSIGHT_RECENT_LIMIT` before passing to
+        the critic so the prompt stays bounded."""
+        from fido.events import _INSIGHT_RECENT_LIMIT
+
+        gh = MagicMock()
+        # Return way more than the cap — the filer should pass only
+        # the leading slice to the critic.
+        oversized = [
+            {
+                "title": f"Insight {i}",
+                "body": "b",
+                "html_url": f"https://x/issues/{i}",
+            }
+            for i in range(_INSIGHT_RECENT_LIMIT * 3)
+        ]
+        gh.search_issues.side_effect = [[], oversized]
+        gh.create_issue.return_value = f"https://github.com/{_INSIGHT_REPO}/issues/11"
+
+        captured: dict[str, object] = {}
+
+        from dataclasses import dataclass, field
+
+        @dataclass
+        class _Agent:
+            calls: list[object] = field(default_factory=list)
+
+            def run_turn(self, *args: object, **kwargs: object) -> str:
+                self.calls.append((args, kwargs))
+                return '{"is_duplicate": false}'
+
+        @dataclass
+        class _Prompts:
+            def insight_dedup_critic_prompt(
+                self,
+                proposed_insight: dict[str, str],
+                recent_insights: list[dict[str, str]],
+            ) -> str:
+                captured["recent_count"] = len(recent_insights)
+                return "p"
+
+        filer = _GitHubInsightFiler(
+            gh,
+            agent=_Agent(),  # type: ignore[arg-type]
+            prompts=_Prompts(),  # type: ignore[arg-type]
+            critic_system_prompt="critic-sys",
+        )
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        assert captured["recent_count"] == _INSIGHT_RECENT_LIMIT
+
 
 class TestDispatcher:
     """Unit tests for the :class:`~fido.events.Dispatcher` collaborator."""

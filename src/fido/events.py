@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from fido.config import Config, RepoConfig
+from fido.critics import (
+    InsightDedupVerdict,
+    run_insight_dedup_critic,
+)
 from fido.github import GitHub
 from fido.prompts import NO_TOOLS_CLAUSE, Prompts
 from fido.provider import (
@@ -110,23 +114,59 @@ _INSIGHT_REPO = "FidoCanCode/home"
 _INSIGHT_LABEL = "Insight"
 
 
+_INSIGHT_RECENT_LIMIT = 30
+
+
 class _GitHubInsightFiler:
     """InsightFiler implementation that creates GitHub issues on :data:`_INSIGHT_REPO`.
 
-    Idempotent: before filing, searches for an existing issue carrying the
-    ``<!-- insight-source: {comment_id} -->`` marker in its body.  If one is
-    found the filing is skipped so replaying the same comment never creates
-    duplicate insights.
+    Two-layer dedup:
+
+    1. **Per-comment idempotency marker** — the cheap path.  Every
+       insight body carries ``<!-- insight-source: {comment_id} -->``;
+       a GitHub search for that marker catches same-comment replays
+       (e.g. the same webhook re-delivered, or a comment re-processed
+       after a worker restart).
+    2. **Cross-comment near-duplicate critic (HOL-19 / #1913)** — the
+       slow path.  Runs Opus over the proposed insight plus the
+       recent ``Insight``-labelled issues; skips filing when the
+       critic verdicts ``is_duplicate=true``.  Fail-open: a critic
+       transport/parse failure proceeds to file (the marker check
+       still prevents the dumbest duplicates).
+
+    The critic dependencies are optional so legacy call sites without
+    an agent (and the bulk of the existing tests) still file
+    unchanged.  Production wiring in ``Dispatcher`` passes the live
+    agent + prompts so the critic actually runs.
     """
 
-    def __init__(self, gh: GitHub) -> None:
+    def __init__(
+        self,
+        gh: GitHub,
+        *,
+        agent: ProviderAgent | None = None,
+        prompts: Prompts | None = None,
+        critic_system_prompt: str | None = None,
+    ) -> None:
+        # All three of agent / prompts / critic_system_prompt are
+        # required for the HOL-19 critic to fire.  If any is None the
+        # critic is disabled and we fall back to marker-only dedup —
+        # matches the legacy no-critic behaviour for any caller that
+        # hasn't migrated.
         self._gh = gh
+        self._agent = agent
+        self._prompts = prompts
+        self._critic_system_prompt = critic_system_prompt
 
     def file_insight(self, insight: Insight, target: CommentTarget) -> None:
         """File *insight* as a GitHub issue against :data:`_INSIGHT_REPO`.
 
-        Skips creation if an issue with the idempotency marker for
-        *target.comment_id* already exists.
+        Skips creation when EITHER:
+        - The same-comment idempotency marker is already on record (a
+          replay of this exact comment).
+        - The HOL-19 critic verdicts the insight as a near-duplicate
+          of a recent filed insight (catches cross-comment duplicates
+          the marker can't see).
         """
         marker = f"<!-- insight-source: {target.comment_id} -->"
         existing = self._gh.search_issues(_INSIGHT_REPO, f'"{marker}" in:body is:issue')
@@ -137,11 +177,68 @@ class _GitHubInsightFiler:
                 existing[0].get("html_url", ""),
             )
             return
+        verdict = self._dedup_critic_verdict(insight)
+        if verdict.is_duplicate:
+            log.info(
+                "insight-dedup critic verdicted near-duplicate of %s — "
+                "skipping filing for comment %d: %s",
+                verdict.duplicate_url,
+                target.comment_id,
+                verdict.rationale or "(no rationale)",
+            )
+            return
         source_link = _insight_source_link(target)
         title = f"Insight: {insight.title}"
         body = f"{insight.hook}\n\n{insight.why}\n\nSource: {source_link}\n\n{marker}"
         url = self._gh.create_issue(_INSIGHT_REPO, title, body, labels=[_INSIGHT_LABEL])
         log.info("filed insight issue for comment %d: %s", target.comment_id, url)
+
+    def _dedup_critic_verdict(self, insight: Insight) -> InsightDedupVerdict:
+        """Run the HOL-19 critic when the agent/prompts collaborators
+        were injected; otherwise return the default pass-through
+        verdict so the legacy no-critic path is preserved exactly.
+        """
+        if (
+            self._agent is None
+            or self._prompts is None
+            or self._critic_system_prompt is None
+        ):
+            return InsightDedupVerdict()
+        recent = self._recent_insights_for_critic()
+        return run_insight_dedup_critic(
+            proposed_insight={
+                "title": insight.title,
+                "hook": insight.hook,
+                "why": insight.why,
+            },
+            recent_insights=recent,
+            agent=self._agent,
+            prompts=self._prompts,
+            critic_system_prompt=self._critic_system_prompt,
+        )
+
+    def _recent_insights_for_critic(self) -> list[dict[str, str]]:
+        """Fetch the most-recent open ``Insight``-labelled issues from
+        :data:`_INSIGHT_REPO`, capped at :data:`_INSIGHT_RECENT_LIMIT`.
+
+        Returns ``[{title, body, url}, ...]`` shaped for the critic
+        prompt formatter.  An empty list is returned when the search
+        yields nothing — the critic prompt treats that as a pass.
+        """
+        results = self._gh.search_issues(
+            _INSIGHT_REPO,
+            f"label:{_INSIGHT_LABEL} is:issue is:open",
+        )
+        out: list[dict[str, str]] = []
+        for item in results[:_INSIGHT_RECENT_LIMIT]:
+            out.append(
+                {
+                    "title": str(item.get("title", "")),
+                    "body": str(item.get("body", "") or ""),
+                    "url": str(item.get("html_url", "")),
+                }
+            )
+        return out
 
 
 def _insight_source_link(target: CommentTarget) -> str:
@@ -1646,7 +1743,14 @@ class Dispatcher:
             else SynthesisExecutor(
                 gh,
                 rescope=rescope_trigger,
-                insight_filer=_GitHubInsightFiler(gh),
+                insight_filer=_GitHubInsightFiler(
+                    gh,
+                    agent=agent,
+                    prompts=prompts,
+                    critic_system_prompt=prompts.critic_system_prompt(
+                        issue=issue_ctx, pr=pr_ctx
+                    ),
+                ),
                 fido_logins=FIDO_LOGINS,
             )
         )
@@ -1892,7 +1996,14 @@ class Dispatcher:
             else SynthesisExecutor(
                 gh,
                 rescope=rescope_trigger,
-                insight_filer=_GitHubInsightFiler(gh),
+                insight_filer=_GitHubInsightFiler(
+                    gh,
+                    agent=agent,
+                    prompts=prompts,
+                    critic_system_prompt=prompts.critic_system_prompt(
+                        issue=issue_ctx, pr=pr_ctx
+                    ),
+                ),
                 fido_logins=FIDO_LOGINS,
             )
         )

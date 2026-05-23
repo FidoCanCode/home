@@ -1416,6 +1416,87 @@ class Prompts:
             "No other text before or after the JSON."
         )
 
+    def insight_dedup_critic_prompt(
+        self,
+        proposed_insight: dict[str, str],
+        recent_insights: list[dict[str, str]],
+    ) -> str:
+        """Build the HOL-19 / #1913 insight-filing critic prompt.
+
+        Layer-2 gate that runs AFTER the cheap per-comment idempotency
+        marker check in ``_GitHubInsightFiler.file_insight`` and BEFORE
+        the GitHub issue is created.  Asks Opus whether the proposed
+        insight is a near-duplicate of any recently-filed insight,
+        catching cross-comment near-duplicates the per-comment marker
+        can't see.
+
+        ``proposed_insight`` carries ``title``, ``hook``, ``why`` —
+        the fields that will land in the issue body.
+        ``recent_insights`` is a list of ``{title, body, url}`` dicts
+        for previously filed insights (typically the last 30 open
+        ``Insight``-labelled issues, sorted newest-first by the caller).
+
+        Verdict JSON shape::
+
+            {"is_duplicate": false, "rationale": "<one-line>"}
+            {"is_duplicate": true, "duplicate_url": "<URL of dup>",
+             "rationale": "<one-line>"}
+
+        ``duplicate_url`` MUST be set when ``is_duplicate=true`` so the
+        filer can log a pointer to the existing insight.  When the
+        ``recent_insights`` list is empty the model still must reply —
+        any insight is non-duplicate by default in that case.
+        """
+
+        def _fmt(entry: dict[str, str]) -> str:
+            title = entry.get("title", "").strip()
+            body = (entry.get("body", "") or "").strip()
+            url = entry.get("url", "")
+            # Keep each entry compact — the model only needs enough to
+            # judge near-duplicate, not the full body.  Cap the body at
+            # 400 chars so a single oversized insight can't crowd out
+            # the rest of the comparison set.
+            if len(body) > 400:
+                body = body[:400] + "…"
+            return f"  - {url}\n    title: {title}\n    body: {body}"
+
+        if recent_insights:
+            recent_block = "\n".join(_fmt(e) for e in recent_insights)
+        else:
+            recent_block = "  (none — no recent insights to compare against)"
+        proposed_title = proposed_insight.get("title", "").strip()
+        proposed_hook = proposed_insight.get("hook", "").strip()
+        proposed_why = (proposed_insight.get("why", "") or "").strip()
+        return (
+            "You proposed filing a new insight issue.  Verify it is "
+            "not a near-duplicate of an insight already on file.\n\n"
+            "PROPOSED INSIGHT:\n"
+            f"  title: {proposed_title}\n"
+            f"  hook: {proposed_hook}\n"
+            f"  why: {proposed_why}\n\n"
+            "RECENT FILED INSIGHTS (newest first):\n"
+            f"{recent_block}\n\n"
+            "QUESTION: Is the proposed insight a near-duplicate of any "
+            "of the recent filed insights above?  Two insights are "
+            "near-duplicates when they make the SAME core claim — the "
+            "lesson learned, the invariant noticed, or the surprise "
+            "reported — even if the wording, the example given, or the "
+            "linked source differs.  Different angles on the same "
+            "underlying point ARE duplicates.  Different points that "
+            "happen to share vocabulary are NOT.\n\n"
+            "Pass (is_duplicate=false) requires: the proposed insight's "
+            "core claim does not appear in the recent list.  When the "
+            "recent list is empty, every proposal passes by default.\n\n"
+            "Reply with ONLY one JSON object on one line:\n"
+            '  {"is_duplicate": false, "rationale": "<one-line>"}\n'
+            "OR\n"
+            '  {"is_duplicate": true, '
+            '"duplicate_url": "<URL of the recent insight it duplicates>", '
+            '"rationale": "<one-line — which prior insight and why it '
+            'is the same core claim>"}\n\n'
+            "No other text before or after the JSON."
+        )
+
     def synthesis_failure_explanation_prompt(self, comment_body: str) -> str:
         """Build the fallback prompt for when synthesis exhausts retries.
 
