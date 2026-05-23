@@ -272,6 +272,94 @@ class SynthesisExhaustedError(Exception):
     """
 
 
+# ---------------------------------------------------------------------------
+# Intent-coverage critic (HOL-15 / #1909)
+# ---------------------------------------------------------------------------
+#
+# After a synthesis response parses, this critic asks the model to verify
+# that the registered intents (``change_request``) + reply prose faithfully
+# cover the original comment.  Catches:
+#
+#   - missing : prose promises work the change_request doesn't capture
+#               (#1862's shape — closes that bug).
+#   - invented: prose claims to do something the comment didn't ask for.
+#   - mismatched: change_request scope doesn't match the comment's ask.
+#
+# The bare Yes/No verification turn (``_check_and_promote`` / #1218) only
+# catches "missing change_request"; this broader critic covers all three
+# axes.  It runs ADDITIVELY today — both gates fire per attempt.  A future
+# leaf removes ``_check_and_promote`` once the critic has earned its keep.
+
+_CRITIC_RETRY_SUFFIX_TEMPLATE = (
+    "\n\n---\n"
+    "Your previous response failed the intent-coverage critic with this "
+    "gap:\n\n"
+    "  {gap}\n\n"
+    "Rewrite the synthesis response to address the gap.  Same JSON schema "
+    "as before."
+)
+
+
+def _run_intent_coverage_critic(
+    response: CommentResponse,
+    comment_body: str,
+    agent: ProviderAgent,
+    prompts: Prompts,
+    followup_system_prompt: str,
+) -> CriticVerdict:
+    """Ask the model whether ``response`` faithfully covers ``comment_body``.
+
+    Returns ``CriticVerdict(passed=True)`` on a clean pass, or
+    ``CriticVerdict(passed=False, gap=...)`` when the critic spots a
+    coverage problem.  Parse failures or unrecognised JSON from the critic
+    fail OPEN (return ``passed=True``) — the critic is an additional gate,
+    not the only one, so a flaky critic turn must not block a valid
+    response from shipping.  ``ContextOverflowError`` / ``SessionLeakError``
+    still propagate per project convention.
+    """
+    prompt = prompts.intent_coverage_critic_prompt(
+        comment_body=comment_body,
+        reply_text=response.reply_text,
+        change_request=response.change_request,
+    )
+    try:
+        raw = agent.run_turn(
+            prompt,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            system_prompt=followup_system_prompt,
+            retry_on_preempt=True,
+        )
+    except ContextOverflowError, SessionLeakError:
+        raise
+    except Exception as exc:
+        log.warning(
+            "intent-coverage critic transport failure (%s) — failing open",
+            exc,
+        )
+        return CriticVerdict(passed=True)
+
+    objs = _extract_json_objects(raw or "")
+    if not objs:
+        log.warning("intent-coverage critic returned no parseable JSON — failing open")
+        return CriticVerdict(passed=True)
+    obj = objs[0]
+    if obj.get("passed") is True:
+        return CriticVerdict(passed=True)
+    if obj.get("passed") is False:
+        gap = obj.get("gap")
+        if isinstance(gap, str) and gap.strip():
+            return CriticVerdict(passed=False, gap=gap.strip())
+        # Critic said "failed" but gave no gap — fail open per the same
+        # "don't block a valid response on a flaky critic" rule above.
+        log.warning("intent-coverage critic failed without a gap — failing open")
+        return CriticVerdict(passed=True)
+    log.warning(
+        "intent-coverage critic returned malformed verdict %r — failing open",
+        obj,
+    )
+    return CriticVerdict(passed=True)
+
+
 def _extract_json_objects(raw: str) -> list[dict[str, Any]]:
     """Return all JSON objects found in *raw* using a consume loop.
 
@@ -434,10 +522,19 @@ def call_synthesis(
     )
 
     last_error: Exception | None = None
+    last_critic_gap: str | None = None
     for attempt in range(MAX_RETRIES):
-        user_prompt = (
-            base_user_prompt if attempt == 0 else base_user_prompt + _RETRY_SUFFIX
-        )
+        # Per-attempt prompt suffix.  Critic gap takes priority over the
+        # generic JSON-strictness nudge — the critic gap is more specific
+        # and addresses a successful-parse-but-bad-coverage problem.
+        if last_critic_gap is not None:
+            user_prompt = base_user_prompt + _CRITIC_RETRY_SUFFIX_TEMPLATE.format(
+                gap=last_critic_gap
+            )
+        elif attempt > 0:
+            user_prompt = base_user_prompt + _RETRY_SUFFIX
+        else:
+            user_prompt = base_user_prompt
         # ``retry_on_preempt=True`` (#1687): a preempted (cancelled)
         # turn returns an empty string from the drain.  Without this,
         # ``_parse_comment_response`` below would raise "no JSON
@@ -461,6 +558,7 @@ def call_synthesis(
             response = _parse_comment_response(raw)
         except ValueError as exc:
             last_error = exc
+            last_critic_gap = None
             log.warning(
                 "synthesis attempt %d/%d parse failure — %s",
                 attempt + 1,
@@ -469,8 +567,36 @@ def call_synthesis(
             )
             continue
 
+        # HOL-15 / #1909: intent-coverage critic gate.  Fires for every
+        # parsed response and can demand a retry with a specific gap.
+        # Fails open on transport/parse problems (see
+        # ``_run_intent_coverage_critic`` docstring) — the gate is
+        # additional, not the only one, so a flaky critic must not
+        # block a valid response from shipping.
+        verdict = _run_intent_coverage_critic(
+            response,
+            comment_body=comment_body,
+            agent=agent,
+            prompts=prompts,
+            followup_system_prompt=followup_system_prompt,
+        )
+        if not verdict.passed:
+            last_error = ValueError(f"intent-coverage critic: {verdict.gap}")
+            last_critic_gap = verdict.gap
+            log.warning(
+                "synthesis attempt %d/%d critic gap — %s",
+                attempt + 1,
+                MAX_RETRIES,
+                verdict.gap,
+            )
+            continue
+
         if attempt > 0:
             log.info("synthesis: succeeded on attempt %d/%d", attempt + 1, MAX_RETRIES)
+        # Legacy ``_check_and_promote`` (#1218) still fires as the
+        # "missing change_request" backstop.  Removed in a follow-up
+        # once the HOL-15 critic has earned its keep across enough
+        # production turns to retire the bare Yes/No fallback.
         return _check_and_promote(
             response, agent, followup_system_prompt=followup_system_prompt
         )

@@ -1038,6 +1038,67 @@ class Prompts:
             "Respond with ONLY the JSON object.  No text before or after it."
         )
 
+    def intent_coverage_critic_prompt(
+        self,
+        comment_body: str,
+        reply_text: str,
+        change_request: str | None,
+    ) -> str:
+        """Build the HOL-15 / #1909 critic prompt.
+
+        Asks the model to verify intent-coverage of a synthesis response
+        in **both** directions:
+        - missing: the prose promises something the change request
+          doesn't capture (work will be missed — #1862's shape).
+        - invented: the prose claims to do something the comment
+          didn't actually ask for (invented promise).
+        - mismatched: the change request is too narrow vs the comment's
+          actual ask.
+
+        Returns a fixed JSON envelope so the caller can parse with one
+        shape regardless of which axis tripped::
+
+            {"passed": true}
+            {"passed": false, "gap": "<one-line description>"}
+
+        The bare Yes/No verification turn (legacy ``_check_and_promote``,
+        #1218) only catches the "missing change_request" axis; this
+        broader critic catches inventions and mismatches too.
+        """
+        cr_block = (
+            change_request
+            if change_request and change_request.strip()
+            else "(none — no work queued)"
+        )
+        return (
+            "You wrote a reply to a PR comment.  Verify intent-coverage.\n\n"
+            "ORIGINAL COMMENT:\n"
+            f"{comment_body}\n\n"
+            "YOUR REPLY (the prose you proposed to post):\n"
+            f"{reply_text}\n\n"
+            "REGISTERED CHANGE REQUEST "
+            "(what you queued as actionable work, or none):\n"
+            f"{cr_block}\n\n"
+            "QUESTION: Do the registered change request + your reply "
+            "prose faithfully cover this comment, with no invented "
+            "promises and no missing work?\n\n"
+            "A pass requires ALL of:\n"
+            "  - missing: every action your prose promises is captured by "
+            "the change request (or already done — describe completed work "
+            "in past tense without a change request).\n"
+            "  - invented: your prose claims only what the comment actually "
+            "asked for; you did not invent a promise the commenter did "
+            "not request.\n"
+            "  - mismatched: the change request scope matches what the "
+            "comment is asking for (not narrower, not broader).\n\n"
+            "Reply with ONLY one JSON object on one line:\n"
+            '  {"passed": true}\n'
+            "OR\n"
+            '  {"passed": false, "gap": "<one-line description of what '
+            'is missing, invented, or mismatched>"}\n\n'
+            "No other text before or after the JSON."
+        )
+
     def synthesis_failure_explanation_prompt(self, comment_body: str) -> str:
         """Build the fallback prompt for when synthesis exhausts retries.
 

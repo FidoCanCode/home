@@ -1963,3 +1963,72 @@ class TestSynthesisPrompt:
         result = Prompts("").synthesis_prompt("comment", is_bot=False)
         assert "change_request" in result
         assert "future" in result.lower() or "I'll" in result or "I will" in result
+
+
+# ─── HOL-15 / #1909 — intent-coverage critic prompt ────────────────────────
+
+
+class TestIntentCoverageCriticPrompt:
+    """Layer 2 critic prompt that gates the synthesis turn.  Wraps the
+    comment + reply + change_request into a question Opus answers as
+    ``{"passed": true}`` or ``{"passed": false, "gap": "..."}``."""
+
+    def test_includes_comment_and_reply(self) -> None:
+        result = Prompts("").intent_coverage_critic_prompt(
+            comment_body="Please fix the test.",
+            reply_text="I'll add the missing test case.",
+            change_request="Add the missing test case",
+        )
+        assert "Please fix the test." in result
+        assert "I'll add the missing test case." in result
+        assert "Add the missing test case" in result
+
+    def test_renders_none_change_request_as_label(self) -> None:
+        """When no work is queued, the prompt must render a clear
+        sentinel rather than the bare string ``None`` so Opus can
+        reason about the no-queue case."""
+        result = Prompts("").intent_coverage_critic_prompt(
+            comment_body="just thinking out loud",
+            reply_text="Got it.",
+            change_request=None,
+        )
+        assert "(none — no work queued)" in result
+        assert "None" not in result.split("REGISTERED CHANGE REQUEST")[1].split(
+            "QUESTION"
+        )[0].replace("(none — no work queued)", "")
+
+    def test_empty_change_request_treated_as_none(self) -> None:
+        """Empty string and whitespace-only change_request render the
+        same as None — they carry no actionable scope."""
+        result = Prompts("").intent_coverage_critic_prompt(
+            comment_body="x",
+            reply_text="y",
+            change_request="   \t",
+        )
+        assert "(none — no work queued)" in result
+
+    def test_question_distinguishes_three_failure_axes(self) -> None:
+        """The pass rule must enumerate ``missing``/``invented``/
+        ``mismatched`` so Opus knows which axes to check.  The bare
+        Yes/No (#1218) only caught missing — HOL-15 is the broader
+        gate."""
+        result = Prompts("").intent_coverage_critic_prompt(
+            comment_body="x", reply_text="y", change_request=None
+        )
+        assert "missing" in result
+        assert "invented" in result
+        assert "mismatched" in result
+
+    def test_response_schema_is_passed_gap_envelope(self) -> None:
+        """Output schema must be the fixed ``{"passed": bool}`` /
+        ``{"passed": false, "gap": "..."}`` envelope so the Python
+        parser has one shape to handle."""
+        result = Prompts("").intent_coverage_critic_prompt(
+            comment_body="x", reply_text="y", change_request=None
+        )
+        assert '"passed": true' in result
+        assert '"passed": false' in result
+        assert '"gap"' in result
+        # JSON-only directive — no preamble/postamble lets parser pick
+        # the verdict cleanly from the response.
+        assert "No other text" in result
