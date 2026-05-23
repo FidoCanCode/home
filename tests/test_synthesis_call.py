@@ -992,6 +992,40 @@ class TestIntentCoverageCritic:
 
         assert result.reply_text == "Done."
 
+    def test_critic_scans_past_leading_unrelated_json(self) -> None:
+        """codex r3293359040 on PR #1932: a response that leads with an
+        unrelated JSON object before the real verdict envelope must
+        still pick up the verdict.  Before the fix, only the first
+        decoded object was checked — a leading ``{}`` would mask a
+        following ``{"passed": false, "gap": "..."}`` and the
+        intent-coverage failure would silently ship."""
+        raw_v1 = _make_raw(reply_text="Promise.", change_request=None)
+        raw_v2 = _make_raw(reply_text="Tests added.", change_request="Add tests")
+        critic_with_leading_noise = '{} {"passed": false, "gap": "missing tests"}'
+        agent = _make_agent([raw_v1, critic_with_leading_noise, raw_v2, _CRITIC_PASS])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        # Critic verdict was picked up — synthesis retried (4 turns
+        # total: v1 + critic-fail + v2 + critic-pass).
+        assert result.change_request == "Add tests"
+        assert agent.run_turn.call_count == 4
+
+    def test_critic_scans_past_leading_unrelated_json_pass_case(self) -> None:
+        """Symmetric to the fail-case test: a leading unrelated object
+        followed by ``{"passed": true}`` must still resolve as a pass
+        (not fail-open through ignorance)."""
+        raw = _make_raw(reply_text="Done.", change_request="Fix it")
+        agent = _make_agent([raw, '{} {"passed": true}'])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Done."
+        # synthesis + critic only — no retry, no verify (change_request set).
+        assert agent.run_turn.call_count == 2
+
     def test_critic_uses_followup_system_prompt(self) -> None:
         """Critic turn must run with the synthesis follow-up system
         prompt (the plain-text-friendly variant), not the main

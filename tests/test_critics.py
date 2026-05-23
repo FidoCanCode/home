@@ -471,6 +471,26 @@ class TestRunTaskCreationCritic:
         )
         assert verdict.relationship == "distinct"
 
+    def test_scans_past_leading_unrelated_json(self) -> None:
+        """codex r3293359040 on PR #1932: a response that leads with an
+        unrelated JSON object before the real verdict envelope must
+        still pick up the verdict — not silently fail open through
+        only-check-the-first-object logic."""
+        raw = (
+            '{} {"relationship": "duplicate_of", "duplicate_of_id": "t-1", '
+            '"scope": "single", "proposed_splits": [], '
+            '"rationale": "covered"}'
+        )
+        verdict = run_task_creation_critic(
+            self._proposed(),
+            self._queue(),
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakePrompts(),
+            followup_system_prompt="followup",
+        )
+        assert verdict.relationship == "duplicate_of"
+        assert verdict.duplicate_of_id == "t-1"
+
     def test_malformed_verdict_fails_open(self) -> None:
         raw = json.dumps({"relationship": "wat", "scope": "single"})
         verdict = run_task_creation_critic(

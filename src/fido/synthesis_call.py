@@ -342,20 +342,28 @@ def _run_intent_coverage_critic(
     if not objs:
         log.warning("intent-coverage critic returned no parseable JSON — failing open")
         return CriticVerdict(passed=True)
-    obj = objs[0]
-    if obj.get("passed") is True:
-        return CriticVerdict(passed=True)
-    if obj.get("passed") is False:
-        gap = obj.get("gap")
-        if isinstance(gap, str) and gap.strip():
-            return CriticVerdict(passed=False, gap=gap.strip())
-        # Critic said "failed" but gave no gap — fail open per the same
-        # "don't block a valid response on a flaky critic" rule above.
-        log.warning("intent-coverage critic failed without a gap — failing open")
-        return CriticVerdict(passed=True)
+    # codex r3293359040 on PR #1932: scan ALL extracted JSON objects for
+    # the first one that matches the verdict envelope.  A response that
+    # leads with an unrelated ``{}`` followed by a real verdict would
+    # otherwise be treated as malformed and fail open — silently letting
+    # an intent-coverage failure ship.
+    for obj in objs:
+        if obj.get("passed") is True:
+            return CriticVerdict(passed=True)
+        if obj.get("passed") is False:
+            gap = obj.get("gap")
+            if isinstance(gap, str) and gap.strip():
+                return CriticVerdict(passed=False, gap=gap.strip())
+            # Critic said "failed" but gave no gap — fail open per the
+            # same "don't block a valid response on a flaky critic" rule
+            # above.  Don't try later objects: this object self-identified
+            # as the verdict envelope.
+            log.warning("intent-coverage critic failed without a gap — failing open")
+            return CriticVerdict(passed=True)
     log.warning(
-        "intent-coverage critic returned malformed verdict %r — failing open",
-        obj,
+        "intent-coverage critic returned no envelope-shaped JSON in %d "
+        "objects — failing open",
+        len(objs),
     )
     return CriticVerdict(passed=True)
 

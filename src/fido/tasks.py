@@ -1825,6 +1825,7 @@ def _narrative_chain_entry(verdict: IntentVerdict, ts: str) -> dict[str, Any]:
 def _append_narrative_chain_entries(
     result: list[dict[str, Any]],
     verdicts: list[IntentVerdict],
+    snapshot_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Append per-verdict ``narrative_chain`` entries to touched tasks (HOL-8 / #1902).
 
@@ -1833,11 +1834,17 @@ def _append_narrative_chain_entries(
     sources are unioned:
 
     1. ``verdict.affected_task_ids`` — Opus's explicit "this verdict
-       acted on these existing task ids" attribution.
+       acted on these existing task ids" attribution.  Authoritative
+       for tasks Opus already knew about (i.e. in *snapshot_ids*).
     2. ``task.contributing_intents`` containing
-       ``verdict.intent_comment_id`` — covers freshly-created tasks
-       (Opus ``new`` ops and HOL-6 SKIPPED markers) which by definition
-       have no pre-existing id for Opus to name in ``affected_task_ids``.
+       ``verdict.intent_comment_id`` AND task id NOT in *snapshot_ids*
+       — covers freshly-created tasks (Opus ``new`` ops and HOL-6
+       SKIPPED markers) which by definition have no pre-existing id
+       for Opus to name in ``affected_task_ids``.  The snapshot
+       filter is the codex r3293359039 fix: without it, an intent
+       already split/fanned across multiple existing tasks would have
+       its narrative re-appended to every sibling carrying the intent
+       id, polluting chains that this verdict didn't actually touch.
 
     Mutates *result* in place — caller already holds the tasks-list
     lock and slice-assigns the modified list back.
@@ -1859,6 +1866,12 @@ def _append_narrative_chain_entries(
             if tid in tasks_by_id:
                 touched.add(tid)
         for tid, task in tasks_by_id.items():
+            if tid in snapshot_ids:
+                # Pre-existing task — explicit attribution is the only
+                # authoritative source; ``contributing_intents`` membership
+                # is a historical marker that the intent INFLUENCED this
+                # task at some prior rescope, not that THIS verdict did.
+                continue
             intents_field = task.get("contributing_intents") or []
             if verdict.intent_comment_id in intents_field:
                 touched.add(tid)
@@ -3664,7 +3677,7 @@ def reorder_tasks(
             # the in-progress check so the chain is part of the
             # durable state that gets compared and slice-assigned
             # below.  No-op when verdicts is empty (ops-mode rescope).
-            _append_narrative_chain_entries(result, verdicts)
+            _append_narrative_chain_entries(result, verdicts, original_ids)
             if inprogress is not None:
                 # The omission ⇒ completed branch is gone (#1357 case A): the
                 # rescope reducer now uses KeepTask for omitted snapshot

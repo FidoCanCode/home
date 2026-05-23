@@ -5653,6 +5653,82 @@ class TestAppendNarrativeChainEntries:
         assert chain[0] == prior_entry
         assert chain[1]["narrative"] == "second rescope"
 
+    def test_snapshot_filter_restricts_contributing_intents_fallback(
+        self,
+    ) -> None:
+        """codex r3293359039 on PR #1932: the contributing_intents
+        fallback should only fire for freshly-created tasks (id NOT
+        in the snapshot), not pre-existing siblings that merely share
+        an old intent id.  Without the snapshot filter, a verdict
+        attributing to one task would also pollute every other task
+        in the queue that historically carried the same intent."""
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        # Two tasks both carry intent 42 historically.  The verdict's
+        # affected_task_ids names only T-affected.  T-sibling must NOT
+        # get a chain entry — even though its contributing_intents
+        # contains 42.
+        tasks = [
+            {
+                "id": "T-affected",
+                "title": "affected",
+                "contributing_intents": [42],
+            },
+            {
+                "id": "T-sibling",
+                "title": "sibling — same historical intent",
+                "contributing_intents": [42],
+            },
+        ]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=42,
+                outcome="reshaped",
+                ops=({"op": "rewrite", "id": "T-affected", "title": "x"},),
+                affected_task_ids=("T-affected",),
+                narrative="acted on T-affected only",
+            )
+        ]
+        # Snapshot = both task ids (both pre-existing).  Fallback
+        # must NOT fire for either; only the explicit attribution
+        # matters.
+        snapshot = frozenset({"T-affected", "T-sibling"})
+        _append_narrative_chain_entries(tasks, verdicts, snapshot)
+        assert tasks[0]["narrative_chain"][0]["narrative"] == (
+            "acted on T-affected only"
+        )
+        assert "narrative_chain" not in tasks[1]
+
+    def test_snapshot_filter_still_attributes_fresh_tasks(
+        self,
+    ) -> None:
+        """Pre-existing-only restriction must not break the
+        fresh-task path: a task whose id is NOT in the snapshot
+        (freshly-created this rescope) still receives attribution
+        via contributing_intents."""
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        tasks = [
+            {"id": "T-old", "title": "untouched", "contributing_intents": [99]},
+            {"id": "T-fresh", "title": "new task", "contributing_intents": [99]},
+        ]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=99,
+                outcome="no_op",
+                narrative="fresh marker",
+            )
+        ]
+        # Only T-old was in the snapshot — T-fresh is new this rescope.
+        snapshot = frozenset({"T-old"})
+        _append_narrative_chain_entries(tasks, verdicts, snapshot)
+        # T-old (pre-existing) gets no fallback attribution.
+        assert "narrative_chain" not in tasks[0]
+        # T-fresh (freshly-created) gets the fallback attribution.
+        assert tasks[1]["narrative_chain"][0]["narrative"] == "fresh marker"
+
 
 class TestMergeLineageNarrativeChain:
     """HOL-9 / #1903: merge folds source narrative_chains into target."""

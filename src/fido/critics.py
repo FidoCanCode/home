@@ -251,11 +251,17 @@ def run_task_creation_critic(
     if not objs:
         log.warning("task-creation critic returned no parseable JSON — failing open")
         return TaskCreationVerdict()
-    verdict = _parse_task_creation_verdict(objs[0])
-    if verdict is None:
-        log.warning(
-            "task-creation critic returned malformed verdict %r — failing open",
-            objs[0],
-        )
-        return TaskCreationVerdict()
-    return verdict
+    # codex r3293359040 on PR #1932: scan all extracted JSON objects for
+    # the first one that parses as the verdict envelope.  A response that
+    # leads with an unrelated ``{}`` followed by a real verdict would
+    # otherwise be treated as malformed and fail open silently.
+    for obj in objs:
+        verdict = _parse_task_creation_verdict(obj)
+        if verdict is not None:
+            return verdict
+    log.warning(
+        "task-creation critic returned no envelope-shaped JSON in %d "
+        "objects — failing open",
+        len(objs),
+    )
+    return TaskCreationVerdict()
