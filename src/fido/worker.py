@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from fido.critics import TaskCompletionVerdict
     from fido.events import Action, Dispatcher
 
 import requests as _requests
@@ -3356,6 +3357,83 @@ class Worker:
             )
             log.info("filed out-of-scope ask from turn sentinel: %s", ask.title[:60])
 
+    def _run_task_completion_critic(
+        self, task: dict[str, Any], commit_sha: str
+    ) -> "TaskCompletionVerdict":
+        """HOL-17 / #1911: run the task-completion critic on the just-landed
+        commit's diff.
+
+        Returns the parsed verdict (fail-open default ``passed=True`` if
+        the critic is unreachable, malformed, or transport-erroring —
+        matches HOL-15/HOL-16 posture).  Reads the diff via
+        ``git show <sha>`` so the critic sees exactly what landed on
+        disk, not a re-derived approximation.
+        """
+        from fido.critics import run_task_completion_critic
+
+        # ``git show`` on a SHA we just committed is reliable; if it
+        # fails, something is very wrong (corrupt repo, missing HEAD)
+        # and crashing here lets the watchdog restart cleanly rather
+        # than shipping an uncritiqued commit.
+        diff = self._git(["show", "--no-color", commit_sha]).stdout or ""
+        invariant = (task.get("invariant") or "").strip()
+        description = (task.get("description") or "").strip()
+        prompts = self._get_prompts()
+        return run_task_completion_critic(
+            task_invariant=invariant,
+            task_description=description,
+            diff=diff,
+            agent=self._provider_agent,
+            prompts=prompts,
+            followup_system_prompt=prompts.synthesis_followup_system_prompt(
+                issue=None, pr=None
+            ),
+        )
+
+    def _handle_task_completion_critic_failure(
+        self, task: dict[str, Any], gap: str
+    ) -> None:
+        """HOL-17 / #1911: handle a failed task-completion critic verdict.
+
+        Reverses the just-landed commit (``git reset --soft HEAD~1`` —
+        changes remain staged so the worker's next turn sees them),
+        appends the critic gap to the task description so the next
+        worker turn has guidance, and marks the task IN_PROGRESS so
+        the picker re-selects it on the next cycle.
+
+        The reset is destructive on the LOCAL commit only — nothing
+        was pushed yet, so no remote state changes.  The staged
+        changes survive: the worker can refine them, ``git restore
+        --staged`` selected files to drop scope-creep, or amend its
+        approach based on the gap.
+        """
+        log.warning(
+            "task-completion critic FAILED for %s — soft-resetting "
+            "commit, appending gap to description: %s",
+            task["id"],
+            gap,
+        )
+        # ``git reset --soft HEAD~1`` on a SHA we just committed is
+        # equally reliable; same fail-fast rationale as ``git show``
+        # above.  Letting a reset failure crash here surfaces the
+        # corruption rather than papering over it with an in_progress
+        # task that has a phantom commit ahead of upstream.
+        self._git(["reset", "--soft", "HEAD~1"])
+        # Append the critic gap to the task description so the next
+        # worker turn reads it as guidance.  Markdown bullet under a
+        # CRITIC: header keeps existing description content intact.
+        with self._tasks.modify() as live:
+            for live_task in live:
+                if live_task["id"] != task["id"]:
+                    continue
+                existing = (live_task.get("description") or "").rstrip()
+                appended = (
+                    f"{existing}\n\nCRITIC: {gap}" if existing else f"CRITIC: {gap}"
+                )
+                live_task["description"] = appended
+                live_task["status"] = str(TaskStatus.IN_PROGRESS)
+                break
+
     def _finish_task(
         self,
         task: dict[str, Any],
@@ -4217,6 +4295,21 @@ class Worker:
                         log.info("task pre-commit hook rejected commit — nudging")
                     case cra_oracle.ActionPushAndComplete():
                         assert isinstance(commit_result, CommitSuccess)
+                        # HOL-17 / #1911: task-completion critic.  Verifies
+                        # the just-landed commit against the task's named
+                        # invariant before push.  On fail: ``git reset
+                        # --soft HEAD~1`` to undo the commit (changes stay
+                        # staged), append the gap to the task description,
+                        # mark task IN_PROGRESS so the picker re-selects
+                        # it next cycle, and return without pushing.
+                        completion_verdict = self._run_task_completion_critic(
+                            task, commit_result.sha
+                        )
+                        if not completion_verdict.passed:
+                            self._handle_task_completion_critic_failure(
+                                task, completion_verdict.gap
+                            )
+                            return True
                         # Task complete: push and advance the queue.
                         pushed = self._push_with_retry("origin", slug)
                         if pushed:

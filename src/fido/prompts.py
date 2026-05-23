@@ -1203,6 +1203,78 @@ class Prompts:
             "No other text before or after the JSON."
         )
 
+    def task_completion_critic_prompt(
+        self,
+        task_invariant: str,
+        task_description: str,
+        diff: str,
+    ) -> str:
+        """Build the HOL-17 / #1911 critic prompt.
+
+        Runs after the worker emits ``commit-task-complete`` and the
+        harness has staged + committed.  Asks Opus to verify the
+        committed diff against the task's named invariant:
+
+          - **establishes**: does the diff actually establish the
+            invariant?  (Catches PR #1858's "13 tasks marked complete
+            without any code change" pattern — empty diff, claimed done.)
+          - **only**: does the diff do ONLY that work?  (Catches
+            scope-creep where a fix invariant pulls in unrelated
+            refactors / dependency bumps / drive-by cleanups.)
+
+        Verdict JSON shape::
+
+            {
+              "passed": true,
+              "rationale": "<one-line>"
+            }
+            OR
+            {
+              "passed": false,
+              "gap": "<one-line description of what's missing or
+                      out-of-scope>",
+              "rationale": "<longer prose>"
+            }
+
+        On ``passed=false`` the worker handler resets the commit
+        (``git reset --soft HEAD~1`` — changes stay staged), marks the
+        task back to ``in_progress``, appends the gap to the task
+        description, and the worker re-picks next cycle.
+        """
+        invariant_block = task_invariant or "(no invariant declared)"
+        description_block = task_description or "(no description)"
+        diff_block = diff.strip() or "(empty diff)"
+        return (
+            "You declared a task complete and committed a diff.  Verify "
+            "the diff against the named invariant along TWO axes.\n\n"
+            "TASK INVARIANT (the single property this commit should "
+            "establish — HOL-12 contract):\n"
+            f"  {invariant_block}\n\n"
+            "TASK DESCRIPTION (full context for the task):\n"
+            f"{description_block}\n\n"
+            "COMMITTED DIFF (everything in the just-landed commit):\n"
+            f"{diff_block}\n\n"
+            "QUESTION: Did the diff establish the named invariant — and "
+            "only that invariant?\n\n"
+            "A pass requires BOTH of:\n"
+            "  - establishes: the diff makes the invariant true.  An "
+            "empty diff or a diff that doesn't touch the invariant's "
+            "subject is a fail (closes PR #1858's empty-commit pattern).\n"
+            "  - only: the diff does ONLY the named work.  Unrelated "
+            "refactors, dependency bumps, drive-by cleanups, or work "
+            "that belongs to a different invariant are scope-creep and "
+            "fail this axis.  An exception: trivial co-changes that the "
+            "invariant work demands (e.g. import additions, format "
+            "tweaks the formatter mandates) are part of the invariant, "
+            "not scope-creep.\n\n"
+            "Reply with ONLY one JSON object on one line:\n"
+            '  {"passed": true, "rationale": "<one-line>"}\n'
+            "OR\n"
+            '  {"passed": false, "gap": "<what is missing or '
+            'out-of-scope>", "rationale": "<longer prose>"}\n\n'
+            "No other text before or after the JSON."
+        )
+
     def synthesis_failure_explanation_prompt(self, comment_body: str) -> str:
         """Build the fallback prompt for when synthesis exhausts retries.
 

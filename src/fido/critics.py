@@ -29,8 +29,10 @@ from fido.synthesis_call import extract_json_objects
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "TaskCompletionVerdict",
     "TaskCreationProposedSplit",
     "TaskCreationVerdict",
+    "run_task_completion_critic",
     "run_task_creation_critic",
 ]
 
@@ -208,6 +210,138 @@ def _parse_task_creation_verdict(
         proposed_splits=proposed_splits,
         rationale=rationale,
     )
+
+
+# ---------------------------------------------------------------------------
+# Task-completion critic (HOL-17 / #1911)
+# ---------------------------------------------------------------------------
+#
+# Runs after the worker emits ``commit-task-complete`` and the harness has
+# staged + committed.  The critic verifies the committed diff against the
+# task's named invariant along TWO axes:
+#
+#   - establishes: the diff actually makes the invariant true (catches
+#                  PR #1858's "13 tasks marked complete without any code
+#                  change" pattern — empty diff, claimed done).
+#   - only:        the diff does ONLY the named work; no scope-creep
+#                  refactors, dependency bumps, or unrelated cleanups.
+#
+# On ``passed=false`` the worker handler resets the just-landed commit
+# (``git reset --soft HEAD~1`` — changes remain staged), marks the task
+# back to ``in_progress`` with the gap appended to the description, and
+# the worker re-picks on the next cycle to address the specific complaint.
+
+
+@dataclass(frozen=True)
+class TaskCompletionVerdict:
+    """Critic verdict for one ``commit-task-complete`` op.
+
+    Default (no critic wired, or critic failed open) is "passed, no
+    rationale" so the just-landed commit ships unchanged — preserves
+    the legacy no-critic behaviour.
+
+    ``passed``: ``True`` → push and mark complete (current behaviour);
+    ``False`` → soft-reset the commit, append ``gap`` to the task
+    description, mark task in_progress, worker re-picks next cycle.
+
+    ``gap`` is the one-line complaint suitable for appending to the
+    task description so the next worker turn sees it as guidance.
+    Required when ``passed=False``.
+    """
+
+    passed: bool = True
+    gap: str = ""
+    rationale: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.passed and not self.gap.strip():
+            raise ValueError(
+                "TaskCompletionVerdict.gap is required when passed=False — "
+                "the gap is what the next worker turn needs to address"
+            )
+
+
+def _parse_task_completion_verdict(
+    obj: dict[str, Any],
+) -> TaskCompletionVerdict | None:
+    """Parse a verdict envelope dict into :class:`TaskCompletionVerdict`.
+
+    Returns ``None`` when the envelope is malformed — caller treats as
+    fail-open (default verdict: ``passed=True``).
+    """
+    passed = obj.get("passed")
+    if not isinstance(passed, bool):
+        return None
+    rationale_raw = obj.get("rationale", "")
+    rationale = rationale_raw.strip() if isinstance(rationale_raw, str) else ""
+    if passed:
+        return TaskCompletionVerdict(passed=True, rationale=rationale)
+    gap = obj.get("gap")
+    if not isinstance(gap, str) or not gap.strip():
+        return None
+    return TaskCompletionVerdict(passed=False, gap=gap.strip(), rationale=rationale)
+
+
+def run_task_completion_critic(
+    task_invariant: str,
+    task_description: str,
+    diff: str,
+    *,
+    agent: ProviderAgent,
+    prompts: Prompts,
+    followup_system_prompt: str,
+) -> TaskCompletionVerdict:
+    """Ask Opus to verdict the committed diff against the task invariant.
+
+    Returns the parsed :class:`TaskCompletionVerdict`.  Fail-open on
+    transport errors, malformed responses, or unparseable verdicts —
+    the default verdict (``passed=True``) preserves the legacy
+    no-critic behaviour, so a flaky critic must not block valid task
+    completion from shipping.  ``ContextOverflowError`` /
+    ``SessionLeakError`` still propagate per project convention.
+
+    When the task has no declared invariant (legacy tasks pre-HOL-11),
+    the critic still runs but the prompt renders ``(no invariant
+    declared)`` so Opus reasons about scope-creep without an anchor.
+    Empty-diff complete still fails the establishes axis even without
+    an invariant (a completed task that didn't change anything is the
+    PR #1858 pattern regardless of whether HOL-12 named the work).
+    """
+    prompt = prompts.task_completion_critic_prompt(
+        task_invariant=task_invariant,
+        task_description=task_description,
+        diff=diff,
+    )
+    try:
+        raw = agent.run_turn(
+            prompt,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            system_prompt=followup_system_prompt,
+            retry_on_preempt=True,
+        )
+    except ContextOverflowError, SessionLeakError:
+        raise
+    except Exception as exc:
+        log.warning(
+            "task-completion critic transport failure (%s) — failing open",
+            exc,
+        )
+        return TaskCompletionVerdict()
+
+    objs = extract_json_objects(raw or "")
+    if not objs:
+        log.warning("task-completion critic returned no parseable JSON — failing open")
+        return TaskCompletionVerdict()
+    for obj in objs:
+        verdict = _parse_task_completion_verdict(obj)
+        if verdict is not None:
+            return verdict
+    log.warning(
+        "task-completion critic returned no envelope-shaped JSON in %d "
+        "objects — failing open",
+        len(objs),
+    )
+    return TaskCompletionVerdict()
 
 
 def run_task_creation_critic(

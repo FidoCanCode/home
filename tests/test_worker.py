@@ -12541,6 +12541,119 @@ class TestExecuteTask:
         assert "HOL-13" in comment_body
         assert "spans 3 invariants" in comment_body
 
+    def test_task_completion_critic_failure_soft_resets_and_reparks(
+        self, tmp_path: Path
+    ) -> None:
+        """HOL-17 / #1911: when the task-completion critic returns
+        ``passed=false``, the just-landed commit is soft-reset (changes
+        stay staged), the gap is appended to the task description, and
+        the task goes back to IN_PROGRESS so the picker re-selects it.
+        Closes PR #1858's "task marked complete without code" pattern
+        and its scope-creep sibling."""
+        import subprocess as _subprocess
+
+        from fido.types import TaskStatus
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "transient failures retry up to 3 times"
+        task["description"] = "Wire retry on the network layer."
+        # Pre-mark the target as IN_PROGRESS so the picker selects it
+        # regardless of list order; the sibling lives at position 0 so
+        # the description-mutation loop iterates past it (covering the
+        # ``if live_task["id"] != task["id"]: continue`` arm) before
+        # matching the target.
+        task["status"] = str(TaskStatus.IN_PROGRESS)
+        sibling = self._pending_task("Sibling task")
+        sibling["id"] = "t-sibling"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [sibling, task]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+
+        # Critic LLM call goes through ``self._provider_agent.run_turn``.
+        # Return a failing verdict envelope so the worker's HOL-17
+        # handler triggers (soft-reset + reparking).
+        worker._provider_agent.run_turn = MagicMock(
+            return_value=(
+                '{"passed": false, "gap": "diff also touches '
+                'unrelated retry log formatting", '
+                '"rationale": "scope-creep"}'
+            )
+        )
+
+        git_calls: list[list[str]] = []
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            git_calls.append(args)
+            if args[:2] == ["show", "--no-color"]:
+                return _subprocess.CompletedProcess(
+                    args=["git", *args],
+                    returncode=0,
+                    stdout="diff --git a/x b/x\n+changed\n",
+                    stderr="",
+                )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout="", stderr=""
+            )
+
+        worker._git = git_stub
+        result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        assert result is True
+        # NOT completed — the critic blocked the push.
+        worker._tasks.complete_with_resolve.assert_not_called()
+        worker.ensure_pushed.assert_not_called()
+        # Soft reset was invoked on the just-landed commit.
+        assert ["reset", "--soft", "HEAD~1"] in git_calls
+        # Task is back to IN_PROGRESS with the gap appended.
+        live = worker._tasks._task_list
+        affected = next(t for t in live if t["id"] == task["id"])
+        assert affected["status"] == str(TaskStatus.IN_PROGRESS)
+        assert (
+            "CRITIC: diff also touches unrelated retry log formatting"
+            in (affected["description"])
+        )
+        assert "Wire retry on the network layer." in affected["description"]
+
+    def test_task_completion_critic_pass_pushes_and_completes(
+        self, tmp_path: Path
+    ) -> None:
+        """The happy-path critic pass must not regress the legacy
+        push-and-complete behaviour."""
+        import subprocess as _subprocess
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "transient failures retry up to 3 times"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [task]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": true, "rationale": "diff covers invariant"}'
+        )
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout="", stderr=""
+            )
+
+        worker._git = git_stub
+        result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        assert result is True
+        worker._tasks.complete_with_resolve.assert_called_once()
+
     def test_commit_in_progress_continues_session(self, tmp_path: Path) -> None:
         """commit-task-in-progress sentinel causes the loop to continue with
         the same session rather than completing the task."""

@@ -2136,3 +2136,70 @@ class TestTaskCreationCriticPrompt:
         assert '"proposed_splits":' in result
         assert '"rationale":' in result
         assert "No other text" in result
+
+
+# ─── HOL-17 / #1911 — task-completion critic prompt ────────────────────────
+
+
+class TestTaskCompletionCriticPrompt:
+    """Layer 2 critic that gates ``commit-task-complete`` against the
+    just-landed diff and the task's named invariant."""
+
+    def test_includes_invariant_description_diff(self) -> None:
+        result = Prompts("").task_completion_critic_prompt(
+            task_invariant="transient failures retry up to 3 times",
+            task_description="Wire retry on the network layer.",
+            diff="diff --git a/x b/x\n+changed\n",
+        )
+        assert "transient failures retry up to 3 times" in result
+        assert "Wire retry on the network layer." in result
+        assert "+changed" in result
+
+    def test_empty_invariant_renders_sentinel(self) -> None:
+        """Tasks predating HOL-11 don't have an invariant; render a
+        clear marker so Opus knows to reason about scope-creep without
+        an anchor (but the establishes-axis can still catch empty
+        diffs)."""
+        result = Prompts("").task_completion_critic_prompt(
+            task_invariant="",
+            task_description="Legacy task body.",
+            diff="diff --git a/x b/x\n+ok\n",
+        )
+        assert "no invariant declared" in result
+
+    def test_empty_diff_renders_sentinel(self) -> None:
+        """PR #1858's empty-commit pattern: the prompt must render
+        ``(empty diff)`` distinct from "missing field" so Opus reads it
+        as a clear flag for the establishes axis."""
+        result = Prompts("").task_completion_critic_prompt(
+            task_invariant="x",
+            task_description="",
+            diff="",
+        )
+        assert "(empty diff)" in result
+
+    def test_both_axes_documented(self) -> None:
+        """The pass rule must enumerate ``establishes`` and ``only``
+        so Opus reasons about both."""
+        result = Prompts("").task_completion_critic_prompt(
+            task_invariant="x",
+            task_description="",
+            diff="d",
+        )
+        assert "establishes" in result
+        assert "only" in result
+        # Pattern reference: PR #1858 is the empty-commit prior art
+        # this critic exists to catch.
+        assert "PR #1858" in result
+
+    def test_response_schema_is_verdict_envelope(self) -> None:
+        result = Prompts("").task_completion_critic_prompt(
+            task_invariant="x",
+            task_description="",
+            diff="d",
+        )
+        assert '"passed": true' in result
+        assert '"passed": false' in result
+        assert '"gap":' in result
+        assert '"rationale":' in result
+        assert "No other text" in result

@@ -7,10 +7,13 @@ from typing import Any
 import pytest
 
 from fido.critics import (
+    TaskCompletionVerdict,
     TaskCreationProposedSplit,
     TaskCreationVerdict,
     _parse_proposed_splits,
+    _parse_task_completion_verdict,
     _parse_task_creation_verdict,
+    run_task_completion_critic,
     run_task_creation_critic,
 )
 
@@ -541,5 +544,262 @@ class TestRunTaskCreationCritic:
                 self._queue(),
                 agent=agent,
                 prompts=_FakePrompts(),
+                followup_system_prompt="followup",
+            )
+
+
+# ---------------------------------------------------------------------------
+# TaskCompletionVerdict — constructor invariants
+# ---------------------------------------------------------------------------
+
+
+class TestTaskCompletionVerdictDefaults:
+    """Default verdict is "passed, no gap" so a no-critic code path or
+    fail-open result leaves the just-landed commit unchanged."""
+
+    def test_default_passes(self) -> None:
+        v = TaskCompletionVerdict()
+        assert v.passed is True
+        assert v.gap == ""
+        assert v.rationale == ""
+
+    def test_pass_with_rationale_constructs(self) -> None:
+        v = TaskCompletionVerdict(passed=True, rationale="diff covers invariant")
+        assert v.passed
+        assert v.rationale == "diff covers invariant"
+
+
+class TestTaskCompletionVerdictConstructorInvariants:
+    def test_fail_requires_gap(self) -> None:
+        with pytest.raises(ValueError, match="gap is required"):
+            TaskCompletionVerdict(passed=False)
+
+    def test_fail_rejects_blank_gap(self) -> None:
+        with pytest.raises(ValueError, match="gap is required"):
+            TaskCompletionVerdict(passed=False, gap=" \t ")
+
+    def test_fail_with_gap_constructs(self) -> None:
+        v = TaskCompletionVerdict(
+            passed=False, gap="diff touched scope-creep file", rationale="long"
+        )
+        assert not v.passed
+        assert v.gap == "diff touched scope-creep file"
+
+
+# ---------------------------------------------------------------------------
+# _parse_task_completion_verdict
+# ---------------------------------------------------------------------------
+
+
+class TestParseTaskCompletionVerdict:
+    def test_parses_passed_true(self) -> None:
+        v = _parse_task_completion_verdict({"passed": True, "rationale": "looks right"})
+        assert v is not None
+        assert v.passed
+        assert v.rationale == "looks right"
+
+    def test_parses_passed_false_with_gap(self) -> None:
+        v = _parse_task_completion_verdict(
+            {
+                "passed": False,
+                "gap": "diff doesn't touch the invariant",
+                "rationale": "longer",
+            }
+        )
+        assert v is not None
+        assert not v.passed
+        assert v.gap == "diff doesn't touch the invariant"
+        assert v.rationale == "longer"
+
+    def test_missing_passed_returns_none(self) -> None:
+        assert _parse_task_completion_verdict({"rationale": "x"}) is None
+
+    def test_non_bool_passed_returns_none(self) -> None:
+        assert _parse_task_completion_verdict({"passed": "yes"}) is None
+
+    def test_passed_false_without_gap_returns_none(self) -> None:
+        """A ``false`` verdict with no gap can't drive a meaningful
+        retry — caller treats as fail-open to avoid useless soft-resets."""
+        assert (
+            _parse_task_completion_verdict({"passed": False, "rationale": "x"}) is None
+        )
+
+    def test_passed_false_with_blank_gap_returns_none(self) -> None:
+        assert (
+            _parse_task_completion_verdict(
+                {"passed": False, "gap": " ", "rationale": "x"}
+            )
+            is None
+        )
+
+
+# ---------------------------------------------------------------------------
+# run_task_completion_critic
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeCompletionPrompts:
+    """Hand-rolled Prompts stand-in for the completion critic."""
+
+    prompt_value: str = "completion-critic-prompt"
+    calls: list[tuple] = field(default_factory=list)
+
+    def task_completion_critic_prompt(
+        self,
+        task_invariant: str,
+        task_description: str,
+        diff: str,
+    ) -> str:
+        self.calls.append(("task_completion_critic_prompt", task_invariant, diff))
+        return self.prompt_value
+
+
+class TestRunTaskCompletionCritic:
+    def test_pass_through_on_passed_true(self) -> None:
+        agent = _FakeAgent(
+            run_turn_responses=[
+                '{"passed": true, "rationale": "diff establishes the invariant"}'
+            ]
+        )
+        verdict = run_task_completion_critic(
+            task_invariant="rescope ops are typed values",
+            task_description="Replace raw dicts in the rescope reducer.",
+            diff="diff --git a/x b/x\n+typed\n",
+            agent=agent,
+            prompts=_FakeCompletionPrompts(),
+            followup_system_prompt="followup",
+        )
+        assert verdict.passed
+        assert verdict.rationale == "diff establishes the invariant"
+
+    def test_returns_fail_verdict_with_gap(self) -> None:
+        raw = json.dumps(
+            {
+                "passed": False,
+                "gap": "diff also touches unrelated file foo.py",
+                "rationale": "scope-creep into formatting",
+            }
+        )
+        verdict = run_task_completion_critic(
+            task_invariant="rescope ops are typed values",
+            task_description="Replace raw dicts in the rescope reducer.",
+            diff="diff --git a/foo b/foo\n+unrelated\n",
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeCompletionPrompts(),
+            followup_system_prompt="followup",
+        )
+        assert not verdict.passed
+        assert "foo.py" in verdict.gap
+
+    def test_empty_diff_with_legitimate_fail_verdict(self) -> None:
+        """An empty diff should typically draw a ``passed=false`` verdict
+        from a well-behaved critic (PR #1858 pattern).  The runner just
+        carries that verdict through — the prompt does the "empty diff
+        fails establishes axis" reasoning."""
+        raw = json.dumps(
+            {
+                "passed": False,
+                "gap": "no code change for the named invariant",
+                "rationale": "empty diff",
+            }
+        )
+        verdict = run_task_completion_critic(
+            task_invariant="any invariant",
+            task_description="",
+            diff="",
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeCompletionPrompts(),
+            followup_system_prompt="followup",
+        )
+        assert not verdict.passed
+
+    def test_transport_error_fails_open(self) -> None:
+        agent = _FakeAgent(run_turn_exception=RuntimeError("transport"))
+        verdict = run_task_completion_critic(
+            task_invariant="x",
+            task_description="",
+            diff="diff",
+            agent=agent,
+            prompts=_FakeCompletionPrompts(),
+            followup_system_prompt="followup",
+        )
+        # Fail-open default — pass through, don't block the commit.
+        assert verdict.passed
+
+    def test_unparseable_json_fails_open(self) -> None:
+        verdict = run_task_completion_critic(
+            task_invariant="x",
+            task_description="",
+            diff="diff",
+            agent=_FakeAgent(run_turn_responses=["not json at all"]),
+            prompts=_FakeCompletionPrompts(),
+            followup_system_prompt="followup",
+        )
+        assert verdict.passed
+
+    def test_malformed_verdict_fails_open(self) -> None:
+        verdict = run_task_completion_critic(
+            task_invariant="x",
+            task_description="",
+            diff="diff",
+            agent=_FakeAgent(run_turn_responses=['{"verdict": "wat"}']),
+            prompts=_FakeCompletionPrompts(),
+            followup_system_prompt="followup",
+        )
+        assert verdict.passed
+
+    def test_scans_past_leading_unrelated_json(self) -> None:
+        """Same defense as the other critics: a leading unrelated object
+        before the verdict envelope must not mask the verdict."""
+        raw = '{} {"passed": false, "gap": "scope-creep"}'
+        verdict = run_task_completion_critic(
+            task_invariant="x",
+            task_description="",
+            diff="diff",
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeCompletionPrompts(),
+            followup_system_prompt="followup",
+        )
+        assert not verdict.passed
+        assert verdict.gap == "scope-creep"
+
+    def test_uses_followup_system_prompt(self) -> None:
+        agent = _FakeAgent(run_turn_responses=['{"passed": true}'])
+        run_task_completion_critic(
+            task_invariant="x",
+            task_description="",
+            diff="diff",
+            agent=agent,
+            prompts=_FakeCompletionPrompts(),
+            followup_system_prompt="FOLLOWUP",
+        )
+        assert agent.calls[0].kwargs["system_prompt"] == "FOLLOWUP"
+
+    def test_context_overflow_propagates(self) -> None:
+        from fido.provider import ContextOverflowError
+
+        agent = _FakeAgent(run_turn_exception=ContextOverflowError("overflow"))
+        with pytest.raises(ContextOverflowError):
+            run_task_completion_critic(
+                task_invariant="x",
+                task_description="",
+                diff="diff",
+                agent=agent,
+                prompts=_FakeCompletionPrompts(),
+                followup_system_prompt="followup",
+            )
+
+    def test_session_leak_propagates(self) -> None:
+        from fido.provider import SessionLeakError
+
+        agent = _FakeAgent(run_turn_exception=SessionLeakError("leak"))
+        with pytest.raises(SessionLeakError):
+            run_task_completion_critic(
+                task_invariant="x",
+                task_description="",
+                diff="diff",
+                agent=agent,
+                prompts=_FakeCompletionPrompts(),
                 followup_system_prompt="followup",
             )
