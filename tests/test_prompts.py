@@ -425,6 +425,33 @@ class TestRescopePrompt:
         result = Prompts("").rescope_prompt(tasks, "feat: add parser method")
         assert "feat: add parser method" in result
 
+    def test_narrative_chain_rendered_when_present(self) -> None:
+        # HOL-8 / #1902: per-task narrative_chain lands in the rescope
+        # prompt so Opus sees the history of verdicts that touched the
+        # task across prior rescopes.
+        task = self._task("Carry-over", task_id="T1")
+        task["narrative_chain"] = [
+            {
+                "outcome": "reshaped",
+                "narrative": "Split into prereq + feature.",
+                "intent_comment_id": 42,
+                "ts": "2026-05-23T10:00:00Z",
+            }
+        ]
+        result = Prompts("").rescope_prompt([task], "")
+        # The chain JSON is part of the pending-task block.
+        assert '"narrative_chain"' in result
+        assert "Split into prereq + feature." in result
+        assert '"intent_comment_id": 42' in result
+
+    def test_narrative_chain_omitted_when_empty(self) -> None:
+        # No chain → no field in the rendered JSON.  Keeps the prompt
+        # compact for fresh tasks that haven't gone through a rescope.
+        tasks = [self._task("Fresh", task_id="T1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        # Pending JSON block must NOT contain the field name.
+        assert '"narrative_chain"' not in result
+
     def test_empty_commit_summary_shows_none(self) -> None:
         tasks = [self._task("Add tests", task_id="1")]
         result = Prompts("").rescope_prompt(tasks, "")
@@ -712,6 +739,34 @@ class TestRescopePromptVerdicts:
         # Envelope keyword + explicit JSON shape directive.
         assert '"verdicts"' in result
         assert '{"verdicts": [...]}' in result
+
+    def test_narrative_chain_rendered_when_present(self) -> None:
+        # HOL-8 / #1902: per-task narrative_chain renders in the
+        # verdict-envelope prompt too — the verdict-shape prompt is
+        # the modern path, so the chain has to land here.
+        task = self._task("Carry-over", task_id="T1")
+        task["narrative_chain"] = [
+            {
+                "outcome": "no_op",
+                "narrative": "Already covered by an in-flight task.",
+                "intent_comment_id": 99,
+                "ts": "2026-05-23T11:00:00Z",
+            }
+        ]
+        result = Prompts("").rescope_prompt_verdicts(
+            [task], "", intents=[self._intent(1)]
+        )
+        assert '"narrative_chain"' in result
+        assert "Already covered by an in-flight task." in result
+        assert '"intent_comment_id": 99' in result
+
+    def test_narrative_chain_omitted_when_empty(self) -> None:
+        # No chain → no field — keeps the prompt compact for fresh
+        # tasks that haven't seen a rescope yet.
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        assert '"narrative_chain"' not in result
 
     def test_includes_each_intent_with_author(self) -> None:
         intents = [

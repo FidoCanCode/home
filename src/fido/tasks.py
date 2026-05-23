@@ -1708,6 +1708,79 @@ _SKIP_TITLE_PREFIX = "Skipped: "
 _SKIP_TITLE_MAX_BODY = 60
 
 
+def _narrative_chain_entry(verdict: IntentVerdict, ts: str) -> dict[str, Any]:
+    """Build one ``narrative_chain`` entry for *verdict* at timestamp *ts*.
+
+    Entry shape (HOL-8 / #1902):
+
+    .. code-block:: python
+
+        {
+            "outcome": "honored" | "reshaped" | "superseded" | "no_op",
+            "narrative": <verdict.narrative — non-empty per HOL-3>,
+            "intent_comment_id": <verdict.intent_comment_id>,
+            "ts": <ISO-8601 UTC timestamp of the rescope apply>,
+        }
+
+    These accumulate on each task across rescopes so the next rescope
+    prompt can render the chain and let Opus reason about WHY each
+    task got the work it has.  The chain is append-only and stored
+    deep-copied into the task dict on every apply pass.
+    """
+    return {
+        "outcome": verdict.outcome,
+        "narrative": verdict.narrative,
+        "intent_comment_id": verdict.intent_comment_id,
+        "ts": ts,
+    }
+
+
+def _append_narrative_chain_entries(
+    result: list[dict[str, Any]],
+    verdicts: list[IntentVerdict],
+) -> None:
+    """Append per-verdict ``narrative_chain`` entries to touched tasks (HOL-8 / #1902).
+
+    For each verdict, finds the tasks the verdict touched in *result* and
+    appends one chain entry per (verdict, task) pair.  Two attribution
+    sources are unioned:
+
+    1. ``verdict.affected_task_ids`` — Opus's explicit "this verdict
+       acted on these existing task ids" attribution.
+    2. ``task.contributing_intents`` containing
+       ``verdict.intent_comment_id`` — covers freshly-created tasks
+       (Opus ``new`` ops and HOL-6 SKIPPED markers) which by definition
+       have no pre-existing id for Opus to name in ``affected_task_ids``.
+
+    Mutates *result* in place — caller already holds the tasks-list
+    lock and slice-assigns the modified list back.
+
+    No-op when *verdicts* is empty (e.g. ops-mode rescope without
+    intent envelope).
+    """
+    if not verdicts:
+        return
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    tasks_by_id: dict[str, dict[str, Any]] = {t["id"]: t for t in result if "id" in t}
+    for verdict in verdicts:
+        entry = _narrative_chain_entry(verdict, ts)
+        # Resolve the (id) set of tasks this verdict touched: union of
+        # explicit affected_task_ids and freshly-created tasks whose
+        # contributing_intents include this verdict's intent id.
+        touched: set[str] = set()
+        for tid in verdict.affected_task_ids:
+            if tid in tasks_by_id:
+                touched.add(tid)
+        for tid, task in tasks_by_id.items():
+            intents_field = task.get("contributing_intents") or []
+            if verdict.intent_comment_id in intents_field:
+                touched.add(tid)
+        for tid in touched:
+            task = tasks_by_id[tid]
+            chain = task.setdefault("narrative_chain", [])
+            chain.append(entry)
+
+
 def _skip_title_from_narrative(narrative: str) -> str:
     """Build the title for a HOL-6 SKIPPED marker task.
 
@@ -3331,6 +3404,12 @@ def reorder_tasks(
             result = _apply_reorder(
                 current, ordered_items, original_ids, intents=intents
             )
+            # HOL-8 / #1902: append narrative_chain entries for every
+            # verdict that touched a task in the result.  Runs before
+            # the in-progress check so the chain is part of the
+            # durable state that gets compared and slice-assigned
+            # below.  No-op when verdicts is empty (ops-mode rescope).
+            _append_narrative_chain_entries(result, verdicts)
             if inprogress is not None:
                 # The omission ⇒ completed branch is gone (#1357 case A): the
                 # rescope reducer now uses KeepTask for omitted snapshot

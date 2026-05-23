@@ -5363,6 +5363,150 @@ class TestSkipOpsForNoOpVerdicts:
         assert _skip_title_from_narrative("   \n\t\n") == "Skipped"
 
 
+# ── _append_narrative_chain_entries (HOL-8 / #1902) ──────────────────────────
+
+
+class TestAppendNarrativeChainEntries:
+    """HOL-8: verdicts touching tasks append narrative entries to the chain."""
+
+    def test_empty_verdicts_no_change(self) -> None:
+        from fido.tasks import _append_narrative_chain_entries
+
+        tasks = [{"id": "T1", "title": "x"}]
+        _append_narrative_chain_entries(tasks, [])
+        assert "narrative_chain" not in tasks[0]
+
+    def test_explicit_affected_task_id_appends_entry(self) -> None:
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        tasks = [{"id": "T1", "title": "x"}]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=42,
+                outcome="reshaped",
+                ops=({"op": "rewrite", "id": "T1", "title": "new"},),
+                affected_task_ids=("T1",),
+                narrative="reshaped per ask",
+            )
+        ]
+        _append_narrative_chain_entries(tasks, verdicts)
+        assert tasks[0]["narrative_chain"] == [
+            {
+                "outcome": "reshaped",
+                "narrative": "reshaped per ask",
+                "intent_comment_id": 42,
+                "ts": tasks[0]["narrative_chain"][0]["ts"],
+            }
+        ]
+        # ts is a non-empty ISO-8601 string.
+        assert tasks[0]["narrative_chain"][0]["ts"]
+
+    def test_contributing_intents_match_for_fresh_task(self) -> None:
+        # Freshly-created tasks (Opus new ops, HOL-6 SKIPPED markers)
+        # have no pre-existing id for Opus to name in affected_task_ids
+        # — attribution flows through contributing_intents instead.
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        tasks = [
+            {
+                "id": "T-fresh",
+                "title": "Skipped: drop",
+                "contributing_intents": [99],
+            }
+        ]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=99,
+                outcome="no_op",
+                narrative="already covered",
+            )
+        ]
+        _append_narrative_chain_entries(tasks, verdicts)
+        chain = tasks[0]["narrative_chain"]
+        assert len(chain) == 1
+        assert chain[0]["outcome"] == "no_op"
+        assert chain[0]["intent_comment_id"] == 99
+
+    def test_unrelated_verdict_does_not_append(self) -> None:
+        # A verdict that touches neither this task's id nor its
+        # contributing intents must NOT pollute the chain.
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        tasks = [{"id": "T1", "title": "untouched", "contributing_intents": [10]}]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=999,
+                outcome="honored",
+                ops=({"op": "rewrite", "id": "OTHER", "title": "x"},),
+                affected_task_ids=("OTHER",),
+                narrative="not for us",
+            )
+        ]
+        _append_narrative_chain_entries(tasks, verdicts)
+        assert "narrative_chain" not in tasks[0]
+
+    def test_multiple_verdicts_jointly_honored_task_gets_multiple_entries(
+        self,
+    ) -> None:
+        # Canonical 3+1 pattern from #1798 — three review comments
+        # consolidated into one task.  Each verdict appends its own
+        # chain entry; chain length matches verdict count.
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        tasks = [{"id": "T-fix-all", "title": "consolidated"}]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=cid,
+                outcome="honored",
+                affected_task_ids=("T-fix-all",),
+                narrative=f"ask #{cid}",
+            )
+            for cid in (1, 2, 3)
+        ]
+        _append_narrative_chain_entries(tasks, verdicts)
+        chain = tasks[0]["narrative_chain"]
+        assert [e["intent_comment_id"] for e in chain] == [1, 2, 3]
+        assert [e["narrative"] for e in chain] == ["ask #1", "ask #2", "ask #3"]
+
+    def test_existing_chain_appended_not_replaced(self) -> None:
+        # Chains are append-only across rescopes — pre-existing
+        # entries survive; new entry is added at the end.
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        prior_entry = {
+            "outcome": "honored",
+            "narrative": "first rescope",
+            "intent_comment_id": 1,
+            "ts": "2024-01-01T00:00:00Z",
+        }
+        tasks = [
+            {
+                "id": "T1",
+                "title": "x",
+                "narrative_chain": [prior_entry],
+            }
+        ]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=2,
+                outcome="reshaped",
+                ops=({"op": "rewrite", "id": "T1", "title": "y"},),
+                affected_task_ids=("T1",),
+                narrative="second rescope",
+            )
+        ]
+        _append_narrative_chain_entries(tasks, verdicts)
+        chain = tasks[0]["narrative_chain"]
+        assert len(chain) == 2
+        assert chain[0] == prior_entry
+        assert chain[1]["narrative"] == "second rescope"
+
+
 class TestSkipMarkerEndToEnd:
     """HOL-6: integration through ``_apply_reorder``.
 

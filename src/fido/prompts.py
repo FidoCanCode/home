@@ -406,13 +406,23 @@ class Prompts:
         completed = [t for t in task_list if t.get("status") == "completed"]
 
         def _fmt(t: dict[str, Any]) -> dict[str, Any]:
-            return {
+            out: dict[str, Any] = {
                 "id": t.get("id", ""),
                 "type": t.get("type", "spec"),
                 "status": t.get("status", "pending"),
                 "title": t.get("title", ""),
                 "description": t.get("description", ""),
             }
+            # HOL-8 / #1902: render narrative_chain so Opus sees the
+            # history of verdicts that touched this task across prior
+            # rescopes — lets the next-rescope reasoning explain WHY
+            # each task got the work it has (and not just the current
+            # title/description).  Omitted when empty so the prompt
+            # stays compact for fresh tasks.
+            chain = t.get("narrative_chain") or []
+            if chain:
+                out["narrative_chain"] = chain
+            return out
 
         pending_json = json.dumps([_fmt(t) for t in pending], indent=2)
         completed_titles = [t.get("title", "") for t in completed]
@@ -589,13 +599,23 @@ class Prompts:
         completed = [t for t in task_list if t.get("status") == "completed"]
 
         def _fmt(t: dict[str, Any]) -> dict[str, Any]:
-            return {
+            out: dict[str, Any] = {
                 "id": t.get("id", ""),
                 "type": t.get("type", "spec"),
                 "status": t.get("status", "pending"),
                 "title": t.get("title", ""),
                 "description": t.get("description", ""),
             }
+            # HOL-8 / #1902: render narrative_chain so Opus sees the
+            # history of verdicts that touched this task across prior
+            # rescopes — lets the next-rescope reasoning explain WHY
+            # each task got the work it has (and not just the current
+            # title/description).  Omitted when empty so the prompt
+            # stays compact for fresh tasks.
+            chain = t.get("narrative_chain") or []
+            if chain:
+                out["narrative_chain"] = chain
+            return out
 
         pending_json = json.dumps([_fmt(t) for t in pending], indent=2)
         completed_titles = [t.get("title", "") for t in completed]
