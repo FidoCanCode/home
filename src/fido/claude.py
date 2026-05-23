@@ -490,6 +490,8 @@ class ClaudeSession(OwnedSession):
         session_id: str | None = None,
         tools: str | None = None,
         snapshot_publisher: provider.SnapshotPublisher | None = None,
+        talker_resolver: provider.TalkerResolver | None = None,
+        register_talker: Callable[[provider.SessionTalker], None] | None = None,
     ) -> None:
         self._idle_timeout = idle_timeout
         self._selector = selector
@@ -504,6 +506,12 @@ class ClaudeSession(OwnedSession):
         # the observation (#1792).  Set inside ``_stream_lock`` to be safe.
         self._last_turn_cancelled_sticky = False
         self._repo_name = repo_name
+        # Injectable collaborators for provider coordination — tests pass typed
+        # fakes at construction time; production uses the module-level defaults.
+        self._talker_resolver: provider.TalkerResolver | None = talker_resolver
+        self._register_talker: Callable[[provider.SessionTalker], None] = (
+            register_talker if register_talker is not None else provider.register_talker
+        )
         self._model = model_name(
             ProviderModel("claude-opus-4-6") if model is None else model
         )
@@ -897,12 +905,16 @@ class ClaudeSession(OwnedSession):
             # worker's turn aborts and releases promptly rather than being
             # waited out (#637).  Webhook-on-webhook still queues FIFO with
             # no cancel.
-            provider.try_preempt_worker(self._repo_name, self._fire_worker_cancel)
+            provider.try_preempt_worker(
+                self._repo_name,
+                self._fire_worker_cancel,
+                self._talker_resolver,
+            )
             self._fsm_acquire_handler()
         self._bump_entry_depth()
         if self._repo_name is not None:
             try:
-                provider.register_talker(
+                self._register_talker(
                     provider.SessionTalker(
                         repo_name=self._repo_name,
                         thread_id=threading.get_ident(),

@@ -1,6 +1,7 @@
 """Tests for ClaudeSession.hold_for_handler (#658)."""
 
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -25,7 +26,30 @@ def _make_session_proc(lines: list[str]) -> MagicMock:
     return proc
 
 
-def _setup_session(tmp_path: Path, repo: str = "owner/repo") -> ClaudeSession:
+class _SpyClaudeSession(ClaudeSession):
+    """ClaudeSession subclass that records ``_fire_worker_cancel`` invocations.
+
+    Tests that need to assert whether the cancel signal fired pass an instance
+    of this class instead of a bare ``ClaudeSession``.  The override skips the
+    real cancel mechanism (wakeup-pipe write + ``_cancel.set()``) because these
+    tests have no actual worker thread blocking inside ``iter_events`` — all
+    they need is a record of the call count.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.cancel_calls: list[int] = []
+
+    def _fire_worker_cancel(self) -> None:
+        self.cancel_calls.append(1)
+
+
+def _setup_session(
+    tmp_path: Path,
+    repo: str = "owner/repo",
+    *,
+    register_talker: Callable[[provider.SessionTalker], None] | None = None,
+) -> ClaudeSession:
     system_file = tmp_path / "system.md"
     system_file.write_text("sys")
     proc = _make_session_proc(['{"type":"result","result":"reply"}\n'])
@@ -37,6 +61,7 @@ def _setup_session(tmp_path: Path, repo: str = "owner/repo") -> ClaudeSession:
         selector=MagicMock(return_value=([proc.stdout], [], [])),
         repo_name=repo,
         model="claude-opus-4-6",
+        register_talker=register_talker,
     )
 
 
@@ -60,19 +85,18 @@ def test_hold_acquires_lock_and_registers_talker(tmp_path: Path) -> None:
 
 
 def test_nested_with_inside_hold_does_not_double_register(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """Re-entering ``with session:`` inside ``hold_for_handler`` must not
     attempt a second talker registration (would raise SessionLeakError)."""
-    session = _setup_session(tmp_path)
-    register_calls = []
+    register_calls: list[str] = []
     real_register = provider.register_talker
 
-    def counting_register(talker: object) -> None:
+    def counting_register(talker: provider.SessionTalker) -> None:
         register_calls.append(talker.kind)
         real_register(talker)
 
-    monkeypatch.setattr(provider, "register_talker", counting_register)
+    session = _setup_session(tmp_path, register_talker=counting_register)
     provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():
@@ -87,26 +111,33 @@ def test_nested_with_inside_hold_does_not_double_register(
         session.stop()
 
 
-def test_hold_preempt_fires_cancel_when_worker_holds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_hold_preempt_fires_cancel_when_worker_holds(tmp_path: Path) -> None:
     """hold_for_handler() fires _fire_worker_cancel iff
     the current lock holder is a worker and the caller is a webhook."""
-    session = _setup_session(tmp_path)
+    system_file = tmp_path / "system.md"
+    system_file.write_text("sys")
+    proc = _make_session_proc(['{"type":"result","result":"reply"}\n'])
+    proc.pid = 55555
 
-    def fake_talker(kind: str) -> SessionTalker:
+    def fake_talker(_repo: str) -> SessionTalker:
         return SessionTalker(
             repo_name="owner/repo",
             thread_id=999_999,
-            kind=kind,  # type: ignore[arg-type]
+            kind="worker",  # type: ignore[arg-type]
             description="fake",
             subprocess_pid=55555,
             started_at=talker_now(),
         )
 
-    monkeypatch.setattr(provider, "get_talker", lambda _repo: fake_talker("worker"))
-    cancel_calls = []
-    monkeypatch.setattr(session, "_fire_worker_cancel", lambda: cancel_calls.append(1))
+    session = _SpyClaudeSession(
+        system_file,
+        work_dir=tmp_path,
+        popen=MagicMock(return_value=proc),
+        selector=MagicMock(return_value=([proc.stdout], [], [])),
+        repo_name="owner/repo",
+        model="claude-opus-4-6",
+        talker_resolver=fake_talker,
+    )
     provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():
@@ -114,20 +145,28 @@ def test_hold_preempt_fires_cancel_when_worker_holds(
     finally:
         provider.set_thread_kind(None)
         session.stop()
-    assert cancel_calls == [1]
+    assert session.cancel_calls == [1]
 
 
-def test_hold_preempt_no_fire_when_no_worker_holder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_hold_preempt_no_fire_when_no_worker_holder(tmp_path: Path) -> None:
     """preempt_worker=True with no current holder — try_preempt_worker returns
     (False, None) and no cancel fires.  Exercises the ``else`` branch of the
     new preempt outcome logging in hold_for_handler (#955)."""
-    session = _setup_session(tmp_path)
+    system_file = tmp_path / "system.md"
+    system_file.write_text("sys")
+    proc = _make_session_proc(['{"type":"result","result":"reply"}\n'])
+    proc.pid = 55555
+
     # No holder registered — try_preempt_worker sees current_kind=None.
-    monkeypatch.setattr(provider, "get_talker", lambda _repo: None)
-    cancel_calls = []
-    monkeypatch.setattr(session, "_fire_worker_cancel", lambda: cancel_calls.append(1))
+    session = _SpyClaudeSession(
+        system_file,
+        work_dir=tmp_path,
+        popen=MagicMock(return_value=proc),
+        selector=MagicMock(return_value=([proc.stdout], [], [])),
+        repo_name="owner/repo",
+        model="claude-opus-4-6",
+        talker_resolver=lambda _repo: None,
+    )
     provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():
@@ -135,35 +174,42 @@ def test_hold_preempt_no_fire_when_no_worker_holder(
     finally:
         provider.set_thread_kind(None)
         session.stop()
-    assert cancel_calls == []
+    assert session.cancel_calls == []
 
 
-def test_hold_preempt_skipped_when_no_preempt_worker_flag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_hold_preempt_skipped_when_no_preempt_worker_flag(tmp_path: Path) -> None:
     """Default preempt_worker=False — no cancel fires even with a worker
     holder."""
-    session = _setup_session(tmp_path)
+    system_file = tmp_path / "system.md"
+    system_file.write_text("sys")
+    proc = _make_session_proc(['{"type":"result","result":"reply"}\n'])
+    proc.pid = 55555
 
-    def fake_talker(kind: str) -> SessionTalker:
+    def fake_talker(_repo: str) -> SessionTalker:
         return SessionTalker(
             repo_name="owner/repo",
             thread_id=999_999,
-            kind=kind,  # type: ignore[arg-type]
+            kind="worker",  # type: ignore[arg-type]
             description="fake",
             subprocess_pid=55555,
             started_at=talker_now(),
         )
 
-    monkeypatch.setattr(provider, "get_talker", lambda _repo: fake_talker("worker"))
-    cancel_calls = []
-    monkeypatch.setattr(session, "_fire_worker_cancel", lambda: cancel_calls.append(1))
+    session = _SpyClaudeSession(
+        system_file,
+        work_dir=tmp_path,
+        popen=MagicMock(return_value=proc),
+        selector=MagicMock(return_value=([proc.stdout], [], [])),
+        repo_name="owner/repo",
+        model="claude-opus-4-6",
+        talker_resolver=fake_talker,
+    )
     try:
         with session.hold_for_handler():  # preempt-always now lives in __enter__
             pass
     finally:
         session.stop()
-    assert cancel_calls == []
+    assert session.cancel_calls == []
 
 
 def test_other_thread_blocks_while_held(tmp_path: Path) -> None:
@@ -304,7 +350,7 @@ def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
 
 
 def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """Post-#979: after hold_for_handler() fires the
     cancel signal, the handler's own prompt() must run to completion.  In
@@ -313,36 +359,39 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
     enters the stream is clean.  The cancel signal that was set for the
     previous holder is unconditionally cleared at the start of the handler's
     iter_events call."""
-    session = _setup_session(tmp_path)
+    system_file = tmp_path / "system.md"
+    system_file.write_text("sys")
 
-    def fake_talker(kind: str) -> SessionTalker:
+    def fake_talker(_repo: str) -> SessionTalker:
         return SessionTalker(
             repo_name="owner/repo",
             thread_id=999_999,
-            kind=kind,  # type: ignore[arg-type]
+            kind="worker",  # type: ignore[arg-type]
             description="fake",
             subprocess_pid=55555,
             started_at=talker_now(),
         )
 
-    monkeypatch.setattr(provider, "get_talker", lambda _repo: fake_talker("worker"))
-
     # Pipe contains exactly the handler's own response — no stale events
     # from the prior turn (those were drained inside iter_events when the
     # worker turn closed cleanly on type=result).
+    #
+    # The same proc mock is used for both the initial spawn and any
+    # subsequent _respawn call (triggered by prompt()'s switch_tools when
+    # transitioning from worker tools → READ_ONLY_ALLOWED_TOOLS).  Because
+    # popen always returns the same object, _selector and _proc stay in sync
+    # across the respawn so iter_events never spins on a mismatched stdout.
     proc = _make_session_proc(['{"type":"result","result":"triage-reply"}\n'])
     proc.pid = 55555
-    monkeypatch.setattr(session, "_proc", proc)
-    # hold_for_handler triggers switch_tools → _respawn, which calls
-    # self._popen_fn(...) to spawn a "new" subprocess.  Point _popen_fn
-    # at the same mocked proc so the respawn doesn't revert to the
-    # _setup_session default proc (whose stdout would no longer match
-    # _selector, leaving iter_events to spin until OOM).
-    monkeypatch.setattr(session, "_popen_fn", MagicMock(return_value=proc))
-    monkeypatch.setattr(
-        session, "_selector", MagicMock(return_value=([proc.stdout], [], []))
+    session = ClaudeSession(
+        system_file,
+        work_dir=tmp_path,
+        popen=MagicMock(return_value=proc),
+        selector=MagicMock(return_value=([proc.stdout], [], [])),
+        repo_name="owner/repo",
+        model="claude-opus-4-6",
+        talker_resolver=fake_talker,
     )
-
     provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
         with session.hold_for_handler():
@@ -441,9 +490,7 @@ def test_queued_webhook_acquires_lock_before_worker_after_inner_prompt(
     )
 
 
-def test_hold_reraises_leak_error_and_releases_lock(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_hold_reraises_leak_error_and_releases_lock(tmp_path: Path) -> None:
     """If register_talker raises SessionLeakError inside hold, the lock must
     be released before the exception propagates so we don't deadlock."""
     session = _setup_session(tmp_path)
