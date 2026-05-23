@@ -16,7 +16,9 @@ prose promises always correspond to queued tasks (fixes #1218).
 
 import json
 import logging
-from typing import Any
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, TypeVar
 
 from fido.prompts import Prompts
 from fido.provider import (
@@ -36,6 +38,120 @@ log = logging.getLogger(__name__)
 
 #: Maximum number of synthesis LLM attempts before raising.
 MAX_RETRIES: int = 3
+
+
+# ---------------------------------------------------------------------------
+# Critic loop helper (HOL-14 / #1908)
+# ---------------------------------------------------------------------------
+#
+# The same shape — generate → verify → loop on gap → exhaust — repeats at
+# every LLM emission point in the holistic-gate architecture (#1894 / Layer 2):
+# intent registration, new-task creation, task completion, reply prose,
+# insight filing.  HOL-15..HOL-19 each instantiate this with their own
+# narrow verify question.  HOL-14 owns the helper; downstream leaves only
+# supply ``generate`` and ``verify``.
+
+_T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class CriticVerdict:
+    """One verdict from a critic over a proposed LLM emission.
+
+    ``passed`` is the dispatch axis: ``True`` short-circuits the loop and
+    returns the proposal; ``False`` records ``gap`` as a hint for the next
+    ``generate`` attempt.
+
+    ``gap`` is a one-line plain-English description of why the proposal
+    failed — fed back into ``generate`` as the retry nudge so the next
+    proposal can address the specific complaint.  Empty when ``passed``;
+    required when ``not passed``.
+    """
+
+    passed: bool
+    gap: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.passed and not self.gap.strip():
+            raise ValueError(
+                "CriticVerdict.gap is required when passed=False — "
+                "the gap is what the next generate() attempt needs to address"
+            )
+
+
+class CriticExhaustedError(Exception):
+    """All :func:`critic_loop` attempts failed verification.
+
+    Carries the chain of gaps so the caller can route the exhaustion to the
+    appropriate sentinel (HOL-20/21: bug-and-block via the existing
+    ``stuck-on-task`` BLOCKED path).
+    """
+
+    def __init__(self, label: str, gaps: list[str]) -> None:
+        self.label = label
+        self.gaps = list(gaps)
+        msg = (
+            f"critic_loop({label!r}) exhausted {len(gaps)} attempts — "
+            f"final gap: {gaps[-1]!r}"
+        )
+        super().__init__(msg)
+
+
+def critic_loop(
+    generate: Callable[[int, str], _T],
+    verify: Callable[[_T], CriticVerdict],
+    *,
+    label: str,
+    max_attempts: int = MAX_RETRIES,
+) -> _T:
+    """Run the generate → verify → loop pattern over an LLM emission.
+
+    ``generate(attempt, gap_so_far)`` produces a candidate of type ``_T``.
+    On the first attempt ``gap_so_far`` is the empty string.  On later
+    attempts it is the gap from the previous failed verdict, which the
+    generator weaves into its prompt nudge so the next candidate addresses
+    the specific complaint.
+
+    ``verify(candidate)`` returns a :class:`CriticVerdict`.  ``passed=True``
+    immediately returns the candidate; ``passed=False`` records the gap and
+    loops.
+
+    ``label`` is a short identifier (e.g. ``"intent-coverage"``,
+    ``"task-completion"``) used in the exhaustion error and log lines so
+    HOL-20/21 can route by emission point.
+
+    Raises :class:`CriticExhaustedError` when ``max_attempts`` candidates
+    all fail verification.  The error carries every gap so the bug-and-block
+    routing can attach the full retry history to the auto-filed issue.
+
+    ``generate`` is allowed to raise — its exception propagates out
+    untouched.  Only verification gaps drive the loop.
+    """
+    gaps: list[str] = []
+    gap_so_far = ""
+    for attempt in range(max_attempts):
+        candidate = generate(attempt, gap_so_far)
+        verdict = verify(candidate)
+        if verdict.passed:
+            if attempt > 0:
+                log.info(
+                    "critic_loop[%s]: passed on attempt %d/%d",
+                    label,
+                    attempt + 1,
+                    max_attempts,
+                )
+            return candidate
+        gaps.append(verdict.gap)
+        gap_so_far = verdict.gap
+        log.warning(
+            "critic_loop[%s]: attempt %d/%d failed — gap: %s",
+            label,
+            attempt + 1,
+            max_attempts,
+            verdict.gap,
+        )
+    raise CriticExhaustedError(label, gaps)
+
 
 _RETRY_SUFFIX = (
     "\n\n---\n"

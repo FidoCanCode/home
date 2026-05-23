@@ -9,11 +9,14 @@ import pytest
 from fido.synthesis import Insight
 from fido.synthesis_call import (
     MAX_RETRIES,
+    CriticExhaustedError,
+    CriticVerdict,
     SynthesisExhaustedError,
     _extract_json_objects,
     _parse_comment_response,
     call_failure_explanation,
     call_synthesis,
+    critic_loop,
 )
 from fido.types import ActiveIssue, ActivePR
 
@@ -848,3 +851,137 @@ class TestCallSynthesisVerificationTurn:
 
         with pytest.raises(SessionLeakError):
             call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+
+# ---------------------------------------------------------------------------
+# HOL-14 / #1908 — critic_loop helper
+# ---------------------------------------------------------------------------
+
+
+class TestCriticVerdict:
+    """Constructor invariant: a failing verdict must carry a non-empty
+    gap.  The gap is the nudge the next generate() attempt needs to
+    address — losing it defeats the loop."""
+
+    def test_pass_requires_no_gap(self) -> None:
+        v = CriticVerdict(passed=True)
+        assert v.passed
+        assert v.gap == ""
+
+    def test_pass_with_gap_allowed(self) -> None:
+        v = CriticVerdict(passed=True, gap="optional context")
+        assert v.passed
+        assert v.gap == "optional context"
+
+    def test_fail_requires_non_empty_gap(self) -> None:
+        with pytest.raises(ValueError, match="gap is required"):
+            CriticVerdict(passed=False)
+
+    def test_fail_rejects_empty_gap(self) -> None:
+        with pytest.raises(ValueError, match="gap is required"):
+            CriticVerdict(passed=False, gap="")
+
+    def test_fail_rejects_whitespace_gap(self) -> None:
+        with pytest.raises(ValueError, match="gap is required"):
+            CriticVerdict(passed=False, gap="   \n\t  ")
+
+
+class TestCriticLoop:
+    """Behavioural contract of :func:`critic_loop` — the shape HOL-15..HOL-19
+    depend on.  Tests use hand-rolled lambdas / fakes per project rule."""
+
+    def test_returns_first_passing_candidate(self) -> None:
+        attempts: list[tuple[int, str]] = []
+
+        def generate(attempt: int, gap: str) -> str:
+            attempts.append((attempt, gap))
+            return "candidate"
+
+        def verify(_c: str) -> CriticVerdict:
+            return CriticVerdict(passed=True)
+
+        result = critic_loop(generate, verify, label="t")
+        assert result == "candidate"
+        assert attempts == [(0, "")]
+
+    def test_loops_with_gap_until_passing(self) -> None:
+        gap_seen: list[str] = []
+
+        def generate(attempt: int, gap: str) -> str:
+            gap_seen.append(gap)
+            return f"v{attempt}"
+
+        def verify(candidate: str) -> CriticVerdict:
+            if candidate == "v0":
+                return CriticVerdict(passed=False, gap="missing X")
+            if candidate == "v1":
+                return CriticVerdict(passed=False, gap="missing Y")
+            return CriticVerdict(passed=True)
+
+        result = critic_loop(generate, verify, label="t", max_attempts=5)
+        assert result == "v2"
+        assert gap_seen == ["", "missing X", "missing Y"]
+
+    def test_raises_critic_exhausted_after_max_attempts(self) -> None:
+        def generate(attempt: int, gap: str) -> str:
+            return f"v{attempt}"
+
+        def verify(c: str) -> CriticVerdict:
+            return CriticVerdict(passed=False, gap=f"never-passes ({c})")
+
+        with pytest.raises(CriticExhaustedError) as excinfo:
+            critic_loop(generate, verify, label="my-emission", max_attempts=3)
+        err = excinfo.value
+        assert err.label == "my-emission"
+        # Every gap is preserved so HOL-20/21 can attach full retry
+        # history to the auto-filed bug.
+        assert err.gaps == [
+            "never-passes (v0)",
+            "never-passes (v1)",
+            "never-passes (v2)",
+        ]
+
+    def test_generate_exception_propagates(self) -> None:
+        """The loop is for verification gaps, not generation errors.
+        Generation exceptions (transport, parsing, context overflow)
+        should bubble out untouched so the caller decides whether to
+        retry or surface."""
+
+        class _Boom(RuntimeError):
+            pass
+
+        def generate(attempt: int, gap: str) -> str:
+            raise _Boom("transport")
+
+        def verify(_c: str) -> CriticVerdict:
+            return CriticVerdict(passed=True)
+
+        with pytest.raises(_Boom, match="transport"):
+            critic_loop(generate, verify, label="t")
+
+    def test_default_max_attempts_uses_synthesis_constant(self) -> None:
+        attempts: list[int] = []
+
+        def generate(attempt: int, gap: str) -> str:
+            attempts.append(attempt)
+            return "x"
+
+        def verify(_c: str) -> CriticVerdict:
+            return CriticVerdict(passed=False, gap="nope")
+
+        with pytest.raises(CriticExhaustedError):
+            critic_loop(generate, verify, label="t")
+        assert len(attempts) == MAX_RETRIES
+
+    def test_label_in_exhausted_message(self) -> None:
+        """HOL-20/21 routes by label, so the label has to make it onto
+        the error path verbatim."""
+
+        def generate(attempt: int, gap: str) -> str:
+            return "x"
+
+        def verify(_c: str) -> CriticVerdict:
+            return CriticVerdict(passed=False, gap="g")
+
+        with pytest.raises(CriticExhaustedError, match="my-special-label"):
+            critic_loop(generate, verify, label="my-special-label", max_attempts=1)
