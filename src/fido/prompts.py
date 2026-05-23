@@ -518,12 +518,25 @@ class Prompts:
             '"title": "...", "description": "..."}\n'
             "      — fold each source's lineage into the target; sources close\n"
             '  {"op": "split", "id": "<existing-id>", "children": '
-            '[{"title": "...", "description": "..."}, ...]}\n'
+            '[{"title": "...", "description": "...", '
+            '"invariant": "..."}, ...]}\n'
             "      — close the source and spawn N children inheriting its lineage\n"
             '  {"op": "new", "title": "...", "description": "...", '
-            '"type": "spec"}\n'
+            '"type": "spec", "invariant": "..."}\n'
             "      — create a brand-new task (fresh id assigned by the runtime)\n"
             "\n"
+            "One invariant per task (HOL-12 / #1906) — every ``new`` op and "
+            "every ``split`` child MUST carry a one-line ``invariant``: the "
+            "single property the resulting commit will establish (a Rocq "
+            "lemma name, a Python assertion, a CI rule that starts failing, "
+            "or one behavioural change the reviewer can verify in isolation).  "
+            "If you can't name one invariant for a proposed task, the task "
+            "is too big — split it into multiple ``new`` ops, one per "
+            'invariant.  Examples: "rescope ops are typed values, not raw '
+            'dicts" / "no_op verdicts produce SKIPPED marker tasks" / '
+            '"comment-stream backlog drains before next webhook".  Counter-'
+            'examples (too broad): "refactor the rescope reducer" / "fix '
+            'all the bugs from PR review" / "improve test coverage".\n\n'
             "Provenance — every op above accepts an optional "
             '"contributing_intents": [<intent comment_id>, ...] field listing '
             "the change-request comment ids from the intents block above that "
@@ -721,12 +734,25 @@ class Prompts:
             '"title": "...", "description": "..."}\n'
             "      — fold each source's lineage into target; sources close\n"
             '  {"op": "split", "id": "<existing-id>", "children": '
-            '[{"title": "...", "description": "..."}, ...]}\n'
+            '[{"title": "...", "description": "...", '
+            '"invariant": "..."}, ...]}\n'
             "      — close the source and spawn N children inheriting its lineage\n"
             '  {"op": "new", "title": "...", "description": "...", '
-            '"type": "spec"}\n'
+            '"type": "spec", "invariant": "..."}\n'
             "      — create a brand-new task (fresh id assigned by the runtime)\n"
             "\n"
+            "One invariant per task (HOL-12 / #1906) — every ``new`` op and "
+            "every ``split`` child MUST carry a one-line ``invariant``: the "
+            "single property the resulting commit will establish (a Rocq "
+            "lemma name, a Python assertion, a CI rule that starts failing, "
+            "or one behavioural change the reviewer can verify in isolation).  "
+            "If you can't name one invariant for a proposed task, the task "
+            "is too big — split it into multiple ``new`` ops, one per "
+            'invariant.  Examples: "rescope ops are typed values, not raw '
+            'dicts" / "no_op verdicts produce SKIPPED marker tasks" / '
+            '"comment-stream backlog drains before next webhook".  Counter-'
+            'examples (too broad): "refactor the rescope reducer" / "fix '
+            'all the bugs from PR review" / "improve test coverage".\n\n'
             "Constraints:\n"
             "1. Exactly one verdict per intent (no missing, no duplicates).\n"
             "2. ``by_intent_comment_id`` must reference another intent in this "

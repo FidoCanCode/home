@@ -702,6 +702,38 @@ class TestRescopePrompt:
         # in the new schema.
         assert '{"op": "new"' in result
 
+    def test_new_op_schema_advertises_invariant_field(self) -> None:
+        """HOL-12 / #1906: the ``new`` op schema must show
+        ``"invariant": "..."`` so Opus emits one per task."""
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        # Look at the new-op JSON sample only (not the constraint
+        # paragraph, which mentions "invariant" as well).
+        new_op_block = result.split('{"op": "new"')[1].split("\n")[0]
+        assert '"invariant"' in new_op_block
+
+    def test_split_children_schema_advertises_invariant_field(self) -> None:
+        """HOL-12 / #1906: every ``split`` child is a fresh task too,
+        so the schema example must include an ``invariant`` field on
+        each child."""
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        split_block = result.split('{"op": "split"')[1].split("\n")[0]
+        assert '"invariant"' in split_block
+
+    def test_one_invariant_per_task_rule_stated(self) -> None:
+        """HOL-12 / #1906: the rule itself — ``new``/``split`` children
+        carry exactly one invariant — must appear in plain English so
+        Opus reasons about it, not just the schema field."""
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        assert "One invariant per task" in result
+        assert "HOL-12" in result
+        # The split-when-too-big guidance has to be explicit — otherwise
+        # Opus will emit one giant ``new`` op with a hand-wavy
+        # invariant rather than fan it into multiple ops.
+        assert "split it into multiple" in result
+
 
 # ── Prompts.rescope_prompt_verdicts (#1810 / INV-D wiring leaf) ──────────────
 
@@ -874,6 +906,33 @@ class TestRescopePromptVerdicts:
             "new",
         ):
             assert f'"op": "{op_name}"' in result
+
+    def test_new_op_schema_advertises_invariant_field(self) -> None:
+        """HOL-12 / #1906: ``new`` op schema in the verdict envelope
+        must advertise ``invariant`` so Opus emits one per task."""
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        new_op_block = result.split('{"op": "new"')[1].split("\n")[0]
+        assert '"invariant"' in new_op_block
+
+    def test_split_children_schema_advertises_invariant_field(self) -> None:
+        """HOL-12 / #1906: every ``split`` child carries one invariant."""
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        split_block = result.split('{"op": "split"')[1].split("\n")[0]
+        assert '"invariant"' in split_block
+
+    def test_one_invariant_per_task_rule_stated(self) -> None:
+        """HOL-12 / #1906: the prose rule must be explicit (so Opus
+        reasons about scope, not just fills in a slot)."""
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        assert "One invariant per task" in result
+        assert "HOL-12" in result
+        assert "split it into multiple" in result
 
     def test_current_task_list_included(self) -> None:
         tasks = [
