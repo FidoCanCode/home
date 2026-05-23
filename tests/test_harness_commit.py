@@ -26,6 +26,7 @@ from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
     SkipTaskWithReason,
+    SplitTask,
     StuckOnTask,
 )
 from fido.types import GitIdentity
@@ -109,6 +110,18 @@ class TestCommitSkip:
         hc, runner = _committer(tmp_path, [])
         result = hc.commit(StuckOnTask(reason="need human input"))
         assert result == CommitSkipped(reason="need human input")
+        assert runner.calls == []
+
+    def test_split_task_returns_commit_skipped(self, tmp_path: Path) -> None:
+        """HOL-13 / #1907: SplitTask is non-commit (like StuckOnTask /
+        SkipTaskWithReason) — the LLM declared the task scope exceeds
+        one invariant, so no working-tree changes belong here.  The
+        commit decision is uniform; the "park for re-decomposition"
+        vs. "park as BLOCKED" distinction lives upstream in the
+        worker handler."""
+        hc, runner = _committer(tmp_path, [])
+        result = hc.commit(SplitTask(reason="task spans 3 invariants"))
+        assert result == CommitSkipped(reason="task spans 3 invariants")
         assert runner.calls == []
 
 

@@ -11189,6 +11189,11 @@ class TestExecuteTask:
         """JSON sentinel for stuck-on-task."""
         return f'{{"turn_outcome":"stuck-on-task","reason":"{reason}"}}'
 
+    @staticmethod
+    def _split_output(reason: str = "task spans 3 invariants") -> str:
+        """JSON sentinel for split-task (HOL-13 / #1907)."""
+        return f'{{"turn_outcome":"split-task","reason":"{reason}"}}'
+
     def test_returns_false_when_no_tasks(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
         fido_dir = self._fido_dir(tmp_path)
@@ -12501,6 +12506,40 @@ class TestExecuteTask:
         _repo, _pr, comment_body = worker.gh.comment_issue.call_args[0]
         assert "BLOCKED:" in comment_body
         assert "need API credentials" in comment_body
+
+    def test_split_task_posts_redecomp_blocked_and_parks(self, tmp_path: Path) -> None:
+        """HOL-13 / #1907: split-task sentinel parks the task with a
+        BLOCKED comment whose body distinguishes the "needs
+        re-decomposition" cause from generic stuck-on-task — that label
+        is what future rescope passes (or the human) read to act on the
+        marker."""
+        from fido.types import TaskStatus
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Refactor the whole rescope reducer")
+        fake_runner = _FakeProviderRunner(
+            "sid",
+            self._split_output(
+                "scope spans 3 invariants: typed ops + skipped lift + chain merge"
+            ),
+        )
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [task]
+        worker.set_status = MagicMock()
+        worker._git = self._simple_git_mock()
+        result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+        # Same parking shape as StuckOnTask: not completed, marked BLOCKED.
+        worker._tasks.complete_with_resolve.assert_not_called()
+        worker._tasks.update.assert_any_call("t1", TaskStatus.BLOCKED)
+        # Comment body carries the HOL-13 marker so downstream detection
+        # can distinguish "needs re-decomposition" from generic stuck.
+        worker.gh.comment_issue.assert_called_once()
+        _repo, _pr, comment_body = worker.gh.comment_issue.call_args[0]
+        assert "BLOCKED (needs re-decomposition" in comment_body
+        assert "HOL-13" in comment_body
+        assert "spans 3 invariants" in comment_body
 
     def test_commit_in_progress_continues_session(self, tmp_path: Path) -> None:
         """commit-task-in-progress sentinel causes the loop to continue with

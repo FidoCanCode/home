@@ -6,6 +6,7 @@ from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
     SkipTaskWithReason,
+    SplitTask,
     StuckOnTask,
 )
 from fido.turn_outcome import Insight, OutOfScopeAsk, parse_turn_outcome
@@ -145,6 +146,53 @@ class TestParseTurnOutcomeStuckOnTask:
         line = '{"turn_outcome": "stuck-on-task", "reason": " "}'
         with pytest.raises(ValueError, match="non-empty.*reason"):
             parse_turn_outcome(line)
+
+
+class TestParseTurnOutcomeSplitTask:
+    """HOL-13 / #1907: worker emits ``split-task`` when the task's scope
+    exceeds one statable invariant.  Parser mirrors ``stuck-on-task`` —
+    same field shape, same validation, distinct dispatch type."""
+
+    def test_valid(self) -> None:
+        line = (
+            '{"turn_outcome": "split-task", '
+            '"reason": "task spans 3 invariants: A, B, C"}'
+        )
+        assert parse_turn_outcome(line).outcome == SplitTask(
+            reason="task spans 3 invariants: A, B, C"
+        )
+
+    def test_missing_reason(self) -> None:
+        with pytest.raises(ValueError, match="non-empty.*reason"):
+            parse_turn_outcome('{"turn_outcome": "split-task"}')
+
+    def test_reason_not_string(self) -> None:
+        line = '{"turn_outcome": "split-task", "reason": 42}'
+        with pytest.raises(ValueError, match="non-empty.*reason"):
+            parse_turn_outcome(line)
+
+    def test_reason_empty(self) -> None:
+        line = '{"turn_outcome": "split-task", "reason": ""}'
+        with pytest.raises(ValueError, match="non-empty.*reason"):
+            parse_turn_outcome(line)
+
+    def test_reason_whitespace_only(self) -> None:
+        line = '{"turn_outcome": "split-task", "reason": "\\t \\n"}'
+        with pytest.raises(ValueError, match="non-empty.*reason"):
+            parse_turn_outcome(line)
+
+    def test_distinct_from_stuck_on_task(self) -> None:
+        """The two parking sentinels must dispatch to distinct types so
+        the worker handler can route them differently (HOL-13 wires
+        ``split-task`` to the "needs re-decomposition" comment shape
+        that future rescope passes detect)."""
+        stuck_line = '{"turn_outcome": "stuck-on-task", "reason": "x"}'
+        split_line = '{"turn_outcome": "split-task", "reason": "x"}'
+        stuck = parse_turn_outcome(stuck_line).outcome
+        split = parse_turn_outcome(split_line).outcome
+        assert isinstance(stuck, StuckOnTask)
+        assert isinstance(split, SplitTask)
+        assert stuck != split
 
 
 class TestParseTurnOutcomeMultiLine:

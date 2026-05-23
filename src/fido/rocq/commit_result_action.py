@@ -19,6 +19,7 @@ from fido.rocq.turn_outcome import (
     CommitTaskInProgress,
     SkipTaskWithReason,
     StuckOnTask,
+    SplitTask,
     TurnOutcomeT,
 )
 from fido.rocq.commit_result import (
@@ -83,6 +84,8 @@ def outcome_is_complete(o: TurnOutcome) -> bool:
         case SkipTaskWithReason(reason):
             return False
         case StuckOnTask(reason):
+            return False
+        case SplitTask(reason):
             return False
         case __impossible:
             assert_never(__impossible)

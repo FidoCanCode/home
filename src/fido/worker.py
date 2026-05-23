@@ -67,6 +67,7 @@ from fido.rocq.commit_result import (
     CommitSuccess,
 )
 from fido.rocq.turn_outcome import (
+    SplitTask,
     StuckOnTask,
 )
 from fido.setup_outcome import NoTasksNeeded, parse_setup_outcome
@@ -4127,6 +4128,31 @@ class Worker:
                         repo_ctx.repo,
                         pr_number,
                         f"BLOCKED: {outcome.reason}",
+                    )
+                    with self._state.modify() as state:
+                        state.pop("current_task_id", None)
+                    return True
+                if isinstance(outcome, SplitTask):
+                    # HOL-13 / #1907: LLM picked up the task and declared
+                    # its scope exceeds one statable invariant.  Same
+                    # parking shape as StuckOnTask (BLOCKED + comment,
+                    # current_task_id cleared), but the comment is
+                    # labelled so the next rescope pass (or the human)
+                    # can fan it into invariant-sized children.  The
+                    # "routes to rescope" arrow is via the BLOCKED
+                    # comment text — the next rescope reads the queue,
+                    # sees the labelled marker, and Opus emits a split
+                    # op replacing the parked task with HOL-12-sized
+                    # children.
+                    log.info("task needs re-decomposition: %s", outcome.reason)
+                    self._tasks.update(task["id"], TaskStatus.BLOCKED)
+                    self.gh.comment_issue(
+                        repo_ctx.repo,
+                        pr_number,
+                        (
+                            "BLOCKED (needs re-decomposition — HOL-13): "
+                            f"{outcome.reason}"
+                        ),
                     )
                     with self._state.modify() as state:
                         state.pop("current_task_id", None)

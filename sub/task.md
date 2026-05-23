@@ -71,6 +71,10 @@ Every turn **must** end with a `turn_outcome` JSON object as the final non-empty
   ```json
   {"turn_outcome": "stuck-on-task", "reason": "<what you need from the human>"}
   ```
+- **`split-task`** — the picked task's scope exceeds one statable invariant (one commit boundary). Emit this **before** doing any work when you can't articulate the task as a single property the resulting commit will establish — a Rocq lemma name, a Python assertion, a CI rule that starts failing, or one behavioural change a reviewer can verify in isolation. The harness parks the task as BLOCKED with a "needs re-decomposition" label so the next rescope can fan it out into invariant-sized children. **Do not attempt the work** — emit the sentinel instead. If you have already started editing files, prefer `commit-task-in-progress` for the part you can articulate as one invariant, then `split-task` for the rest on the next turn.
+  ```json
+  {"turn_outcome": "split-task", "reason": "task scope spans <N> invariants: <invariant-1>, <invariant-2>, ..."}
+  ```
 
 ### Optional fields on any sentinel
 
