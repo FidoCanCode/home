@@ -129,6 +129,22 @@ class TestTaskStoreOracleAdapter:
         )
         assert isinstance(_task_status_for_oracle({}), oracle.StatusPending)
 
+    def test_task_status_skipped_maps_to_completed_at_oracle(self) -> None:
+        # HOL-5 / #1899: SKIPPED projects to StatusCompleted at the
+        # oracle boundary — terminal for picker purposes.  The
+        # SKIPPED-vs-COMPLETED distinction is retained at the Python
+        # layer for UI (HOL-7) and reply-back narrative; the oracle
+        # only needs to know terminal vs not.  Both string and enum
+        # forms map.
+        assert isinstance(
+            _task_status_for_oracle({"status": TaskStatus.SKIPPED}),
+            oracle.StatusCompleted,
+        )
+        assert isinstance(
+            _task_status_for_oracle({"status": "skipped"}),
+            oracle.StatusCompleted,
+        )
+
     def test_task_source_comment_maps_thread_metadata(self) -> None:
         assert _task_source_comment_for_oracle({"thread": {"comment_id": "42"}}) == 42
         assert _task_source_comment_for_oracle({"thread": {}}) is None
@@ -223,6 +239,16 @@ class TestRescopeOracleAdapter:
             == "StatusBlocked"
         )
         assert type(_rescope_task_status_for_oracle({})).__name__ == "StatusPending"
+        # HOL-5 / #1899: SKIPPED projects to StatusCompleted in the
+        # rescope oracle too — the snapshot-order computation treats it
+        # as already-terminal, so the rescope won't try to re-mutate a
+        # skipped marker.
+        assert (
+            type(
+                _rescope_task_status_for_oracle({"status": TaskStatus.SKIPPED})
+            ).__name__
+            == "StatusCompleted"
+        )
         assert (
             _rescope_task_source_comment_for_oracle({"thread": {"comment_id": "42"}})
             == 42
@@ -4130,6 +4156,19 @@ class TestReorderTasks:
         ip = {"id": "ip", "status": "in_progress", "type": "spec"}
         result = [
             {"id": "done", "status": "completed", "type": "spec"},
+            ip,
+        ]
+        assert _inprogress_was_demoted(ip, result) is False
+
+    def test_inprogress_demoted_helper_skips_skipped_at_front(self) -> None:
+        # HOL-5 / #1899: SKIPPED is also terminal — a skipped marker
+        # task at the front of result must not count as demotion (the
+        # picker walks past it).  Same rule as completed.
+        from fido.tasks import _inprogress_was_demoted
+
+        ip = {"id": "ip", "status": "in_progress", "type": "spec"}
+        result = [
+            {"id": "skipped1", "status": "skipped", "type": "spec"},
             ip,
         ]
         assert _inprogress_was_demoted(ip, result) is False

@@ -929,7 +929,11 @@ def _ci_oracle_task_kind(task: Mapping[str, object]) -> ci_oracle.TaskKind:
 
 def _ci_oracle_task_status(task: Mapping[str, object]) -> ci_oracle.TaskStatus:
     match task.get("status", TaskStatus.PENDING):
-        case TaskStatus.COMPLETED | "completed":
+        case TaskStatus.COMPLETED | "completed" | TaskStatus.SKIPPED | "skipped":
+            # SKIPPED (HOL-5 / #1899) projects to StatusCompleted: the
+            # CI oracle's terminal predicate treats both as "no longer
+            # needs work" so a skipped marker task can't be a barrier
+            # to CI work going first.
             return ci_oracle.StatusCompleted()
         case TaskStatus.BLOCKED | "blocked":
             return ci_oracle.StatusBlocked()

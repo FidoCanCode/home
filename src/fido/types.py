@@ -17,6 +17,15 @@ class TaskStatus(StrEnum):
     COMPLETED = "completed"
     IN_PROGRESS = "in_progress"
     BLOCKED = "blocked"
+    # SKIPPED (HOL-5 / #1899): marker status for tasks created from
+    # ``no_op`` rescope verdicts.  Carries the verdict narrative so the
+    # requestor's "why was my ask dropped?" question has an answer on
+    # the queue; treated as terminal by the picker (never picked,
+    # never blocks) but distinct from COMPLETED so the PR-body
+    # formatter can render it under its own "Skipped" block (HOL-7).
+    # See PR #1890 for the no_op-silent-drop failure that motivated
+    # this status, and epic #1894 for the broader gate architecture.
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
