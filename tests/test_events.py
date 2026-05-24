@@ -6857,10 +6857,15 @@ class TestRouteCriticExhaustedBlocked:
         executor.remove_eyes_reaction = MagicMock()
         return executor
 
-    def test_routes_eyes_blocked_comment_and_bug(self) -> None:
-        """Happy path: all three side effects fire in order — eyes
-        removed, BLOCKED comment posted on the source PR, bug filed
-        on FidoCanCode/home."""
+    def test_happy_path_files_bug_then_posts_blocked_then_removes_eyes(
+        self,
+    ) -> None:
+        """Codex on PR #1932: file bug FIRST so the BLOCKED comment
+        can cite the actual URL; THEN post the BLOCKED comment
+        (durability boundary — embed the promise marker so a crash
+        after this point lets recovery dedup); THEN remove eyes
+        (pure UX, best-effort).  Returns True on success so the
+        dispatcher acks the promise."""
         from fido.events import _route_critic_exhausted_blocked
 
         gh = MagicMock()
@@ -6869,72 +6874,49 @@ class TestRouteCriticExhaustedBlocked:
         target = self._make_target()
         exc = self._make_exc()
 
-        _route_critic_exhausted_blocked(exc, target, gh=gh, executor=executor)
+        posted = _route_critic_exhausted_blocked(
+            exc,
+            target,
+            gh=gh,
+            executor=executor,
+            promise_id="promise-uuid-xyz",
+        )
+        assert posted is True
 
-        # Eyes removed via executor (best-effort).
-        executor.remove_eyes_reaction.assert_called_once_with(target)
-        # BLOCKED comment posted on source PR (owner/repo#42).
-        comment_call = gh.comment_issue.call_args
-        assert comment_call.args[0] == "owner/repo"
-        assert comment_call.args[1] == 42
-        assert "BLOCKED" in comment_call.args[2]
-        assert "intent-coverage" in comment_call.args[2]
-        # Bug filed on FidoCanCode/home with Bug label.
+        # Bug filed FIRST.
         bug_call = gh.create_issue.call_args
         assert bug_call.args[0] == "FidoCanCode/home"
         assert "intent-coverage" in bug_call.args[1]
         assert "owner/repo" in bug_call.args[1]
         assert "999" in bug_call.args[1]
+        assert bug_call.kwargs.get("labels") == ["Bug"]
         # Body carries the full retry trace.
         bug_body = bug_call.args[2]
         for gap in exc.critic_gaps:
             assert gap in bug_body
         for preview in exc.synthesis_attempts:
             assert preview in bug_body
-        assert bug_call.kwargs.get("labels") == ["Bug"]
+        # BLOCKED comment posted on source PR with the bug URL.
+        comment_call = gh.comment_issue.call_args
+        assert comment_call.args[0] == "owner/repo"
+        assert comment_call.args[1] == 42
+        blocked = comment_call.args[2]
+        assert "BLOCKED" in blocked
+        assert "intent-coverage" in blocked
+        # The cited bug URL is the actual create_issue return value.
+        assert "https://github.com/FidoCanCode/home/issues/9" in blocked
+        # Recovery marker embedded so a crash after post can dedup.
+        assert "promise-uuid-xyz" in blocked
+        # Eyes removed via executor (best-effort).
+        executor.remove_eyes_reaction.assert_called_once_with(target)
 
-    def test_eyes_failure_still_posts_comment_and_files_bug(self) -> None:
-        """If eyes removal fails (transient GitHub), the BLOCKED
-        comment and bug filing must still proceed.  The failures are
-        independent — one of three signals can be lost without
-        cascading."""
-        from fido.events import _route_critic_exhausted_blocked
-
-        gh = MagicMock()
-        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/10"
-        executor = self._make_executor()
-        executor.remove_eyes_reaction.side_effect = RuntimeError("eyes 503")
-        exc = self._make_exc()
-
-        _route_critic_exhausted_blocked(
-            exc, self._make_target(), gh=gh, executor=executor
-        )
-
-        gh.comment_issue.assert_called_once()
-        gh.create_issue.assert_called_once()
-
-    def test_comment_failure_still_files_bug(self) -> None:
-        """If the BLOCKED comment fails (rate limit), the bug filing
-        is independent and still fires."""
-        from fido.events import _route_critic_exhausted_blocked
-
-        gh = MagicMock()
-        gh.comment_issue.side_effect = RuntimeError("comment 429")
-        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/11"
-        executor = self._make_executor()
-        exc = self._make_exc()
-
-        _route_critic_exhausted_blocked(
-            exc, self._make_target(), gh=gh, executor=executor
-        )
-
-        gh.create_issue.assert_called_once()
-
-    def test_bug_filing_failure_swallowed(self) -> None:
-        """If the bug-filing call fails (e.g. rate limit), the
-        exception is swallowed — the BLOCKED comment already landed,
-        which is the most user-visible signal.  Crashing here would
-        make the dispatcher loop fail."""
+    def test_bug_filing_failure_softens_wording_but_still_posts(self) -> None:
+        """Codex on PR #1932: when ``create_issue`` fails, the BLOCKED
+        comment must NOT claim ``Auto-filed against …`` (that would
+        be a false durable-state claim on the PR).  Soften the
+        wording to ``Auto-filing … FAILED`` and continue posting —
+        the human notice still matters even when the bug log
+        didn't land."""
         from fido.events import _route_critic_exhausted_blocked
 
         gh = MagicMock()
@@ -6942,13 +6924,72 @@ class TestRouteCriticExhaustedBlocked:
         executor = self._make_executor()
         exc = self._make_exc()
 
-        # Should NOT raise.
-        _route_critic_exhausted_blocked(
-            exc, self._make_target(), gh=gh, executor=executor
+        posted = _route_critic_exhausted_blocked(
+            exc,
+            self._make_target(),
+            gh=gh,
+            executor=executor,
+            promise_id="p1",
         )
-
+        # Comment landed → True (ack the promise).
+        assert posted is True
         gh.comment_issue.assert_called_once()
+        body = gh.comment_issue.call_args.args[2]
+        # No URL claimed; failure noted explicitly.
+        assert "FAILED" in body
+        assert "Auto-filed against `FidoCanCode/home` for follow-up:" not in body
+
+    def test_comment_failure_returns_false_so_caller_skips_ack(self) -> None:
+        """Codex on PR #1932: if the BLOCKED comment post fails, the
+        helper returns False so the caller does NOT ack the
+        direct_promise.  The unacked promise lets recovery re-fire
+        on the next webhook delivery, eventually getting the user
+        signal posted.  Returning True here would silently swallow
+        the failure — the user would see nothing AND the promise
+        would be marked handled."""
+        from fido.events import _route_critic_exhausted_blocked
+
+        gh = MagicMock()
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/11"
+        gh.comment_issue.side_effect = RuntimeError("comment 429")
+        executor = self._make_executor()
+        exc = self._make_exc()
+
+        posted = _route_critic_exhausted_blocked(
+            exc,
+            self._make_target(),
+            gh=gh,
+            executor=executor,
+            promise_id="p2",
+        )
+        assert posted is False
+        # Bug WAS filed (preceded the post); only the comment failed.
         gh.create_issue.assert_called_once()
+        gh.comment_issue.assert_called_once()
+        # Eyes NOT touched — short-circuit on post failure.
+        executor.remove_eyes_reaction.assert_not_called()
+
+    def test_eyes_failure_still_returns_true(self) -> None:
+        """Eyes removal is pure UX cleanup AFTER the comment post.
+        A failure here means the user-visible BLOCKED comment
+        already landed, so the helper still returns True (caller
+        acks the promise — the work is durably done)."""
+        from fido.events import _route_critic_exhausted_blocked
+
+        gh = MagicMock()
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/12"
+        executor = self._make_executor()
+        executor.remove_eyes_reaction.side_effect = RuntimeError("eyes 503")
+        exc = self._make_exc()
+
+        posted = _route_critic_exhausted_blocked(
+            exc,
+            self._make_target(),
+            gh=gh,
+            executor=executor,
+            promise_id="p3",
+        )
+        assert posted is True
 
     def test_blocked_comment_includes_final_gap(self) -> None:
         """The BLOCKED comment quotes the final critic gap so the
@@ -6957,17 +6998,46 @@ class TestRouteCriticExhaustedBlocked:
         from fido.events import _route_critic_exhausted_blocked
 
         gh = MagicMock()
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/13"
         executor = self._make_executor()
         exc = self._make_exc(
             gaps=["g1", "g2", "the very specific final complaint"],
         )
 
         _route_critic_exhausted_blocked(
-            exc, self._make_target(), gh=gh, executor=executor
+            exc,
+            self._make_target(),
+            gh=gh,
+            executor=executor,
+            promise_id="p4",
         )
 
         body = gh.comment_issue.call_args.args[2]
         assert "the very specific final complaint" in body
+
+    def test_no_promise_id_omits_marker(self) -> None:
+        """When the caller passes ``promise_id=None`` (legacy path
+        with no claim), the BLOCKED comment still lands but carries
+        no marker — recovery has nothing to dedup against on this
+        path, but the comment is still informative."""
+        from fido.events import _route_critic_exhausted_blocked
+
+        gh = MagicMock()
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/14"
+        executor = self._make_executor()
+        exc = self._make_exc()
+
+        posted = _route_critic_exhausted_blocked(
+            exc,
+            self._make_target(),
+            gh=gh,
+            executor=executor,
+            promise_id=None,
+        )
+        assert posted is True
+        body = gh.comment_issue.call_args.args[2]
+        # No reply-promise marker pattern present.
+        assert "fido:reply-promise:" not in body
 
 
 class TestDispatcher:

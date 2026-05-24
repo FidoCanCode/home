@@ -37,6 +37,7 @@ from fido.store import (
     FidoStore,
     ReplyOutboxEffectRecord,
     ReplyPromiseRecord,
+    append_reply_promise_marker,
     append_reply_promise_markers,
 )
 from fido.synthesis import Insight
@@ -374,58 +375,38 @@ def _route_critic_exhausted_blocked(
     *,
     gh: GitHub,
     executor: "SynthesisExecutor",
-) -> None:
+    promise_id: str | None,
+) -> bool:
     """HOL-20 / #1914: route a critic-exhaustion through the BLOCKED
     PR mechanism instead of the legacy "please rephrase" fallback.
 
-    Three side effects, in order so each can fail independently without
-    blocking the others:
+    Returns ``True`` iff the BLOCKED comment actually landed on
+    GitHub.  Caller acks ``direct_promise`` only on ``True`` — codex
+    on PR #1932: swallowing a failed post and then acking would mark
+    the comment "handled" with no visible signal, silently losing
+    the user-facing notice.  Returning ``False`` keeps the promise
+    recoverable so the next webhook delivery (or recovery scan)
+    re-fires the route.
 
-    1. Remove the eyes reaction — the triage decisively concluded and
-       Fido is no longer "looking" at this comment.  Best-effort: a
-       transient GitHub failure here mustn't block the user-visible
-       BLOCKED comment.
-    2. Post a BLOCKED comment on the source PR thread so the human
-       sees concrete feedback about what happened and what to do.
-    3. Auto-file a bug against :data:`_BUG_REPO` carrying the full
-       retry history (synthesis attempts + critic gaps), so future
-       triage-critic prompt tuning has the case to learn from.
+    Order of operations (codex on PR #1932):
 
-    Each step's failure is logged and swallowed: the worst case is
-    losing one of the three signals, but the comment-processing flow
-    must NOT crash on this path — the dispatcher already had to give
-    up on the synthesis, crashing on top of that wastes the eyes
-    reaction and the BLOCKED comment that DID land.
+    1. File the bug against :data:`_BUG_REPO` FIRST so the BLOCKED
+       comment's claim of "auto-filed" is grounded in the actual
+       result (URL embedded when filing succeeded; wording softened
+       when it didn't).  Bug filing is best-effort: a transient
+       GitHub error here mustn't block the user-visible BLOCKED
+       comment.
+    2. Build the BLOCKED comment body, embed the reply-promise
+       recovery marker, and post.  This step is the durability
+       boundary — if the post raises, return ``False`` so the
+       promise stays claimed and recovery's ``recover_from_bodies``
+       scan can re-detect the situation.  If the post LANDED but
+       a crash interrupts before ack, the embedded marker lets
+       ``recover_from_bodies`` recognise the work as already done
+       and ack the promise (no duplicate BLOCKED comment).
+    3. Remove the eyes reaction — pure UX cleanup, best-effort.
     """
-    try:
-        executor.remove_eyes_reaction(target)
-    except Exception as cleanup_exc:
-        log.warning(
-            "critic-exhausted route: failed to remove eyes reaction "
-            "(%s) — continuing to post BLOCKED comment",
-            cleanup_exc,
-        )
-
     source_link = _insight_source_link(target)
-    blocked_body = (
-        f"**BLOCKED**: synthesis {exc.label} critic exhausted "
-        f"{len(exc.critic_gaps)} attempts on this comment.\n\n"
-        f"The Layer 2 critic ({exc.label}) repeatedly rejected the "
-        f"triage response.  Final gap from the critic:\n\n"
-        f"> {exc.critic_gaps[-1] if exc.critic_gaps else '(no gap recorded)'}\n\n"
-        f"Auto-filed against `{_BUG_REPO}` for follow-up.  See the "
-        f"originating comment: {source_link}"
-    )
-    try:
-        gh.comment_issue(target.repo, target.pr, blocked_body)
-    except Exception as comment_exc:
-        log.warning(
-            "critic-exhausted route: failed to post BLOCKED comment on "
-            "%s#%d (%s) — continuing to file bug",
-            target.repo,
-            target.pr,
-            comment_exc,
-        )
 
     bug_title = (
         f"Bug: synthesis {exc.label} critic exhausted "
@@ -445,17 +426,65 @@ def _route_critic_exhausted_blocked(
         f"## Critic gaps (one per attempt)\n\n{gap_lines}\n\n"
         f"## Synthesis attempts (reply_text preview)\n\n{attempt_lines}\n"
     )
+    bug_url: str | None = None
     try:
-        gh.create_issue(_BUG_REPO, bug_title, bug_body, labels=[_BUG_LABEL])
+        bug_url = gh.create_issue(_BUG_REPO, bug_title, bug_body, labels=[_BUG_LABEL])
     except Exception as file_exc:
         log.warning(
             "critic-exhausted route: failed to auto-file bug for "
-            "%s#%d comment %d (%s) — the BLOCKED comment still landed",
+            "%s#%d comment %d (%s) — BLOCKED comment will note the "
+            "filing failure instead of claiming a URL",
             target.repo,
             target.pr,
             target.comment_id,
             file_exc,
         )
+
+    if bug_url:
+        filing_line = f"Auto-filed against `{_BUG_REPO}` for follow-up: {bug_url}"
+    else:
+        filing_line = (
+            f"Auto-filing against `{_BUG_REPO}` FAILED — see Fido logs for "
+            f"the full gap chain."
+        )
+    blocked_body = (
+        f"**BLOCKED**: synthesis {exc.label} critic exhausted "
+        f"{len(exc.critic_gaps)} attempts on this comment.\n\n"
+        f"The Layer 2 critic ({exc.label}) repeatedly rejected the "
+        f"triage response.  Final gap from the critic:\n\n"
+        f"> {exc.critic_gaps[-1] if exc.critic_gaps else '(no gap recorded)'}\n\n"
+        f"{filing_line}\n\n"
+        f"See the originating comment: {source_link}"
+    )
+    # Codex on PR #1932: embed the reply-promise marker so a crash
+    # between the successful post and the ack doesn't leave recovery
+    # blind.  ``recover_from_bodies`` finds the marker in the posted
+    # comment, recognises the work as done, and acks the promise —
+    # no duplicate BLOCKED comment on the next dispatch.
+    blocked_body = append_reply_promise_marker(blocked_body, promise_id)
+
+    try:
+        gh.comment_issue(target.repo, target.pr, blocked_body)
+    except Exception as comment_exc:
+        log.warning(
+            "critic-exhausted route: failed to post BLOCKED comment on "
+            "%s#%d (%s) — leaving promise unacked so recovery retries",
+            target.repo,
+            target.pr,
+            comment_exc,
+        )
+        return False
+
+    try:
+        executor.remove_eyes_reaction(target)
+    except Exception as cleanup_exc:
+        log.warning(
+            "critic-exhausted route: failed to remove eyes reaction "
+            "(%s) — BLOCKED comment already landed",
+            cleanup_exc,
+        )
+
+    return True
 
 
 # Per-work_dir coalescing state for Dispatcher.reorder_tasks_background.
@@ -1996,18 +2025,27 @@ class Dispatcher:
                 critic_exc.label,
                 info.get("comment_id"),
             )
+            posted = False
             if target is not None:
-                _route_critic_exhausted_blocked(
-                    critic_exc, target, gh=gh, executor=executor
+                posted = _route_critic_exhausted_blocked(
+                    critic_exc,
+                    target,
+                    gh=gh,
+                    executor=executor,
+                    promise_id=direct_promise.promise_id
+                    if direct_promise is not None
+                    else None,
                 )
-            # Codex on PR #1932: ack the direct_promise so the
-            # webhook claim is released.  ACK (not fail) because the
-            # comment IS handled — we posted BLOCKED and filed a bug;
-            # failing would re-fire the same BLOCKED route on every
-            # webhook redelivery.  Without this, the comment stays
-            # permanently claimed and a re-delivery is silently
-            # dropped.
-            if direct_promise is not None:
+            # Codex on PR #1932: only ack when the BLOCKED comment
+            # actually landed.  If the post failed,
+            # ``_route_critic_exhausted_blocked`` returns False and
+            # the promise stays claimed so recovery can re-fire on
+            # the next webhook delivery (or scan).  The embedded
+            # reply-promise marker in the BLOCKED body lets
+            # ``recover_from_bodies`` recognise a successful post on
+            # the next pass and ack the promise WITHOUT duplicating
+            # the comment.
+            if posted and direct_promise is not None:
                 FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
             # ``BLOCKED`` category signals the caller no action was
             # taken (no reply, no rescope) — server.py + worker
@@ -2278,15 +2316,20 @@ class Dispatcher:
                 _cid,
                 number,
             )
+            posted = False
             if issue_target is not None:
-                _route_critic_exhausted_blocked(
-                    critic_exc, issue_target, gh=gh, executor=executor
+                posted = _route_critic_exhausted_blocked(
+                    critic_exc,
+                    issue_target,
+                    gh=gh,
+                    executor=executor,
+                    promise_id=direct_promise.promise_id
+                    if direct_promise is not None
+                    else None,
                 )
-            # See the matching ack in the review-comment path above —
-            # ack (not fail) because we handled the comment via
-            # BLOCKED + bug-file; failing would re-fire on every
-            # webhook redelivery.  Codex on PR #1932.
-            if direct_promise is not None:
+            # See the matching gated-ack in the review-comment path
+            # above (Codex on PR #1932).
+            if posted and direct_promise is not None:
                 FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
             return ("BLOCKED", [])
         except SynthesisExhaustedError:
