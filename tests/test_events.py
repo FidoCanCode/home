@@ -43,7 +43,7 @@ from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import SynthesisCriticExhaustedError, SynthesisExhaustedError
 from fido.synthesis_executor import CommentTarget
 from fido.tasks import Tasks
-from fido.types import ActiveIssue, ActivePR, RescopeIntent
+from fido.types import ActiveIssue, ActivePR, IntentVerdict, RescopeIntent
 from fido.worker import ActivityReporter
 from tests.fakes import _FakeDispatcher
 
@@ -4551,6 +4551,96 @@ class TestBuildOnRescopeApply:
         ]
         cb(result, op_inputs, {"t1": 1, "t2": 2}, [])
         gh.reply_to_review_comment.assert_not_called()
+
+    def test_no_op_verdict_notifies_via_hol24_path(self, tmp_path: Path) -> None:
+        # HOL-24 / #1918: the oracle doesn't fire for no_op verdicts
+        # (nothing reorganized), so the verdict-based pass picks them
+        # up and notifies the requester their ask was silently dropped.
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        alice = self._intent(101, author="alice")
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
+            intents=[alice],
+            pr_ctx=self._pr(),
+            agent=_client("Reply text"),
+            prompts=Prompts("p"),
+        )
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="no_op",
+            narrative="dropped because the requested change conflicts with the spec",
+        )
+        cb([], [], {}, [verdict])
+        comment_ids = [c.args[3] for c in gh.reply_to_review_comment.call_args_list]
+        assert comment_ids == [101]
+
+    def test_honored_non_divergent_verdict_silent(self, tmp_path: Path) -> None:
+        # HOL-24: an honored verdict whose task description contains
+        # the change_request verbatim is NOT material — triage reply
+        # was enough, no second voice reply.
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        alice = self._intent(101, author="alice")
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
+            intents=[alice],
+            pr_ctx=self._pr(),
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
+        result = [
+            {
+                "id": "t1",
+                "title": "t",
+                "description": "implement req 101 exactly as written",
+                "contributing_intents": [101],
+            }
+        ]
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="honored",
+            narrative="queued as asked",
+            affected_task_ids=("t1",),
+        )
+        cb(result, [], {"t1": 1}, [verdict])
+        gh.reply_to_review_comment.assert_not_called()
+
+    def test_verdict_dedupes_against_oracle_path(self, tmp_path: Path) -> None:
+        # HOL-24: if the oracle already notified intent 101 (cross-author
+        # rewrite), a material verdict for the same intent_comment_id
+        # must NOT double-notify.
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        alice = self._intent(101, "2024-01-15T10:00:00+00:00", author="alice")
+        bob = self._intent(202, "2024-01-15T10:01:00+00:00", author="bob")
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
+            intents=[alice, bob],
+            pr_ctx=self._pr(),
+            agent=_client("Reply text"),
+            prompts=Prompts("p"),
+        )
+        result = [
+            {
+                "id": "t1",
+                "title": "Renamed by bob",
+                "description": "",
+                "contributing_intents": [101, 202],
+            }
+        ]
+        op_inputs = [
+            task_queue_rescope.OpInput(
+                oi_op=task_queue_rescope.RewriteTask(1, "Renamed by bob", ""),
+                oi_intents=[202],
+            )
+        ]
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="reshaped",
+            narrative="rewritten",
+            affected_task_ids=("t1",),
+        )
+        cb(result, op_inputs, {"t1": 1}, [verdict])
+        comment_ids = [c.args[3] for c in gh.reply_to_review_comment.call_args_list]
+        assert comment_ids == [101]  # once, not twice
 
 
 class TestNotifyIntentOutcome:

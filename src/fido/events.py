@@ -52,7 +52,14 @@ from fido.tasks import (
     Tasks,
     thread_comment_author_for_auto_resolve_oracle,
 )
-from fido.types import ActiveIssue, ActivePR, IntentVerdict, RescopeIntent, TaskType
+from fido.types import (
+    ActiveIssue,
+    ActivePR,
+    IntentVerdict,
+    RescopeIntent,
+    TaskType,
+    verdict_is_material,
+)
 from fido.worker import ActivityReporter
 
 log = logging.getLogger(__name__)
@@ -2864,7 +2871,6 @@ class Dispatcher:
             task_id_to_positive: dict[str, int],
             verdicts: list["IntentVerdict"],
         ) -> None:
-            del verdicts  # reserved; not consumed by the current rule
             if pr_ctx is None:
                 return
             intent_rows = _rocq_intent_rows(intents)
@@ -2873,6 +2879,7 @@ class Dispatcher:
                 intent_rows, task_records, op_inputs
             )
             positive_to_task_id = {pos: tid for tid, pos in task_id_to_positive.items()}
+            notified_cids: set[int] = set()
             for cid, kind in entries:
                 intent = intents_by_cid[cid]
                 affected_positives = oracle.intent_contributing_tasks(cid, task_records)
@@ -2891,6 +2898,55 @@ class Dispatcher:
                     agent=agent,
                     prompts=prompts,
                 )
+                notified_cids.add(cid)
+
+            # HOL-24 / #1918: verdict-based per-thread reply gating.
+            # The oracle above covers the cross-author destructive-op
+            # cases that pre-date the verdict envelope.  This pass uses
+            # the HOL-23 ``verdict_is_material`` predicate to catch
+            # verdicts the oracle misses — primarily ``no_op`` drops
+            # (the request silently disappeared, closes the #1890
+            # class of failure) and honored-but-divergent (Opus queued
+            # something different from what the user asked).  Dedupes
+            # against the oracle path by intent_comment_id so we never
+            # double-notify.
+            tasks_by_id = {t["id"]: t for t in result}
+            for verdict in verdicts:
+                cid = verdict.intent_comment_id
+                if cid in notified_cids:
+                    continue
+                intent = intents_by_cid[cid]
+                affected_task_ids = [
+                    tid for tid in verdict.affected_task_ids if tid in tasks_by_id
+                ]
+                descs = tuple(
+                    (tasks_by_id[tid].get("description") or "")
+                    for tid in affected_task_ids
+                )
+                if not verdict_is_material(intent, verdict, task_descriptions=descs):
+                    continue
+                # Map outcome → existing NotifyKind.  no_op shares the
+                # "your ask was dropped" emotional shape with NotifyDropped;
+                # reshaped/honored-divergent/superseded all share "your ask
+                # landed but in a form different from what you wrote" with
+                # NotifyChanged.  HOL-25 will refine prose framing per
+                # outcome inside ``_notify_intent_outcome``.
+                kind: oracle.NotifyKind = (
+                    oracle.NotifyDropped()
+                    if verdict.outcome == "no_op"
+                    else oracle.NotifyChanged()
+                )
+                self._notify_intent_outcome(
+                    intent,
+                    kind,
+                    pr=pr_ctx.number,
+                    batch_intents=intents,
+                    affected_task_ids=affected_task_ids,
+                    result=result,
+                    agent=agent,
+                    prompts=prompts,
+                )
+                notified_cids.add(cid)
 
         return on_rescope_apply
 
