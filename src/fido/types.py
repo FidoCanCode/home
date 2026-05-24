@@ -372,6 +372,59 @@ class IntentVerdict:
             )
 
 
+def verdict_is_material(
+    intent: "RescopeIntent",
+    verdict: IntentVerdict,
+    *,
+    task_descriptions: tuple[str, ...] = (),
+) -> bool:
+    """HOL-23 / #1917: True when *verdict* warrants a per-thread reply
+    posted back to *intent*'s origin comment.
+
+    Used by HOL-24 to gate which verdicts in a rescope batch produce
+    outbox reply effects.  The triage reply already covered the
+    user-visible acknowledgement for the comment; this predicate
+    decides whether the rescope's actual decision diverged enough
+    from "I queued exactly what you asked" to warrant a follow-up
+    voice reply.
+
+    Rules:
+
+    - ``outcome != "honored"`` (``reshaped`` / ``superseded`` /
+      ``no_op``) → always material.  These are user-visible
+      decisions the triage reply couldn't have anticipated.
+    - ``outcome == "honored"`` with ``task_descriptions`` supplied:
+      material when NO task description contains
+      ``intent.change_request`` verbatim (case-insensitive).  Per
+      HOL-23's "**Open**: should honored-with-divergence count as
+      material? Default yes ('you said X, I queued Y')" — yes by
+      default; the caller can pass the descriptions of the tasks
+      this verdict's ``affected_task_ids`` produced so the
+      heuristic can answer.  Without ``task_descriptions`` the
+      caller is signalling "don't try" and we fall back to "honored
+      = not material" (triage reply was enough).
+
+    The change_request → task-description containment check is a
+    deliberately simple heuristic; it catches the obvious
+    "you said X, I queued <much-longer-thing>" divergence without
+    needing LLM judgement.  A future leaf could refine with a
+    similarity-based check if false negatives appear in practice.
+    """
+    if verdict.outcome != "honored":
+        return True
+    if not task_descriptions:
+        return False
+    request = intent.change_request.strip().lower()
+    if not request:
+        return False
+    for desc in task_descriptions:
+        if request in (desc or "").strip().lower():
+            # The change_request text is verbatim in this task's
+            # description — not divergent enough to be material.
+            return False
+    return True
+
+
 @dataclass(frozen=True)
 class RescopeIntent:
     """Origin metadata for a rescope trigger from comment synthesis.

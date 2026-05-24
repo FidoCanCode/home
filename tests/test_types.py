@@ -478,3 +478,115 @@ class TestTaskStatusSkipped:
         assert TaskStatus.SKIPPED != TaskStatus.BLOCKED
         assert TaskStatus.SKIPPED != TaskStatus.PENDING
         assert TaskStatus.SKIPPED != TaskStatus.IN_PROGRESS
+
+
+# ---------------------------------------------------------------------------
+# HOL-23 / #1917 — verdict_is_material predicate
+# ---------------------------------------------------------------------------
+
+
+class TestVerdictIsMaterial:
+    """HOL-23 / #1917: predicate gates per-thread reply-back emission.
+
+    Test matrix covers each outcome × match/divergence combination
+    per the issue's acceptance criteria.
+    """
+
+    def _intent(self, change_request: str = "Fix the bug") -> object:
+        from fido.types import RescopeIntent
+
+        return RescopeIntent(
+            change_request=change_request,
+            comment_id=42,
+            timestamp="2026-05-24T10:00:00Z",
+        )
+
+    def _verdict(self, outcome: str) -> object:
+        from fido.types import IntentVerdict
+
+        return IntentVerdict(
+            intent_comment_id=42,
+            outcome=outcome,
+            narrative="x",
+        )
+
+    def test_reshaped_is_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        assert verdict_is_material(self._intent(), self._verdict("reshaped"))
+
+    def test_superseded_is_material(self) -> None:
+        from fido.types import IntentVerdict, verdict_is_material
+
+        verdict = IntentVerdict(
+            intent_comment_id=42,
+            outcome="superseded",
+            by_intent_comment_id=99,
+            narrative="x",
+        )
+        assert verdict_is_material(self._intent(), verdict)
+
+    def test_no_op_is_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        assert verdict_is_material(self._intent(), self._verdict("no_op"))
+
+    def test_honored_without_descriptions_is_not_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        assert not verdict_is_material(self._intent(), self._verdict("honored"))
+
+    def test_honored_matching_task_description_is_not_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        assert not verdict_is_material(
+            self._intent("Fix the bug"),
+            self._verdict("honored"),
+            task_descriptions=("Fix the bug in the retry path.",),
+        )
+
+    def test_honored_diverging_task_description_is_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        # Task description doesn't contain the change_request text —
+        # "you said X, I queued Y" pattern → material.
+        assert verdict_is_material(
+            self._intent("Fix the bug"),
+            self._verdict("honored"),
+            task_descriptions=("Refactor the entire retry subsystem.",),
+        )
+
+    def test_honored_case_insensitive_match(self) -> None:
+        from fido.types import verdict_is_material
+
+        assert not verdict_is_material(
+            self._intent("FIX THE BUG"),
+            self._verdict("honored"),
+            task_descriptions=("fix the bug pls.",),
+        )
+
+    def test_honored_with_multiple_tasks_any_match_is_not_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        # If ANY task description covers the request verbatim, the
+        # intent is honoured-as-asked → not material.
+        assert not verdict_is_material(
+            self._intent("Fix the bug"),
+            self._verdict("honored"),
+            task_descriptions=(
+                "Unrelated description.",
+                "Fix the bug as part of the broader refactor.",
+            ),
+        )
+
+    def test_honored_with_empty_change_request_is_not_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        # Empty change_request can't be a basis for divergence —
+        # callers shouldn't construct intents this way but the
+        # predicate must not divide-by-zero.
+        assert not verdict_is_material(
+            self._intent(""),
+            self._verdict("honored"),
+            task_descriptions=("anything",),
+        )
