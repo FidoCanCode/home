@@ -3,6 +3,7 @@
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import urllib.request
@@ -115,6 +116,54 @@ class IssueCacheInfo:
     last_reconcile_drift: int
 
 
+@dataclass(frozen=True)
+class BlockedTaskInfo:
+    """HOL-29 / #1923: one BLOCKED task surfaced to ``./fido status``.
+
+    Picked up by ``repo_status`` when a task's status is ``blocked``
+    AND its description carries the ``CRITIC EXHAUSTED`` marker that
+    HOL-21's escalation helper appends.  Surfacing these in the
+    status output lets a human see at a glance which tasks have
+    auto-blocked themselves, without having to read tasks.json.
+
+    The bug-file URL isn't stored in tasks.json today (it's on the
+    PR thread as a BLOCKED comment); a future leaf could persist it
+    here for direct linking from status.
+    """
+
+    task_id: str
+    title: str
+    final_gap: str
+    attempt_count: int
+
+
+_CRITIC_EXHAUSTED_RE = re.compile(
+    r"CRITIC EXHAUSTED \((?P<count>\d+) attempts\): (?P<gap>.+?)$",
+    re.MULTILINE,
+)
+
+
+def _blocked_critic_tasks(task_list: list[dict[str, Any]]) -> list[BlockedTaskInfo]:
+    """Scan *task_list* for HOL-21-escalated BLOCKED tasks."""
+    out: list[BlockedTaskInfo] = []
+    for task in task_list:
+        if task.get("status") != "blocked":
+            continue
+        desc = task.get("description") or ""
+        match = _CRITIC_EXHAUSTED_RE.search(desc)
+        if match is None:
+            continue
+        out.append(
+            BlockedTaskInfo(
+                task_id=str(task.get("id", "")),
+                title=str(task.get("title", "")),
+                final_gap=match.group("gap").strip(),
+                attempt_count=int(match.group("count")),
+            )
+        )
+    return out
+
+
 @dataclass
 class RepoStatus:
     name: str
@@ -148,6 +197,11 @@ class RepoStatus:
     claude_talker: ClaudeTalkerInfo | None = None
     rescoping: bool = False  # True while a background Opus reorder is in flight
     issue_cache: IssueCacheInfo | None = None
+    # HOL-29 / #1923: BLOCKED tasks whose description carries the
+    # HOL-21 ``CRITIC EXHAUSTED`` marker.  Surfaced in the formatter
+    # so a human can see at a glance which tasks have auto-blocked
+    # themselves (and find the auto-filed bug from the PR thread).
+    blocked_critic_tasks: list[BlockedTaskInfo] = field(default_factory=list)
 
 
 @dataclass
@@ -751,6 +805,7 @@ def repo_status(
     task_list = Tasks(repo_config.work_dir).list()
     pending = sum(1 for t in task_list if t["status"] == "pending")
     completed = sum(1 for t in task_list if t["status"] == "completed")
+    blocked_critic_tasks = _blocked_critic_tasks(task_list)
 
     current = _current_task(task_list)
     task_number, task_total = _task_position(task_list)
@@ -796,6 +851,7 @@ def repo_status(
         claude_talker=claude_talker,
         rescoping=rescoping,
         issue_cache=issue_cache,
+        blocked_critic_tasks=blocked_critic_tasks,
     )
 
 
@@ -1198,7 +1254,35 @@ def _format_repo_body(repo: RepoStatus, *, c: Color) -> list[str]:
 
     body.extend(_format_webhook_lines(repo, c=c))
 
+    body.extend(_format_blocked_critic_lines(repo, c=c))
+
     return body
+
+
+def _format_blocked_critic_lines(repo: RepoStatus, *, c: Color) -> list[str]:
+    """HOL-29 / #1923: surface HOL-21-escalated BLOCKED tasks.
+
+    Empty list when no escalations are on the queue.  Each blocked
+    task gets one line: ``BLOCKED: <title> — <final-gap> (N attempts)``
+    in red so the human sees the escalation at a glance.  The bug
+    URL lives on the PR thread (not in tasks.json today); a human
+    can follow the PR comment for it.
+    """
+    if not repo.blocked_critic_tasks:
+        return []
+    lines: list[str] = []
+    for blocked in repo.blocked_critic_tasks:
+        gap_preview = (
+            blocked.final_gap
+            if len(blocked.final_gap) <= 80
+            else blocked.final_gap[:77] + "..."
+        )
+        lines.append(
+            f"  {c.color(RED, 'BLOCKED:')} {blocked.title} "
+            f"{c.color(DIM, '—')} {gap_preview} "
+            f"{c.color(DIM, f'({blocked.attempt_count} attempts)')}"
+        )
+    return lines
 
 
 def _should_show_worker_line(repo: RepoStatus) -> bool:
