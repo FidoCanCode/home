@@ -4604,6 +4604,61 @@ class TestBuildOnRescopeApply:
         cb(result, [], {"t1": 1}, [verdict])
         gh.reply_to_review_comment.assert_not_called()
 
+    def test_hol25_no_op_framing_carries_narrative(self) -> None:
+        # HOL-25 / #1919: no_op verdict framing names the outcome
+        # explicitly AND includes the verdict's narrative so Opus has
+        # the rescope's reasoning to weave into the reply.
+        from fido.events import _hol25_verdict_framing
+
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="no_op",
+            narrative="duplicates work already queued as #42",
+        )
+        framing = _hol25_verdict_framing(verdict)
+        assert "NOT queued" in framing
+        assert "duplicates work already queued as #42" in framing
+        assert "in flight" in framing  # negative-claim guard
+
+    def test_hol25_honored_framing_carries_narrative(self) -> None:
+        from fido.events import _hol25_verdict_framing
+
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="honored",
+            narrative="scoped to the parser only, not the whole pipeline",
+        )
+        framing = _hol25_verdict_framing(verdict)
+        assert "queued" in framing
+        assert "scoped to the parser only" in framing
+        assert "verbatim" in framing  # negative-claim guard
+
+    def test_hol25_reshaped_framing_carries_narrative(self) -> None:
+        from fido.events import _hol25_verdict_framing
+
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="reshaped",
+            narrative="merged with adjacent typo fix as one commit",
+        )
+        framing = _hol25_verdict_framing(verdict)
+        assert "RESHAPED" in framing
+        assert "merged with adjacent typo fix as one commit" in framing
+
+    def test_hol25_superseded_framing_renders_by_intent_link(self) -> None:
+        from fido.events import _hol25_verdict_framing
+
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="superseded",
+            narrative="overridden by a later directive",
+            by_intent_comment_id=202,
+        )
+        framing = _hol25_verdict_framing(verdict)
+        assert "SUPERSEDED" in framing
+        assert "#202" in framing
+        assert "overridden by a later directive" in framing
+
     def test_verdict_dedupes_against_oracle_path(self, tmp_path: Path) -> None:
         # HOL-24: if the oracle already notified intent 101 (cross-author
         # rewrite), a material verdict for the same intent_comment_id

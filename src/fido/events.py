@@ -2634,6 +2634,7 @@ class Dispatcher:
         result: list[dict[str, Any]],
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
+        verdict: IntentVerdict | None = None,
     ) -> None:
         """Post a per-intent reply per the INV-F reply-back rule.
 
@@ -2696,7 +2697,15 @@ class Dispatcher:
                 seen_cids.add(other_cid)
                 co_contributing.append(other)
 
-        if isinstance(kind, oracle.NotifyDropped):
+        # HOL-25 / #1919: when the call carries a verdict (HOL-24 path),
+        # use outcome+narrative framing so the prose grounds in what the
+        # rescope actually decided rather than the cross-author oracle's
+        # default "a later commenter caused..." story (which may not be
+        # true — a no_op verdict can stand alone with no other commenter
+        # involved).
+        if verdict is not None:
+            framing = _hol25_verdict_framing(verdict)
+        elif isinstance(kind, oracle.NotifyDropped):
             framing = (
                 "A change request from a PR comment was DROPPED by the rescope "
                 "because a later commenter's intent caused the task this "
@@ -2945,6 +2954,7 @@ class Dispatcher:
                     result=result,
                     agent=agent,
                     prompts=prompts,
+                    verdict=verdict,  # HOL-25: drives outcome-aware framing
                 )
                 notified_cids.add(cid)
 
@@ -3593,6 +3603,71 @@ def _intent_arrival_indices(intents: list[RescopeIntent]) -> dict[int, int]:
     """
     ordered = sorted(intents, key=lambda i: i.timestamp)
     return {intent.comment_id: idx for idx, intent in enumerate(ordered)}
+
+
+def _hol25_verdict_framing(verdict: IntentVerdict) -> str:
+    """HOL-25 / #1919: per-thread material-divergence framing built from
+    the rescope verdict's outcome + narrative.
+
+    Falls under the voice-text-not-templated rule: this builds the
+    INSTRUCTION sent to Opus (a deterministic fact-carrier), not the
+    user-visible reply text — Opus generates that per call from these
+    facts.  Each outcome carries a different story shape:
+
+    - ``no_op``: the request didn't land in the queue at all.  The
+      narrative explains why; the reply must NOT pretend work is in
+      flight.
+    - ``honored`` (divergent): a task DID land, but its scope reads
+      differently from the literal change_request.  Reply explains
+      the reshape so the requester doesn't think their exact ask was
+      queued verbatim.
+    - ``reshaped``: same shape as honored-divergent at the user-facing
+      level; the verdict's narrative carries the rescope's reasoning.
+    - ``superseded``: another later intent in the same batch took
+      precedence.  ``by_intent_comment_id`` (when set) names the
+      superseding intent so the prompt can render the link.
+    """
+    # IntentVerdict.__post_init__ enforces non-empty narrative on every
+    # outcome (HOL-3 / #1897) and ``by_intent_comment_id`` on superseded
+    # (INV-E / #1803), so we can trust both here without fallback branches.
+    narrative = (verdict.narrative or "").strip()
+    match verdict.outcome:
+        case "no_op":
+            return (
+                "A change request from a PR comment was NOT queued by the "
+                "rescope.  Tell this commenter their ask did not land, and "
+                "explain WHY using the rescope's narrative below.  Do NOT "
+                "imply work is in flight — nothing was queued.\n\n"
+                f"Rescope narrative: {narrative}"
+            )
+        case "honored":
+            return (
+                "A change request from a PR comment WAS queued, but the "
+                "task that landed reads differently from the literal ask.  "
+                "Tell this commenter their ask landed and explain the "
+                "reshape using the rescope's narrative below.  Do NOT "
+                "claim the task description matches verbatim — it diverges.\n\n"
+                f"Rescope narrative: {narrative}"
+            )
+        case "reshaped":
+            return (
+                "A change request from a PR comment was RESHAPED by the "
+                "rescope into a different-scope task.  Tell this commenter "
+                "the STORY of how their ask was reshaped using the "
+                "rescope's narrative below.  Do NOT claim work is done — "
+                "the rescope only restructured the plan.\n\n"
+                f"Rescope narrative: {narrative}"
+            )
+        case "superseded":
+            return (
+                f"A change request from a PR comment was SUPERSEDED by intent "
+                f"comment #{verdict.by_intent_comment_id} "
+                "in the same rescope batch.  Tell this commenter their ask "
+                "was overridden using the rescope's narrative below.  Do "
+                "NOT say their work is done — it was dropped in favour of "
+                "the superseding intent.\n\n"
+                f"Rescope narrative: {narrative}"
+            )
 
 
 def _rocq_intent_rows(
