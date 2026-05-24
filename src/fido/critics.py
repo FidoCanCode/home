@@ -688,10 +688,33 @@ def run_insight_dedup_critic(
     if not objs:
         log.warning("insight-dedup critic returned no parseable JSON — failing open")
         return InsightDedupVerdict()
+    # Codex on PR #1932: the prompt contract is "duplicate_url MUST
+    # be one of the recent_insights shown to the critic" — a URL
+    # that's repo-shaped but ISN'T in the corpus is hallucination,
+    # not a legitimate dedup signal.  Normalize and pre-compute the
+    # allowed set once so the per-verdict check is cheap; an empty
+    # corpus (recent_insights==[]) reduces this to "every duplicate
+    # verdict is hallucination", which matches the prompt's "any
+    # insight is non-duplicate by default" rule on empty input.
+    allowed_urls = {
+        _normalize_insight_url(str(entry.get("url", ""))) for entry in recent_insights
+    }
+    allowed_urls.discard("")
     saw_malformed_dup = False
     for obj in objs:
         verdict = _parse_insight_dedup_verdict(obj)
         if verdict is not None:
+            if verdict.is_duplicate and (
+                _normalize_insight_url(verdict.duplicate_url) not in allowed_urls
+            ):
+                log.warning(
+                    "insight-dedup critic returned duplicate_url %r not in "
+                    "corpus of %d recent insights — failing open (likely "
+                    "hallucinated)",
+                    verdict.duplicate_url,
+                    len(allowed_urls),
+                )
+                continue
             return verdict
         if obj.get("is_duplicate") is True:
             saw_malformed_dup = True
@@ -706,3 +729,15 @@ def run_insight_dedup_critic(
             len(objs),
         )
     return InsightDedupVerdict()
+
+
+def _normalize_insight_url(url: str) -> str:
+    """Normalize a GitHub insight URL for corpus-membership comparison.
+
+    Strips trailing slashes and lowercases the whole thing (GitHub
+    URLs are case-insensitive on scheme/host/owner/repo).  The
+    duplicate-URL check above compares normalized forms so a verdict
+    that capitalises the repo name differently than the corpus entry
+    still matches.
+    """
+    return url.strip().rstrip("/").lower()

@@ -1278,12 +1278,17 @@ class TestRunInsightDedupCritic:
 
     def test_catches_cross_comment_near_duplicate(self) -> None:
         """HOL-19 acceptance: same core lesson filed against a different
-        comment is detected as near-duplicate."""
+        comment is detected as near-duplicate.  The verdict's
+        ``duplicate_url`` must point at an entry actually shown in
+        the corpus (Codex on PR #1932 — out-of-corpus URLs are
+        hallucination, fail open)."""
+        # The corpus _recent() returns ends at /issues/100 — use that
+        # URL so the runner's corpus-membership check sees a match.
         raw = json.dumps(
             {
                 "is_duplicate": True,
-                "duplicate_url": "https://github.com/FidoCanCode/home/issues/42",
-                "rationale": "same mock/prod divergence lesson as #42",
+                "duplicate_url": "https://github.com/FidoCanCode/home/issues/100",
+                "rationale": "same mock/prod divergence lesson as #100",
             }
         )
         verdict = run_insight_dedup_critic(
@@ -1294,7 +1299,7 @@ class TestRunInsightDedupCritic:
             critic_system_prompt="critic-sys",
         )
         assert verdict.is_duplicate
-        assert verdict.duplicate_url.endswith("/42")
+        assert verdict.duplicate_url.endswith("/100")
 
     def test_transport_error_fails_open(self) -> None:
         agent = _FakeAgent(run_turn_exception=RuntimeError("transport"))
@@ -1342,11 +1347,14 @@ class TestRunInsightDedupCritic:
 
     def test_scans_past_malformed_early_envelope(self) -> None:
         """Mirrors the reply-prose scan: an early ``is_duplicate=true``
-        without a URL must not mask a later well-formed verdict."""
+        without a URL must not mask a later well-formed verdict.  The
+        second verdict's URL must be in the ``_recent`` corpus or the
+        runner's membership check would fail it open too (Codex on
+        PR #1932)."""
         raw = (
             '{"is_duplicate": true} '
             '{"is_duplicate": true, '
-            '"duplicate_url": "https://github.com/FidoCanCode/home/issues/7", '
+            '"duplicate_url": "https://github.com/FidoCanCode/home/issues/100", '
             '"rationale": "real dup"}'
         )
         verdict = run_insight_dedup_critic(
@@ -1357,7 +1365,96 @@ class TestRunInsightDedupCritic:
             critic_system_prompt="critic-sys",
         )
         assert verdict.is_duplicate
-        assert verdict.duplicate_url == ("https://github.com/FidoCanCode/home/issues/7")
+        assert verdict.duplicate_url == (
+            "https://github.com/FidoCanCode/home/issues/100"
+        )
+
+    def test_duplicate_url_not_in_corpus_fails_open(self) -> None:
+        """Codex on PR #1932: the prompt contract says the duplicate
+        URL must be one of the ``recent_insights`` shown to the
+        critic.  A repo-shaped URL that ISN'T in the corpus is
+        hallucination — the critic invented a number that maps to an
+        existing-but-unrelated FidoCanCode/home issue, which would
+        otherwise make the filer skip filing and record a marker on
+        the wrong issue.  Runner must check membership in the
+        corpus before honouring the duplicate verdict; on miss, fail
+        open so the insight files normally."""
+        recent = [
+            {
+                "title": "Previously filed",
+                "body": "",
+                "url": "https://github.com/FidoCanCode/home/issues/100",
+            }
+        ]
+        # Critic hallucinates a different (but repo-valid) issue
+        # number that was never shown in the corpus.
+        raw = json.dumps(
+            {
+                "is_duplicate": True,
+                "duplicate_url": "https://github.com/FidoCanCode/home/issues/999",
+                "rationale": "claims dup of #999 which was never shown",
+            }
+        )
+        verdict = run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=recent,
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        # Failed open — out-of-corpus URL is hallucination.
+        assert not verdict.is_duplicate
+
+    def test_duplicate_url_in_corpus_case_insensitive(self) -> None:
+        """The corpus check normalises both sides so a verdict that
+        capitalises the URL differently than the corpus entry still
+        matches.  GitHub URLs are case-insensitive on scheme/host/
+        owner/repo, so requiring strict equality would reject valid
+        signals from a critic that paraphrased the URL."""
+        recent = [
+            {
+                "title": "p",
+                "body": "",
+                "url": "https://github.com/FidoCanCode/home/issues/42",
+            }
+        ]
+        raw = json.dumps(
+            {
+                "is_duplicate": True,
+                "duplicate_url": "HTTPS://GITHUB.COM/fidocancode/home/issues/42/",
+                "rationale": "case-variant",
+            }
+        )
+        verdict = run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=recent,
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert verdict.is_duplicate
+
+    def test_duplicate_against_empty_corpus_fails_open(self) -> None:
+        """Empty corpus = "any duplicate verdict is hallucination" by
+        the prompt contract.  The fail-open posture lets the insight
+        file even when the critic mistakenly returns a duplicate
+        verdict (e.g., recent-insights search degraded to empty and
+        the critic still claimed a dup against some imagined URL)."""
+        raw = json.dumps(
+            {
+                "is_duplicate": True,
+                "duplicate_url": "https://github.com/FidoCanCode/home/issues/1",
+                "rationale": "imagined",
+            }
+        )
+        verdict = run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=[],
+            agent=_FakeAgent(run_turn_responses=[raw]),
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+        )
+        assert not verdict.is_duplicate
 
     def test_uses_critic_system_prompt(self) -> None:
         agent = _FakeAgent(run_turn_responses=['{"is_duplicate": false}'])
