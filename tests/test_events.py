@@ -7032,6 +7032,124 @@ class TestGitHubInsightFiler:
         assert captured["recent_count"] == _INSIGHT_RECENT_LIMIT
 
 
+class TestFileStuckOnCriticBug:
+    """HOL-21 / #1915: shared bug-file helper for ALL critic
+    exhaustion routes (HOL-15..HOL-19).  Pulled out of
+    ``_route_critic_exhausted_blocked`` so per-leaf retry budgets
+    for HOL-16/HOL-17/HOL-19 can call it without duplicating the
+    idempotency-marker + body templating logic."""
+
+    def _ctx(
+        self,
+        *,
+        emission_point: str = "task-completion",
+        target_kind: str = "task",
+        target_id: str = "t-9",
+        attempts_preview: tuple[str, ...] = (),
+    ) -> object:
+        from fido.events import StuckOnCriticContext
+
+        return StuckOnCriticContext(
+            emission_point=emission_point,
+            source_repo="owner/repo",
+            source_pr=42,
+            target_kind=target_kind,
+            target_id=target_id,
+            source_link="https://github.com/owner/repo/pull/42",
+            gaps=("g1", "g2", "g3"),
+            attempts_preview=attempts_preview,
+        )
+
+    def test_files_new_bug_with_idempotency_marker(self) -> None:
+        from fido.events import _file_stuck_on_critic_bug
+
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/1000"
+
+        url = _file_stuck_on_critic_bug(self._ctx(), gh=gh)
+        assert url == "https://github.com/FidoCanCode/home/issues/1000"
+        body = gh.create_issue.call_args.args[2]
+        assert "<!-- critic-exhaustion: task-completion:" in body
+        assert "owner/repo#42:task:t-9 -->" in body
+        for gap in ("g1", "g2", "g3"):
+            assert gap in body
+        title = gh.create_issue.call_args.args[1]
+        assert "task-completion critic exhausted" in title
+        # Default empty attempts_preview → sentinel line in body.
+        assert "(no per-attempt previews recorded)" in body
+
+    def test_reuses_existing_bug_on_marker_hit(self) -> None:
+        from fido.events import _file_stuck_on_critic_bug
+
+        gh = MagicMock()
+        gh.search_issues.return_value = [
+            {"html_url": "https://github.com/FidoCanCode/home/issues/2000"}
+        ]
+
+        url = _file_stuck_on_critic_bug(self._ctx(), gh=gh)
+        assert url == "https://github.com/FidoCanCode/home/issues/2000"
+        gh.create_issue.assert_not_called()
+
+    def test_search_failure_falls_through_to_create(self) -> None:
+        from fido.events import _file_stuck_on_critic_bug
+
+        gh = MagicMock()
+        gh.search_issues.side_effect = RuntimeError("503")
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/3000"
+
+        url = _file_stuck_on_critic_bug(self._ctx(), gh=gh)
+        assert url == "https://github.com/FidoCanCode/home/issues/3000"
+
+    def test_create_failure_returns_none(self) -> None:
+        from fido.events import _file_stuck_on_critic_bug
+
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.side_effect = RuntimeError("500")
+
+        url = _file_stuck_on_critic_bug(self._ctx(), gh=gh)
+        assert url is None
+
+    def test_emission_point_part_of_idempotency_key(self) -> None:
+        """Two different critics exhausting on the same target file
+        SEPARATE bugs because the emission_point is in the marker."""
+        from fido.events import _file_stuck_on_critic_bug
+
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = "https://x/issues/1"
+
+        _file_stuck_on_critic_bug(self._ctx(emission_point="task-completion"), gh=gh)
+        intent_body = gh.create_issue.call_args.args[2]
+        gh.reset_mock()
+        gh.search_issues.return_value = []
+
+        _file_stuck_on_critic_bug(self._ctx(emission_point="task-creation"), gh=gh)
+        creation_body = gh.create_issue.call_args.args[2]
+
+        assert "task-completion:" in intent_body
+        assert "task-creation:" in creation_body
+        assert "task-completion:" not in creation_body
+
+    def test_attempts_preview_when_provided(self) -> None:
+        """When the caller has per-attempt previews (HOL-15/18 path
+        always does), they're rendered in the bug body."""
+        from fido.events import _file_stuck_on_critic_bug
+
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = "https://x/issues/1"
+
+        _file_stuck_on_critic_bug(
+            self._ctx(attempts_preview=("preview-A", "preview-B")), gh=gh
+        )
+        body = gh.create_issue.call_args.args[2]
+        assert "preview-A" in body
+        assert "preview-B" in body
+        assert "(no per-attempt previews recorded)" not in body
+
+
 class TestRouteCriticExhaustedBlocked:
     """HOL-20 / #1914: critic-exhaustion route — BLOCKED PR comment +
     auto-filed bug carrying the full retry trace."""

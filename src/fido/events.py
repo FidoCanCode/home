@@ -412,6 +412,131 @@ _BUG_REPO = "FidoCanCode/home"
 _BUG_LABEL = "Bug"
 
 
+@dataclass(frozen=True)
+class StuckOnCriticContext:
+    """HOL-21 / #1915: context bundle for ``_file_stuck_on_critic_bug``.
+
+    Every critic that detects exhaustion (HOL-15..HOL-19) builds one
+    of these and hands it to the shared filing helper.  The shape is
+    deliberately critic-agnostic so the bug body, idempotency
+    marker, and title template are all uniform across emission
+    points — the auto-filed bug is recognizably the same shape
+    whether it came from intent-coverage exhaustion on a triage
+    reply or task-completion exhaustion on a worker commit.
+
+    Fields:
+
+    - ``emission_point``: short label identifying which critic
+      exhausted (``"intent-coverage"``, ``"task-completion"``, etc.).
+      Part of the idempotency key so two different critics
+      exhausting on the same target still file separate bugs.
+    - ``source_repo`` / ``source_pr``: where the exhaustion happened.
+    - ``target_kind`` / ``target_id``: what the critic was working on
+      when it exhausted (``"comment"``/``"task"``).  Part of the
+      idempotency key.
+    - ``source_link``: clickable URL to the target.
+    - ``gaps``: every failed verdict's gap text, in order.
+    - ``attempts_preview``: per-attempt response preview when
+      available (HOL-15/18 carry these; HOL-17 task-completion may
+      use the per-attempt commit summary instead; HOL-16/19 leave
+      empty when their exhaustion paths land).
+    """
+
+    emission_point: str
+    source_repo: str
+    source_pr: int
+    target_kind: str
+    target_id: str
+    source_link: str
+    gaps: tuple[str, ...]
+    attempts_preview: tuple[str, ...] = ()
+
+
+def _file_stuck_on_critic_bug(ctx: StuckOnCriticContext, *, gh: GitHub) -> str | None:
+    """HOL-21 / #1915: file (idempotently) a bug on :data:`_BUG_REPO`
+    for a critic exhaustion.
+
+    Returns the bug URL on success (whether newly filed or reused
+    from an idempotency-marker hit), or ``None`` when both the
+    marker search AND the create call fail — caller decides whether
+    to soften the BLOCKED-comment wording (no URL to cite) or carry
+    on silently.
+
+    Idempotency marker keyed on
+    ``(emission_point, source_repo, source_pr, target_kind, target_id)``
+    so retry attempts of the same exhaustion route reuse the
+    existing bug instead of spamming ``_BUG_REPO`` with duplicates.
+    Two different critics exhausting on the same target file
+    SEPARATE bugs because the emission point is part of the key —
+    different root causes warrant separate tickets.
+    """
+    bug_marker = (
+        f"<!-- critic-exhaustion: {ctx.emission_point}:"
+        f"{ctx.source_repo}#{ctx.source_pr}:"
+        f"{ctx.target_kind}:{ctx.target_id} -->"
+    )
+    bug_title = (
+        f"Bug: {ctx.emission_point} critic exhausted "
+        f"on {ctx.source_repo}#{ctx.source_pr} {ctx.target_kind} {ctx.target_id}"
+    )
+    gap_lines = (
+        "\n".join(f"  {i + 1}. {gap}" for i, gap in enumerate(ctx.gaps))
+        or "  (no gaps recorded)"
+    )
+    if ctx.attempts_preview:
+        attempts_block = "\n".join(
+            f"  {i + 1}. {preview!r}" for i, preview in enumerate(ctx.attempts_preview)
+        )
+    else:
+        attempts_block = "  (no per-attempt previews recorded)"
+    bug_body = (
+        f"## Critic exhaustion\n\n"
+        f"- Critic: `{ctx.emission_point}`\n"
+        f"- Source: {ctx.source_link}\n"
+        f"- Source repo / PR: `{ctx.source_repo}#{ctx.source_pr}`\n"
+        f"- Target: `{ctx.target_kind} {ctx.target_id}`\n"
+        f"- Attempts: {len(ctx.gaps)}\n\n"
+        f"## Critic gaps (one per attempt)\n\n{gap_lines}\n\n"
+        f"## Per-attempt previews\n\n{attempts_block}\n\n"
+        f"{bug_marker}\n"
+    )
+    try:
+        existing_bugs = gh.search_issues(_BUG_REPO, f'"{bug_marker}" in:body is:issue')
+    except Exception as search_exc:
+        log.warning(
+            "stuck-on-critic[%s]: bug-marker search failed (%s) — "
+            "proceeding to file (may create a duplicate)",
+            ctx.emission_point,
+            search_exc,
+        )
+        existing_bugs = []
+    if existing_bugs:
+        url = existing_bugs[0].get("html_url")
+        log.info(
+            "stuck-on-critic[%s]: existing bug found for %s#%d %s %s — reusing %s",
+            ctx.emission_point,
+            ctx.source_repo,
+            ctx.source_pr,
+            ctx.target_kind,
+            ctx.target_id,
+            url,
+        )
+        return str(url) if url else None
+    try:
+        return str(gh.create_issue(_BUG_REPO, bug_title, bug_body, labels=[_BUG_LABEL]))
+    except Exception as file_exc:
+        log.warning(
+            "stuck-on-critic[%s]: failed to auto-file bug for %s#%d %s %s (%s)",
+            ctx.emission_point,
+            ctx.source_repo,
+            ctx.source_pr,
+            ctx.target_kind,
+            ctx.target_id,
+            file_exc,
+        )
+        return None
+
+
 def _route_critic_exhausted_blocked(
     exc: "SynthesisCriticExhaustedError",
     target: CommentTarget,
@@ -458,74 +583,24 @@ def _route_critic_exhausted_blocked(
     """
     source_link = _insight_source_link(target)
 
-    bug_title = (
-        f"Bug: synthesis {exc.label} critic exhausted "
-        f"on {target.repo}#{target.pr} comment {target.comment_id}"
+    # HOL-21 / #1915: bug-filing is shared infrastructure now —
+    # ``_file_stuck_on_critic_bug`` handles the body, idempotency
+    # marker, and URL return for ALL critic exhaustion routes
+    # (synthesis critics here + per-leaf retry budgets for HOL-16/
+    # HOL-17/HOL-19 in their own modules).
+    bug_url = _file_stuck_on_critic_bug(
+        StuckOnCriticContext(
+            emission_point=exc.label,
+            source_repo=target.repo,
+            source_pr=target.pr,
+            target_kind="comment",
+            target_id=str(target.comment_id),
+            source_link=source_link,
+            gaps=tuple(exc.critic_gaps),
+            attempts_preview=tuple(exc.synthesis_attempts),
+        ),
+        gh=gh,
     )
-    gap_lines = "\n".join(f"  {i + 1}. {gap}" for i, gap in enumerate(exc.critic_gaps))
-    attempt_lines = "\n".join(
-        f"  {i + 1}. {preview!r}" for i, preview in enumerate(exc.synthesis_attempts)
-    )
-    # Codex on PR #1932: idempotency marker keyed on
-    # ``(critic_label, source_repo, source_pr, source_comment_id)``
-    # so a retry of this route (e.g. comment-post failed and the
-    # promise stayed claimed) doesn't file a SECOND bug for the same
-    # exhaustion.  Without this, transient GitHub failures spamming
-    # ``_BUG_REPO`` with duplicate Bug issues that obscure real
-    # incidents.  Two different critics exhausting on the same
-    # comment file separate bugs (different root causes) because the
-    # label is part of the key.
-    bug_marker = (
-        f"<!-- critic-exhaustion: {exc.label}:"
-        f"{target.repo}#{target.pr}:{target.comment_id} -->"
-    )
-    bug_body = (
-        f"## Critic exhaustion\n\n"
-        f"- Critic: `{exc.label}`\n"
-        f"- Source comment: {source_link}\n"
-        f"- Source repo / PR: `{target.repo}#{target.pr}`\n"
-        f"- Source comment id: `{target.comment_id}`\n"
-        f"- Attempts: {len(exc.synthesis_attempts)}\n\n"
-        f"## Critic gaps (one per attempt)\n\n{gap_lines}\n\n"
-        f"## Synthesis attempts (reply_text preview)\n\n{attempt_lines}\n\n"
-        f"{bug_marker}\n"
-    )
-    bug_url: str | None = None
-    try:
-        existing_bugs = gh.search_issues(_BUG_REPO, f'"{bug_marker}" in:body is:issue')
-    except Exception as search_exc:
-        log.warning(
-            "critic-exhausted route: bug-marker search failed (%s) — "
-            "proceeding to file (may create a duplicate)",
-            search_exc,
-        )
-        existing_bugs = []
-    if existing_bugs:
-        bug_url = existing_bugs[0].get("html_url")
-        log.info(
-            "critic-exhausted route: existing bug found for %s#%d "
-            "comment %d critic=%s — reusing %s",
-            target.repo,
-            target.pr,
-            target.comment_id,
-            exc.label,
-            bug_url,
-        )
-    else:
-        try:
-            bug_url = gh.create_issue(
-                _BUG_REPO, bug_title, bug_body, labels=[_BUG_LABEL]
-            )
-        except Exception as file_exc:
-            log.warning(
-                "critic-exhausted route: failed to auto-file bug for "
-                "%s#%d comment %d (%s) — BLOCKED comment will note the "
-                "filing failure instead of claiming a URL",
-                target.repo,
-                target.pr,
-                target.comment_id,
-                file_exc,
-            )
 
     if bug_url:
         filing_line = f"Auto-filed against `{_BUG_REPO}` for follow-up: {bug_url}"
