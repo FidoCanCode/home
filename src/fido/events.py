@@ -342,7 +342,13 @@ def _parse_insight_issue_number(url: str) -> int | None:
     match = _INSIGHT_URL_RE.match(url.strip())
     if match is None:
         return None
-    if match.group("owner_repo") != _INSIGHT_REPO:
+    # GitHub owner/repo names are case-insensitive — codex on PR
+    # #1932 flagged that a critic URL like
+    # ``https://github.com/fidocancode/home/issues/123`` was treated
+    # as cross-repo under strict equality, which dropped the durable
+    # skip-marker write and let a later fail-open replay file the
+    # duplicate insight after all.  Normalize both sides.
+    if match.group("owner_repo").lower() != _INSIGHT_REPO.lower():
         return None
     return int(match.group("number"))
 
@@ -422,6 +428,19 @@ def _route_critic_exhausted_blocked(
     attempt_lines = "\n".join(
         f"  {i + 1}. {preview!r}" for i, preview in enumerate(exc.synthesis_attempts)
     )
+    # Codex on PR #1932: idempotency marker keyed on
+    # ``(critic_label, source_repo, source_pr, source_comment_id)``
+    # so a retry of this route (e.g. comment-post failed and the
+    # promise stayed claimed) doesn't file a SECOND bug for the same
+    # exhaustion.  Without this, transient GitHub failures spamming
+    # ``_BUG_REPO`` with duplicate Bug issues that obscure real
+    # incidents.  Two different critics exhausting on the same
+    # comment file separate bugs (different root causes) because the
+    # label is part of the key.
+    bug_marker = (
+        f"<!-- critic-exhaustion: {exc.label}:"
+        f"{target.repo}#{target.pr}:{target.comment_id} -->"
+    )
     bug_body = (
         f"## Critic exhaustion\n\n"
         f"- Critic: `{exc.label}`\n"
@@ -430,21 +449,45 @@ def _route_critic_exhausted_blocked(
         f"- Source comment id: `{target.comment_id}`\n"
         f"- Attempts: {len(exc.synthesis_attempts)}\n\n"
         f"## Critic gaps (one per attempt)\n\n{gap_lines}\n\n"
-        f"## Synthesis attempts (reply_text preview)\n\n{attempt_lines}\n"
+        f"## Synthesis attempts (reply_text preview)\n\n{attempt_lines}\n\n"
+        f"{bug_marker}\n"
     )
     bug_url: str | None = None
     try:
-        bug_url = gh.create_issue(_BUG_REPO, bug_title, bug_body, labels=[_BUG_LABEL])
-    except Exception as file_exc:
+        existing_bugs = gh.search_issues(_BUG_REPO, f'"{bug_marker}" in:body is:issue')
+    except Exception as search_exc:
         log.warning(
-            "critic-exhausted route: failed to auto-file bug for "
-            "%s#%d comment %d (%s) — BLOCKED comment will note the "
-            "filing failure instead of claiming a URL",
+            "critic-exhausted route: bug-marker search failed (%s) — "
+            "proceeding to file (may create a duplicate)",
+            search_exc,
+        )
+        existing_bugs = []
+    if existing_bugs:
+        bug_url = existing_bugs[0].get("html_url")
+        log.info(
+            "critic-exhausted route: existing bug found for %s#%d "
+            "comment %d critic=%s — reusing %s",
             target.repo,
             target.pr,
             target.comment_id,
-            file_exc,
+            exc.label,
+            bug_url,
         )
+    else:
+        try:
+            bug_url = gh.create_issue(
+                _BUG_REPO, bug_title, bug_body, labels=[_BUG_LABEL]
+            )
+        except Exception as file_exc:
+            log.warning(
+                "critic-exhausted route: failed to auto-file bug for "
+                "%s#%d comment %d (%s) — BLOCKED comment will note the "
+                "filing failure instead of claiming a URL",
+                target.repo,
+                target.pr,
+                target.comment_id,
+                file_exc,
+            )
 
     if bug_url:
         filing_line = f"Auto-filed against `{_BUG_REPO}` for follow-up: {bug_url}"

@@ -6700,6 +6700,157 @@ class TestSkipMarkerEndToEnd:
         titles = [it.get("title") for it in result]
         assert "Proposed new" in titles
 
+    def test_apply_keeps_proposal_when_target_closed_by_same_batch(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex on PR #1932: a drop verdict whose target is being
+        CLOSED in the same batch (status="completed", merged away,
+        or split) must NOT honor the drop — otherwise the proposal
+        is dropped against a target that won't survive the batch and
+        no live task carries the scope, silently losing work.
+
+        Concretely: rescope batch closes ``existing`` AND the critic
+        says the new proposal duplicates ``existing``.  The proposal
+        must be KEPT so its scope survives somewhere."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_verdicts
+
+        existing = self._add(tmp_path, "Doomed target")
+        items = [
+            # The same batch closes ``existing`` via status="completed".
+            {"id": existing["id"], "title": existing["title"], "status": "completed"},
+            {
+                "id": None,
+                "title": "Proposed new (would dup existing)",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        verdicts = [
+            None,  # the closing item gets no verdict (has an id)
+            TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id=existing["id"],
+            ),
+        ]
+
+        result = _apply_task_creation_verdicts(items, verdicts, [existing])
+        titles = [it.get("title") for it in result]
+        # The new proposal is KEPT — the named "duplicate of" target
+        # is closing in the same batch, so dropping the proposal too
+        # would leave the scope unrepresented.
+        assert "Proposed new (would dup existing)" in titles
+
+    def test_apply_keeps_proposal_when_target_merged_in_same_batch(
+        self, tmp_path: Path
+    ) -> None:
+        """Sibling case: the target is closed by appearing as a
+        ``merge_sources`` of another item in the same batch."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_verdicts
+
+        source = self._add(tmp_path, "Will be merged")
+        target = self._add(tmp_path, "Merge sink")
+        items = [
+            # The same batch folds ``source`` into ``target``.
+            {
+                "id": target["id"],
+                "title": target["title"],
+                "merge_sources": [source["id"]],
+            },
+            {
+                "id": None,
+                "title": "Proposed new (would dup source)",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        verdicts = [
+            None,
+            TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id=source["id"],
+            ),
+        ]
+
+        result = _apply_task_creation_verdicts(items, verdicts, [source, target])
+        titles = [it.get("title") for it in result]
+        # ``source`` is being absorbed by the merge in this batch —
+        # the proposal that duplicates ``source`` must survive.
+        assert "Proposed new (would dup source)" in titles
+
+    def test_apply_keeps_proposal_when_target_split_in_same_batch(
+        self, tmp_path: Path
+    ) -> None:
+        """Third closing-shape: the target carries non-empty
+        ``split_targets`` so it'll be closed and replaced by children."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_verdicts
+
+        target = self._add(tmp_path, "Will be split")
+        items = [
+            # The same batch splits ``target`` into two children.
+            {
+                "id": target["id"],
+                "title": target["title"],
+                "split_targets": [
+                    {"title": "child A", "description": "", "invariant": "a"},
+                    {"title": "child B", "description": "", "invariant": "b"},
+                ],
+            },
+            {
+                "id": None,
+                "title": "Proposed new (would dup target)",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        verdicts = [
+            None,
+            TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id=target["id"],
+            ),
+        ]
+
+        result = _apply_task_creation_verdicts(items, verdicts, [target])
+        titles = [it.get("title") for it in result]
+        assert "Proposed new (would dup target)" in titles
+
+    def test_apply_drops_proposal_when_target_survives_batch(
+        self, tmp_path: Path
+    ) -> None:
+        """Boundary: when the target is NOT being closed by the
+        batch, the drop verdict IS honored — that's the whole point
+        of HOL-16 dedup.  Pins the negative case so the new
+        survives-batch guard doesn't accidentally over-keep."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_verdicts
+
+        existing = self._add(tmp_path, "Stays put")
+        items = [
+            {
+                "id": None,
+                "title": "Proposed dup",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        verdicts = [
+            TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id=existing["id"],
+            ),
+        ]
+
+        result = _apply_task_creation_verdicts(items, verdicts, [existing])
+        titles = [it.get("title") for it in result]
+        assert "Proposed dup" not in titles
+
     def test_split_child_invariants_land_on_materialised_children(
         self, tmp_path: Path
     ) -> None:

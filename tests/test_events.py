@@ -2611,6 +2611,11 @@ class TestReplyToCommentSynthesisFallback:
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.comment_issue.return_value = {"id": 9999}
         mock_gh.reply_to_review_comment.return_value = {"id": 9999}
+        # Bug-marker search defaults to "no existing bug" so HOL-20
+        # routes proceed to create_issue (codex on PR #1932: the
+        # bug-filing idempotency search would otherwise hit the
+        # MagicMock truthy default and short-circuit the create).
+        mock_gh.search_issues.return_value = []
         return mock_gh
 
     def test_review_comment_falls_back_when_synthesis_exhausted(
@@ -2886,6 +2891,7 @@ class TestReplyToCommentSynthesisFallback:
         mock_gh = MagicMock()
         mock_gh.get_repo_info.return_value = "owner/repo"
         mock_gh.comment_issue.return_value = {"id": 8889}
+        mock_gh.search_issues.return_value = []  # HOL-20 bug-marker search
         mock_gh.create_issue.return_value = (
             "https://github.com/FidoCanCode/home/issues/2"
         )
@@ -6832,6 +6838,24 @@ class TestGitHubInsightFiler:
             == 1234
         )
 
+    def test_parse_insight_issue_number_accepts_case_variants(self) -> None:
+        """Codex on PR #1932: GitHub owner/repo names are
+        case-insensitive, so a critic URL like
+        ``fidocancode/home`` (lowercase) must be treated as the
+        same repo as ``FidoCanCode/home``.  Strict equality dropped
+        the durable skip-marker write and let a later fail-open
+        replay file the duplicate insight after all."""
+        from fido.events import _parse_insight_issue_number
+
+        assert (
+            _parse_insight_issue_number("https://github.com/fidocancode/home/issues/42")
+            == 42
+        )
+        assert (
+            _parse_insight_issue_number("https://github.com/FIDOCANCODE/HOME/issues/7")
+            == 7
+        )
+
     def test_parse_insight_issue_number_rejects_other_repo_url(self) -> None:
         """Codex on PR #1932: a critic that returned a valid issue URL
         from a DIFFERENT repo (``rhencke/confusio/issues/5``)
@@ -6963,6 +6987,7 @@ class TestRouteCriticExhaustedBlocked:
         from fido.events import _route_critic_exhausted_blocked
 
         gh = MagicMock()
+        gh.search_issues.return_value = []  # no existing bug — proceed to create
         gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/9"
         executor = self._make_executor()
         target = self._make_target()
@@ -7014,6 +7039,7 @@ class TestRouteCriticExhaustedBlocked:
         from fido.events import _route_critic_exhausted_blocked
 
         gh = MagicMock()
+        gh.search_issues.return_value = []  # no existing bug — proceed to create
         gh.create_issue.side_effect = RuntimeError("create 500")
         executor = self._make_executor()
         exc = self._make_exc()
@@ -7044,6 +7070,7 @@ class TestRouteCriticExhaustedBlocked:
         from fido.events import _route_critic_exhausted_blocked
 
         gh = MagicMock()
+        gh.search_issues.return_value = []  # no existing bug — proceed to create
         gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/11"
         gh.comment_issue.side_effect = RuntimeError("comment 429")
         executor = self._make_executor()
@@ -7132,6 +7159,91 @@ class TestRouteCriticExhaustedBlocked:
         body = gh.comment_issue.call_args.args[2]
         # No reply-promise marker pattern present.
         assert "fido:reply-promise:" not in body
+
+    def test_bug_filing_idempotent_across_retries(self) -> None:
+        """Codex on PR #1932: when the BLOCKED comment post fails and
+        the route is re-fired by recovery, the FIRST act each retry
+        does is file a bug — without idempotency, transient failures
+        spam ``FidoCanCode/home`` with duplicate Bug issues that
+        obscure real incidents.
+
+        Idempotency uses a marker keyed on
+        ``(critic_label, source_repo, source_pr, source_comment_id)``.
+        On a retry, the search finds the existing bug and reuses
+        its URL instead of creating a second one."""
+        from fido.events import _route_critic_exhausted_blocked
+
+        gh = MagicMock()
+        # First call: marker search returns existing bug → skip create.
+        gh.search_issues.return_value = [
+            {"html_url": "https://github.com/FidoCanCode/home/issues/9000"}
+        ]
+        executor = self._make_executor()
+        exc = self._make_exc()
+
+        posted = _route_critic_exhausted_blocked(
+            exc,
+            self._make_target(),
+            gh=gh,
+            executor=executor,
+            promise_ids=["p1"],
+        )
+        assert posted is True
+        # No new bug filed — the search hit short-circuited the create.
+        gh.create_issue.assert_not_called()
+        # Posted BLOCKED comment cites the EXISTING bug URL.
+        body = gh.comment_issue.call_args.args[2]
+        assert "https://github.com/FidoCanCode/home/issues/9000" in body
+
+    def test_bug_search_failure_falls_through_to_create(self) -> None:
+        """Belt-and-braces: a search failure (rate limit, etc.) must
+        NOT block the bug filing — degrade to "may create a
+        duplicate" rather than skipping the bug entirely."""
+        from fido.events import _route_critic_exhausted_blocked
+
+        gh = MagicMock()
+        gh.search_issues.side_effect = RuntimeError("search 503")
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/9001"
+        executor = self._make_executor()
+        exc = self._make_exc()
+
+        posted = _route_critic_exhausted_blocked(
+            exc,
+            self._make_target(),
+            gh=gh,
+            executor=executor,
+            promise_ids=["p1"],
+        )
+        assert posted is True
+        # Create did fire (no existing bug found because search blew up).
+        gh.create_issue.assert_called_once()
+
+    def test_bug_marker_distinguishes_critic_label(self) -> None:
+        """Two different critics exhausting on the SAME comment file
+        SEPARATE bugs because the marker key includes the critic
+        label (different root causes warrant separate tickets)."""
+        from fido.events import _route_critic_exhausted_blocked
+
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/9002"
+        executor = self._make_executor()
+        exc = self._make_exc(label="reply-prose")
+
+        _route_critic_exhausted_blocked(
+            exc,
+            self._make_target(),
+            gh=gh,
+            executor=executor,
+            promise_ids=["p1"],
+        )
+        bug_body = gh.create_issue.call_args.args[2]
+        # The marker carries the label so the next intent-coverage
+        # exhaustion on the same comment doesn't dedup against this
+        # reply-prose bug.
+        assert "<!-- critic-exhaustion: reply-prose:" in bug_body
+        search_query = gh.search_issues.call_args.args[1]
+        assert "reply-prose:" in search_query
 
     def test_multiple_promise_ids_embedded_for_grouped_paths(self) -> None:
         """Codex on PR #1932: queued / recovery paths can carry

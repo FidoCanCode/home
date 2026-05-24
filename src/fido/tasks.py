@@ -2611,6 +2611,27 @@ def _apply_task_creation_verdicts(
     )
     out: list[dict[str, Any]] = []
     pending_queue_ids = _pending_queue_ids(current)
+    # Codex on PR #1932: a drop verdict whose target is being CLOSED
+    # by the same batch (status="completed", absorbed by another
+    # item's merge_sources, or split via split_targets) must NOT
+    # honor the drop — the named "duplicate of"/"supersedes" target
+    # won't survive the batch, so dropping the proposal too would
+    # leave no live task carrying that scope.  Compute the
+    # batch-closing id set once and treat closing targets the same
+    # way as missing targets (KEEP the proposal, fail-open).
+    batch_closing_ids: set[str] = set()
+    for it in ordered_items:
+        it_id = it.get("id")
+        if isinstance(it_id, str) and it_id:
+            if it.get("status") == str(TaskStatus.COMPLETED):
+                batch_closing_ids.add(it_id)
+            elif it.get("split_targets"):
+                batch_closing_ids.add(it_id)
+        merge_sources = it.get("merge_sources") or []
+        if isinstance(merge_sources, list):
+            for source in merge_sources:
+                if isinstance(source, str) and source:
+                    batch_closing_ids.add(source)
     for item, verdict in zip(ordered_items, verdicts, strict=True):
         if verdict is None:
             out.append(item)
@@ -2618,14 +2639,21 @@ def _apply_task_creation_verdicts(
         if verdict.drops_proposal:
             target_id = verdict.duplicate_of_id or verdict.supersedes_id
             # codex r3293399805 (hallucinated id) + Rob review (target
-            # deleted between unlocked critic and locked apply): same
-            # safe behaviour — when the target is no longer in the
-            # current pending queue, KEEP the proposed task instead of
-            # silently dropping legitimate work.
-            if target_id is None or target_id not in pending_queue_ids:
+            # deleted between unlocked critic and locked apply) +
+            # codex on PR #1932 (target closed BY this batch): same
+            # safe behaviour — when the target won't survive the
+            # batch, KEEP the proposed task instead of silently
+            # dropping legitimate work.
+            target_alive = (
+                target_id is not None
+                and target_id in pending_queue_ids
+                and target_id not in batch_closing_ids
+            )
+            if not target_alive:
                 log.warning(
-                    "task-creation critic %r references target id %r not "
-                    "in current pending queue — keeping proposed task",
+                    "task-creation critic %r references target id %r "
+                    "that won't survive the batch (missing or closing) — "
+                    "keeping proposed task",
                     verdict.relationship,
                     target_id,
                 )
