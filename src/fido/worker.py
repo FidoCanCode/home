@@ -1101,6 +1101,22 @@ def ci_ready_for_review(
 
 _BODY_TAG_RE = re.compile(r"<body>\s*(.*?)\s*</body>", re.DOTALL | re.IGNORECASE)
 
+# HOL-21 / #1915: task-completion critic re-park budget.  Each
+# failed critic verdict re-parks the task IN_PROGRESS and appends
+# ``CRITIC: <gap>`` to the description for the next worker turn.
+# After this many failures on the SAME task, escalate to BLOCKED +
+# auto-file bug instead of cycling indefinitely.  Matches the
+# spirit of ``MAX_RETRIES`` for synthesis-critic exhaustion (HOL-
+# 20) — same shape of "give up after N, file a bug for follow-up".
+_HOL17_MAX_REPARK_BUDGET = 3
+
+# Matches the ``CRITIC: <gap-text>`` lines appended to a task
+# description on each failed task-completion critic verdict.  Used
+# by the re-park-budget check above to count prior failures and by
+# the escalation path to build the gap chain for the auto-filed
+# bug body.
+_CRITIC_GAP_RE = re.compile(r"^CRITIC: (.+)$", re.MULTILINE)
+
 
 def _extract_body(raw: str | None) -> str:
     """Extract content between <body>...</body> tags from provider output.
@@ -3393,21 +3409,45 @@ class Worker:
         )
 
     def _handle_task_completion_critic_failure(
-        self, task: dict[str, Any], gap: str
+        self,
+        task: dict[str, Any],
+        gap: str,
+        *,
+        repo: str | None = None,
+        pr_number: int | None = None,
     ) -> None:
-        """HOL-17 / #1911: handle a failed task-completion critic verdict.
+        """HOL-17 / #1911 + HOL-21 / #1915: handle a failed task-
+        completion critic verdict.
 
-        Reverses the just-landed commit (``git reset --soft HEAD~1`` —
+        On the first ``_HOL17_MAX_REPARK_BUDGET`` failures: reverse
+        the just-landed commit (``git reset --soft HEAD~1`` —
         changes remain staged so the worker's next turn sees them),
-        appends the critic gap to the task description so the next
-        worker turn has guidance, and marks the task IN_PROGRESS so
+        append the critic gap to the task description so the next
+        worker turn has guidance, and mark the task IN_PROGRESS so
         the picker re-selects it on the next cycle.
 
+        When the budget is exhausted (the task description already
+        carries ``_HOL17_MAX_REPARK_BUDGET`` ``CRITIC:`` markers
+        from prior failures): stop re-parking, mark the task BLOCKED,
+        post a BLOCKED comment on the PR, auto-file a bug via the
+        shared HOL-21 ``file_stuck_on_critic_bug`` helper.  The
+        task no longer cycles indefinitely on the same complaint —
+        a human (or a future re-decomposition rescope) has to
+        intervene.
+
         The reset is destructive on the LOCAL commit only — nothing
-        was pushed yet, so no remote state changes.  The staged
-        changes survive: the worker can refine them, ``git restore
-        --staged`` selected files to drop scope-creep, or amend its
-        approach based on the gap.
+        was pushed yet, so no remote state changes.  In the re-park
+        case the staged changes survive: the worker can refine them
+        or amend.  In the escalation case the staged changes are
+        discarded (``git reset --hard HEAD``) because there's no
+        retry to keep them for.
+
+        ``repo`` / ``pr_number`` are optional only for legacy callers
+        (and the migrating tests); production paths pass them so the
+        escalation branch can post the BLOCKED comment and build the
+        bug-file source link.  When omitted on the escalation path
+        we still file the bug (with a placeholder source link) but
+        skip the PR comment.
         """
         log.warning(
             "task-completion critic FAILED for %s — soft-resetting "
@@ -3421,6 +3461,29 @@ class Worker:
         # corruption rather than papering over it with an in_progress
         # task that has a phantom commit ahead of upstream.
         self._git(["reset", "--soft", "HEAD~1"])
+        # HOL-21 / #1915: count the trailing CRITIC: markers in the
+        # task description to see whether this failure exhausts the
+        # re-park budget.  Each prior re-park appended one ``CRITIC:
+        # <gap>`` line; the current gap is in ``gap`` and not yet
+        # appended.  ``prior_gaps + 1`` is therefore the total number
+        # of critic failures including this one.
+        existing_desc = (task.get("description") or "").rstrip()
+        prior_gaps = _CRITIC_GAP_RE.findall(existing_desc)
+        if len(prior_gaps) + 1 > _HOL17_MAX_REPARK_BUDGET:
+            log.warning(
+                "task-completion critic budget exhausted for %s (%d "
+                "prior failures + current): escalating to BLOCKED + "
+                "auto-file bug",
+                task["id"],
+                len(prior_gaps),
+            )
+            self._escalate_task_completion_critic_exhausted(
+                task=task,
+                gap_chain=(*prior_gaps, gap),
+                repo=repo,
+                pr_number=pr_number,
+            )
+            return
         # Append the critic gap to the task description so the next
         # worker turn reads it as guidance.  Markdown bullet under a
         # CRITIC: header keeps existing description content intact.
@@ -3494,6 +3557,116 @@ class Worker:
         # next cycle.
         with self._state.modify() as state:
             state.pop("current_task_id", None)
+
+    def _escalate_task_completion_critic_exhausted(
+        self,
+        *,
+        task: dict[str, Any],
+        gap_chain: tuple[str, ...],
+        repo: str | None,
+        pr_number: int | None,
+    ) -> None:
+        """HOL-21 / #1915: end the re-park cycle when the task-
+        completion critic has rejected the same task
+        ``_HOL17_MAX_REPARK_BUDGET`` times in a row.
+
+        Side effects:
+
+        1. Discard the staged changes from the just-rolled-back
+           commit (``git reset --hard HEAD``).  No retry is coming,
+           so leaving the staged diff would feed it to the next
+           unrelated task.
+        2. Mark the task BLOCKED so the picker skips it.  Clear
+           ``current_task_id`` so the next worker cycle picks fresh.
+        3. Auto-file a bug on ``_BUG_REPO`` via the shared HOL-21
+           helper (idempotent — repeated escalation on the same
+           task reuses the existing bug rather than spamming).
+        4. When ``repo`` / ``pr_number`` are known, post a BLOCKED
+           comment on the PR pointing at the bug.  Best-effort: a
+           transient GitHub failure here mustn't crash the worker
+           loop, the BLOCKED task status + bug filing are already
+           the durable signals.
+        """
+        # Local import to avoid the worker → events → worker cycle
+        # at module-import time (events.py imports Worker types).
+        from fido.events import (
+            StuckOnCriticContext,
+            file_stuck_on_critic_bug,
+        )
+
+        self._git(["reset", "--hard", "HEAD"])
+
+        with self._tasks.modify() as live:
+            for live_task in live:
+                if live_task["id"] != task["id"]:
+                    continue
+                live_task["status"] = str(TaskStatus.BLOCKED)
+                # Append the final gap to the description so the
+                # BLOCKED record carries the full retry trace too
+                # (the bug body has it, but readers of tasks.json
+                # see it without leaving the file).
+                existing = (live_task.get("description") or "").rstrip()
+                final_gap = gap_chain[-1] if gap_chain else "(no gap recorded)"
+                appended_marker = (
+                    f"CRITIC EXHAUSTED ({len(gap_chain)} attempts): {final_gap}"
+                )
+                live_task["description"] = (
+                    f"{existing}\n\n{appended_marker}" if existing else appended_marker
+                )
+                break
+
+        with self._state.modify() as state:
+            state.pop("current_task_id", None)
+
+        # Build the source link from whatever PR context we have.
+        if repo and pr_number:
+            source_link = f"https://github.com/{repo}/pull/{pr_number}"
+        else:
+            source_link = "(worker context — no PR link available)"
+
+        bug_url = file_stuck_on_critic_bug(
+            StuckOnCriticContext(
+                emission_point="task-completion",
+                source_repo=repo or "(unknown)",
+                source_pr=pr_number or 0,
+                target_kind="task",
+                target_id=str(task["id"]),
+                source_link=source_link,
+                gaps=tuple(gap_chain),
+            ),
+            gh=self.gh,
+        )
+
+        if repo and pr_number:
+            blocked_body = (
+                f"**BLOCKED**: task-completion critic exhausted "
+                f"{len(gap_chain)} attempts on task `{task['id']}` "
+                f"({task.get('title', '(no title)')!r}).\n\n"
+                f"The Layer 2 critic kept rejecting the commit.  Final gap:\n\n"
+                f"> {gap_chain[-1] if gap_chain else '(no gap recorded)'}\n\n"
+            )
+            if bug_url:
+                blocked_body += (
+                    f"Auto-filed against `FidoCanCode/home` for follow-up: {bug_url}\n"
+                )
+            else:
+                blocked_body += (
+                    "Auto-filing against `FidoCanCode/home` FAILED — see "
+                    "Fido logs for the full gap chain.\n"
+                )
+            try:
+                self.gh.comment_issue(repo, pr_number, blocked_body)
+            except Exception as exc:
+                log.warning(
+                    "HOL-21: failed to post BLOCKED comment on %s#%d "
+                    "for task %s (%s) — task is still marked BLOCKED, "
+                    "bug at %s",
+                    repo,
+                    pr_number,
+                    task["id"],
+                    exc,
+                    bug_url or "(none)",
+                )
 
     def _finish_task(
         self,
@@ -4368,7 +4541,10 @@ class Worker:
                         )
                         if not completion_verdict.passed:
                             self._handle_task_completion_critic_failure(
-                                task, completion_verdict.gap
+                                task,
+                                completion_verdict.gap,
+                                repo=repo_ctx.repo,
+                                pr_number=pr_number,
                             )
                             # Rob review on PR #1932: the rolled-back turn
                             # may have leaked top-level PR comments via the

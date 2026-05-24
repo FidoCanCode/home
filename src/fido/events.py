@@ -414,7 +414,7 @@ _BUG_LABEL = "Bug"
 
 @dataclass(frozen=True)
 class StuckOnCriticContext:
-    """HOL-21 / #1915: context bundle for ``_file_stuck_on_critic_bug``.
+    """HOL-21 / #1915: context bundle for ``file_stuck_on_critic_bug``.
 
     Every critic that detects exhaustion (HOL-15..HOL-19) builds one
     of these and hands it to the shared filing helper.  The shape is
@@ -452,7 +452,7 @@ class StuckOnCriticContext:
     attempts_preview: tuple[str, ...] = ()
 
 
-def _file_stuck_on_critic_bug(ctx: StuckOnCriticContext, *, gh: GitHub) -> str | None:
+def file_stuck_on_critic_bug(ctx: StuckOnCriticContext, *, gh: GitHub) -> str | None:
     """HOL-21 / #1915: file (idempotently) a bug on :data:`_BUG_REPO`
     for a critic exhaustion.
 
@@ -584,11 +584,11 @@ def _route_critic_exhausted_blocked(
     source_link = _insight_source_link(target)
 
     # HOL-21 / #1915: bug-filing is shared infrastructure now —
-    # ``_file_stuck_on_critic_bug`` handles the body, idempotency
+    # ``file_stuck_on_critic_bug`` handles the body, idempotency
     # marker, and URL return for ALL critic exhaustion routes
     # (synthesis critics here + per-leaf retry budgets for HOL-16/
     # HOL-17/HOL-19 in their own modules).
-    bug_url = _file_stuck_on_critic_bug(
+    bug_url = file_stuck_on_critic_bug(
         StuckOnCriticContext(
             emission_point=exc.label,
             source_repo=target.repo,

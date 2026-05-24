@@ -7061,13 +7061,13 @@ class TestFileStuckOnCriticBug:
         )
 
     def test_files_new_bug_with_idempotency_marker(self) -> None:
-        from fido.events import _file_stuck_on_critic_bug
+        from fido.events import file_stuck_on_critic_bug
 
         gh = MagicMock()
         gh.search_issues.return_value = []
         gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/1000"
 
-        url = _file_stuck_on_critic_bug(self._ctx(), gh=gh)
+        url = file_stuck_on_critic_bug(self._ctx(), gh=gh)
         assert url == "https://github.com/FidoCanCode/home/issues/1000"
         body = gh.create_issue.call_args.args[2]
         assert "<!-- critic-exhaustion: task-completion:" in body
@@ -7080,52 +7080,52 @@ class TestFileStuckOnCriticBug:
         assert "(no per-attempt previews recorded)" in body
 
     def test_reuses_existing_bug_on_marker_hit(self) -> None:
-        from fido.events import _file_stuck_on_critic_bug
+        from fido.events import file_stuck_on_critic_bug
 
         gh = MagicMock()
         gh.search_issues.return_value = [
             {"html_url": "https://github.com/FidoCanCode/home/issues/2000"}
         ]
 
-        url = _file_stuck_on_critic_bug(self._ctx(), gh=gh)
+        url = file_stuck_on_critic_bug(self._ctx(), gh=gh)
         assert url == "https://github.com/FidoCanCode/home/issues/2000"
         gh.create_issue.assert_not_called()
 
     def test_search_failure_falls_through_to_create(self) -> None:
-        from fido.events import _file_stuck_on_critic_bug
+        from fido.events import file_stuck_on_critic_bug
 
         gh = MagicMock()
         gh.search_issues.side_effect = RuntimeError("503")
         gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/3000"
 
-        url = _file_stuck_on_critic_bug(self._ctx(), gh=gh)
+        url = file_stuck_on_critic_bug(self._ctx(), gh=gh)
         assert url == "https://github.com/FidoCanCode/home/issues/3000"
 
     def test_create_failure_returns_none(self) -> None:
-        from fido.events import _file_stuck_on_critic_bug
+        from fido.events import file_stuck_on_critic_bug
 
         gh = MagicMock()
         gh.search_issues.return_value = []
         gh.create_issue.side_effect = RuntimeError("500")
 
-        url = _file_stuck_on_critic_bug(self._ctx(), gh=gh)
+        url = file_stuck_on_critic_bug(self._ctx(), gh=gh)
         assert url is None
 
     def test_emission_point_part_of_idempotency_key(self) -> None:
         """Two different critics exhausting on the same target file
         SEPARATE bugs because the emission_point is in the marker."""
-        from fido.events import _file_stuck_on_critic_bug
+        from fido.events import file_stuck_on_critic_bug
 
         gh = MagicMock()
         gh.search_issues.return_value = []
         gh.create_issue.return_value = "https://x/issues/1"
 
-        _file_stuck_on_critic_bug(self._ctx(emission_point="task-completion"), gh=gh)
+        file_stuck_on_critic_bug(self._ctx(emission_point="task-completion"), gh=gh)
         intent_body = gh.create_issue.call_args.args[2]
         gh.reset_mock()
         gh.search_issues.return_value = []
 
-        _file_stuck_on_critic_bug(self._ctx(emission_point="task-creation"), gh=gh)
+        file_stuck_on_critic_bug(self._ctx(emission_point="task-creation"), gh=gh)
         creation_body = gh.create_issue.call_args.args[2]
 
         assert "task-completion:" in intent_body
@@ -7135,13 +7135,13 @@ class TestFileStuckOnCriticBug:
     def test_attempts_preview_when_provided(self) -> None:
         """When the caller has per-attempt previews (HOL-15/18 path
         always does), they're rendered in the bug body."""
-        from fido.events import _file_stuck_on_critic_bug
+        from fido.events import file_stuck_on_critic_bug
 
         gh = MagicMock()
         gh.search_issues.return_value = []
         gh.create_issue.return_value = "https://x/issues/1"
 
-        _file_stuck_on_critic_bug(
+        file_stuck_on_critic_bug(
             self._ctx(attempts_preview=("preview-A", "preview-B")), gh=gh
         )
         body = gh.create_issue.call_args.args[2]
