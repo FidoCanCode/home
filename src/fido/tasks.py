@@ -16,7 +16,7 @@ from typing import IO, TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from fido.appstate import FidoState, TaskListSnapshot
     from fido.atomic import AtomicUpdater
-    from fido.critics import TaskCreationVerdict
+    from fido.critics import TaskCreationDropCounter, TaskCreationVerdict
 
 from fido.claude import ClaudeClient
 from fido.github import GitHub
@@ -2593,6 +2593,8 @@ def _apply_task_creation_verdicts(
     ordered_items: list[dict[str, Any]],
     verdicts: list["TaskCreationVerdict | None"],
     current: list[dict[str, Any]],
+    *,
+    drop_counter: "TaskCreationDropCounter | None" = None,
 ) -> list[dict[str, Any]]:
     """Apply pre-gathered task-creation verdicts against the CURRENT
     queue, dropping/fanning items per verdict.
@@ -2666,6 +2668,19 @@ def _apply_task_creation_verdicts(
                 target_id,
                 verdict.rationale,
             )
+            # HOL-16 follow-up / #1934: bump the per-intent drop
+            # counter for every intent_comment_id whose comment
+            # contributed to this dropped proposal.  After N drops
+            # attributed to the same intent the counter escalates
+            # via its injected escalator (the comment is the source
+            # of repeated rejected proposals — either Opus keeps
+            # re-proposing legitimately distinct work the critic
+            # mis-classifies, or the comment's intent isn't being
+            # honoured).
+            if drop_counter is not None:
+                for cid in item.get("contributing_intents") or ():
+                    if isinstance(cid, int):
+                        drop_counter.record_drop(cid)
             continue
         if verdict.fans_out:
             log.info(
@@ -3587,6 +3602,7 @@ def reorder_tasks(
     ]
     | None = None,
     _on_done: Callable[[], None] | None = None,
+    task_creation_drop_counter: "TaskCreationDropCounter | None" = None,
 ) -> None:
     """Reorder pending tasks by Opus dependency analysis.
 
@@ -3868,7 +3884,10 @@ def reorder_tasks(
         # proposed task to be KEPT, not silently dropped (Rob review
         # on PR #1932).
         ordered_items = _apply_task_creation_verdicts(
-            ordered_items, task_creation_verdicts, current
+            ordered_items,
+            task_creation_verdicts,
+            current,
+            drop_counter=task_creation_drop_counter,
         )
         validation_errors = _validate_rescope_batch(current, ordered_items)
         if validation_errors:
@@ -3998,6 +4017,20 @@ def reorder_tasks(
         # write).  Neither makes sense after a rejection: nothing committed,
         # nothing to sync.  Skip every post-commit callback (codex on #1733).
         return
+
+    # HOL-16 follow-up / #1934: reset the per-intent drop counter for
+    # any intent_comment_id that no longer has live contributing tasks
+    # in the post-batch result.  An intent's drop streak only matters
+    # while the intent is still actively trying to land work; once it
+    # has either been fully covered or moved on, a fresh start clears
+    # the slate so a later, unrelated drop doesn't carry old debt.
+    if task_creation_drop_counter is not None:
+        active_intent_ids: set[int] = set()
+        for t in result:
+            for cid in t.get("contributing_intents") or ():
+                if isinstance(cid, int):
+                    active_intent_ids.add(cid)
+        task_creation_drop_counter.reset_inactive_intents(active_intent_ids)
 
     if _on_changes is not None:
         # Always call with the (possibly empty) list — the production

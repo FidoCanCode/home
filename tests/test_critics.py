@@ -1684,3 +1684,93 @@ class TestInsightDedupCriticTransportCounterWiring:
             transport_counter=counter,
         )
         assert calls == [2]
+
+
+class TestTaskCreationDropCounter:
+    """HOL-16 follow-up / #1934: per-intent task-creation drop counter
+    escalates after N drops attributed to the same intent_comment_id;
+    resets when the intent has no live contributing tasks."""
+
+    def test_escalates_at_threshold_for_single_intent(self) -> None:
+        from fido.critics import TaskCreationDropCounter
+
+        calls: list[tuple[int, int]] = []
+        counter = TaskCreationDropCounter(
+            threshold=3, escalator=lambda cid, count: calls.append((cid, count))
+        )
+        counter.record_drop(101)
+        counter.record_drop(101)
+        assert calls == []
+        counter.record_drop(101)
+        assert calls == [(101, 3)]
+
+    def test_drops_for_different_intents_tracked_separately(self) -> None:
+        from fido.critics import TaskCreationDropCounter
+
+        calls: list[tuple[int, int]] = []
+        counter = TaskCreationDropCounter(
+            threshold=2, escalator=lambda cid, count: calls.append((cid, count))
+        )
+        counter.record_drop(101)
+        counter.record_drop(202)
+        counter.record_drop(101)
+        # 101 hit threshold; 202 hasn't.
+        assert calls == [(101, 2)]
+
+    def test_already_escalated_suppresses_re_fire(self) -> None:
+        from fido.critics import TaskCreationDropCounter
+
+        calls: list[tuple[int, int]] = []
+        counter = TaskCreationDropCounter(
+            threshold=2, escalator=lambda cid, count: calls.append((cid, count))
+        )
+        counter.record_drop(101)
+        counter.record_drop(101)
+        counter.record_drop(101)
+        counter.record_drop(101)
+        assert calls == [(101, 2)]
+
+    def test_reset_inactive_intents_clears_counter_and_latch(self) -> None:
+        from fido.critics import TaskCreationDropCounter
+
+        calls: list[tuple[int, int]] = []
+        counter = TaskCreationDropCounter(
+            threshold=2, escalator=lambda cid, count: calls.append((cid, count))
+        )
+        counter.record_drop(101)
+        counter.record_drop(101)  # escalates
+        assert calls == [(101, 2)]
+        # Intent 101 has no live contributing tasks anymore — reset.
+        counter.reset_inactive_intents(active_intent_ids=set())
+        # Fresh drops can escalate again.
+        counter.record_drop(101)
+        counter.record_drop(101)
+        assert calls == [(101, 2), (101, 2)]
+
+    def test_reset_inactive_keeps_active_intents(self) -> None:
+        from fido.critics import TaskCreationDropCounter
+
+        calls: list[tuple[int, int]] = []
+        counter = TaskCreationDropCounter(
+            threshold=3, escalator=lambda cid, count: calls.append((cid, count))
+        )
+        counter.record_drop(101)
+        counter.record_drop(202)
+        # Both 101 and 202 stay active.
+        counter.reset_inactive_intents(active_intent_ids={101, 202})
+        # Counters preserved — one more drop on 101 doesn't escalate yet
+        # (count is now 2, threshold is 3).
+        counter.record_drop(101)
+        assert calls == []
+        # But 101 now reaches threshold.
+        counter.record_drop(101)
+        assert calls == [(101, 3)]
+
+    def test_none_escalator_no_op(self) -> None:
+        from fido.critics import TaskCreationDropCounter
+
+        counter = TaskCreationDropCounter(threshold=1, escalator=None)
+        # Must not raise.
+        counter.record_drop(101)
+        counter.record_drop(101)
+        counter.reset_inactive_intents(set())

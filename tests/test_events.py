@@ -7989,6 +7989,25 @@ class TestDispatcher:
         mock_gh.get_issue_comments.assert_called_once_with(repo_cfg.name, 42)
         assert count == 0
 
+    def test_task_creation_drop_escalator_files_bug(self, tmp_path: Path) -> None:
+        # HOL-16 follow-up / #1934: when the process-local per-intent
+        # drop counter crosses the threshold, the Dispatcher-bound
+        # escalator files a bug via ``file_stuck_on_critic_bug`` with
+        # ``emission_point="task-creation"`` and the comment id as
+        # ``target_id``.
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/9998"
+        d = Dispatcher(cfg, repo_cfg, gh)
+        d._escalate_task_creation_drop_streak(intent_comment_id=12345, count=3)
+        gh.create_issue.assert_called_once()
+        args = gh.create_issue.call_args.args
+        assert args[0] == "FidoCanCode/home"
+        assert "task-creation" in args[2]
+        assert "12345" in args[2]
+
     def test_insight_dedup_transport_escalator_files_bug(self, tmp_path: Path) -> None:
         # HOL-19 follow-up / #1935: when the process-local
         # transport-failure counter crosses the threshold, the

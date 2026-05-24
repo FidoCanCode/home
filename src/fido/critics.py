@@ -37,6 +37,7 @@ __all__ = [
     "InsightDedupVerdict",
     "ReplyProseVerdict",
     "TaskCompletionVerdict",
+    "TaskCreationDropCounter",
     "TaskCreationProposedSplit",
     "TaskCreationVerdict",
     "run_insight_dedup_critic",
@@ -643,6 +644,73 @@ def _parse_insight_dedup_verdict(
         duplicate_url=url.strip(),
         rationale=rationale,
     )
+
+
+class TaskCreationDropCounter:
+    """HOL-16 follow-up / #1934: process-local per-``intent_comment_id``
+    drop counter for the task-creation critic.
+
+    Each ``_apply_task_creation_verdicts`` call records every drop
+    attributed to an intent_comment_id (via the item's
+    ``contributing_intents``).  When the per-intent count crosses
+    ``threshold``, the injected ``escalator(intent_comment_id, count)``
+    fires once and is suppressed until the counter resets for that
+    intent.
+
+    Reset rule (per the #1934 issue body): when an intent's
+    contributing tasks reach zero — either the comment was successfully
+    covered by another task that DID land, or the system moved on and
+    no live proposal carries the intent anymore.  Callers invoke
+    ``reset_inactive_intents`` after each batch apply with the set of
+    intent ids that still appear in live task ``contributing_intents``.
+
+    Thread-safe: a lock guards every read-modify cycle.
+
+    Process-local persistence per the issue body ("isn't worth building
+    until we observe the pattern in production").  Survives across
+    rescope batches in one Fido process, resets on restart.
+    """
+
+    def __init__(
+        self,
+        *,
+        threshold: int = 3,
+        escalator: Callable[[int, int], None] | None = None,
+    ) -> None:
+        self._threshold = threshold
+        self._escalator = escalator
+        self._drops_by_intent: dict[int, int] = {}
+        self._already_escalated: set[int] = set()
+        self._lock = threading.Lock()
+
+    def record_drop(self, intent_comment_id: int) -> None:
+        escalator: Callable[[int, int], None] | None = None
+        count = 0
+        with self._lock:
+            self._drops_by_intent[intent_comment_id] = (
+                self._drops_by_intent.get(intent_comment_id, 0) + 1
+            )
+            count = self._drops_by_intent[intent_comment_id]
+            if (
+                count >= self._threshold
+                and intent_comment_id not in self._already_escalated
+                and self._escalator is not None
+            ):
+                self._already_escalated.add(intent_comment_id)
+                escalator = self._escalator
+        if escalator is not None:
+            escalator(intent_comment_id, count)
+
+    def reset_inactive_intents(self, active_intent_ids: set[int]) -> None:
+        """Drop counters for any intent_comment_id NOT in
+        *active_intent_ids* — those intents have no live contributing
+        tasks anymore, so the drop streak is broken.
+        """
+        with self._lock:
+            for cid in list(self._drops_by_intent):
+                if cid not in active_intent_ids:
+                    self._drops_by_intent.pop(cid, None)
+                    self._already_escalated.discard(cid)
 
 
 class InsightDedupTransportCounter:

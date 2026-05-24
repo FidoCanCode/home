@@ -15,6 +15,7 @@ from fido.critics import (
     INSIGHT_REPO,
     InsightDedupTransportCounter,
     InsightDedupVerdict,
+    TaskCreationDropCounter,
     run_insight_dedup_critic,
 )
 from fido.github import GitHub
@@ -1489,6 +1490,43 @@ class Dispatcher:
         self._insight_dedup_transport_counter = InsightDedupTransportCounter(
             escalator=self._escalate_insight_dedup_transport_failure,
         )
+        # HOL-16 follow-up / #1934: process-local per-intent
+        # task-creation-drop counter; escalates via the Dispatcher-
+        # bound method when an intent's drops cross threshold.
+        self._task_creation_drop_counter = TaskCreationDropCounter(
+            escalator=self._escalate_task_creation_drop_streak,
+        )
+
+    def _escalate_task_creation_drop_streak(
+        self, intent_comment_id: int, count: int
+    ) -> None:
+        """HOL-16 follow-up / #1934: escalator bound to the
+        Dispatcher's per-intent
+        :class:`TaskCreationDropCounter`.  Files a bug against
+        ``FidoCanCode/home`` when a single intent_comment_id has had
+        N proposals dropped in a row — either Opus keeps re-proposing
+        legitimately-distinct work the critic mis-classifies, or the
+        comment's intent isn't being honoured.
+        """
+        file_stuck_on_critic_bug(
+            StuckOnCriticContext(
+                emission_point="task-creation",
+                source_repo=self._repo_cfg.name,
+                source_pr=0,
+                target_kind="comment",
+                target_id=str(intent_comment_id),
+                source_link=(
+                    f"(process-local — comment {intent_comment_id} had "
+                    f"{count} proposals dropped by the task-creation critic "
+                    f"in {self._repo_cfg.name})"
+                ),
+                gaps=(
+                    f"{count} consecutive task-creation drops attributed to "
+                    f"comment #{intent_comment_id}",
+                ),
+            ),
+            gh=self._gh,
+        )
 
     def _escalate_insight_dedup_transport_failure(self, count: int) -> None:
         """HOL-19 follow-up / #1935: escalator bound to the
@@ -2962,6 +3000,11 @@ class Dispatcher:
             "_on_inprogress_affected": on_inprogress_affected,
             "agent": agent,
             "prompts": prompts,
+            # HOL-16 follow-up / #1934: process-local per-intent
+            # drop counter shared across this Dispatcher's rescope
+            # batches; escalates via the Dispatcher-bound escalator
+            # method when an intent's drops cross threshold.
+            "task_creation_drop_counter": self._task_creation_drop_counter,
         }
         issue_ctx, pr_ctx = _load_active_context_for_rescope(
             work_dir, repo_cfg.name, gh
