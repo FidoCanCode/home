@@ -2000,6 +2000,15 @@ class Dispatcher:
                 _route_critic_exhausted_blocked(
                     critic_exc, target, gh=gh, executor=executor
                 )
+            # Codex on PR #1932: ack the direct_promise so the
+            # webhook claim is released.  ACK (not fail) because the
+            # comment IS handled — we posted BLOCKED and filed a bug;
+            # failing would re-fire the same BLOCKED route on every
+            # webhook redelivery.  Without this, the comment stays
+            # permanently claimed and a re-delivery is silently
+            # dropped.
+            if direct_promise is not None:
+                FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
             # ``BLOCKED`` category signals the caller no action was
             # taken (no reply, no rescope) — server.py + worker
             # callers discard the value, so this is informational.
@@ -2273,6 +2282,12 @@ class Dispatcher:
                 _route_critic_exhausted_blocked(
                     critic_exc, issue_target, gh=gh, executor=executor
                 )
+            # See the matching ack in the review-comment path above —
+            # ack (not fail) because we handled the comment via
+            # BLOCKED + bug-file; failing would re-fire on every
+            # webhook redelivery.  Codex on PR #1932.
+            if direct_promise is not None:
+                FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
             return ("BLOCKED", [])
         except SynthesisExhaustedError:
             log.warning(

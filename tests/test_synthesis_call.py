@@ -1009,6 +1009,68 @@ class TestIntentCoverageCritic:
         assert len(caught.value.synthesis_attempts) == MAX_RETRIES
         assert all("Promise." in preview for preview in caught.value.synthesis_attempts)
 
+    def test_parse_after_critic_resets_chain_to_generic_exhausted(self) -> None:
+        """Codex on PR #1932: a mixed sequence (critic-fail then
+        parse-fail attempts) used to leave stale critic state intact
+        — exhaustion would route to the BLOCKED PR / auto-file path
+        even though the LAST attempt was a parse failure (the model
+        couldn't emit valid JSON, NOT a critic that wouldn't accept
+        what it emitted).  Parse failures must RESET the critic
+        chain so the final exhaustion reflects the actual final
+        failure mode."""
+        good_raw = _make_raw(reply_text="Promise.", change_request=None)
+        # Attempt 1: parse → critic-fail.
+        # Attempt 2: parse fail.
+        # Attempt 3: parse fail.
+        # Last failure is parse → generic SynthesisExhaustedError.
+        agent = _make_agent(
+            [
+                good_raw,
+                "Yes",
+                _critic_fail("missing X"),
+                "not json",
+                "still not json",
+            ]
+        )
+        prompts = _make_prompts()
+
+        with pytest.raises(SynthesisExhaustedError) as caught:
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        # The exception is the BASE class, not the critic subclass —
+        # the parse failures reset the trailing-critic chain.
+        assert not isinstance(caught.value, SynthesisCriticExhaustedError)
+
+    def test_critic_after_parse_routes_to_blocked(self) -> None:
+        """Mirror case: parse-fail early, then trailing critic-fail
+        attempts.  The LAST failure IS a critic gap, so exhaustion
+        routes to the BLOCKED / auto-file path with the trailing
+        critic chain attached.  The earlier parse-failure attempt
+        is correctly excluded from the chain."""
+        good_raw = _make_raw(reply_text="Promise.", change_request=None)
+        agent = _make_agent(
+            [
+                "not json",
+                good_raw,
+                "Yes",
+                _critic_fail("missing tests on attempt 2"),
+                good_raw,
+                "Yes",
+                _critic_fail("missing tests on attempt 3"),
+            ]
+        )
+        prompts = _make_prompts()
+
+        with pytest.raises(SynthesisCriticExhaustedError) as caught:
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        # Only the trailing critic-fail attempts are in the chain —
+        # the early parse-failure is correctly excluded.
+        assert caught.value.label == "intent-coverage"
+        assert len(caught.value.critic_gaps) == 2
+        assert caught.value.critic_gaps == [
+            "missing tests on attempt 2",
+            "missing tests on attempt 3",
+        ]
+
     def test_parse_only_exhaustion_raises_generic_synthesis_exhausted(self) -> None:
         """Parse-only failures (model can't emit valid JSON) raise the
         generic ``SynthesisExhaustedError``, NOT the HOL-20 critic
@@ -1097,6 +1159,46 @@ class TestIntentCoverageCritic:
         assert result.change_request == "Add tests"
         # synth-v1 + verify + critic-fail + synth-v2 + critic-pass = 5
         assert agent.run_turn.call_count == 5
+
+    def test_retry_suffix_uses_critic_label_that_failed(self) -> None:
+        """Codex on PR #1932: the critic-retry user prompt previously
+        hard-coded "intent-coverage critic" even when the failure was
+        a reply-prose critic, nudging the model toward the wrong
+        failure mode.  The label must reflect the critic that
+        actually failed so the model's next attempt addresses the
+        right axis."""
+        raw_v1 = _make_raw(reply_text="Fixed in commit deadbeef.", change_request="x")
+        raw_v2 = _make_raw(reply_text="Fixed in commit abc1234.", change_request="x")
+        prose_fail = json.dumps(
+            {
+                "passed": False,
+                "gap": "commit deadbeef not in recent_commit_shas",
+                "rationale": "checked git log",
+            }
+        )
+        prose_pass = json.dumps({"passed": True, "rationale": "grounded"})
+        agent = _make_agent(
+            [raw_v1, _CRITIC_PASS, prose_fail, raw_v2, _CRITIC_PASS, prose_pass]
+        )
+        prompts = _make_prompts()
+        prompts.reply_prose_claim_grounding_prompt.return_value = "reply-prose-prompt"
+
+        call_synthesis(
+            "comment",
+            is_bot=False,
+            agent=agent,
+            prompts=prompts,
+            claim_grounding_state={"recent_commit_shas": ["abc1234"]},
+        )
+
+        # Synth attempt 1 = idx 0 (no retry suffix).  Synth attempt 2 =
+        # idx 3 (after intent-pass + reply-prose-fail).  The retry
+        # user prompt at idx 3 must name "reply-prose critic", NOT
+        # "intent-coverage critic".
+        retry_args, _ = agent.run_turn.call_args_list[3]
+        assert "reply-prose critic" in retry_args[0]
+        assert "intent-coverage critic" not in retry_args[0]
+        assert "commit deadbeef not in recent_commit_shas" in retry_args[0]
 
     def test_reply_prose_critic_fires_when_grounding_state_provided(
         self,

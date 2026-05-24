@@ -331,8 +331,7 @@ class SynthesisCriticExhaustedError(SynthesisExhaustedError):
 
 _CRITIC_RETRY_SUFFIX_TEMPLATE = (
     "\n\n---\n"
-    "Your previous response failed the intent-coverage critic with this "
-    "gap:\n\n"
+    "Your previous response failed the {label} critic with this gap:\n\n"
     "  {gap}\n\n"
     "Rewrite the synthesis response to address the gap.  Same JSON schema "
     "as before."
@@ -597,13 +596,17 @@ def call_synthesis(
 
     last_error: Exception | None = None
     last_critic_gap: str | None = None
+    last_critic_label: str | None = None
     # HOL-20 / #1914: per-attempt history so a critic-exhaustion can
     # raise ``SynthesisCriticExhaustedError`` carrying the full retry
-    # trace.  ``critic_gaps[i]`` is the gap from attempt ``i``'s
-    # critic verdict (only populated when a critic actually fired and
-    # rejected); ``synthesis_attempts[i]`` is the response text the
-    # critic rejected.  Parse failures append ``None``/``""`` so the
-    # two lists stay aligned with attempt indices.
+    # trace.  Only contiguous trailing critic-failure attempts are
+    # accumulated — a parse failure RESETS the chain (codex on PR
+    # #1932: a mixed critic-then-parse failure sequence used to leave
+    # stale critic state intact, incorrectly routing to BLOCKED even
+    # when the LAST attempt was a parse failure).  ``last_critic_label``
+    # being non-None is the signal that the most-recent attempt
+    # exited the critic gate, so the trailing run reflects exactly
+    # what caused the final exhaustion.
     critic_label_at_exhaustion: str | None = None
     critic_gaps: list[str] = []
     synthesis_attempts: list[str] = []
@@ -611,9 +614,15 @@ def call_synthesis(
         # Per-attempt prompt suffix.  Critic gap takes priority over the
         # generic JSON-strictness nudge — the critic gap is more specific
         # and addresses a successful-parse-but-bad-coverage problem.
+        # The label is parameterised so a reply-prose critic retry
+        # nudges toward grounded claims, not toward intent coverage
+        # (codex on PR #1932: the suffix used to hard-code "intent-
+        # coverage critic" even when the failure was reply-prose,
+        # pushing the model toward the wrong failure mode).
         if last_critic_gap is not None:
             user_prompt = base_user_prompt + _CRITIC_RETRY_SUFFIX_TEMPLATE.format(
-                gap=last_critic_gap
+                label=last_critic_label or "intent-coverage",
+                gap=last_critic_gap,
             )
         elif attempt > 0:
             user_prompt = base_user_prompt + _RETRY_SUFFIX
@@ -643,6 +652,18 @@ def call_synthesis(
         except ValueError as exc:
             last_error = exc
             last_critic_gap = None
+            last_critic_label = None
+            # Codex on PR #1932: a parse failure means the FINAL
+            # failure (if exhausted here) is "model couldn't emit
+            # valid JSON" — NOT a critic exhaustion.  Reset the
+            # critic chain so the exhaustion check below picks the
+            # right path; the legacy "please rephrase" fallback is
+            # the correct response to a model that can't parse, not
+            # the BLOCKED PR route (which is for "the critic won't
+            # accept what the model emits").
+            critic_label_at_exhaustion = None
+            critic_gaps = []
+            synthesis_attempts = []
             log.warning(
                 "synthesis attempt %d/%d parse failure — %s",
                 attempt + 1,
@@ -682,6 +703,7 @@ def call_synthesis(
         if not verdict.passed:
             last_error = ValueError(f"intent-coverage critic: {verdict.gap}")
             last_critic_gap = verdict.gap
+            last_critic_label = "intent-coverage"
             critic_label_at_exhaustion = "intent-coverage"
             critic_gaps.append(verdict.gap)
             synthesis_attempts.append(response.reply_text[:200])
@@ -711,6 +733,7 @@ def call_synthesis(
             if not prose_verdict.passed:
                 last_error = ValueError(f"reply-prose critic: {prose_verdict.gap}")
                 last_critic_gap = prose_verdict.gap
+                last_critic_label = "reply-prose"
                 critic_label_at_exhaustion = "reply-prose"
                 critic_gaps.append(prose_verdict.gap)
                 synthesis_attempts.append(response.reply_text[:200])

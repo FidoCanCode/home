@@ -2769,6 +2769,14 @@ class TestReplyToCommentSynthesisFallback:
         bug_args = mock_gh.create_issue.call_args.args
         assert bug_args[0] == "FidoCanCode/home"
         assert "intent-coverage" in bug_args[1]
+        # Codex on PR #1932: the direct_promise the dispatcher created
+        # MUST be acked, not left dangling.  A dangling promise keeps
+        # the comment permanently claimed — every webhook redelivery
+        # would short-circuit before reaching the synthesis call,
+        # silently swallowing the work.  ``recoverable_promises``
+        # returns claimed-but-not-acked promises; for a cleanly
+        # routed BLOCKED comment, the list must be empty.
+        assert FidoStore(tmp_path).recoverable_promises() == []
 
     def test_issue_comment_critic_exhausted_routes_to_blocked(
         self, tmp_path: Path
@@ -2815,6 +2823,8 @@ class TestReplyToCommentSynthesisFallback:
         assert mock_gh.create_issue.called
         bug_args = mock_gh.create_issue.call_args.args
         assert "reply-prose" in bug_args[1]
+        # Promise must be acked (see review-comment sibling test).
+        assert FidoStore(tmp_path).recoverable_promises() == []
 
     def test_issue_comment_falls_back_when_synthesis_exhausted(
         self, tmp_path: Path
