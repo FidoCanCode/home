@@ -2341,6 +2341,16 @@ class Dispatcher:
                 ),
                 promise_ids=promise_ids,
             )
+            # HOL-26 / #1920: file insights BEFORE the reply post so any
+            # claim in the reply body about a filed insight is true at
+            # the moment of posting.  Sequenced here (not inside
+            # executor.execute_effects_only below) because the
+            # production reply path threads the outbox protocol through
+            # its own post — the convenience execute() chain doesn't
+            # apply.  Matching ``insights_already_filed=True`` on the
+            # effects call prevents double-filing.
+            if target is not None:
+                executor.file_insights_pre_reply(synthesis_response, target)
             log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
             posted = gh.reply_to_review_comment(
                 info["repo"], info["pr"], body, info["comment_id"]
@@ -2374,7 +2384,9 @@ class Dispatcher:
         # ``executor`` instance built before the synthesis call so the failure
         # path could share its eyes-removal helper.
         if target is not None:
-            executor.execute_effects_only(synthesis_response, target)
+            executor.execute_effects_only(
+                synthesis_response, target, insights_already_filed=True
+            )
 
         return (category, titles)
 
@@ -2588,6 +2600,11 @@ class Dispatcher:
                 ),
                 promise_ids=promise_ids,
             )
+            # HOL-26 / #1920: file insights BEFORE the reply post.  See
+            # the matching comment on the review-comment path; the
+            # invariant is the same.
+            if issue_target is not None:
+                executor.file_insights_pre_reply(synthesis_response, issue_target)
             log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
             posted = gh.comment_issue(repo_full, number, body)
             log.info("reply posted on PR #%s", number)
@@ -2615,7 +2632,9 @@ class Dispatcher:
         # before the synthesis call so the failure path could share its
         # eyes-removal helper.
         if issue_target is not None:
-            executor.execute_effects_only(synthesis_response, issue_target)
+            executor.execute_effects_only(
+                synthesis_response, issue_target, insights_already_filed=True
+            )
 
         log.info(
             "reply_to_issue_comment: complete for PR #%s (category=%s)",
@@ -3011,6 +3030,21 @@ class Dispatcher:
                 affected_task_ids = [
                     tid for tid in verdict.affected_task_ids if tid in tasks_by_id
                 ]
+                # Codex P2 on PR #1938: honored verdicts can omit
+                # ``affected_task_ids`` even when they shaped real
+                # tasks (the field is optional on the dataclass).
+                # Without this fallback, the divergence check below
+                # sees no descriptions and ``verdict_is_material``
+                # returns False for honored — silently skipping the
+                # reply for what's actually a divergent landing.
+                # Fall back to every task whose
+                # ``contributing_intents`` lists this comment id.
+                if not affected_task_ids:
+                    affected_task_ids = [
+                        tid
+                        for tid, t in tasks_by_id.items()
+                        if cid in (t.get("contributing_intents") or ())
+                    ]
                 descs = tuple(
                     (tasks_by_id[tid].get("description") or "")
                     for tid in affected_task_ids

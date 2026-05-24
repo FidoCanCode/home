@@ -13173,7 +13173,13 @@ class TestExecuteTask:
         worker, gh = self._make_worker(tmp_path)
         task = self._pending_task("Add retry logic")
         task["status"] = "in_progress"
-        worker._tasks._task_list = [task]
+        # Include a sibling task so the modify() loop iterates past a
+        # non-matching id before finding the target — covers the
+        # ``if live_task["id"] != task["id"]: continue`` arm in
+        # ``_escalate_task_completion_critic_exhausted``.
+        sibling = self._pending_task("Sibling task")
+        sibling["id"] = "t-sibling"
+        worker._tasks._task_list = [sibling, task]
         gh.search_issues.return_value = []
         gh.create_issue.return_value = "https://x/issues/1"
 
@@ -13197,6 +13203,9 @@ class TestExecuteTask:
 
         affected = next(t for t in worker._tasks._task_list if t["id"] == task["id"])
         assert affected["status"] == str(TaskStatus.BLOCKED)
+        # Sibling untouched.
+        sib_after = next(t for t in worker._tasks._task_list if t["id"] == "t-sibling")
+        assert sib_after["status"] != str(TaskStatus.BLOCKED)
         gh.create_issue.assert_called_once()
         gh.comment_issue.assert_not_called()
         assert ["reset", "--hard", "HEAD"] in git_calls
@@ -13338,6 +13347,65 @@ class TestExecuteTask:
         assert "CRITIC EXHAUSTED" not in affected["description"]
         # No bug filed on the budget-boundary case.
         gh.create_issue.assert_not_called()
+
+    def test_task_completion_critic_budget_uses_live_counter_not_stale_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex P1 on PR #1938: the budget decision must read
+        ``critic_retry_count`` from LIVE state under the lock, not
+        from the stale ``task`` snapshot passed in.  This test pins
+        the live-wins semantics by constructing a deliberate stale-
+        vs-live mismatch — the live counter is at-budget while the
+        passed-in snapshot says zero.  Result: escalate (the live
+        counter decides), not re-park (which the stale snapshot
+        would have driven)."""
+        import subprocess as _subprocess
+
+        from fido.types import TaskStatus
+        from fido.worker import _HOL17_MAX_REPARK_BUDGET
+
+        worker, gh = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        # Stale snapshot: counter says zero (would re-park if used).
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "x"
+        task["status"] = "in_progress"
+        task["critic_retry_count"] = 0
+        # Live state: counter at budget - 1 (next failure escalates
+        # when the budget check uses the live read).
+        live_row = dict(task)
+        live_row["critic_retry_count"] = _HOL17_MAX_REPARK_BUDGET - 1
+        worker._tasks._task_list = [live_row]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": false, "gap": "stale-vs-live divergent"}'
+        )
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = "https://x/issues/1"
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> "_subprocess.CompletedProcess[str]":
+            stdout = (
+                "diff --git a/x b/x\n+changed\n"
+                if args[:2] == ["show", "--no-color"]
+                else ""
+            )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout=stdout, stderr=""
+            )
+
+        worker._git = git_stub
+        worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        # Live counter drove the decision — task escalated to BLOCKED.
+        affected = next(t for t in worker._tasks._task_list if t["id"] == task["id"])
+        assert affected["status"] == str(TaskStatus.BLOCKED)
+        assert "CRITIC EXHAUSTED" in affected["description"]
+        gh.create_issue.assert_called_once()
 
     def test_task_completion_critic_failure_cleans_up_leaked_comments(
         self, tmp_path: Path
@@ -17923,3 +17991,112 @@ class TestLeakedCommentCleanup:
             "owner/repo", 7, "fido-bot", before_ids=set()
         )
         gh.delete_issue_comment.assert_not_called()
+
+
+class TestEmitHol28TerminalReplyFor:
+    """HOL-28 / #1922 wire (codex P1 on PR #1938): the helper called
+    from ``_finish_task`` synthesizes ``RescopeIntent`` stubs from the
+    just-completed task's ``contributing_intents`` and hands them to
+    ``Dispatcher.notify_newly_terminal_intent_threads``.
+
+    The helper is best-effort: a transient dispatcher failure logs but
+    does not propagate."""
+
+    class _StubDispatcher:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+            self.raise_on_next: Exception | None = None
+
+        def notify_newly_terminal_intent_threads(
+            self,
+            prev_tasks: list[dict[str, object]],
+            new_tasks: list[dict[str, object]],
+            *,
+            batch_intents: list[object],
+            pr: int,
+            agent: object,
+            prompts: object,
+        ) -> None:
+            if self.raise_on_next is not None:
+                raise self.raise_on_next
+            self.calls.append(
+                {
+                    "prev_tasks": prev_tasks,
+                    "new_tasks": new_tasks,
+                    "batch_intents": batch_intents,
+                    "pr": pr,
+                }
+            )
+
+    def _make_worker(
+        self, tmp_path: Path, dispatcher: object, prompts: object | None
+    ) -> Worker:
+        gh = MagicMock()
+        gh.find_closed_prs_as_context.return_value = []
+        gh.fetch_closed_sub_issues.return_value = []
+        worker = Worker(
+            tmp_path,
+            gh,
+            registry=MagicMock(spec=ActivityReporter),
+            _tasks=_FakeTasks(),
+            provider_runner=_FakeProviderRunner(),
+            prompt_builder=_FakePromptBuilder(),
+            harness_committer_factory=_FakeHarnessCommitterFactory(),
+            task_syncer=_FakeTaskSyncer(),
+        )
+        worker._dispatcher = dispatcher  # type: ignore[assignment]
+        worker._prompts = prompts  # type: ignore[assignment]
+        return worker
+
+    def test_no_contributing_intents_skips_dispatcher(self, tmp_path: Path) -> None:
+        dispatcher = self._StubDispatcher()
+        worker = self._make_worker(tmp_path, dispatcher, prompts=object())
+        task: dict[str, object] = {"id": "t1", "contributing_intents": []}
+        worker._emit_hol28_terminal_reply_for(task=task, prev_tasks=[], pr_number=42)
+        assert dispatcher.calls == []
+
+    def test_no_prompts_skips_dispatcher(self, tmp_path: Path) -> None:
+        dispatcher = self._StubDispatcher()
+        worker = self._make_worker(tmp_path, dispatcher, prompts=None)
+        task: dict[str, object] = {"id": "t1", "contributing_intents": [101]}
+        worker._emit_hol28_terminal_reply_for(task=task, prev_tasks=[], pr_number=42)
+        assert dispatcher.calls == []
+
+    def test_contributing_intents_synthesizes_stubs_and_calls(
+        self, tmp_path: Path
+    ) -> None:
+        from fido.types import RescopeIntent
+
+        dispatcher = self._StubDispatcher()
+        worker = self._make_worker(tmp_path, dispatcher, prompts=object())
+        task: dict[str, object] = {
+            "id": "t1",
+            "status": "completed",
+            "contributing_intents": [101, 202],
+        }
+        worker._tasks._task_list = [task]  # type: ignore[attr-defined]
+        worker._emit_hol28_terminal_reply_for(
+            task=task, prev_tasks=[{**task, "status": "in_progress"}], pr_number=42
+        )
+        assert len(dispatcher.calls) == 1
+        call = dispatcher.calls[0]
+        assert call["pr"] == 42
+        intents = call["batch_intents"]
+        assert all(isinstance(i, RescopeIntent) for i in intents)
+        assert [i.comment_id for i in intents] == [101, 202]
+        assert intents[0].comment_type == "pulls"
+
+    def test_dispatcher_failure_logged_not_raised(self, tmp_path: Path) -> None:
+        dispatcher = self._StubDispatcher()
+        dispatcher.raise_on_next = RuntimeError("GitHub down")
+        worker = self._make_worker(tmp_path, dispatcher, prompts=object())
+        task: dict[str, object] = {
+            "id": "t1",
+            "status": "completed",
+            "contributing_intents": [101],
+        }
+        worker._tasks._task_list = [task]  # type: ignore[attr-defined]
+        # Must not raise — task completion can't be gated on per-reply errors.
+        worker._emit_hol28_terminal_reply_for(
+            task=task, prev_tasks=[{**task, "status": "in_progress"}], pr_number=42
+        )

@@ -141,6 +141,29 @@ class SynthesisExecutor:
         self._insight_filer = insight_filer
         self._fido_logins = fido_logins
 
+    def file_insights_pre_reply(
+        self,
+        response: CommentResponse,
+        target: CommentTarget,
+    ) -> None:
+        """HOL-26 / #1920: file insights BEFORE the reply is posted, so
+        the durable GitHub issues exist before any user-visible reply
+        can claim they do.
+
+        Public hook used by production reply paths (``Dispatcher``'s
+        ``reply_to_review_comment`` / ``reply_to_issue_comment``) which
+        own their own post step and must call this before posting.  The
+        matching ``execute_effects_only`` call must then pass
+        ``insights_already_filed=True`` so the post-reply effects pass
+        does not double-file.
+
+        The convenience entry :meth:`execute` chains this + post +
+        post-reply effects internally; production callers that thread
+        the outbox protocol through their own post can't use that
+        chain and split it explicitly via this hook.
+        """
+        self._file_insights(response, target)
+
     def execute(
         self,
         response: CommentResponse,
@@ -158,8 +181,15 @@ class SynthesisExecutor:
         GitHub issues before any user-visible reply claims they do.
         HOL-18's reply-prose claim-grounding critic remains the
         verification-layer backstop for URL-in-prose.
+
+        Production callers in ``Dispatcher`` use
+        :meth:`file_insights_pre_reply` + their own outbox-routed post
+        + :meth:`execute_effects_only` (with
+        ``insights_already_filed=True``) instead of this entry point,
+        because they need to thread the outbox protocol through the
+        post step.
         """
-        self._file_insights(response, target)
+        self.file_insights_pre_reply(response, target)
         self._post_reply(response.reply_text, target)
         return self.execute_effects_only(response, target, insights_already_filed=True)
 

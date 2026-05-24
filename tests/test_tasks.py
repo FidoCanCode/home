@@ -842,6 +842,25 @@ class TestUnblockTasks:
     def test_returns_zero_on_empty_file(self, tmp_path: Path) -> None:
         assert Tasks(tmp_path).unblock_tasks() == 0
 
+    def test_resets_critic_retry_count_on_unblock(self, tmp_path: Path) -> None:
+        # Codex P1 on PR #1938: a task that escalated to BLOCKED on
+        # the HOL-17 budget would carry the at-budget counter back
+        # into PENDING when unblocked.  Without the reset, the very
+        # next critic failure re-escalates immediately.
+        from fido.worker import _HOL17_MAX_REPARK_BUDGET
+
+        t = Tasks(tmp_path).add(title="task", task_type=TaskType.SPEC)
+        Tasks(tmp_path).update(t["id"], TaskStatus.BLOCKED)
+        # Simulate the at-budget counter the escalation left behind.
+        with Tasks(tmp_path).modify() as live:
+            for row in live:
+                if row["id"] == t["id"]:
+                    row["critic_retry_count"] = _HOL17_MAX_REPARK_BUDGET
+        Tasks(tmp_path).unblock_tasks()
+        after = next(r for r in Tasks(tmp_path).list() if r["id"] == t["id"])
+        assert after["status"] == str(TaskStatus.PENDING)
+        assert after["critic_retry_count"] == 0
+
 
 # ── _build_task_list_snapshot ─────────────────────────────────────────────────
 

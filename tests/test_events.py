@@ -4659,6 +4659,43 @@ class TestBuildOnRescopeApply:
         assert "#202" in framing
         assert "overridden by a later directive" in framing
 
+    def test_honored_verdict_falls_back_to_contributing_intents(
+        self, tmp_path: Path
+    ) -> None:
+        # Codex P2 on PR #1938: an honored verdict that omits
+        # ``affected_task_ids`` would skip the divergence check (no
+        # task descriptions to compare against → not material → silent
+        # drop), even when the resulting task text diverges.  Fall
+        # back to every task whose contributing_intents lists this
+        # intent's comment_id.
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        alice = self._intent(101, author="alice")
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
+            intents=[alice],
+            pr_ctx=self._pr(),
+            agent=_client("Reply text"),
+            prompts=Prompts("p"),
+        )
+        result = [
+            {
+                "id": "t1",
+                "title": "Renamed",
+                "description": "completely different from the ask",
+                "contributing_intents": [101],
+            }
+        ]
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="honored",
+            narrative="queued as asked",
+            affected_task_ids=(),  # omitted
+        )
+        cb(result, [], {"t1": 1}, [verdict])
+        # Divergence detected via the fallback — reply fires.
+        comment_ids = [c.args[3] for c in gh.reply_to_review_comment.call_args_list]
+        assert comment_ids == [101]
+
     def test_verdict_dedupes_against_oracle_path(self, tmp_path: Path) -> None:
         # HOL-24: if the oracle already notified intent 101 (cross-author
         # rewrite), a material verdict for the same intent_comment_id

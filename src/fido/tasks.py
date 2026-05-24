@@ -4388,12 +4388,21 @@ class Tasks(JsonFileStore):
 
         Called when a new PR comment arrives so the worker can re-evaluate
         whether it is still blocked.  Returns the number of tasks unblocked.
+
+        Also resets ``critic_retry_count`` to 0 on every unblocked task —
+        without this (codex P1 on PR #1938), a task that escalated to
+        BLOCKED on the HOL-17 budget would carry the at-budget counter
+        back into PENDING.  The next critic failure would immediately
+        re-escalate the task to BLOCKED with no real retry window.
+        Unblocking is the user signalling "give this another go" — they
+        deserve a fresh budget.
         """
         count = 0
         with self.modify() as task_list:
             for t in task_list:
                 if t.get("status") == TaskStatus.BLOCKED:
                     t["status"] = str(TaskStatus.PENDING)
+                    t["critic_retry_count"] = 0
                     count += 1
         if count:
             log.info("unblocked %d task(s)", count)
