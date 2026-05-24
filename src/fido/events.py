@@ -1502,7 +1502,7 @@ class Dispatcher:
 
     def _escalate_task_creation_drop_streak(
         self, intent_comment_id: int, count: int
-    ) -> None:
+    ) -> bool:
         """HOL-16 follow-up / #1934: escalator bound to the
         Dispatcher's per-intent
         :class:`TaskCreationDropCounter`.  Files a bug against
@@ -1510,49 +1510,69 @@ class Dispatcher:
         N proposals dropped in a row — either Opus keeps re-proposing
         legitimately-distinct work the critic mis-classifies, or the
         comment's intent isn't being honoured.
+
+        Returns ``True`` on successful bug file/reuse (the helper
+        returns a URL).  Returns ``False`` on transient failure
+        (``file_stuck_on_critic_bug`` returns ``None``) so the counter
+        leaves its escalated latch clear and retries on the next drop
+        — without this, a transient GitHub error at the first
+        threshold crossing would permanently suppress escalation
+        across restarts (codex P1 on PR #1938).
         """
-        file_stuck_on_critic_bug(
-            StuckOnCriticContext(
-                emission_point="task-creation",
-                source_repo=self._repo_cfg.name,
-                source_pr=0,
-                target_kind="comment",
-                target_id=str(intent_comment_id),
-                source_link=(
-                    f"(process-local — comment {intent_comment_id} had "
-                    f"{count} proposals dropped by the task-creation critic "
-                    f"in {self._repo_cfg.name})"
+        return (
+            file_stuck_on_critic_bug(
+                StuckOnCriticContext(
+                    emission_point="task-creation",
+                    source_repo=self._repo_cfg.name,
+                    source_pr=0,
+                    target_kind="comment",
+                    target_id=str(intent_comment_id),
+                    source_link=(
+                        f"(durable — comment {intent_comment_id} had "
+                        f"{count} proposals dropped by the task-creation critic "
+                        f"in {self._repo_cfg.name})"
+                    ),
+                    gaps=(
+                        f"{count} consecutive task-creation drops attributed to "
+                        f"comment #{intent_comment_id}",
+                    ),
                 ),
-                gaps=(
-                    f"{count} consecutive task-creation drops attributed to "
-                    f"comment #{intent_comment_id}",
-                ),
-            ),
-            gh=self._gh,
+                gh=self._gh,
+            )
+            is not None
         )
 
-    def _escalate_insight_dedup_transport_failure(self, count: int) -> None:
+    def _escalate_insight_dedup_transport_failure(self, count: int) -> bool:
         """HOL-19 follow-up / #1935: escalator bound to the
         Dispatcher's process-local
         :class:`InsightDedupTransportCounter`.  Files a bug against
         ``FidoCanCode/home`` so the critic infra failure is visible
         for follow-up, idempotent via the shared
         ``file_stuck_on_critic_bug`` marker.
+
+        Returns ``True`` on success / ``False`` on transient failure
+        (same contract as the task-creation escalator — see codex P1
+        on PR #1938).  The counter releases its already-escalated
+        latch on ``False`` so the next transport failure retries the
+        bug filing.
         """
-        file_stuck_on_critic_bug(
-            StuckOnCriticContext(
-                emission_point="insight-dedup-transport",
-                source_repo=self._repo_cfg.name,
-                source_pr=0,
-                target_kind="critic",
-                target_id="insight-dedup",
-                source_link=(
-                    f"(process-local — {count} consecutive transport failures "
-                    f"in {self._repo_cfg.name})"
+        return (
+            file_stuck_on_critic_bug(
+                StuckOnCriticContext(
+                    emission_point="insight-dedup-transport",
+                    source_repo=self._repo_cfg.name,
+                    source_pr=0,
+                    target_kind="critic",
+                    target_id="insight-dedup",
+                    source_link=(
+                        f"(process-local — {count} consecutive transport failures "
+                        f"in {self._repo_cfg.name})"
+                    ),
+                    gaps=(f"{count} consecutive transport failures",),
                 ),
-                gaps=(f"{count} consecutive transport failures",),
-            ),
-            gh=self._gh,
+                gh=self._gh,
+            )
+            is not None
         )
 
     def dispatch(

@@ -721,13 +721,21 @@ class TaskCreationDropCounter:
     the streak and can prevent the exhaustion bug from ever filing.
     The default backend (no ``store=`` passed) is in-memory, suitable
     for tests; production wires ``store=FidoStore(work_dir)``.
+
+    Codex P1 follow-up: the escalator returns ``True`` on successful
+    bug file/reuse, ``False`` when ``file_stuck_on_critic_bug``
+    failed (e.g. transient GitHub error).  The durable
+    ``escalated=1`` latch is set ONLY after a successful return — a
+    transient failure at the first threshold crossing leaves the
+    latch clear so the next drop retries the escalation instead of
+    suppressing it forever across restarts.
     """
 
     def __init__(
         self,
         *,
         threshold: int = 3,
-        escalator: Callable[[int, int], None] | None = None,
+        escalator: Callable[[int, int], bool] | None = None,
         store: TaskCreationDropStore | None = None,
     ) -> None:
         self._threshold = threshold
@@ -745,8 +753,9 @@ class TaskCreationDropCounter:
             and not already_escalated
             and self._escalator is not None
         ):
-            self._store.mark_task_creation_drop_escalated(intent_comment_id)
-            self._escalator(intent_comment_id, count)
+            # Fire FIRST; only set the durable latch on success.
+            if self._escalator(intent_comment_id, count):
+                self._store.mark_task_creation_drop_escalated(intent_comment_id)
 
     def reset_inactive_intents(self, active_intent_ids: set[int]) -> None:
         """Drop counters for any intent_comment_id NOT in
@@ -785,7 +794,7 @@ class InsightDedupTransportCounter:
         self,
         *,
         threshold: int = 3,
-        escalator: Callable[[int], None] | None = None,
+        escalator: Callable[[int], bool] | None = None,
     ) -> None:
         self._threshold = threshold
         self._escalator = escalator
@@ -794,7 +803,16 @@ class InsightDedupTransportCounter:
         self._lock = threading.Lock()
 
     def record_transport_failure(self) -> None:
-        escalator: Callable[[int], None] | None = None
+        # Codex P1 follow-up on PR #1938: the escalator returns
+        # ``True`` on successful bug file/reuse, ``False`` on
+        # transient failure.  We tentatively claim the latch under
+        # the lock to suppress concurrent at-threshold races, then
+        # RELEASE it if the escalator reports failure — otherwise a
+        # transient GitHub error would permanently suppress future
+        # escalations.  Net behaviour: the next transport failure
+        # retries the escalation; a successful prior fire still
+        # latches durably.
+        escalator: Callable[[int], bool] | None = None
         count = 0
         with self._lock:
             self._consecutive_failures += 1
@@ -806,12 +824,10 @@ class InsightDedupTransportCounter:
                 self._already_escalated = True
                 escalator = self._escalator
                 count = self._consecutive_failures
-        # Fire the escalator OUTSIDE the lock — it may touch GitHub
-        # and we don't want a slow API call holding the counter lock.
-        # ``_already_escalated`` set under the lock prevents duplicate
-        # fires from concurrent at-threshold transitions.
         if escalator is not None:
-            escalator(count)
+            if not escalator(count):
+                with self._lock:
+                    self._already_escalated = False
 
     def record_success(self) -> None:
         with self._lock:

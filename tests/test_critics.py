@@ -1558,7 +1558,9 @@ class TestInsightDedupTransportCounter:
         from fido.critics import InsightDedupTransportCounter
 
         calls: list[int] = []
-        counter = InsightDedupTransportCounter(threshold=3, escalator=calls.append)
+        counter = InsightDedupTransportCounter(
+            threshold=3, escalator=lambda c: calls.append(c) or True
+        )
         counter.record_transport_failure()
         counter.record_transport_failure()
         assert calls == []
@@ -1569,7 +1571,9 @@ class TestInsightDedupTransportCounter:
         from fido.critics import InsightDedupTransportCounter
 
         calls: list[int] = []
-        counter = InsightDedupTransportCounter(threshold=2, escalator=calls.append)
+        counter = InsightDedupTransportCounter(
+            threshold=2, escalator=lambda c: calls.append(c) or True
+        )
         counter.record_transport_failure()
         counter.record_transport_failure()
         counter.record_transport_failure()
@@ -1581,7 +1585,9 @@ class TestInsightDedupTransportCounter:
         from fido.critics import InsightDedupTransportCounter
 
         calls: list[int] = []
-        counter = InsightDedupTransportCounter(threshold=2, escalator=calls.append)
+        counter = InsightDedupTransportCounter(
+            threshold=2, escalator=lambda c: calls.append(c) or True
+        )
         counter.record_transport_failure()
         counter.record_transport_failure()
         assert calls == [2]
@@ -1600,6 +1606,33 @@ class TestInsightDedupTransportCounter:
         counter.record_transport_failure()
         counter.record_success()
 
+    def test_failed_escalator_releases_latch_and_retries(self) -> None:
+        # Codex P1 follow-up on PR #1938: when the escalator returns
+        # False (transient bug-file failure), the already-escalated
+        # latch must be released so the next transport failure
+        # retries the escalation — without this a transient GitHub
+        # error at the first threshold crossing permanently
+        # suppresses future escalations.
+        from fido.critics import InsightDedupTransportCounter
+
+        results = iter([False, True])
+        fire_count = [0]
+
+        def flaky_escalator(_count: int) -> bool:
+            fire_count[0] += 1
+            return next(results)
+
+        counter = InsightDedupTransportCounter(threshold=1, escalator=flaky_escalator)
+        # First failure fires escalator → returns False → latch released.
+        counter.record_transport_failure()
+        assert fire_count[0] == 1
+        # Second failure fires AGAIN (because latch was released) → True.
+        counter.record_transport_failure()
+        assert fire_count[0] == 2
+        # Third failure: latch now set, no re-fire.
+        counter.record_transport_failure()
+        assert fire_count[0] == 2
+
 
 class TestInsightDedupCriticTransportCounterWiring:
     """``run_insight_dedup_critic`` calls the counter on transport
@@ -1615,7 +1648,9 @@ class TestInsightDedupCriticTransportCounterWiring:
         from fido.critics import InsightDedupTransportCounter
 
         calls: list[int] = []
-        counter = InsightDedupTransportCounter(threshold=1, escalator=calls.append)
+        counter = InsightDedupTransportCounter(
+            threshold=1, escalator=lambda c: calls.append(c) or True
+        )
         agent = _FakeAgent(run_turn_exception=RuntimeError("network"))
         run_insight_dedup_critic(
             proposed_insight=self._proposed(),
@@ -1631,7 +1666,9 @@ class TestInsightDedupCriticTransportCounterWiring:
         from fido.critics import InsightDedupTransportCounter
 
         calls: list[int] = []
-        counter = InsightDedupTransportCounter(threshold=2, escalator=calls.append)
+        counter = InsightDedupTransportCounter(
+            threshold=2, escalator=lambda c: calls.append(c) or True
+        )
         # Pre-bump to threshold-1 so escalation doesn't fire.
         counter.record_transport_failure()
         # Verdict-shape-valid response: is_duplicate=false (any well-formed envelope).
@@ -1661,7 +1698,9 @@ class TestInsightDedupCriticTransportCounterWiring:
         from fido.critics import InsightDedupTransportCounter
 
         calls: list[int] = []
-        counter = InsightDedupTransportCounter(threshold=2, escalator=calls.append)
+        counter = InsightDedupTransportCounter(
+            threshold=2, escalator=lambda c: calls.append(c) or True
+        )
         counter.record_transport_failure()
         # Parse failure: no JSON.
         agent = _FakeAgent(run_turn_responses=["garbage no json here"])
@@ -1696,7 +1735,7 @@ class TestTaskCreationDropCounter:
 
         calls: list[tuple[int, int]] = []
         counter = TaskCreationDropCounter(
-            threshold=3, escalator=lambda cid, count: calls.append((cid, count))
+            threshold=3, escalator=lambda cid, count: calls.append((cid, count)) or True
         )
         counter.record_drop(101)
         counter.record_drop(101)
@@ -1709,7 +1748,7 @@ class TestTaskCreationDropCounter:
 
         calls: list[tuple[int, int]] = []
         counter = TaskCreationDropCounter(
-            threshold=2, escalator=lambda cid, count: calls.append((cid, count))
+            threshold=2, escalator=lambda cid, count: calls.append((cid, count)) or True
         )
         counter.record_drop(101)
         counter.record_drop(202)
@@ -1722,7 +1761,7 @@ class TestTaskCreationDropCounter:
 
         calls: list[tuple[int, int]] = []
         counter = TaskCreationDropCounter(
-            threshold=2, escalator=lambda cid, count: calls.append((cid, count))
+            threshold=2, escalator=lambda cid, count: calls.append((cid, count)) or True
         )
         counter.record_drop(101)
         counter.record_drop(101)
@@ -1735,7 +1774,7 @@ class TestTaskCreationDropCounter:
 
         calls: list[tuple[int, int]] = []
         counter = TaskCreationDropCounter(
-            threshold=2, escalator=lambda cid, count: calls.append((cid, count))
+            threshold=2, escalator=lambda cid, count: calls.append((cid, count)) or True
         )
         counter.record_drop(101)
         counter.record_drop(101)  # escalates
@@ -1752,7 +1791,7 @@ class TestTaskCreationDropCounter:
 
         calls: list[tuple[int, int]] = []
         counter = TaskCreationDropCounter(
-            threshold=3, escalator=lambda cid, count: calls.append((cid, count))
+            threshold=3, escalator=lambda cid, count: calls.append((cid, count)) or True
         )
         counter.record_drop(101)
         counter.record_drop(202)
@@ -1790,7 +1829,7 @@ class TestTaskCreationDropCounter:
         calls: list[tuple[int, int]] = []
         counter1 = TaskCreationDropCounter(
             threshold=3,
-            escalator=lambda cid, count: calls.append((cid, count)),
+            escalator=lambda cid, count: calls.append((cid, count)) or True,
             store=store,
         )
         counter1.record_drop(101)
@@ -1801,7 +1840,7 @@ class TestTaskCreationDropCounter:
         del counter1
         counter2 = TaskCreationDropCounter(
             threshold=3,
-            escalator=lambda cid, count: calls.append((cid, count)),
+            escalator=lambda cid, count: calls.append((cid, count)) or True,
             store=store,
         )
         # Streak survived — the third drop escalates.
@@ -1820,7 +1859,7 @@ class TestTaskCreationDropCounter:
         calls: list[tuple[int, int]] = []
         counter1 = TaskCreationDropCounter(
             threshold=2,
-            escalator=lambda cid, count: calls.append((cid, count)),
+            escalator=lambda cid, count: calls.append((cid, count)) or True,
             store=store,
         )
         counter1.record_drop(101)
@@ -1829,10 +1868,48 @@ class TestTaskCreationDropCounter:
         del counter1
         counter2 = TaskCreationDropCounter(
             threshold=2,
-            escalator=lambda cid, count: calls.append((cid, count)),
+            escalator=lambda cid, count: calls.append((cid, count)) or True,
             store=store,
         )
         counter2.record_drop(101)
         counter2.record_drop(101)
         # No re-fire — latch durably preserved.
         assert calls == [(101, 2)]
+
+    def test_failed_escalator_does_not_persist_latch(self, tmp_path: object) -> None:
+        # Codex P1 follow-up on PR #1938: if file_stuck_on_critic_bug
+        # returned None (transient GitHub failure), the durable
+        # escalated=1 latch must NOT be set — otherwise a transient
+        # failure at the first threshold crossing permanently
+        # suppresses escalation across restarts even though no bug
+        # was filed.
+        from fido.critics import TaskCreationDropCounter
+        from fido.store import FidoStore
+
+        store = FidoStore(tmp_path)  # type: ignore[arg-type]
+        results = iter([False, True])
+        calls: list[tuple[int, int]] = []
+
+        def flaky_escalator(cid: int, count: int) -> bool:
+            calls.append((cid, count))
+            return next(results)
+
+        counter1 = TaskCreationDropCounter(
+            threshold=2, escalator=flaky_escalator, store=store
+        )
+        counter1.record_drop(101)
+        counter1.record_drop(101)  # crosses threshold; escalator returns False
+        assert calls == [(101, 2)]
+        # Simulate a restart with the durable store carrying state.
+        del counter1
+        counter2 = TaskCreationDropCounter(
+            threshold=2, escalator=flaky_escalator, store=store
+        )
+        # Next drop should re-fire because the latch was NOT persisted
+        # on the failed attempt.  This time the escalator returns True
+        # → latch persists going forward.
+        counter2.record_drop(101)
+        assert calls == [(101, 2), (101, 3)]
+        # Further drops on 101 don't re-fire (latch now durably set).
+        counter2.record_drop(101)
+        assert calls == [(101, 2), (101, 3)]
