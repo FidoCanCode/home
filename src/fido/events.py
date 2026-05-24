@@ -782,6 +782,14 @@ def build_review_comment_action(
             "comment_type": "pulls",
             "lineage_key": lineage_key,
             "lineage_comment_ids": list(lineage_comment_ids),
+            # HOL-22 / #1916: identifies the GitHub review submission
+            # this comment belongs to.  The eager-eyes predicate uses
+            # it to detect "same-submission batch" vs "solo comment
+            # arriving during an unrelated batch" (closes #1875).
+            # None for review comments that aren't part of a
+            # submission (e.g. single-line comments without a
+            # review wrapper); the predicate's fallback handles that.
+            "pull_request_review_id": comment.get("pull_request_review_id"),
         },
         comment_body=body,
         is_bot=is_bot,

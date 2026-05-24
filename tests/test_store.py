@@ -929,6 +929,104 @@ def test_has_other_open_pr_comments_scopes_by_repo(tmp_path: Path) -> None:
     )
 
 
+def test_has_other_open_pr_comments_review_id_scopes_to_same_submission(
+    tmp_path: Path,
+) -> None:
+    """HOL-22 / #1916: when ``review_id`` is provided, only OTHER
+    queue entries from the SAME review submission count as
+    "batched with this comment".  A solo human comment queued
+    behind an unrelated batch from a DIFFERENT review submission
+    still gets sub-1s eager-eyes (closes #1875)."""
+    store = FidoStore(tmp_path)
+    # Batch from review submission 12345.
+    store.enqueue_pr_comment(
+        delivery_id="delivery-batch-a",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=1001,
+        author="bot",
+        is_bot=True,
+        body="batch a",
+        github_created_at="2026-04-30T10:00:00Z",
+        payload_json='{"pull_request_review_id": 12345}',
+    )
+    # Solo human comment from a DIFFERENT submission 67890.
+    solo = store.enqueue_pr_comment(
+        delivery_id="delivery-solo",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=1002,
+        author="rob",
+        is_bot=False,
+        body="solo human",
+        github_created_at="2026-04-30T10:00:01Z",
+        payload_json='{"pull_request_review_id": 67890}',
+    )
+    # With review-id scoping: no other open comment from the solo's
+    # submission → eager-eyes fires.
+    assert (
+        store.has_other_open_pr_comments(
+            repo="owner/repo",
+            exclude_comment_id=solo.comment_id,
+            review_id=67890,
+        )
+        is False
+    )
+    # Legacy unscoped call (review_id=None) still sees the batch
+    # comment → eager-eyes skipped.
+    assert (
+        store.has_other_open_pr_comments(
+            repo="owner/repo",
+            exclude_comment_id=solo.comment_id,
+        )
+        is True
+    )
+
+
+def test_has_other_open_pr_comments_review_id_detects_same_submission_batch(
+    tmp_path: Path,
+) -> None:
+    """HOL-22 sibling: when another open comment IS from the same
+    review submission, the scoped predicate returns True so eyes
+    is correctly skipped (the worker posts eyes on claim instead)."""
+    store = FidoStore(tmp_path)
+    # Two comments from the same review submission 99999.
+    store.enqueue_pr_comment(
+        delivery_id="delivery-batch-first",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=2001,
+        author="rob",
+        is_bot=False,
+        body="batch first",
+        github_created_at="2026-04-30T10:00:00Z",
+        payload_json='{"pull_request_review_id": 99999}',
+    )
+    sibling = store.enqueue_pr_comment(
+        delivery_id="delivery-batch-sibling",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=2002,
+        author="rob",
+        is_bot=False,
+        body="batch sibling",
+        github_created_at="2026-04-30T10:00:01Z",
+        payload_json='{"pull_request_review_id": 99999}',
+    )
+    assert (
+        store.has_other_open_pr_comments(
+            repo="owner/repo",
+            exclude_comment_id=sibling.comment_id,
+            review_id=99999,
+        )
+        is True
+    )
+
+
 def test_recover_in_progress_pr_comments_requeues_abandoned_claim(
     tmp_path: Path,
 ) -> None:

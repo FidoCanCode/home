@@ -665,7 +665,13 @@ class FidoStore:
             ).fetchall()
         return [int(row[0]) for row in rows]
 
-    def has_other_open_pr_comments(self, *, repo: str, exclude_comment_id: int) -> bool:
+    def has_other_open_pr_comments(
+        self,
+        *,
+        repo: str,
+        exclude_comment_id: int,
+        review_id: int | None = None,
+    ) -> bool:
         """Return whether *repo* has any other open queue entries.
 
         "Open" means ``state IN ('pending', 'in_progress', 'retryable_failed')``
@@ -674,20 +680,52 @@ class FidoStore:
         comment for the same repo, this comment is part of a batch and the
         worker will post eyes when it claims the comment in pickup order
         (#1662).
+
+        HOL-22 / #1916: when ``review_id`` is provided (the incoming
+        comment is part of a specific GitHub review submission), only
+        OTHER queue entries from the SAME review submission count as
+        "batched with this comment".  A solo human comment queued
+        behind an unrelated batch from a different review submission
+        is no longer falsely classified as batched — it still gets
+        the sub-1s eyes ack (closes #1875).  When ``review_id`` is
+        None (top-level PR comments, issue comments, anything not
+        from a review), fall back to the legacy "any other open"
+        check.
         """
         self.ensure_schema()
         with closing(self._connect()) as conn:
-            row = conn.execute(
-                """
-                SELECT 1
-                FROM pr_comment_queue
-                WHERE repo = ?
-                  AND comment_id != ?
-                  AND state IN ('pending', 'in_progress', 'retryable_failed')
-                LIMIT 1
-                """,
-                (repo, int(exclude_comment_id)),
-            ).fetchone()
+            if review_id is None:
+                row = conn.execute(
+                    """
+                    SELECT 1
+                    FROM pr_comment_queue
+                    WHERE repo = ?
+                      AND comment_id != ?
+                      AND state IN ('pending', 'in_progress', 'retryable_failed')
+                    LIMIT 1
+                    """,
+                    (repo, int(exclude_comment_id)),
+                ).fetchone()
+            else:
+                # Filter on the JSON-encoded payload's
+                # ``pull_request_review_id`` so only comments from the
+                # SAME review submission count.  Rows without that
+                # field (e.g. queued before HOL-22 landed, or
+                # non-review comment types) compare as NULL and are
+                # correctly excluded — they're "not part of this
+                # review", which is exactly what we want.
+                row = conn.execute(
+                    """
+                    SELECT 1
+                    FROM pr_comment_queue
+                    WHERE repo = ?
+                      AND comment_id != ?
+                      AND state IN ('pending', 'in_progress', 'retryable_failed')
+                      AND json_extract(payload_json, '$.pull_request_review_id') = ?
+                    LIMIT 1
+                    """,
+                    (repo, int(exclude_comment_id), int(review_id)),
+                ).fetchone()
         return row is not None
 
     def claim_next_pr_comment(
