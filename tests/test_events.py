@@ -6928,6 +6928,29 @@ class TestGitHubInsightFiler:
             is None
         )
 
+    def test_recent_insights_query_sorts_by_created_desc(self) -> None:
+        """Codex on PR #1932: GitHub issue-search defaults to
+        best-match ranking, so without an explicit
+        ``sort:created-desc`` the first
+        :data:`_INSIGHT_RECENT_LIMIT` results may not be the most
+        recent ones — feeding stale comparison examples to the
+        dedup critic and raising the false-"distinct" rate.  Pin
+        the qualifier so a future refactor can't accidentally drop
+        it."""
+        gh = MagicMock()
+        gh.search_issues.side_effect = [
+            [],  # marker lookup
+            [],  # recent-insights lookup — content doesn't matter
+        ]
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/17"
+        filer = self._make_critic_filer(gh, agent_response='{"is_duplicate": false}')
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        # Second call is the recent-insights search.
+        recent_query = gh.search_issues.call_args_list[1].args[1]
+        assert "sort:created-desc" in recent_query
+
     def test_recent_insights_search_failure_falls_open(self) -> None:
         """Codex on PR #1932: the recent-corpus search runs OUTSIDE
         any fail-open guard in ``run_insight_dedup_critic`` (the

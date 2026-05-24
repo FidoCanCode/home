@@ -310,9 +310,17 @@ class _GitHubInsightFiler:
         insight file normally).
         """
         try:
+            # Codex on PR #1932: GitHub issue-search defaults to
+            # best-match ranking, so slicing the first
+            # :data:`_INSIGHT_RECENT_LIMIT` results could omit the
+            # newest insights entirely (and feed stale comparison
+            # examples to the dedup critic, raising false-"distinct"
+            # rates).  Explicit ``sort:created-desc`` makes the
+            # "most recent" claim in the docstring above actually
+            # true.
             results = self._gh.search_issues(
                 _INSIGHT_REPO,
-                f"label:{_INSIGHT_LABEL} is:issue is:open",
+                f"label:{_INSIGHT_LABEL} is:issue is:open sort:created-desc",
             )
         except Exception as exc:
             log.warning(
