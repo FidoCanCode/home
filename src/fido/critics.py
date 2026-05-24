@@ -17,6 +17,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from fido.prompts import Prompts
 from fido.provider import (
@@ -732,12 +733,24 @@ def run_insight_dedup_critic(
 
 
 def _normalize_insight_url(url: str) -> str:
-    """Normalize a GitHub insight URL for corpus-membership comparison.
+    """Normalize a GitHub insight URL to its ISSUE IDENTITY for
+    corpus-membership comparison.
 
-    Strips trailing slashes and lowercases the whole thing (GitHub
-    URLs are case-insensitive on scheme/host/owner/repo).  The
-    duplicate-URL check above compares normalized forms so a verdict
-    that capitalises the repo name differently than the corpus entry
-    still matches.
+    Two URLs that refer to the same issue must produce the same
+    normalised form, even when one carries an anchor / query string
+    / trailing slash that the other doesn't.  Codex on PR #1932:
+    without that collapse, a verdict like
+    ``.../issues/100#issuecomment-1`` was treated as out-of-corpus
+    against ``.../issues/100`` — failing open and letting the
+    duplicate insight file.
+
+    Uses :func:`urllib.parse.urlparse` to split off query+fragment
+    (cleaner than slicing on ``#``/``?`` manually; handles edge
+    cases like multiple ``?`` and percent-encoding correctly) and
+    keeps only ``scheme://netloc/path``.  Lowercase + trailing-slash
+    strip cover the remaining axes (GitHub is case-insensitive on
+    scheme/host/owner/repo).
     """
-    return url.strip().rstrip("/").lower()
+    parsed = urlparse(url.strip())
+    canonical = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    return canonical.lower().rstrip("/")

@@ -1434,6 +1434,47 @@ class TestRunInsightDedupCritic:
         )
         assert verdict.is_duplicate
 
+    def test_duplicate_url_with_anchor_or_query_matches_bare_corpus_url(
+        self,
+    ) -> None:
+        """Codex on PR #1932: a verdict URL with an anchor (e.g.
+        ``#issuecomment-1``) or query (``?foo=bar``) refers to the
+        SAME issue as the bare URL.  Normalisation must collapse
+        these so the membership check sees them as matching.
+        Without it, a critic that paraphrased the URL with an
+        anchor would be treated as out-of-corpus and fail open,
+        filing the duplicate insight."""
+        recent = [
+            {
+                "title": "Existing",
+                "body": "",
+                "url": "https://github.com/FidoCanCode/home/issues/100",
+            }
+        ]
+        for variant in (
+            "https://github.com/FidoCanCode/home/issues/100#issuecomment-1",
+            "https://github.com/FidoCanCode/home/issues/100?notification_referrer_id=x",
+            "https://github.com/FidoCanCode/home/issues/100/",
+            "https://github.com/FidoCanCode/home/issues/100#",
+        ):
+            raw = json.dumps(
+                {
+                    "is_duplicate": True,
+                    "duplicate_url": variant,
+                    "rationale": "x",
+                }
+            )
+            verdict = run_insight_dedup_critic(
+                proposed_insight=self._proposed(),
+                recent_insights=recent,
+                agent=_FakeAgent(run_turn_responses=[raw]),
+                prompts=_FakeInsightDedupPrompts(),
+                critic_system_prompt="critic-sys",
+            )
+            assert verdict.is_duplicate, (
+                f"expected variant to match corpus: {variant!r}"
+            )
+
     def test_duplicate_against_empty_corpus_fails_open(self) -> None:
         """Empty corpus = "any duplicate verdict is hallucination" by
         the prompt contract.  The fail-open posture lets the insight
