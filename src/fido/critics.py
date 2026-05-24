@@ -15,6 +15,8 @@ output from shipping.
 
 import logging
 import re
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -31,6 +33,7 @@ from fido.synthesis_call import extract_json_objects
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "InsightDedupTransportCounter",
     "InsightDedupVerdict",
     "ReplyProseVerdict",
     "TaskCompletionVerdict",
@@ -642,6 +645,69 @@ def _parse_insight_dedup_verdict(
     )
 
 
+class InsightDedupTransportCounter:
+    """HOL-19 follow-up / #1935: process-local consecutive-transport-
+    failure counter for ``run_insight_dedup_critic``.
+
+    Each ``run_insight_dedup_critic`` call updates the counter:
+    transport failures (the ``except Exception`` arm — RuntimeError,
+    network blips, model unavailable) bump it; a verdict-shape-valid
+    response resets it.  Parse failures don't reset (no clean signal
+    that the critic infrastructure is healthy) and don't bump (might
+    just be one bad model turn).
+
+    When the counter crosses ``threshold`` consecutive failures, the
+    injected ``escalator`` callback is invoked with the failure count.
+    Production wiring escalates via ``file_stuck_on_critic_bug`` with
+    ``emission_point="insight-dedup-transport"``.
+
+    Thread-safe under free-threaded Python: a lock guards every read-
+    modify cycle so two simultaneous critic calls can't both observe
+    "below threshold" and both miss an escalation.
+
+    Process-local persistence per the issue body ("a flaky day would
+    still trigger the bug within a session") — survives across critic
+    calls in one Fido process, resets on restart.
+    """
+
+    def __init__(
+        self,
+        *,
+        threshold: int = 3,
+        escalator: Callable[[int], None] | None = None,
+    ) -> None:
+        self._threshold = threshold
+        self._escalator = escalator
+        self._consecutive_failures = 0
+        self._already_escalated = False
+        self._lock = threading.Lock()
+
+    def record_transport_failure(self) -> None:
+        escalator: Callable[[int], None] | None = None
+        count = 0
+        with self._lock:
+            self._consecutive_failures += 1
+            if (
+                self._consecutive_failures >= self._threshold
+                and not self._already_escalated
+                and self._escalator is not None
+            ):
+                self._already_escalated = True
+                escalator = self._escalator
+                count = self._consecutive_failures
+        # Fire the escalator OUTSIDE the lock — it may touch GitHub
+        # and we don't want a slow API call holding the counter lock.
+        # ``_already_escalated`` set under the lock prevents duplicate
+        # fires from concurrent at-threshold transitions.
+        if escalator is not None:
+            escalator(count)
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._consecutive_failures = 0
+            self._already_escalated = False
+
+
 def run_insight_dedup_critic(
     proposed_insight: dict[str, str],
     recent_insights: list[dict[str, str]],
@@ -649,6 +715,7 @@ def run_insight_dedup_critic(
     agent: ProviderAgent,
     prompts: Prompts,
     critic_system_prompt: str,
+    transport_counter: InsightDedupTransportCounter | None = None,
 ) -> InsightDedupVerdict:
     """Ask Opus whether ``proposed_insight`` near-duplicates any of
     ``recent_insights``.
@@ -683,6 +750,11 @@ def run_insight_dedup_critic(
             "insight-dedup critic transport failure (%s) — failing open",
             exc,
         )
+        # HOL-19 follow-up / #1935: count transport failures so a
+        # cross-comment pattern (the critic infra itself is broken,
+        # not "this insight is duplicate") can escalate to a bug.
+        if transport_counter is not None:
+            transport_counter.record_transport_failure()
         return InsightDedupVerdict()
 
     objs = extract_json_objects(raw or "")
@@ -716,6 +788,12 @@ def run_insight_dedup_critic(
                     len(allowed_urls),
                 )
                 continue
+            # HOL-19 follow-up / #1935: a verdict-shape-valid response
+            # means the critic infra is healthy — reset the
+            # transport-failure counter.  Parse failures don't reset
+            # (no clean health signal).
+            if transport_counter is not None:
+                transport_counter.record_success()
             return verdict
         if obj.get("is_duplicate") is True:
             saw_malformed_dup = True

@@ -1546,3 +1546,141 @@ class TestRunInsightDedupCritic:
                 prompts=_FakeInsightDedupPrompts(),
                 critic_system_prompt="critic-sys",
             )
+
+
+class TestInsightDedupTransportCounter:
+    """HOL-19 follow-up / #1935: consecutive-transport-failure counter
+    escalates via the injected escalator after crossing the threshold;
+    parse failures don't bump or reset; verdict-shape-valid responses
+    reset."""
+
+    def test_escalates_at_threshold(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        calls: list[int] = []
+        counter = InsightDedupTransportCounter(threshold=3, escalator=calls.append)
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        assert calls == []
+        counter.record_transport_failure()
+        assert calls == [3]
+
+    def test_already_escalated_suppresses_re_fire(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        calls: list[int] = []
+        counter = InsightDedupTransportCounter(threshold=2, escalator=calls.append)
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        # Escalated once, then suppressed until reset.
+        assert calls == [2]
+
+    def test_success_resets_counter_and_escalation_latch(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        calls: list[int] = []
+        counter = InsightDedupTransportCounter(threshold=2, escalator=calls.append)
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        assert calls == [2]
+        counter.record_success()
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        # Fresh escalation after the reset.
+        assert calls == [2, 2]
+
+    def test_none_escalator_no_op(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        counter = InsightDedupTransportCounter(threshold=1, escalator=None)
+        # Must not raise.
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        counter.record_success()
+
+
+class TestInsightDedupCriticTransportCounterWiring:
+    """``run_insight_dedup_critic`` calls the counter on transport
+    failure and on verdict-shape-valid success."""
+
+    def _proposed(self) -> dict[str, str]:
+        return {"title": "t", "hook": "h", "why": "w"}
+
+    def _recent(self) -> list[dict[str, str]]:
+        return [{"title": "rt", "body": "rb", "url": "https://github.com/o/r/issues/1"}]
+
+    def test_transport_failure_bumps_counter(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        calls: list[int] = []
+        counter = InsightDedupTransportCounter(threshold=1, escalator=calls.append)
+        agent = _FakeAgent(run_turn_exception=RuntimeError("network"))
+        run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=agent,
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+            transport_counter=counter,
+        )
+        assert calls == [1]
+
+    def test_verdict_valid_response_resets_counter(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        calls: list[int] = []
+        counter = InsightDedupTransportCounter(threshold=2, escalator=calls.append)
+        # Pre-bump to threshold-1 so escalation doesn't fire.
+        counter.record_transport_failure()
+        # Verdict-shape-valid response: is_duplicate=false (any well-formed envelope).
+        agent = _FakeAgent(run_turn_responses=['{"is_duplicate": false}'])
+        run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=agent,
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+            transport_counter=counter,
+        )
+        # Counter reset — a fresh round of failures starts fresh.
+        agent2 = _FakeAgent(run_turn_exception=RuntimeError("network"))
+        run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=agent2,
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+            transport_counter=counter,
+        )
+        # Only 1 transport failure after reset; below threshold.
+        assert calls == []
+
+    def test_parse_failure_does_not_reset(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        calls: list[int] = []
+        counter = InsightDedupTransportCounter(threshold=2, escalator=calls.append)
+        counter.record_transport_failure()
+        # Parse failure: no JSON.
+        agent = _FakeAgent(run_turn_responses=["garbage no json here"])
+        run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=agent,
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+            transport_counter=counter,
+        )
+        # Counter still at 1.  Next transport failure should escalate at threshold=2.
+        agent2 = _FakeAgent(run_turn_exception=RuntimeError("network"))
+        run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=agent2,
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+            transport_counter=counter,
+        )
+        assert calls == [2]

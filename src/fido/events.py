@@ -13,6 +13,7 @@ from typing import Any
 from fido.config import Config, RepoConfig
 from fido.critics import (
     INSIGHT_REPO,
+    InsightDedupTransportCounter,
     InsightDedupVerdict,
     run_insight_dedup_critic,
 )
@@ -157,6 +158,7 @@ class _GitHubInsightFiler:
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
         critic_system_prompt: str | None = None,
+        transport_counter: InsightDedupTransportCounter | None = None,
     ) -> None:
         # All three of agent / prompts / critic_system_prompt are
         # required for the HOL-19 critic to fire.  If any is None the
@@ -167,6 +169,12 @@ class _GitHubInsightFiler:
         self._agent = agent
         self._prompts = prompts
         self._critic_system_prompt = critic_system_prompt
+        # HOL-19 follow-up / #1935: when an
+        # ``InsightDedupTransportCounter`` is injected, transport-failure
+        # patterns escalate to a bug via the counter's escalator.  None
+        # in tests; production wiring in ``Dispatcher`` constructs one
+        # bound to ``file_stuck_on_critic_bug``.
+        self._transport_counter = transport_counter
 
     def file_insight(self, insight: Insight, target: CommentTarget) -> None:
         """File *insight* as a GitHub issue against :data:`_INSIGHT_REPO`.
@@ -298,6 +306,7 @@ class _GitHubInsightFiler:
             agent=self._agent,
             prompts=self._prompts,
             critic_system_prompt=self._critic_system_prompt,
+            transport_counter=self._transport_counter,
         )
 
     def _recent_insights_for_critic(self) -> list[dict[str, str]]:
@@ -1471,6 +1480,39 @@ class Dispatcher:
         self._sync_fn = sync_fn
         self._reorder_coalesce_state = reorder_coalesce_state
         self._get_commit_summary_fn = get_commit_summary_fn
+        # HOL-19 follow-up / #1935: one process-local
+        # transport-failure counter shared across all insight-dedup
+        # critic calls for this Dispatcher (= this repo).  Escalates
+        # via ``file_stuck_on_critic_bug`` when consecutive transport
+        # failures cross the threshold, then suppresses re-fires until
+        # a successful critic call resets it.
+        self._insight_dedup_transport_counter = InsightDedupTransportCounter(
+            escalator=self._escalate_insight_dedup_transport_failure,
+        )
+
+    def _escalate_insight_dedup_transport_failure(self, count: int) -> None:
+        """HOL-19 follow-up / #1935: escalator bound to the
+        Dispatcher's process-local
+        :class:`InsightDedupTransportCounter`.  Files a bug against
+        ``FidoCanCode/home`` so the critic infra failure is visible
+        for follow-up, idempotent via the shared
+        ``file_stuck_on_critic_bug`` marker.
+        """
+        file_stuck_on_critic_bug(
+            StuckOnCriticContext(
+                emission_point="insight-dedup-transport",
+                source_repo=self._repo_cfg.name,
+                source_pr=0,
+                target_kind="critic",
+                target_id="insight-dedup",
+                source_link=(
+                    f"(process-local — {count} consecutive transport failures "
+                    f"in {self._repo_cfg.name})"
+                ),
+                gaps=(f"{count} consecutive transport failures",),
+            ),
+            gh=self._gh,
+        )
 
     def dispatch(
         self,
@@ -2175,6 +2217,7 @@ class Dispatcher:
                     critic_system_prompt=prompts.critic_system_prompt(
                         issue=issue_ctx, pr=pr_ctx
                     ),
+                    transport_counter=self._insight_dedup_transport_counter,
                 ),
                 fido_logins=FIDO_LOGINS,
             )
@@ -2492,6 +2535,7 @@ class Dispatcher:
                     critic_system_prompt=prompts.critic_system_prompt(
                         issue=issue_ctx, pr=pr_ctx
                     ),
+                    transport_counter=self._insight_dedup_transport_counter,
                 ),
                 fido_logins=FIDO_LOGINS,
             )
