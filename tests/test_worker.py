@@ -18171,3 +18171,66 @@ class TestEmitHol28TerminalReplyFor:
         worker._tasks._task_list = [task]  # type: ignore[attr-defined]
         worker._emit_hol28_terminal_reply_for(task=task, prev_tasks=[], pr_number=42)
         assert dispatcher.calls == []
+
+    def test_thread_with_pending_sibling_does_not_fire(self, tmp_path: Path) -> None:
+        # Codex P1 (sixth round) on PR #1938: when one comment shaped
+        # multiple tasks, completing the first must NOT fire the
+        # closing summary while the sibling is still pending.
+        # Thread-level transition predicate guards this.
+        dispatcher = self._StubDispatcher()
+        worker = self._make_worker(tmp_path, dispatcher, prompts=object())
+        t1: dict[str, object] = {
+            "id": "t1",
+            "status": "completed",
+            "thread": {"comment_type": "pulls", "comment_id": 999},
+        }
+        t2_pending: dict[str, object] = {
+            "id": "t2",
+            "status": "pending",
+            "thread": {"comment_type": "pulls", "comment_id": 999},
+        }
+        worker._tasks._task_list = [t1, t2_pending]  # type: ignore[attr-defined]
+        prev = [
+            {**t1, "status": "in_progress"},
+            t2_pending,
+        ]
+        worker._emit_hol28_terminal_reply_for(task=t1, prev_tasks=prev, pr_number=42)
+        assert dispatcher.calls == []
+
+    def test_no_anchored_tasks_does_not_fire(self, tmp_path: Path) -> None:
+        # Vacuous case in the thread-level transition predicate: if
+        # the anchor comment_id matches no live task, return False.
+        dispatcher = self._StubDispatcher()
+        worker = self._make_worker(tmp_path, dispatcher, prompts=object())
+        task: dict[str, object] = {
+            "id": "t1",
+            "status": "completed",
+            "thread": {"comment_type": "pulls", "comment_id": 999},
+        }
+        worker._tasks._task_list = []  # type: ignore[attr-defined]
+        worker._emit_hol28_terminal_reply_for(task=task, prev_tasks=[], pr_number=42)
+        assert dispatcher.calls == []
+
+    def test_thread_fires_only_when_last_sibling_completes(
+        self, tmp_path: Path
+    ) -> None:
+        # Same scenario as above, but now t1 was already completed in
+        # prev and t2 just completed.  Thread transitions from
+        # not-all-terminal (t2 pending) to all-terminal — fire once.
+        dispatcher = self._StubDispatcher()
+        worker = self._make_worker(tmp_path, dispatcher, prompts=object())
+        t1: dict[str, object] = {
+            "id": "t1",
+            "status": "completed",
+            "thread": {"comment_type": "pulls", "comment_id": 999},
+        }
+        t2: dict[str, object] = {
+            "id": "t2",
+            "status": "completed",
+            "thread": {"comment_type": "pulls", "comment_id": 999},
+        }
+        worker._tasks._task_list = [t1, t2]  # type: ignore[attr-defined]
+        prev = [t1, {**t2, "status": "in_progress"}]
+        worker._emit_hol28_terminal_reply_for(task=t2, prev_tasks=prev, pr_number=42)
+        assert len(dispatcher.calls) == 1
+        assert dispatcher.calls[0]["anchor_intent"].comment_id == 999

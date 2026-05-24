@@ -2593,11 +2593,18 @@ def _apply_task_creation_verdicts(
     ordered_items: list[dict[str, Any]],
     verdicts: list["TaskCreationVerdict | None"],
     current: list[dict[str, Any]],
-    *,
-    drop_counter: "TaskCreationDropCounter | None" = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[int]]:
     """Apply pre-gathered task-creation verdicts against the CURRENT
     queue, dropping/fanning items per verdict.
+
+    Returns ``(items_after_apply, dropped_intent_comment_ids)``.  The
+    second list (codex P1 sixth round on PR #1938) lets the caller
+    record drops in the durable
+    :class:`~fido.critics.TaskCreationDropCounter` AFTER
+    ``_validate_rescope_batch`` confirms the batch is being applied;
+    without the deferred-record split, a rejected batch advanced the
+    counter for drops that never actually shipped, which could file
+    false stuck-on-critic bugs.
 
     Re-validates drop targets against ``current`` at apply time so a
     concurrent deletion of the target task between the unlocked
@@ -2612,6 +2619,7 @@ def _apply_task_creation_verdicts(
         f"{len(verdicts)} verdicts"
     )
     out: list[dict[str, Any]] = []
+    dropped_intent_cids: list[int] = []
     pending_queue_ids = _pending_queue_ids(current)
     # Codex on PR #1932: a drop verdict whose target is being CLOSED
     # by the same batch (status="completed", absorbed by another
@@ -2668,19 +2676,16 @@ def _apply_task_creation_verdicts(
                 target_id,
                 verdict.rationale,
             )
-            # HOL-16 follow-up / #1934: bump the per-intent drop
-            # counter for every intent_comment_id whose comment
-            # contributed to this dropped proposal.  After N drops
-            # attributed to the same intent the counter escalates
-            # via its injected escalator (the comment is the source
-            # of repeated rejected proposals — either Opus keeps
-            # re-proposing legitimately distinct work the critic
-            # mis-classifies, or the comment's intent isn't being
-            # honoured).
-            if drop_counter is not None:
-                for cid in item.get("contributing_intents") or ():
-                    if isinstance(cid, int):
-                        drop_counter.record_drop(cid)
+            # HOL-16 follow-up / #1934 (codex P1 sixth round on PR
+            # #1938): RECORD every contributing intent_comment_id
+            # for caller-side counter bumping, but do NOT bump the
+            # durable counter here — the batch may still get rejected
+            # at validation time below.  ``reorder_tasks`` calls
+            # ``drop_counter.record_drop`` for these ids only after
+            # ``_validate_rescope_batch`` confirms apply.
+            for cid in item.get("contributing_intents") or ():
+                if isinstance(cid, int):
+                    dropped_intent_cids.append(cid)
             continue
         if verdict.fans_out:
             log.info(
@@ -2707,7 +2712,7 @@ def _apply_task_creation_verdicts(
             continue
         # distinct + single: pass through.
         out.append(item)
-    return out
+    return out, dropped_intent_cids
 
 
 def _apply_task_creation_critics(
@@ -2724,11 +2729,17 @@ def _apply_task_creation_critics(
     and :func:`_apply_task_creation_verdicts` separately so the slow
     LLM verdict calls happen outside the tasks.json flock while the
     apply still revalidates drop targets against the live queue.
+
+    Discards the dropped-intent-cids list from
+    :func:`_apply_task_creation_verdicts` (drop-counter wiring is the
+    caller's job — this wrapper is for tests that don't exercise
+    the counter).
     """
     verdicts = _gather_task_creation_verdicts(
         ordered_items, current, critic_fn=critic_fn
     )
-    return _apply_task_creation_verdicts(ordered_items, verdicts, current)
+    items, _dropped = _apply_task_creation_verdicts(ordered_items, verdicts, current)
+    return items
 
 
 def _make_new_tasks_from_opus(
@@ -3883,11 +3894,10 @@ def reorder_tasks(
         # got deleted between gather and lock acquisition cause the
         # proposed task to be KEPT, not silently dropped (Rob review
         # on PR #1932).
-        ordered_items = _apply_task_creation_verdicts(
+        ordered_items, dropped_intent_cids = _apply_task_creation_verdicts(
             ordered_items,
             task_creation_verdicts,
             current,
-            drop_counter=task_creation_drop_counter,
         )
         validation_errors = _validate_rescope_batch(current, ordered_items)
         if validation_errors:
@@ -4018,13 +4028,22 @@ def reorder_tasks(
         # nothing to sync.  Skip every post-commit callback (codex on #1733).
         return
 
-    # HOL-16 follow-up / #1934: reset the per-intent drop counter for
-    # any intent_comment_id that no longer has live contributing tasks
-    # in the post-batch result.  An intent's drop streak only matters
-    # while the intent is still actively trying to land work; once it
-    # has either been fully covered or moved on, a fresh start clears
-    # the slate so a later, unrelated drop doesn't carry old debt.
+    # HOL-16 follow-up / #1934 (codex P1 sixth round on PR #1938):
+    # record the drops the critic chose ONLY AFTER the batch passed
+    # validation and got applied above.  Bumping in the apply step
+    # itself was wrong — a rejected batch advanced the durable counter
+    # for drops that never actually shipped, which could file false
+    # stuck-on-critic bugs.
     if task_creation_drop_counter is not None:
+        for cid in dropped_intent_cids:
+            task_creation_drop_counter.record_drop(cid)
+        # Then reset the per-intent drop counter for any
+        # intent_comment_id that no longer has live contributing
+        # tasks in the post-batch result.  An intent's drop streak
+        # only matters while it's still trying to land work; once
+        # the comment has been fully covered or the system moved on,
+        # a fresh start clears the slate so a later unrelated drop
+        # doesn't carry old debt.
         active_intent_ids: set[int] = set()
         for t in result:
             for cid in t.get("contributing_intents") or ():

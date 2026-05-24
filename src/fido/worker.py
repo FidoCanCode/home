@@ -3820,18 +3820,6 @@ class Worker:
         prompts = self._prompts
         if prompts is None:
             return
-        # Caller-side transition check: only emit when this task JUST
-        # transitioned from non-terminal to terminal.  ``_finish_task``
-        # snapshots prev BEFORE ``complete_with_resolve``, so this
-        # predicate fires exactly once per terminal completion.
-        terminal = {TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value}
-        new_status = str(task.get("status"))
-        if new_status not in terminal:
-            return
-        prev_task = next((t for t in prev_tasks if t.get("id") == task.get("id")), None)
-        prev_status = str(prev_task.get("status")) if prev_task else None
-        if prev_status in terminal:
-            return
         thread = task.get("thread") or {}
         comment_type = thread.get("comment_type")
         anchor_comment_id = thread.get("comment_id")
@@ -3844,6 +3832,19 @@ class Worker:
                 task.get("id"),
                 thread,
             )
+            return
+        # Codex P1 (sixth round) on PR #1938: the transition predicate
+        # is THREAD-level, not task-level.  When one comment shaped
+        # multiple tasks (e.g. rescope splits), completing the first
+        # task previously fired the closing summary while sibling
+        # tasks were still pending — and the second task's completion
+        # fired ANOTHER closing summary for the same thread.  Fire
+        # only when EVERY task anchored at this thread is terminal in
+        # the new snapshot AND wasn't all-terminal in the prev one.
+        new_tasks = self._tasks.list()
+        if not _hol28_anchor_thread_just_became_terminal(
+            anchor_comment_id, prev_tasks, new_tasks
+        ):
             return
         anchor_intent = RescopeIntent(
             change_request="(task-anchor reconstruction)",
@@ -6039,3 +6040,39 @@ class WorkerThread(threading.Thread):
                     provider = self._provider
                 if provider is not None:
                     provider.agent.stop_session()
+
+
+def _hol28_anchor_thread_just_became_terminal(
+    anchor_comment_id: int,
+    prev_tasks: list[dict[str, Any]],
+    new_tasks: list[dict[str, Any]],
+) -> bool:
+    """HOL-28 / #1922 transition predicate at the thread level.
+
+    Returns ``True`` iff every task anchored at ``anchor_comment_id``
+    (i.e. ``task["thread"]["comment_id"] == anchor_comment_id``) is
+    in a terminal status (COMPLETED or SKIPPED) in *new_tasks* AND
+    wasn't all-terminal in *prev_tasks*.
+
+    Codex P1 (sixth round) on PR #1938: per-task transition was the
+    wrong granularity — completing the first of several
+    same-thread tasks would fire the closing summary while sibling
+    tasks were still pending.  Thread-level transition fires once
+    per thread, when the LAST contributing task completes.
+
+    Vacuous case (no tasks anchored at this comment_id) returns
+    False — there's nothing to summarize.
+    """
+    terminal = {TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value}
+
+    def _all_terminal(tasks: list[dict[str, Any]]) -> bool:
+        anchored = [
+            t
+            for t in tasks
+            if (t.get("thread") or {}).get("comment_id") == anchor_comment_id
+        ]
+        if not anchored:
+            return False
+        return all(str(t.get("status")) in terminal for t in anchored)
+
+    return _all_terminal(new_tasks) and not _all_terminal(prev_tasks)

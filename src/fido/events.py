@@ -42,7 +42,7 @@ from fido.store import (
     ReplyPromiseRecord,
     append_reply_promise_markers,
 )
-from fido.synthesis import Insight
+from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import (
     SynthesisCriticExhaustedError,
     SynthesisExhaustedError,
@@ -2454,7 +2454,12 @@ class Dispatcher:
             # apply.  Matching ``insights_already_filed=True`` on the
             # effects call prevents double-filing.
             if target is not None:
-                executor.file_insights_pre_reply(synthesis_response, target)
+                _safe_file_insights_pre_reply(
+                    executor,
+                    synthesis_response,
+                    target,
+                    where=f"PR #{info.get('pr')} comment {info.get('comment_id')}",
+                )
             log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
             posted = gh.reply_to_review_comment(
                 info["repo"], info["pr"], body, info["comment_id"]
@@ -2706,10 +2711,14 @@ class Dispatcher:
                 promise_ids=promise_ids,
             )
             # HOL-26 / #1920: file insights BEFORE the reply post.  See
-            # the matching comment on the review-comment path; the
-            # invariant is the same.
+            # the matching comment on the review-comment path.
             if issue_target is not None:
-                executor.file_insights_pre_reply(synthesis_response, issue_target)
+                _safe_file_insights_pre_reply(
+                    executor,
+                    synthesis_response,
+                    issue_target,
+                    where=f"{repo_full} #{number} comment {comment_id}",
+                )
             log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
             posted = gh.comment_issue(repo_full, number, body)
             log.info("reply posted on PR #%s", number)
@@ -3825,6 +3834,37 @@ def _intent_arrival_indices(intents: list[RescopeIntent]) -> dict[int, int]:
     """
     ordered = sorted(intents, key=lambda i: i.timestamp)
     return {intent.comment_id: idx for idx, intent in enumerate(ordered)}
+
+
+def _safe_file_insights_pre_reply(
+    executor: "SynthesisExecutor",
+    response: "CommentResponse",
+    target: "CommentTarget",
+    *,
+    where: str,
+) -> None:
+    """HOL-26 / #1920 (codex P1 sixth round on PR #1938): wrap
+    :meth:`SynthesisExecutor.file_insights_pre_reply` in a best-
+    effort guard so a transient GitHub failure inside the insight-
+    filer (marker search or issue create) does NOT drop the
+    user-visible reply.
+
+    The reply is the primary user-facing artifact; insight filing is
+    bookkeeping.  HOL-18's claim-grounding critic remains the
+    verification-layer backstop for prose that references a
+    not-yet-filed insight.
+
+    *where* is a free-form locator (PR/comment string) for the log
+    line so a transient failure is greppable to its source path.
+    """
+    try:
+        executor.file_insights_pre_reply(response, target)
+    except Exception:
+        log.exception(
+            "HOL-26: file_insights_pre_reply failed for %s — "
+            "proceeding with reply post",
+            where,
+        )
 
 
 def _hol25_verdict_framing(verdict: IntentVerdict) -> str:

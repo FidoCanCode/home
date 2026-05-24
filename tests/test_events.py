@@ -4872,6 +4872,47 @@ class TestHol28TerminalThreadFraming:
         assert "t1: (untitled)" in framing
 
 
+class TestSafeFileInsightsPreReply:
+    """HOL-26 / #1920 (codex P1 sixth round on PR #1938): the
+    production reply paths wrap ``file_insights_pre_reply`` so a
+    transient insight-filer failure does NOT drop the user-visible
+    reply."""
+
+    def test_swallows_exception(self) -> None:
+        from fido.events import _safe_file_insights_pre_reply
+
+        class _Boom:
+            def file_insights_pre_reply(self, _r: object, _t: object) -> None:
+                raise RuntimeError("GitHub down")
+
+        # Must not raise.
+        _safe_file_insights_pre_reply(
+            _Boom(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            where="test",
+        )
+
+    def test_passes_response_and_target_on_success(self) -> None:
+        from fido.events import _safe_file_insights_pre_reply
+
+        seen: list[tuple[object, object]] = []
+
+        class _Spy:
+            def file_insights_pre_reply(self, r: object, t: object) -> None:
+                seen.append((r, t))
+
+        resp = object()
+        target = object()
+        _safe_file_insights_pre_reply(
+            _Spy(),  # type: ignore[arg-type]
+            resp,  # type: ignore[arg-type]
+            target,  # type: ignore[arg-type]
+            where="test",
+        )
+        assert seen == [(resp, target)]
+
+
 class TestNotifyTerminalTaskThread:
     """HOL-28 wire: ``Dispatcher.notify_terminal_task_thread`` posts
     the aggregate reply at *anchor_intent*'s comment for the
