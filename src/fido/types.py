@@ -1,6 +1,6 @@
 """Shared type definitions for fido."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal
@@ -391,7 +391,7 @@ def _task_status_terminal(task: Mapping[str, Any]) -> bool:
 
 
 def intent_thread_terminal(
-    intent_comment_id: int, tasks: list[Mapping[str, Any]]
+    intent_comment_id: int, tasks: Sequence[Mapping[str, Any]]
 ) -> bool:
     """HOL-27 / #1921: True when every task carrying *intent_comment_id*
     in its ``contributing_intents`` is in a terminal status
@@ -420,8 +420,8 @@ def intent_thread_terminal(
 
 
 def newly_terminal_intent_threads(
-    prev_tasks: list[Mapping[str, Any]],
-    new_tasks: list[Mapping[str, Any]],
+    prev_tasks: Sequence[Mapping[str, Any]],
+    new_tasks: Sequence[Mapping[str, Any]],
 ) -> tuple[int, ...]:
     """HOL-27 helper: intent comment ids whose threads were NOT terminal
     in *prev_tasks* but ARE terminal in *new_tasks*.

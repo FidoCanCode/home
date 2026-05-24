@@ -4698,6 +4698,222 @@ class TestBuildOnRescopeApply:
         assert comment_ids == [101]  # once, not twice
 
 
+class TestHol28TerminalThreadFraming:
+    """HOL-28 / #1922: per-thread terminal aggregate framing names
+    landed commits + skipped tasks + carries the requester's ask."""
+
+    def _intent(self, comment_id: int = 101) -> RescopeIntent:
+        return RescopeIntent(
+            change_request="please rename the parser",
+            comment_id=comment_id,
+            timestamp="2024-01-15T10:00:00+00:00",
+        )
+
+    def test_lists_landed_commits(self) -> None:
+        from fido.events import _hol28_terminal_thread_framing
+
+        completed = [{"id": "t1", "title": "rename parser module"}]
+        framing = _hol28_terminal_thread_framing(self._intent(), completed, [])
+        assert "LANDED" in framing
+        assert "t1: rename parser module" in framing
+
+    def test_lists_skipped_tasks_with_reason(self) -> None:
+        from fido.events import _hol28_terminal_thread_framing
+
+        skipped = [
+            {
+                "id": "t2",
+                "title": "rename internal helper",
+                "description": "redundant with t1; skipping",
+            }
+        ]
+        framing = _hol28_terminal_thread_framing(self._intent(), [], skipped)
+        assert "SKIPPED" in framing
+        assert "t2: rename internal helper — redundant with t1; skipping" in framing
+
+    def test_carries_intent_change_request(self) -> None:
+        from fido.events import _hol28_terminal_thread_framing
+
+        framing = _hol28_terminal_thread_framing(self._intent(), [], [])
+        assert "please rename the parser" in framing
+        assert "comment id: 101" in framing
+
+    def test_skipped_with_no_reason_uses_fallback(self) -> None:
+        from fido.events import _hol28_terminal_thread_framing
+
+        skipped = [{"id": "t1", "title": "x", "description": ""}]
+        framing = _hol28_terminal_thread_framing(self._intent(), [], skipped)
+        assert "(no reason recorded)" in framing
+
+    def test_untitled_task_uses_fallback(self) -> None:
+        from fido.events import _hol28_terminal_thread_framing
+
+        completed = [{"id": "t1", "title": ""}]
+        framing = _hol28_terminal_thread_framing(self._intent(), completed, [])
+        assert "t1: (untitled)" in framing
+
+
+class TestNotifyNewlyTerminalIntentThreads:
+    """HOL-28 wire: ``Dispatcher.notify_newly_terminal_intent_threads``
+    posts one aggregate reply per intent whose thread just transitioned
+    to fully-terminal across a tasks.json before/after snapshot."""
+
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _intent(self, comment_id: int, comment_type: str = "pulls") -> RescopeIntent:
+        return RescopeIntent(
+            change_request=f"req {comment_id}",
+            comment_id=comment_id,
+            timestamp="2024-01-15T10:00:00+00:00",
+            comment_type=comment_type,
+        )
+
+    def test_no_transition_no_reply(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        Dispatcher(
+            cfg, cfg.repos["owner/repo"], gh
+        ).notify_newly_terminal_intent_threads(
+            prev_tasks=[
+                {"id": "t1", "status": "completed", "contributing_intents": [101]}
+            ],
+            new_tasks=[
+                {"id": "t1", "status": "completed", "contributing_intents": [101]}
+            ],
+            batch_intents=[self._intent(101)],
+            pr=42,
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
+        gh.reply_to_review_comment.assert_not_called()
+
+    def test_transition_fires_one_reply(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        Dispatcher(
+            cfg, cfg.repos["owner/repo"], gh
+        ).notify_newly_terminal_intent_threads(
+            prev_tasks=[
+                {"id": "t1", "status": "in_progress", "contributing_intents": [101]}
+            ],
+            new_tasks=[
+                {
+                    "id": "t1",
+                    "status": "completed",
+                    "title": "did it",
+                    "contributing_intents": [101],
+                }
+            ],
+            batch_intents=[self._intent(101)],
+            pr=42,
+            agent=_client("Done."),
+            prompts=Prompts("p"),
+        )
+        gh.reply_to_review_comment.assert_called_once()
+        assert gh.reply_to_review_comment.call_args.args[3] == 101
+
+    def test_issue_comment_skipped(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        Dispatcher(
+            cfg, cfg.repos["owner/repo"], gh
+        ).notify_newly_terminal_intent_threads(
+            prev_tasks=[
+                {"id": "t1", "status": "in_progress", "contributing_intents": [101]}
+            ],
+            new_tasks=[
+                {"id": "t1", "status": "completed", "contributing_intents": [101]}
+            ],
+            batch_intents=[self._intent(101, comment_type="issues")],
+            pr=42,
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
+        gh.reply_to_review_comment.assert_not_called()
+
+    def test_intent_missing_from_batch_skipped(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        # transitioned cid is 101 but batch_intents only knows 202.
+        Dispatcher(
+            cfg, cfg.repos["owner/repo"], gh
+        ).notify_newly_terminal_intent_threads(
+            prev_tasks=[
+                {"id": "t1", "status": "in_progress", "contributing_intents": [101]}
+            ],
+            new_tasks=[
+                {"id": "t1", "status": "completed", "contributing_intents": [101]}
+            ],
+            batch_intents=[self._intent(202)],
+            pr=42,
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
+        gh.reply_to_review_comment.assert_not_called()
+
+    def test_post_failure_logged_not_raised(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        gh.reply_to_review_comment.side_effect = RuntimeError("api down")
+        # Must not raise — the worker's task-completion path can't be
+        # gated on per-reply transport errors.
+        Dispatcher(
+            cfg, cfg.repos["owner/repo"], gh
+        ).notify_newly_terminal_intent_threads(
+            prev_tasks=[
+                {"id": "t1", "status": "in_progress", "contributing_intents": [101]}
+            ],
+            new_tasks=[
+                {"id": "t1", "status": "completed", "contributing_intents": [101]}
+            ],
+            batch_intents=[self._intent(101)],
+            pr=42,
+            agent=_client("Done."),
+            prompts=Prompts("p"),
+        )
+
+    def test_multiple_intents_each_get_one_reply(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        Dispatcher(
+            cfg, cfg.repos["owner/repo"], gh
+        ).notify_newly_terminal_intent_threads(
+            prev_tasks=[
+                {"id": "t1", "status": "in_progress", "contributing_intents": [101]},
+                {"id": "t2", "status": "pending", "contributing_intents": [202]},
+            ],
+            new_tasks=[
+                {
+                    "id": "t1",
+                    "status": "completed",
+                    "title": "x",
+                    "contributing_intents": [101],
+                },
+                {
+                    "id": "t2",
+                    "status": "skipped",
+                    "title": "y",
+                    "description": "no longer needed",
+                    "contributing_intents": [202],
+                },
+            ],
+            batch_intents=[self._intent(101), self._intent(202)],
+            pr=42,
+            agent=_client("Done."),
+            prompts=Prompts("p"),
+        )
+        comment_ids = [c.args[3] for c in gh.reply_to_review_comment.call_args_list]
+        assert comment_ids == [101, 202]
+
+
 class TestNotifyIntentOutcome:
     """INV-F (#1804): ``_notify_intent_outcome`` posts a per-intent
     reply with framing keyed on the oracle's ``NotifyKind``."""

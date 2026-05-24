@@ -57,6 +57,7 @@ from fido.types import (
     ActivePR,
     IntentVerdict,
     RescopeIntent,
+    TaskStatus,
     TaskType,
     verdict_is_material,
 )
@@ -2763,6 +2764,88 @@ class Dispatcher:
         except Exception:
             log.exception("failed to notify intent comment %s", intent.comment_id)
 
+    def notify_newly_terminal_intent_threads(
+        self,
+        prev_tasks: list[dict[str, Any]],
+        new_tasks: list[dict[str, Any]],
+        *,
+        batch_intents: list[RescopeIntent],
+        pr: int,
+        agent: ProviderAgent,
+        prompts: Prompts,
+    ) -> None:
+        """HOL-28 / #1922: emit one per-thread aggregate reply for every
+        intent whose thread just transitioned from non-terminal to
+        terminal across the ``prev_tasks`` → ``new_tasks`` snapshot pair.
+
+        Wired by the task-completion path: when the worker marks a task
+        COMPLETED (or the rescope marks one SKIPPED), call this with the
+        before/after task lists.  ``newly_terminal_intent_threads``
+        (HOL-27) computes which intents transitioned; this method posts
+        the aggregate reply per intent.
+
+        Issue comments are silently skipped (same INV-F rule as
+        ``_notify_intent_outcome``: webhook already replied at triage).
+        Bot threads are included (per HOL-28 issue: "Bot threads
+        included" — humans need to follow what landed; so do bots).
+        """
+        from fido.types import newly_terminal_intent_threads
+
+        intents_by_cid = {i.comment_id: i for i in batch_intents}
+        transitioned_cids = newly_terminal_intent_threads(prev_tasks, new_tasks)
+        if not transitioned_cids:
+            return
+        repo = self._repo_cfg.name
+        for cid in transitioned_cids:
+            intent = intents_by_cid.get(cid)
+            if intent is None:
+                # Intent not in the current batch (e.g. comment shaped
+                # tasks across multiple rescope runs and this batch
+                # only carries a subset).  Skip — caller is responsible
+                # for passing the full intent set.
+                continue
+            if intent.comment_type != "pulls":
+                log.info(
+                    "skipping terminal-thread notification for issue "
+                    "comment %s (webhook already replied at triage)",
+                    cid,
+                )
+                continue
+            completed = [
+                t
+                for t in new_tasks
+                if cid in (t.get("contributing_intents") or ())
+                and str(t.get("status")) == TaskStatus.COMPLETED.value
+            ]
+            skipped = [
+                t
+                for t in new_tasks
+                if cid in (t.get("contributing_intents") or ())
+                and str(t.get("status")) == TaskStatus.SKIPPED.value
+            ]
+            framing = _hol28_terminal_thread_framing(intent, completed, skipped)
+            body = safe_voice_turn(
+                agent,
+                prompts.persona_wrap(framing),
+                model=agent.voice_model,
+                allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+                system_prompt=prompts.reply_system_prompt(),
+                log_prefix="notify_terminal_intent_threads",
+            )
+            try:
+                self._gh.reply_to_review_comment(repo, pr, body, intent.comment_id)
+                log.info(
+                    "notified terminal thread for intent comment %s "
+                    "(%d completed, %d skipped)",
+                    cid,
+                    len(completed),
+                    len(skipped),
+                )
+            except Exception:
+                log.exception(
+                    "failed to notify terminal thread for intent comment %s", cid
+                )
+
     def _make_reorder_kwargs(
         self,
         registry: ActivityReporter,
@@ -3668,6 +3751,52 @@ def _hol25_verdict_framing(verdict: IntentVerdict) -> str:
                 "the superseding intent.\n\n"
                 f"Rescope narrative: {narrative}"
             )
+
+
+def _hol28_terminal_thread_framing(
+    intent: RescopeIntent,
+    completed_tasks: list[dict[str, Any]],
+    skipped_tasks: list[dict[str, Any]],
+) -> str:
+    """HOL-28 / #1922: per-thread terminal aggregate framing.
+
+    Built when an intent thread transitions to fully-terminal — every
+    task carrying *intent*'s comment_id in ``contributing_intents`` is
+    now COMPLETED or SKIPPED.  The framing lists what landed (commit
+    titles) and what was skipped (with the skip narrative if present),
+    so Opus can generate a single per-thread reply summarising
+    everything the requester's comment shaped.
+
+    Voice-text-not-templated: this is the INSTRUCTION sent to Opus
+    (deterministic fact-carrier); Opus generates the user-visible
+    prose per call.
+    """
+    parts: list[str] = [
+        "Every task this PR comment shaped has reached terminal state — "
+        "either landed as a commit or skipped with reason.  Tell this "
+        "commenter the AGGREGATE story across all the tasks their ask "
+        "touched.  Do NOT post per-task; this is the single closing "
+        "summary for the whole thread.",
+        "",
+        f"This commenter's change request: {intent.change_request}",
+        f"Their comment id: {intent.comment_id} ({intent.timestamp})",
+    ]
+    if completed_tasks:
+        parts.append("")
+        parts.append("Tasks that LANDED (use commit titles in the story):")
+        for task in completed_tasks:
+            title = (task.get("title") or "").strip() or "(untitled)"
+            parts.append(f"- {task['id']}: {title}")
+    if skipped_tasks:
+        parts.append("")
+        parts.append("Tasks that were SKIPPED (carry the skip reason verbatim):")
+        for task in skipped_tasks:
+            title = (task.get("title") or "").strip() or "(untitled)"
+            reason = (task.get("description") or "").strip() or "(no reason recorded)"
+            parts.append(f"- {task['id']}: {title} — {reason}")
+    parts.append("")
+    parts.append("Write a brief aggregate reply.")
+    return "\n".join(parts)
 
 
 def _rocq_intent_rows(
