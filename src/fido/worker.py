@@ -3846,16 +3846,23 @@ class Worker:
             anchor_comment_id, prev_tasks, new_tasks
         ):
             return
+        # Codex P2 (seventh round) on PR #1938:
+        # ``change_request=""`` (not a placeholder string) so a
+        # downstream framing that interpolates the field can't leak
+        # fabricated request text into the user-visible reply.  The
+        # framing also reads task titles/descriptions for the per-
+        # task story, so an empty change_request degrades cleanly to
+        # "no original ask recorded" instead of inventing one.
         anchor_intent = RescopeIntent(
-            change_request="(task-anchor reconstruction)",
+            change_request="",
             comment_id=int(anchor_comment_id),
             timestamp="",
             comment_type="pulls",
         )
         try:
             self._dispatcher.notify_terminal_task_thread(
-                task=task,
-                anchor_intent=anchor_intent,
+                new_tasks,
+                anchor_intent,
                 pr=pr_number,
                 agent=self._provider_agent,
                 prompts=prompts,

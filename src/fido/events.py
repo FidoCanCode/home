@@ -2436,6 +2436,13 @@ class Dispatcher:
         root_comment_id = (
             thread_comments[0]["id"] if thread_comments else info["comment_id"]
         )
+        # Codex P2 seventh round on PR #1938: track whether the pre-
+        # reply insight file succeeded.  False both when we didn't
+        # try (existing artifact / no target) AND when the try raised
+        # — either way the post-reply effects must run their own
+        # ``_file_insights`` pass so a transient pre-reply failure
+        # doesn't permanently lose the insight.
+        pre_reply_insights_filed = False
         existing_artifact_id = _existing_reply_artifact(repo_cfg, promise_ids)
         if existing_artifact_id is None:
             _claim_reply_outbox_effects(
@@ -2447,18 +2454,13 @@ class Dispatcher:
             )
             # HOL-26 / #1920: file insights BEFORE the reply post so any
             # claim in the reply body about a filed insight is true at
-            # the moment of posting.  Sequenced here (not inside
-            # executor.execute_effects_only below) because the
-            # production reply path threads the outbox protocol through
-            # its own post — the convenience execute() chain doesn't
-            # apply.  Matching ``insights_already_filed=True`` on the
-            # effects call prevents double-filing.
+            # the moment of posting.
             if target is not None:
-                _safe_file_insights_pre_reply(
+                pre_reply_insights_filed = _safe_file_insights_pre_reply(
                     executor,
                     synthesis_response,
                     target,
-                    where=f"PR #{info.get('pr')} comment {info.get('comment_id')}",
+                    where=(f"PR #{info.get('pr')} comment {info.get('comment_id')}"),
                 )
             log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
             posted = gh.reply_to_review_comment(
@@ -2494,7 +2496,9 @@ class Dispatcher:
         # path could share its eyes-removal helper.
         if target is not None:
             executor.execute_effects_only(
-                synthesis_response, target, insights_already_filed=True
+                synthesis_response,
+                target,
+                insights_already_filed=pre_reply_insights_filed,
             )
 
         return (category, titles)
@@ -2701,6 +2705,8 @@ class Dispatcher:
 
         promise_ids = _reply_promise_ids(context)
         body = append_reply_promise_markers(body, promise_ids)
+        # Codex P2 seventh round on PR #1938 — see review-comment path.
+        pre_reply_insights_filed = False
         existing_artifact_id = _existing_reply_artifact(repo_cfg, promise_ids)
         if existing_artifact_id is None:
             _claim_reply_outbox_effects(
@@ -2713,7 +2719,7 @@ class Dispatcher:
             # HOL-26 / #1920: file insights BEFORE the reply post.  See
             # the matching comment on the review-comment path.
             if issue_target is not None:
-                _safe_file_insights_pre_reply(
+                pre_reply_insights_filed = _safe_file_insights_pre_reply(
                     executor,
                     synthesis_response,
                     issue_target,
@@ -2747,7 +2753,9 @@ class Dispatcher:
         # eyes-removal helper.
         if issue_target is not None:
             executor.execute_effects_only(
-                synthesis_response, issue_target, insights_already_filed=True
+                synthesis_response,
+                issue_target,
+                insights_already_filed=pre_reply_insights_filed,
             )
 
         log.info(
@@ -2899,7 +2907,7 @@ class Dispatcher:
 
     def notify_terminal_task_thread(
         self,
-        task: dict[str, Any],
+        new_tasks: list[dict[str, Any]],
         anchor_intent: RescopeIntent,
         *,
         pr: int,
@@ -2931,23 +2939,54 @@ class Dispatcher:
 
         The caller is responsible for:
 
-        - Verifying the task just transitioned from non-terminal to
-          terminal (so this method fires exactly once per terminal
-          transition).
+        - Verifying the thread just transitioned from non-all-terminal
+          to all-terminal (so this method fires exactly once per
+          thread closing).
         - Constructing *anchor_intent* from the task's primary thread
           (``task["thread"]``) with the correct ``comment_type``.
 
+        Codex P1+P2 (seventh round) on PR #1938: this method now
+        receives ``new_tasks`` (the live post-completion snapshot)
+        and builds completed/skipped lists from EVERY task anchored
+        at ``anchor_intent.comment_id``.  The previous shape took a
+        single task argument and gated on its ``status`` — which was
+        broken on both axes:
+
+        1. The worker passed a pre-completion snapshot of the task,
+           so the dispatcher saw stale ``status="in_progress"`` and
+           returned early.
+        2. Even with a fresh row, building the closing summary from
+           only ONE task lost the sibling tasks that shared the
+           thread; the user got "T2 done" with no mention of T1.
+
         Best-effort post: transport failures log but do not propagate.
         """
-        status = str(task.get("status"))
-        completed = [task] if status == TaskStatus.COMPLETED.value else []
-        skipped = [task] if status == TaskStatus.SKIPPED.value else []
-        if not completed and not skipped:
+        terminal = {TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value}
+        anchored = [
+            t
+            for t in new_tasks
+            if (t.get("thread") or {}).get("comment_id") == anchor_intent.comment_id
+        ]
+        completed = [
+            t for t in anchored if str(t.get("status")) == TaskStatus.COMPLETED.value
+        ]
+        skipped = [
+            t for t in anchored if str(t.get("status")) == TaskStatus.SKIPPED.value
+        ]
+        non_terminal = [t for t in anchored if str(t.get("status")) not in terminal]
+        if non_terminal:
             log.info(
-                "notify_terminal_task_thread: task %s is not in a "
-                "terminal status (%r) — skipping",
-                task.get("id"),
-                status,
+                "notify_terminal_task_thread: anchor %s still has "
+                "non-terminal tasks (%r) — skipping",
+                anchor_intent.comment_id,
+                [t.get("id") for t in non_terminal],
+            )
+            return
+        if not anchored:
+            log.info(
+                "notify_terminal_task_thread: no tasks anchored at "
+                "comment %s — skipping",
+                anchor_intent.comment_id,
             )
             return
         framing = _hol28_terminal_thread_framing(anchor_intent, completed, skipped)
@@ -2964,14 +3003,17 @@ class Dispatcher:
                 self._repo_cfg.name, pr, body, anchor_intent.comment_id
             )
             log.info(
-                "notified terminal task thread for task %s at comment %s",
-                task.get("id"),
+                "notified terminal task thread at comment %s "
+                "(%d completed, %d skipped across %d sibling tasks)",
                 anchor_intent.comment_id,
+                len(completed),
+                len(skipped),
+                len(anchored),
             )
         except Exception:
             log.exception(
-                "failed to notify terminal task thread for task %s",
-                task.get("id"),
+                "failed to notify terminal task thread at comment %s",
+                anchor_intent.comment_id,
             )
 
     def _make_reorder_kwargs(
@@ -3842,12 +3884,21 @@ def _safe_file_insights_pre_reply(
     target: "CommentTarget",
     *,
     where: str,
-) -> None:
+) -> bool:
     """HOL-26 / #1920 (codex P1 sixth round on PR #1938): wrap
     :meth:`SynthesisExecutor.file_insights_pre_reply` in a best-
     effort guard so a transient GitHub failure inside the insight-
     filer (marker search or issue create) does NOT drop the
     user-visible reply.
+
+    Returns ``True`` when filing completed cleanly (so the matching
+    ``execute_effects_only`` call can pass
+    ``insights_already_filed=True`` and skip the post-reply re-file).
+    Returns ``False`` on failure (codex P2 seventh round on PR
+    #1938) so the caller leaves ``insights_already_filed=False`` and
+    the post-reply effects pass re-attempts the file — without
+    that, a transient pre-reply failure permanently lost the
+    insight instead of retrying.
 
     The reply is the primary user-facing artifact; insight filing is
     bookkeeping.  HOL-18's claim-grounding critic remains the
@@ -3862,9 +3913,12 @@ def _safe_file_insights_pre_reply(
     except Exception:
         log.exception(
             "HOL-26: file_insights_pre_reply failed for %s — "
-            "proceeding with reply post",
+            "proceeding with reply post; post-reply effects will "
+            "retry the file",
             where,
         )
+        return False
+    return True
 
 
 def _hol25_verdict_framing(verdict: IntentVerdict) -> str:
@@ -3957,9 +4011,18 @@ def _hol28_terminal_thread_framing(
         "touched.  Do NOT post per-task; this is the single closing "
         "summary for the whole thread.",
         "",
-        f"This commenter's change request: {intent.change_request}",
         f"Their comment id: {intent.comment_id} ({intent.timestamp})",
     ]
+    # Codex P2 (seventh round) on PR #1938: only include the
+    # change_request line when it's a real, non-empty value.  The
+    # HOL-28 worker wire constructs a synthetic anchor intent with
+    # ``change_request=""``; interpolating a placeholder string here
+    # would leak fabricated request text into the user-visible reply.
+    if intent.change_request.strip():
+        parts.insert(
+            len(parts) - 1,
+            f"This commenter's change request: {intent.change_request}",
+        )
     if completed_tasks:
         parts.append("")
         parts.append("Tasks that LANDED (use commit titles in the story):")

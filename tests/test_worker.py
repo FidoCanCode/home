@@ -18017,7 +18017,7 @@ class TestEmitHol28TerminalReplyFor:
 
         def notify_terminal_task_thread(
             self,
-            task: dict[str, object],
+            new_tasks: list[dict[str, object]],
             anchor_intent: object,
             *,
             pr: int,
@@ -18028,7 +18028,7 @@ class TestEmitHol28TerminalReplyFor:
                 raise self.raise_on_next
             self.calls.append(
                 {
-                    "task": task,
+                    "new_tasks": new_tasks,
                     "anchor_intent": anchor_intent,
                     "pr": pr,
                 }
@@ -18087,7 +18087,7 @@ class TestEmitHol28TerminalReplyFor:
         assert len(dispatcher.calls) == 1
         call = dispatcher.calls[0]
         assert call["pr"] == 42
-        assert call["task"] is task
+        assert task in call["new_tasks"]
         anchor = call["anchor_intent"]
         assert isinstance(anchor, RescopeIntent)
         assert anchor.comment_id == 999

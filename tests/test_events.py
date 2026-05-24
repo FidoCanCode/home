@@ -4938,13 +4938,24 @@ class TestNotifyTerminalTaskThread:
             comment_type="pulls",
         )
 
+    def _pulls_task(
+        self, tid: str, status: str, anchor_cid: int = 999, **extra: object
+    ) -> dict[str, object]:
+        row: dict[str, object] = {
+            "id": tid,
+            "status": status,
+            "thread": {"comment_type": "pulls", "comment_id": anchor_cid},
+        }
+        row.update(extra)
+        return row
+
     def test_completed_task_fires_reply_at_anchor(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         gh = MagicMock()
-        task = {"id": "t1", "status": "completed", "title": "did it"}
+        new_tasks = [self._pulls_task("t1", "completed", title="did it")]
         Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
-            task=task,
-            anchor_intent=self._anchor(999),
+            new_tasks,
+            self._anchor(999),
             pr=42,
             agent=_client("Done."),
             prompts=Prompts("p"),
@@ -4955,48 +4966,133 @@ class TestNotifyTerminalTaskThread:
     def test_skipped_task_fires_reply(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         gh = MagicMock()
-        task = {
-            "id": "t1",
-            "status": "skipped",
-            "title": "y",
-            "description": "no longer needed",
-        }
+        new_tasks = [
+            self._pulls_task(
+                "t1",
+                "skipped",
+                title="y",
+                description="no longer needed",
+            )
+        ]
         Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
-            task=task,
-            anchor_intent=self._anchor(),
+            new_tasks,
+            self._anchor(),
             pr=42,
             agent=_client("Done."),
             prompts=Prompts("p"),
         )
         gh.reply_to_review_comment.assert_called_once()
 
-    def test_non_terminal_task_silently_skipped(self, tmp_path: Path) -> None:
+    def test_non_terminal_anchored_task_skips_dispatch(self, tmp_path: Path) -> None:
+        # Even if SOME anchored tasks are terminal, a single sibling
+        # still pending blocks the closing summary.
         cfg = self._cfg(tmp_path)
         gh = MagicMock()
-        task = {"id": "t1", "status": "in_progress"}
+        new_tasks = [
+            self._pulls_task("t1", "completed"),
+            self._pulls_task("t2", "pending"),
+        ]
         Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
-            task=task,
-            anchor_intent=self._anchor(),
+            new_tasks,
+            self._anchor(),
             pr=42,
             agent=_client("nope"),
             prompts=Prompts("p"),
         )
         gh.reply_to_review_comment.assert_not_called()
 
+    def test_aggregate_includes_all_sibling_tasks(self, tmp_path: Path) -> None:
+        # Codex P2 (seventh round) on PR #1938: when the closing
+        # summary fires for a multi-task thread, it must mention ALL
+        # sibling terminal tasks, not just one.
+        cfg = self._cfg(tmp_path)
+        captured: list[str] = []
+
+        class _CapturingAgent:
+            voice_model = "claude-opus-4-7"
+
+            def run_turn(self, prompt: str, **_kw: object) -> str:
+                captured.append(prompt)
+                return "Done."
+
+        gh = MagicMock()
+        new_tasks = [
+            self._pulls_task("t1", "completed", title="first commit"),
+            self._pulls_task("t2", "completed", title="second commit"),
+            self._pulls_task("t3", "skipped", title="dropped", description="why"),
+        ]
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            new_tasks,
+            self._anchor(),
+            pr=42,
+            agent=_CapturingAgent(),  # type: ignore[arg-type]
+            prompts=Prompts("p"),
+        )
+        assert captured, "agent.run_turn was not called"
+        framing = captured[0]
+        assert "t1: first commit" in framing
+        assert "t2: second commit" in framing
+        assert "t3: dropped — why" in framing
+
+    def test_anchor_empty_change_request_not_leaked(self, tmp_path: Path) -> None:
+        # Codex P2 (seventh round) on PR #1938: the worker constructs
+        # the anchor intent with ``change_request=""`` to avoid
+        # leaking a placeholder string into the reply.  The framing
+        # must NOT include the change_request line when the field is
+        # empty.
+        cfg = self._cfg(tmp_path)
+        captured: list[str] = []
+
+        class _CapturingAgent:
+            voice_model = "claude-opus-4-7"
+
+            def run_turn(self, prompt: str, **_kw: object) -> str:
+                captured.append(prompt)
+                return "Done."
+
+        gh = MagicMock()
+        anchor = RescopeIntent(
+            change_request="",
+            comment_id=999,
+            timestamp="",
+            comment_type="pulls",
+        )
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            [self._pulls_task("t1", "completed", title="x")],
+            anchor,
+            pr=42,
+            agent=_CapturingAgent(),  # type: ignore[arg-type]
+            prompts=Prompts("p"),
+        )
+        framing = captured[0]
+        assert "change request" not in framing.lower()
+        # And the placeholder string from older versions must not appear.
+        assert "task-anchor reconstruction" not in framing
+
     def test_post_failure_logged_not_raised(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         gh = MagicMock()
         gh.reply_to_review_comment.side_effect = RuntimeError("api down")
-        # Must not raise — the worker's task-completion path can't be
-        # gated on per-reply transport errors.
-        task = {"id": "t1", "status": "completed", "title": "x"}
         Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
-            task=task,
-            anchor_intent=self._anchor(),
+            [self._pulls_task("t1", "completed", title="x")],
+            self._anchor(),
             pr=42,
             agent=_client("Done."),
             prompts=Prompts("p"),
         )
+
+    def test_no_anchored_tasks_skips_dispatch(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        # Anchor is comment 999 but no tasks live at that anchor.
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            [self._pulls_task("t1", "completed", anchor_cid=12345)],
+            self._anchor(999),
+            pr=42,
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
+        gh.reply_to_review_comment.assert_not_called()
 
 
 class TestNotifyIntentOutcome:
