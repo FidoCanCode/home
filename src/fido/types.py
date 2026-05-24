@@ -419,6 +419,32 @@ def intent_thread_terminal(
     return all(_task_status_terminal(t) for t in contributing_tasks)
 
 
+def hol28_anchor_key(thread: object) -> int | None:
+    """HOL-28 / #1922 (codex P2 eighth round on PR #1938): normalize
+    a task's ``thread["comment_id"]`` to an ``int`` for consistent
+    anchor matching across worker + dispatcher.
+
+    Persisted tasks.json can store the comment id as either ``int``
+    or ``str`` (other task code already round-trips through
+    ``int(...)``), so a strict ``isinstance(int)`` check skips
+    string-id rows and a strict ``==`` compare misses string-vs-int
+    sibling matches.  Returns ``None`` when the thread is missing,
+    not a mapping, has no comment_id, or the id can't be coerced —
+    callers treat ``None`` as "no anchor" rather than as a match.
+    """
+    if not isinstance(thread, Mapping):
+        return None
+    raw = thread.get("comment_id")
+    # ``bool`` is an ``int`` subclass; reject so ``True``/``False``
+    # can't sneak in as a fake comment id.
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)  # type: ignore[arg-type]
+    except TypeError, ValueError:
+        return None
+
+
 def newly_terminal_intent_threads(
     prev_tasks: Sequence[Mapping[str, Any]],
     new_tasks: Sequence[Mapping[str, Any]],

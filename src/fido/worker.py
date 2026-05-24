@@ -89,6 +89,7 @@ from fido.types import (
     TaskSnapshot,
     TaskStatus,
     TaskType,
+    hol28_anchor_key,
 )
 
 
@@ -3822,8 +3823,13 @@ class Worker:
             return
         thread = task.get("thread") or {}
         comment_type = thread.get("comment_type")
-        anchor_comment_id = thread.get("comment_id")
-        if comment_type != "pulls" or not isinstance(anchor_comment_id, int):
+        # Codex P2 (eighth round) on PR #1938: normalize the anchor
+        # via ``hol28_anchor_key`` so a string-typed comment_id in
+        # the persisted task (other task code round-trips through
+        # ``int(...)``) doesn't skip the emission or — worse — make
+        # a sibling task invisible during the transition check.
+        anchor_comment_id = hol28_anchor_key(thread)
+        if comment_type != "pulls" or anchor_comment_id is None:
             log.info(
                 "HOL-28: skipping terminal-thread emission for task %s "
                 "(thread=%r — only PR review-comment anchors emit "
@@ -3855,7 +3861,7 @@ class Worker:
         # "no original ask recorded" instead of inventing one.
         anchor_intent = RescopeIntent(
             change_request="",
-            comment_id=int(anchor_comment_id),
+            comment_id=anchor_comment_id,
             timestamp="",
             comment_type="pulls",
         )
@@ -6074,9 +6080,7 @@ def _hol28_anchor_thread_just_became_terminal(
 
     def _all_terminal(tasks: list[dict[str, Any]]) -> bool:
         anchored = [
-            t
-            for t in tasks
-            if (t.get("thread") or {}).get("comment_id") == anchor_comment_id
+            t for t in tasks if hol28_anchor_key(t.get("thread")) == anchor_comment_id
         ]
         if not anchored:
             return False

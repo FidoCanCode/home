@@ -4872,6 +4872,46 @@ class TestHol28TerminalThreadFraming:
         assert "t1: (untitled)" in framing
 
 
+class TestSafeRetryFileInsights:
+    """HOL-26 / #1920 (codex P1 eighth round on PR #1938): replay-
+    path insight-only retry swallows exceptions so a transient
+    failure on retry doesn't propagate up the reply handler."""
+
+    def test_swallows_exception(self) -> None:
+        from fido.events import _safe_retry_file_insights
+
+        class _Boom:
+            def retry_file_insights(self, _r: object, _t: object) -> None:
+                raise RuntimeError("GitHub down")
+
+        # Must not raise.
+        _safe_retry_file_insights(
+            _Boom(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            where="test",
+        )
+
+    def test_passes_through_on_success(self) -> None:
+        from fido.events import _safe_retry_file_insights
+
+        seen: list[tuple[object, object]] = []
+
+        class _Spy:
+            def retry_file_insights(self, r: object, t: object) -> None:
+                seen.append((r, t))
+
+        resp = object()
+        target = object()
+        _safe_retry_file_insights(
+            _Spy(),  # type: ignore[arg-type]
+            resp,  # type: ignore[arg-type]
+            target,  # type: ignore[arg-type]
+            where="test",
+        )
+        assert seen == [(resp, target)]
+
+
 class TestSafeFileInsightsPreReply:
     """HOL-26 / #1920 (codex P1 sixth round on PR #1938): the
     production reply paths wrap ``file_insights_pre_reply`` so a

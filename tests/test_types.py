@@ -773,3 +773,49 @@ class TestNewlyTerminalIntentThreads:
             self._task("t2", "pending", (101,)),
         ]
         assert newly_terminal_intent_threads(prev, new) == ()
+
+
+class TestHol28AnchorKey:
+    """HOL-28 / #1922 (codex P2 eighth round on PR #1938): normalize
+    a task's ``thread["comment_id"]`` to an int so string/int mismatches
+    don't make sibling tasks invisible during the transition check."""
+
+    def test_int_passes_through(self) -> None:
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key({"comment_id": 999, "comment_type": "pulls"}) == 999
+
+    def test_string_coerced_to_int(self) -> None:
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key({"comment_id": "999"}) == 999
+
+    def test_none_thread_returns_none(self) -> None:
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key(None) is None
+
+    def test_non_mapping_returns_none(self) -> None:
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key("not-a-dict") is None
+        assert hol28_anchor_key(42) is None
+
+    def test_missing_comment_id_returns_none(self) -> None:
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key({"comment_type": "pulls"}) is None
+
+    def test_bool_returns_none(self) -> None:
+        # ``bool`` is an ``int`` subclass — reject explicitly so
+        # ``True``/``False`` can't sneak in as a fake comment id.
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key({"comment_id": True}) is None
+        assert hol28_anchor_key({"comment_id": False}) is None
+
+    def test_uncoerceable_returns_none(self) -> None:
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key({"comment_id": "not-a-number"}) is None
+        assert hol28_anchor_key({"comment_id": [1, 2, 3]}) is None

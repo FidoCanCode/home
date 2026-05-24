@@ -2489,17 +2489,34 @@ class Dispatcher:
         if direct_promise is not None:
             FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
-        # Execute post-reply effects: remove eyes, add final emoji, trigger
-        # rescope.  Only runs if we have a real comment_id to react on (the
-        # ``target`` was constructed up-front for the same reason).  Reuses the
-        # ``executor`` instance built before the synthesis call so the failure
-        # path could share its eyes-removal helper.
         if target is not None:
-            executor.execute_effects_only(
-                synthesis_response,
-                target,
-                insights_already_filed=pre_reply_insights_filed,
-            )
+            if existing_artifact_id is None:
+                # Original (non-replay) pass: run the full post-reply
+                # effects sequence — eyes removal, final emoji,
+                # rescope trigger, and (when ``insights_already_filed``
+                # is False) the insight filing retry that didn't get
+                # to land pre-reply.
+                executor.execute_effects_only(
+                    synthesis_response,
+                    target,
+                    insights_already_filed=pre_reply_insights_filed,
+                )
+            else:
+                # Codex P1 (eighth round) on PR #1938: replay path.
+                # The original pass already ran the full post-reply
+                # sequence — eyes/emoji/rescope all fired against the
+                # now-already-recorded reply artifact.  Running
+                # ``execute_effects_only`` again would re-trigger
+                # ``trigger_rescope``, which is NOT idempotent — one
+                # actionable comment would rescope/preempt every time
+                # the replay path runs.  Retry ONLY the insight
+                # filing.
+                _safe_retry_file_insights(
+                    executor,
+                    synthesis_response,
+                    target,
+                    where=(f"PR #{info.get('pr')} comment {info.get('comment_id')}"),
+                )
 
         return (category, titles)
 
@@ -2747,16 +2764,23 @@ class Dispatcher:
         if direct_promise is not None:
             FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
-        # Execute post-reply effects: remove eyes, add final emoji, trigger
-        # rescope.  Reuses the ``executor`` and ``issue_target`` constructed
-        # before the synthesis call so the failure path could share its
-        # eyes-removal helper.
+        # Codex P1 (eighth round) on PR #1938: split original vs.
+        # replay paths — see the matching comment on
+        # ``reply_to_comment``.
         if issue_target is not None:
-            executor.execute_effects_only(
-                synthesis_response,
-                issue_target,
-                insights_already_filed=pre_reply_insights_filed,
-            )
+            if existing_artifact_id is None:
+                executor.execute_effects_only(
+                    synthesis_response,
+                    issue_target,
+                    insights_already_filed=pre_reply_insights_filed,
+                )
+            else:
+                _safe_retry_file_insights(
+                    executor,
+                    synthesis_response,
+                    issue_target,
+                    where=f"{repo_full} #{number} comment {comment_id}",
+                )
 
         log.info(
             "reply_to_issue_comment: complete for PR #%s (category=%s)",
@@ -2961,11 +2985,17 @@ class Dispatcher:
 
         Best-effort post: transport failures log but do not propagate.
         """
+        # Codex P2 (eighth round) on PR #1938: anchor comparison
+        # goes through ``int(...)`` normalization so a string-typed
+        # ``thread.comment_id`` in any sibling row doesn't make that
+        # sibling invisible during the "still pending?" filter.
+        from fido.types import hol28_anchor_key
+
         terminal = {TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value}
         anchored = [
             t
             for t in new_tasks
-            if (t.get("thread") or {}).get("comment_id") == anchor_intent.comment_id
+            if hol28_anchor_key(t.get("thread")) == anchor_intent.comment_id
         ]
         completed = [
             t for t in anchored if str(t.get("status")) == TaskStatus.COMPLETED.value
@@ -3876,6 +3906,33 @@ def _intent_arrival_indices(intents: list[RescopeIntent]) -> dict[int, int]:
     """
     ordered = sorted(intents, key=lambda i: i.timestamp)
     return {intent.comment_id: idx for idx, intent in enumerate(ordered)}
+
+
+def _safe_retry_file_insights(
+    executor: "SynthesisExecutor",
+    response: "CommentResponse",
+    target: "CommentTarget",
+    *,
+    where: str,
+) -> None:
+    """HOL-26 / #1920 (codex P1 eighth round on PR #1938): wrap
+    :meth:`SynthesisExecutor.retry_file_insights` in a best-effort
+    guard for the replay-path insight-only retry.
+
+    Catches and logs — the original reply post landed in a prior
+    pass, so a failure here just leaves the insight not-yet-filed
+    (HOL-18's claim-grounding critic remains the verification
+    backstop).
+    """
+    try:
+        executor.retry_file_insights(response, target)
+    except Exception:
+        log.exception(
+            "HOL-26: insight-filing replay retry failed for %s — "
+            "original reply remains posted; HOL-18 prose-grounding "
+            "critic is the verification backstop",
+            where,
+        )
 
 
 def _safe_file_insights_pre_reply(
