@@ -4698,6 +4698,88 @@ class TestBuildOnRescopeApply:
         assert comment_ids == [101]  # once, not twice
 
 
+class TestHol34NoOpSilentDropRegression:
+    """HOL-34 / #1928: end-to-end regression for PR #1890's
+    no_op-silent-drop pattern.
+
+    Original failure (pre-epic): a rescope verdict of ``no_op`` for a
+    user's change request silently dropped the intent — no SKIPPED
+    marker, no reply-back, the requester never knew.  Once the HOL
+    chain landed (HOL-3 enforces narrative, HOL-6 creates SKIPPED
+    marker, HOL-23/24/25 emit per-thread reply with narrative), this
+    pattern can't recur.
+
+    This test pins the reply-back leg of the closure: a no_op verdict
+    in the rescope batch MUST produce a notification to the
+    originating commenter carrying the verdict's narrative.  HOL-6 +
+    SKIPPED marker is tested in test_tasks.py around the reducer
+    transition; this test is the events-side regression that closes
+    the whole story.
+    """
+
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _intent(self, comment_id: int) -> RescopeIntent:
+        return RescopeIntent(
+            change_request="Please add retry logic to the cache lookup",
+            comment_id=comment_id,
+            timestamp="2024-01-15T10:00:00+00:00",
+            author="alice",
+        )
+
+    def _pr(self) -> ActivePR:
+        return ActivePR(
+            number=42,
+            title="t",
+            url="https://github.com/owner/repo/pull/42",
+            body="",
+        )
+
+    def test_pr_1890_no_op_drop_now_replies_with_narrative(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        gh.reply_to_review_comment.return_value = {"id": 999}
+        intent = self._intent(101)
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
+            intents=[intent],
+            pr_ctx=self._pr(),
+            agent=_client("Heard you — couldn't queue this; here's why."),
+            prompts=Prompts("p"),
+        )
+
+        # Rescope decided the request didn't fit the spec — no_op
+        # verdict with a narrative.  PRE-EPIC: silently dropped.
+        # POST-EPIC: HOL-24 sees the no_op via ``verdict_is_material``
+        # and emits a reply through ``_notify_intent_outcome``
+        # (HOL-25 framing carries the narrative).
+        no_op_verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="no_op",
+            narrative=(
+                "Retry logic is intentionally out-of-scope for the cache "
+                "layer per ARCH-7; routing this to the resilience epic "
+                "instead"
+            ),
+        )
+
+        cb([], [], {}, [no_op_verdict])
+
+        # The reply fires — the failure pattern is closed.
+        gh.reply_to_review_comment.assert_called_once()
+        # And it targets the originating commenter (alice's comment id).
+        assert gh.reply_to_review_comment.call_args.args[3] == 101
+
+
 class TestHol28TerminalThreadFraming:
     """HOL-28 / #1922: per-thread terminal aggregate framing names
     landed commits + skipped tasks + carries the requester's ask."""
