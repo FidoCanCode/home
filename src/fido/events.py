@@ -2888,87 +2888,82 @@ class Dispatcher:
         except Exception:
             log.exception("failed to notify intent comment %s", intent.comment_id)
 
-    def notify_newly_terminal_intent_threads(
+    def notify_terminal_task_thread(
         self,
-        prev_tasks: list[dict[str, Any]],
-        new_tasks: list[dict[str, Any]],
+        task: dict[str, Any],
+        anchor_intent: RescopeIntent,
         *,
-        batch_intents: list[RescopeIntent],
         pr: int,
         agent: ProviderAgent,
         prompts: Prompts,
     ) -> None:
-        """HOL-28 / #1922: emit one per-thread aggregate reply for every
-        intent whose thread just transitioned from non-terminal to
-        terminal across the ``prev_tasks`` → ``new_tasks`` snapshot pair.
+        """HOL-28 / #1922: post the per-thread terminal aggregate reply
+        for *task* at *anchor_intent*'s comment.
 
-        Wired by the task-completion path: when the worker marks a task
-        COMPLETED (or the rescope marks one SKIPPED), call this with the
-        before/after task lists.  ``newly_terminal_intent_threads``
-        (HOL-27) computes which intents transitioned; this method posts
-        the aggregate reply per intent.
+        Codex P1 (fifth round) on PR #1938: the prior shape iterated
+        ``contributing_intents`` and emitted per-intent.  That had two
+        problems:
 
-        Issue comments are silently skipped (same INV-F rule as
-        ``_notify_intent_outcome``: webhook already replied at triage).
-        Bot threads are included (per HOL-28 issue: "Bot threads
-        included" — humans need to follow what landed; so do bots).
+        1. Per-intent emission required per-intent ``comment_type``
+           metadata the tasks.json schema doesn't carry — so a
+           hardcoded fallback could route an issue-comment id through
+           the review-comment endpoint.
+        2. When the worker passed only the task-anchor intent (to
+           avoid the wrong-endpoint hole), terminal threads for
+           non-anchor contributing intents were silently dropped.
+
+        The reconciled contract: HOL-28's job is the closing summary
+        at the task's PRIMARY thread.  Cross-author divergence
+        notifications at rescope time are HOL-24's job.  Tasks whose
+        secondary contributing-intent threads also deserve a closing
+        summary are a future leaf that needs per-intent ``comment_type``
+        in the schema; the predicate ``newly_terminal_intent_threads``
+        (HOL-27) remains a building block for that future work.
+
+        The caller is responsible for:
+
+        - Verifying the task just transitioned from non-terminal to
+          terminal (so this method fires exactly once per terminal
+          transition).
+        - Constructing *anchor_intent* from the task's primary thread
+          (``task["thread"]``) with the correct ``comment_type``.
+
+        Best-effort post: transport failures log but do not propagate.
         """
-        from fido.types import newly_terminal_intent_threads
-
-        intents_by_cid = {i.comment_id: i for i in batch_intents}
-        transitioned_cids = newly_terminal_intent_threads(prev_tasks, new_tasks)
-        if not transitioned_cids:
-            return
-        repo = self._repo_cfg.name
-        for cid in transitioned_cids:
-            intent = intents_by_cid.get(cid)
-            if intent is None:
-                # Intent not in the current batch (e.g. comment shaped
-                # tasks across multiple rescope runs and this batch
-                # only carries a subset).  Skip — caller is responsible
-                # for passing the full intent set.
-                continue
-            if intent.comment_type != "pulls":
-                log.info(
-                    "skipping terminal-thread notification for issue "
-                    "comment %s (webhook already replied at triage)",
-                    cid,
-                )
-                continue
-            completed = [
-                t
-                for t in new_tasks
-                if cid in (t.get("contributing_intents") or ())
-                and str(t.get("status")) == TaskStatus.COMPLETED.value
-            ]
-            skipped = [
-                t
-                for t in new_tasks
-                if cid in (t.get("contributing_intents") or ())
-                and str(t.get("status")) == TaskStatus.SKIPPED.value
-            ]
-            framing = _hol28_terminal_thread_framing(intent, completed, skipped)
-            body = safe_voice_turn(
-                agent,
-                prompts.persona_wrap(framing),
-                model=agent.voice_model,
-                allowed_tools=READ_ONLY_ALLOWED_TOOLS,
-                system_prompt=prompts.reply_system_prompt(),
-                log_prefix="notify_terminal_intent_threads",
+        status = str(task.get("status"))
+        completed = [task] if status == TaskStatus.COMPLETED.value else []
+        skipped = [task] if status == TaskStatus.SKIPPED.value else []
+        if not completed and not skipped:
+            log.info(
+                "notify_terminal_task_thread: task %s is not in a "
+                "terminal status (%r) — skipping",
+                task.get("id"),
+                status,
             )
-            try:
-                self._gh.reply_to_review_comment(repo, pr, body, intent.comment_id)
-                log.info(
-                    "notified terminal thread for intent comment %s "
-                    "(%d completed, %d skipped)",
-                    cid,
-                    len(completed),
-                    len(skipped),
-                )
-            except Exception:
-                log.exception(
-                    "failed to notify terminal thread for intent comment %s", cid
-                )
+            return
+        framing = _hol28_terminal_thread_framing(anchor_intent, completed, skipped)
+        body = safe_voice_turn(
+            agent,
+            prompts.persona_wrap(framing),
+            model=agent.voice_model,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            system_prompt=prompts.reply_system_prompt(),
+            log_prefix="notify_terminal_task_thread",
+        )
+        try:
+            self._gh.reply_to_review_comment(
+                self._repo_cfg.name, pr, body, anchor_intent.comment_id
+            )
+            log.info(
+                "notified terminal task thread for task %s at comment %s",
+                task.get("id"),
+                anchor_intent.comment_id,
+            )
+        except Exception:
+            log.exception(
+                "failed to notify terminal task thread for task %s",
+                task.get("id"),
+            )
 
     def _make_reorder_kwargs(
         self,

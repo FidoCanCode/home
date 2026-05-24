@@ -4872,10 +4872,12 @@ class TestHol28TerminalThreadFraming:
         assert "t1: (untitled)" in framing
 
 
-class TestNotifyNewlyTerminalIntentThreads:
-    """HOL-28 wire: ``Dispatcher.notify_newly_terminal_intent_threads``
-    posts one aggregate reply per intent whose thread just transitioned
-    to fully-terminal across a tasks.json before/after snapshot."""
+class TestNotifyTerminalTaskThread:
+    """HOL-28 wire: ``Dispatcher.notify_terminal_task_thread`` posts
+    the aggregate reply at *anchor_intent*'s comment for the
+    just-terminal task.  Caller-side transition check moved to the
+    worker per codex P1 (fifth round) on PR #1938 — the dispatcher
+    method is now a focused post-with-framing helper."""
 
     def _cfg(self, tmp_path: Path) -> Config:
         return Config(
@@ -4887,91 +4889,53 @@ class TestNotifyNewlyTerminalIntentThreads:
             sub_dir=tmp_path / "sub",
         )
 
-    def _intent(self, comment_id: int, comment_type: str = "pulls") -> RescopeIntent:
+    def _anchor(self, comment_id: int = 999) -> RescopeIntent:
         return RescopeIntent(
-            change_request=f"req {comment_id}",
+            change_request="(task-anchor reconstruction)",
             comment_id=comment_id,
-            timestamp="2024-01-15T10:00:00+00:00",
-            comment_type=comment_type,
+            timestamp="",
+            comment_type="pulls",
         )
 
-    def test_no_transition_no_reply(self, tmp_path: Path) -> None:
+    def test_completed_task_fires_reply_at_anchor(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         gh = MagicMock()
-        Dispatcher(
-            cfg, cfg.repos["owner/repo"], gh
-        ).notify_newly_terminal_intent_threads(
-            prev_tasks=[
-                {"id": "t1", "status": "completed", "contributing_intents": [101]}
-            ],
-            new_tasks=[
-                {"id": "t1", "status": "completed", "contributing_intents": [101]}
-            ],
-            batch_intents=[self._intent(101)],
-            pr=42,
-            agent=_client("nope"),
-            prompts=Prompts("p"),
-        )
-        gh.reply_to_review_comment.assert_not_called()
-
-    def test_transition_fires_one_reply(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        gh = MagicMock()
-        Dispatcher(
-            cfg, cfg.repos["owner/repo"], gh
-        ).notify_newly_terminal_intent_threads(
-            prev_tasks=[
-                {"id": "t1", "status": "in_progress", "contributing_intents": [101]}
-            ],
-            new_tasks=[
-                {
-                    "id": "t1",
-                    "status": "completed",
-                    "title": "did it",
-                    "contributing_intents": [101],
-                }
-            ],
-            batch_intents=[self._intent(101)],
+        task = {"id": "t1", "status": "completed", "title": "did it"}
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            task=task,
+            anchor_intent=self._anchor(999),
             pr=42,
             agent=_client("Done."),
             prompts=Prompts("p"),
         )
         gh.reply_to_review_comment.assert_called_once()
-        assert gh.reply_to_review_comment.call_args.args[3] == 101
+        assert gh.reply_to_review_comment.call_args.args[3] == 999
 
-    def test_issue_comment_skipped(self, tmp_path: Path) -> None:
+    def test_skipped_task_fires_reply(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         gh = MagicMock()
-        Dispatcher(
-            cfg, cfg.repos["owner/repo"], gh
-        ).notify_newly_terminal_intent_threads(
-            prev_tasks=[
-                {"id": "t1", "status": "in_progress", "contributing_intents": [101]}
-            ],
-            new_tasks=[
-                {"id": "t1", "status": "completed", "contributing_intents": [101]}
-            ],
-            batch_intents=[self._intent(101, comment_type="issues")],
+        task = {
+            "id": "t1",
+            "status": "skipped",
+            "title": "y",
+            "description": "no longer needed",
+        }
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            task=task,
+            anchor_intent=self._anchor(),
             pr=42,
-            agent=_client("nope"),
+            agent=_client("Done."),
             prompts=Prompts("p"),
         )
-        gh.reply_to_review_comment.assert_not_called()
+        gh.reply_to_review_comment.assert_called_once()
 
-    def test_intent_missing_from_batch_skipped(self, tmp_path: Path) -> None:
+    def test_non_terminal_task_silently_skipped(self, tmp_path: Path) -> None:
         cfg = self._cfg(tmp_path)
         gh = MagicMock()
-        # transitioned cid is 101 but batch_intents only knows 202.
-        Dispatcher(
-            cfg, cfg.repos["owner/repo"], gh
-        ).notify_newly_terminal_intent_threads(
-            prev_tasks=[
-                {"id": "t1", "status": "in_progress", "contributing_intents": [101]}
-            ],
-            new_tasks=[
-                {"id": "t1", "status": "completed", "contributing_intents": [101]}
-            ],
-            batch_intents=[self._intent(202)],
+        task = {"id": "t1", "status": "in_progress"}
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            task=task,
+            anchor_intent=self._anchor(),
             pr=42,
             agent=_client("nope"),
             prompts=Prompts("p"),
@@ -4984,53 +4948,14 @@ class TestNotifyNewlyTerminalIntentThreads:
         gh.reply_to_review_comment.side_effect = RuntimeError("api down")
         # Must not raise — the worker's task-completion path can't be
         # gated on per-reply transport errors.
-        Dispatcher(
-            cfg, cfg.repos["owner/repo"], gh
-        ).notify_newly_terminal_intent_threads(
-            prev_tasks=[
-                {"id": "t1", "status": "in_progress", "contributing_intents": [101]}
-            ],
-            new_tasks=[
-                {"id": "t1", "status": "completed", "contributing_intents": [101]}
-            ],
-            batch_intents=[self._intent(101)],
+        task = {"id": "t1", "status": "completed", "title": "x"}
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            task=task,
+            anchor_intent=self._anchor(),
             pr=42,
             agent=_client("Done."),
             prompts=Prompts("p"),
         )
-
-    def test_multiple_intents_each_get_one_reply(self, tmp_path: Path) -> None:
-        cfg = self._cfg(tmp_path)
-        gh = MagicMock()
-        Dispatcher(
-            cfg, cfg.repos["owner/repo"], gh
-        ).notify_newly_terminal_intent_threads(
-            prev_tasks=[
-                {"id": "t1", "status": "in_progress", "contributing_intents": [101]},
-                {"id": "t2", "status": "pending", "contributing_intents": [202]},
-            ],
-            new_tasks=[
-                {
-                    "id": "t1",
-                    "status": "completed",
-                    "title": "x",
-                    "contributing_intents": [101],
-                },
-                {
-                    "id": "t2",
-                    "status": "skipped",
-                    "title": "y",
-                    "description": "no longer needed",
-                    "contributing_intents": [202],
-                },
-            ],
-            batch_intents=[self._intent(101), self._intent(202)],
-            pr=42,
-            agent=_client("Done."),
-            prompts=Prompts("p"),
-        )
-        comment_ids = [c.args[3] for c in gh.reply_to_review_comment.call_args_list]
-        assert comment_ids == [101, 202]
 
 
 class TestNotifyIntentOutcome:

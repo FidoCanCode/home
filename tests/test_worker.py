@@ -18015,12 +18015,11 @@ class TestEmitHol28TerminalReplyFor:
             self.calls: list[dict[str, object]] = []
             self.raise_on_next: Exception | None = None
 
-        def notify_newly_terminal_intent_threads(
+        def notify_terminal_task_thread(
             self,
-            prev_tasks: list[dict[str, object]],
-            new_tasks: list[dict[str, object]],
+            task: dict[str, object],
+            anchor_intent: object,
             *,
-            batch_intents: list[object],
             pr: int,
             agent: object,
             prompts: object,
@@ -18029,9 +18028,8 @@ class TestEmitHol28TerminalReplyFor:
                 raise self.raise_on_next
             self.calls.append(
                 {
-                    "prev_tasks": prev_tasks,
-                    "new_tasks": new_tasks,
-                    "batch_intents": batch_intents,
+                    "task": task,
+                    "anchor_intent": anchor_intent,
                     "pr": pr,
                 }
             )
@@ -18067,12 +18065,11 @@ class TestEmitHol28TerminalReplyFor:
         assert dispatcher.calls == []
 
     def test_emits_one_reply_anchored_at_task_thread(self, tmp_path: Path) -> None:
-        # Codex P1 (second round) on PR #1938: HOL-28 emits ONE reply
-        # at the task's primary thread anchor, not per
-        # contributing_intent.  Per-contributing emission needed
-        # per-intent comment_type metadata that the tasks.json schema
-        # doesn't carry; HOL-24's verdict-based reply path already
-        # handles cross-author divergence at rescope time.
+        # Codex P1 (fifth round) on PR #1938: HOL-28 emits ONE reply
+        # at the task's primary thread anchor via
+        # ``notify_terminal_task_thread`` (not the prior
+        # ``notify_newly_terminal_intent_threads`` which iterated
+        # contributing_intents and could drop secondary threads).
         from fido.types import RescopeIntent
 
         dispatcher = self._StubDispatcher()
@@ -18090,12 +18087,45 @@ class TestEmitHol28TerminalReplyFor:
         assert len(dispatcher.calls) == 1
         call = dispatcher.calls[0]
         assert call["pr"] == 42
-        intents = call["batch_intents"]
-        # ONE synthetic intent anchored at the task's thread.
-        assert len(intents) == 1
-        assert isinstance(intents[0], RescopeIntent)
-        assert intents[0].comment_id == 999
-        assert intents[0].comment_type == "pulls"
+        assert call["task"] is task
+        anchor = call["anchor_intent"]
+        assert isinstance(anchor, RescopeIntent)
+        assert anchor.comment_id == 999
+        assert anchor.comment_type == "pulls"
+
+    def test_skips_emission_when_task_was_already_terminal(
+        self, tmp_path: Path
+    ) -> None:
+        # Codex P1 (fifth round) on PR #1938: only fire on the
+        # non-terminal → terminal transition.  If the prev snapshot
+        # already showed terminal status (re-completion / replay /
+        # bug elsewhere), don't double-post.
+        dispatcher = self._StubDispatcher()
+        worker = self._make_worker(tmp_path, dispatcher, prompts=object())
+        task: dict[str, object] = {
+            "id": "t1",
+            "status": "completed",
+            "thread": {"comment_type": "pulls", "comment_id": 999},
+        }
+        worker._tasks._task_list = [task]  # type: ignore[attr-defined]
+        worker._emit_hol28_terminal_reply_for(
+            task=task,
+            prev_tasks=[{**task, "status": "completed"}],
+            pr_number=42,
+        )
+        assert dispatcher.calls == []
+
+    def test_skips_emission_when_task_not_terminal(self, tmp_path: Path) -> None:
+        dispatcher = self._StubDispatcher()
+        worker = self._make_worker(tmp_path, dispatcher, prompts=object())
+        task: dict[str, object] = {
+            "id": "t1",
+            "status": "in_progress",
+            "thread": {"comment_type": "pulls", "comment_id": 999},
+        }
+        worker._tasks._task_list = [task]  # type: ignore[attr-defined]
+        worker._emit_hol28_terminal_reply_for(task=task, prev_tasks=[], pr_number=42)
+        assert dispatcher.calls == []
 
     def test_dispatcher_failure_logged_not_raised(self, tmp_path: Path) -> None:
         dispatcher = self._StubDispatcher()

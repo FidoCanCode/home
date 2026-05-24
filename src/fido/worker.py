@@ -3797,17 +3797,21 @@ class Worker:
         prev_tasks: list[dict[str, Any]],
         pr_number: int,
     ) -> None:
-        """HOL-28 / #1922 (codex P1 on PR #1938): emit one per-thread
-        aggregate reply for every intent whose contributing tasks just
-        became fully terminal.
+        """HOL-28 / #1922 wire: emit ONE aggregate reply at the task's
+        primary thread anchor when *task* just transitioned from non-
+        terminal to terminal across the *prev_tasks* → current snapshot.
 
-        Synthesizes stub ``RescopeIntent`` objects from the comment ids
-        on the just-completed task's ``contributing_intents`` — they
-        aren't durably persisted across the rescope-to-completion span,
-        so the ``change_request`` field is a placeholder.  The aggregate
-        framing in ``Dispatcher`` reads task titles / descriptions from
-        the post-completion task list, so the per-thread story still
-        names the landed commits even with a stub change_request.
+        Codex P1 (fifth round) on PR #1938: the previous shape called
+        a dispatcher method that iterated ``contributing_intents`` and
+        skipped any not in ``batch_intents``.  Passing only the task
+        anchor meant secondary contributing threads were silently
+        dropped; passing every contributing_intent re-opened the
+        wrong-endpoint hole.  The reconciled contract is per-task,
+        not per-contributing-intent — HOL-28 is the closing summary
+        at the task's primary thread; HOL-24's verdict-based path
+        already covers cross-author divergence at rescope time.
+        Per-secondary-thread closing summaries need per-intent
+        ``comment_type`` schema work; a future leaf.
 
         Best-effort: a transient GitHub failure mustn't crash task
         completion.  The terminal task status is already the durable
@@ -3816,25 +3820,18 @@ class Worker:
         prompts = self._prompts
         if prompts is None:
             return
-        # Codex P1 (second round) on PR #1938: emit ONE reply at the
-        # task's PRIMARY thread anchor (``task["thread"]``) rather
-        # than per-contributing-intent.  The earlier "synthesize an
-        # intent per contributing_intent with comment_type='pulls'"
-        # was wrong on two axes:
-        #
-        # 1. ``contributing_intents`` is a flat ``list[int]`` with no
-        #    per-intent ``comment_type``, so a hardcoded fallback
-        #    routed issue-comment ids through ``reply_to_review_comment``.
-        # 2. Mixed-contributor tasks would have produced N replies
-        #    across N threads with the same body — noisy and lossy.
-        #
-        # The canonical thread a requester follows for a task is the
-        # one anchored on the task itself.  HOL-24's verdict-based
-        # reply path already covers cross-author divergence
-        # notifications at rescope time; HOL-28 is the closing summary
-        # at the primary thread.  Per-contributing-intent emission
-        # would require a tasks.json schema change to carry per-intent
-        # ``comment_type`` — left as a separate follow-up.
+        # Caller-side transition check: only emit when this task JUST
+        # transitioned from non-terminal to terminal.  ``_finish_task``
+        # snapshots prev BEFORE ``complete_with_resolve``, so this
+        # predicate fires exactly once per terminal completion.
+        terminal = {TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value}
+        new_status = str(task.get("status"))
+        if new_status not in terminal:
+            return
+        prev_task = next((t for t in prev_tasks if t.get("id") == task.get("id")), None)
+        prev_status = str(prev_task.get("status")) if prev_task else None
+        if prev_status in terminal:
+            return
         thread = task.get("thread") or {}
         comment_type = thread.get("comment_type")
         anchor_comment_id = thread.get("comment_id")
@@ -3848,19 +3845,16 @@ class Worker:
                 thread,
             )
             return
-        batch_intents = [
-            RescopeIntent(
-                change_request="(task-anchor reconstruction)",
-                comment_id=int(anchor_comment_id),
-                timestamp="",
-                comment_type="pulls",
-            )
-        ]
+        anchor_intent = RescopeIntent(
+            change_request="(task-anchor reconstruction)",
+            comment_id=int(anchor_comment_id),
+            timestamp="",
+            comment_type="pulls",
+        )
         try:
-            self._dispatcher.notify_newly_terminal_intent_threads(
-                prev_tasks=prev_tasks,
-                new_tasks=self._tasks.list(),
-                batch_intents=batch_intents,
+            self._dispatcher.notify_terminal_task_thread(
+                task=task,
+                anchor_intent=anchor_intent,
                 pr=pr_number,
                 agent=self._provider_agent,
                 prompts=prompts,
