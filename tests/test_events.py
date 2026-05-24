@@ -2778,6 +2778,100 @@ class TestReplyToCommentSynthesisFallback:
         # routed BLOCKED comment, the list must be empty.
         assert FidoStore(tmp_path).recoverable_promises() == []
 
+    def test_review_comment_critic_exhausted_post_failure_propagates(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex on PR #1932: when the BLOCKED comment post fails, the
+        critic exception must propagate so queued callers
+        (``queue_reply_tasks`` and the direct webhook caller in
+        server.py) hit their error branch and mark the promises
+        FAILED rather than acking them silently.  A failed post with
+        a silent ack would leave no visible signal AND no recoverable
+        promise."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 778},
+            comment_body="something the critic hates",
+            is_bot=False,
+        )
+        mock_gh = self._mock_gh()
+        mock_gh.fetch_comment_thread.return_value = [
+            {"id": 778, "author": "rhencke", "body": "x"},
+        ]
+        mock_gh.create_issue.return_value = (
+            "https://github.com/FidoCanCode/home/issues/2"
+        )
+        # BLOCKED comment post fails — helper returns False, dispatcher
+        # must re-raise so the queued caller marks the promise failed.
+        mock_gh.comment_issue.side_effect = RuntimeError("GitHub 503")
+
+        def _raise_critic_exhausted(*args: object, **kwargs: object) -> Never:
+            raise SynthesisCriticExhaustedError(
+                "intent-coverage", ["g1", "g2", "g3"], ["v1", "v2", "v3"]
+            )
+
+        with pytest.raises(SynthesisCriticExhaustedError):
+            Dispatcher(
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                call_synthesis_fn=_raise_critic_exhausted,
+                call_failure_explanation_fn=lambda *a, **kw: _synthesis_response(
+                    "should-not-fire"
+                ),
+            ).reply_to_comment(
+                action,
+                agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
+            )
+        # Promise must NOT be acked — it stays in the recoverable set
+        # so the queued/recovery caller (or the server's catch) can
+        # mark it failed and retry later.
+        assert FidoStore(tmp_path).recoverable_promises() != []
+
+    def test_issue_comment_critic_exhausted_post_failure_propagates(
+        self, tmp_path: Path
+    ) -> None:
+        """Issue-comment sibling of
+        ``test_review_comment_critic_exhausted_post_failure_propagates``:
+        when the BLOCKED post fails, the critic exception must
+        propagate so the queued/recovery caller marks the promise
+        failed instead of acking it silently."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="PR top-level comment on #7 by owner:\n\ntrigger",
+            comment_body="trigger",
+            is_bot=False,
+            context={"pr_title": "My PR", "comment_id": 889},
+        )
+        mock_gh = MagicMock()
+        mock_gh.get_repo_info.return_value = "owner/repo"
+        mock_gh.create_issue.return_value = (
+            "https://github.com/FidoCanCode/home/issues/3"
+        )
+        mock_gh.comment_issue.side_effect = RuntimeError("GitHub 503")
+
+        def _raise_critic_exhausted(*args: object, **kwargs: object) -> Never:
+            raise SynthesisCriticExhaustedError(
+                "reply-prose", ["g1", "g2"], ["v1", "v2"]
+            )
+
+        with pytest.raises(SynthesisCriticExhaustedError):
+            Dispatcher(
+                cfg,
+                self._repo_cfg(tmp_path),
+                mock_gh,
+                call_synthesis_fn=_raise_critic_exhausted,
+                call_failure_explanation_fn=lambda *a, **kw: _synthesis_response(
+                    "should-not-fire"
+                ),
+            ).reply_to_issue_comment(
+                action,
+                agent=_client(),
+                registry=MagicMock(spec=ActivityReporter),
+            )
+
     def test_issue_comment_critic_exhausted_routes_to_blocked(
         self, tmp_path: Path
     ) -> None:
@@ -6879,7 +6973,7 @@ class TestRouteCriticExhaustedBlocked:
             target,
             gh=gh,
             executor=executor,
-            promise_id="promise-uuid-xyz",
+            promise_ids=["promise-uuid-xyz"],
         )
         assert posted is True
 
@@ -6929,7 +7023,7 @@ class TestRouteCriticExhaustedBlocked:
             self._make_target(),
             gh=gh,
             executor=executor,
-            promise_id="p1",
+            promise_ids=["p1"],
         )
         # Comment landed → True (ack the promise).
         assert posted is True
@@ -6960,7 +7054,7 @@ class TestRouteCriticExhaustedBlocked:
             self._make_target(),
             gh=gh,
             executor=executor,
-            promise_id="p2",
+            promise_ids=["p2"],
         )
         assert posted is False
         # Bug WAS filed (preceded the post); only the comment failed.
@@ -6987,7 +7081,7 @@ class TestRouteCriticExhaustedBlocked:
             self._make_target(),
             gh=gh,
             executor=executor,
-            promise_id="p3",
+            promise_ids=["p3"],
         )
         assert posted is True
 
@@ -7009,17 +7103,17 @@ class TestRouteCriticExhaustedBlocked:
             self._make_target(),
             gh=gh,
             executor=executor,
-            promise_id="p4",
+            promise_ids=["p4"],
         )
 
         body = gh.comment_issue.call_args.args[2]
         assert "the very specific final complaint" in body
 
-    def test_no_promise_id_omits_marker(self) -> None:
-        """When the caller passes ``promise_id=None`` (legacy path
-        with no claim), the BLOCKED comment still lands but carries
-        no marker — recovery has nothing to dedup against on this
-        path, but the comment is still informative."""
+    def test_empty_promise_ids_omits_marker(self) -> None:
+        """When the caller passes ``promise_ids=[]`` (no claim — e.g.
+        a webhook with no comment_id), the BLOCKED comment still
+        lands but carries no marker.  Recovery has nothing to dedup
+        against on this path, but the comment is still informative."""
         from fido.events import _route_critic_exhausted_blocked
 
         gh = MagicMock()
@@ -7032,12 +7126,41 @@ class TestRouteCriticExhaustedBlocked:
             self._make_target(),
             gh=gh,
             executor=executor,
-            promise_id=None,
+            promise_ids=[],
         )
         assert posted is True
         body = gh.comment_issue.call_args.args[2]
         # No reply-promise marker pattern present.
         assert "fido:reply-promise:" not in body
+
+    def test_multiple_promise_ids_embedded_for_grouped_paths(self) -> None:
+        """Codex on PR #1932: queued / recovery paths can carry
+        multiple promise ids in ``context["reply_promise_ids"]`` for
+        grouped comments.  ALL of them must map back to the same
+        posted BLOCKED comment so ``recover_from_bodies`` can dedup
+        on any redelivery (whichever promise the next webhook
+        delivery surfaces, the same posted comment is found)."""
+        from fido.events import _route_critic_exhausted_blocked
+
+        gh = MagicMock()
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/15"
+        executor = self._make_executor()
+        exc = self._make_exc()
+
+        posted = _route_critic_exhausted_blocked(
+            exc,
+            self._make_target(),
+            gh=gh,
+            executor=executor,
+            promise_ids=["promise-A", "promise-B", "promise-C"],
+        )
+        assert posted is True
+        body = gh.comment_issue.call_args.args[2]
+        # All three markers embedded so ``recover_from_bodies`` can
+        # find a match for any of the three promise ids.
+        assert "promise-A" in body
+        assert "promise-B" in body
+        assert "promise-C" in body
 
 
 class TestDispatcher:

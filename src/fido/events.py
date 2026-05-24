@@ -37,7 +37,6 @@ from fido.store import (
     FidoStore,
     ReplyOutboxEffectRecord,
     ReplyPromiseRecord,
-    append_reply_promise_marker,
     append_reply_promise_markers,
 )
 from fido.synthesis import Insight
@@ -375,18 +374,25 @@ def _route_critic_exhausted_blocked(
     *,
     gh: GitHub,
     executor: "SynthesisExecutor",
-    promise_id: str | None,
+    promise_ids: Iterable[str],
 ) -> bool:
     """HOL-20 / #1914: route a critic-exhaustion through the BLOCKED
     PR mechanism instead of the legacy "please rephrase" fallback.
 
     Returns ``True`` iff the BLOCKED comment actually landed on
-    GitHub.  Caller acks ``direct_promise`` only on ``True`` — codex
-    on PR #1932: swallowing a failed post and then acking would mark
-    the comment "handled" with no visible signal, silently losing
-    the user-facing notice.  Returning ``False`` keeps the promise
-    recoverable so the next webhook delivery (or recovery scan)
-    re-fires the route.
+    GitHub.  Caller acks the covered promises only on ``True`` —
+    codex on PR #1932: swallowing a failed post and then acking
+    would mark the comment "handled" with no visible signal,
+    silently losing the user-facing notice.  Returning ``False``
+    keeps the promises recoverable so the next webhook delivery
+    (or recovery scan) re-fires the route.
+
+    ``promise_ids`` is every covered promise — recovery / queued
+    paths pass in the full set from ``context["reply_promise_id"]``
+    + ``context["reply_promise_ids"]``, direct webhook paths pass
+    just ``direct_promise.promise_id``.  All of them are embedded
+    into the BLOCKED comment body so ``recover_from_bodies`` can
+    dedup against any of them on the next pass.
 
     Order of operations (codex on PR #1932):
 
@@ -397,13 +403,13 @@ def _route_critic_exhausted_blocked(
        GitHub error here mustn't block the user-visible BLOCKED
        comment.
     2. Build the BLOCKED comment body, embed the reply-promise
-       recovery marker, and post.  This step is the durability
+       recovery markers, and post.  This step is the durability
        boundary — if the post raises, return ``False`` so the
-       promise stays claimed and recovery's ``recover_from_bodies``
+       promises stay claimed and recovery's ``recover_from_bodies``
        scan can re-detect the situation.  If the post LANDED but
-       a crash interrupts before ack, the embedded marker lets
+       a crash interrupts before ack, the embedded markers let
        ``recover_from_bodies`` recognise the work as already done
-       and ack the promise (no duplicate BLOCKED comment).
+       and ack the promises (no duplicate BLOCKED comment).
     3. Remove the eyes reaction — pure UX cleanup, best-effort.
     """
     source_link = _insight_source_link(target)
@@ -456,12 +462,16 @@ def _route_critic_exhausted_blocked(
         f"{filing_line}\n\n"
         f"See the originating comment: {source_link}"
     )
-    # Codex on PR #1932: embed the reply-promise marker so a crash
-    # between the successful post and the ack doesn't leave recovery
-    # blind.  ``recover_from_bodies`` finds the marker in the posted
-    # comment, recognises the work as done, and acks the promise —
-    # no duplicate BLOCKED comment on the next dispatch.
-    blocked_body = append_reply_promise_marker(blocked_body, promise_id)
+    # Codex on PR #1932: embed every covered reply-promise marker so
+    # a crash between the successful post and the ack doesn't leave
+    # recovery blind.  ``recover_from_bodies`` finds the markers in
+    # the posted comment, recognises the work as done, and acks the
+    # promises — no duplicate BLOCKED comment on the next dispatch.
+    # Plural is essential: queued/recovery paths can carry multiple
+    # promise ids in ``context["reply_promise_ids"]`` for grouped
+    # comments, and ALL of them need to map back to the same posted
+    # comment for dedup to fire on any redelivery.
+    blocked_body = append_reply_promise_markers(blocked_body, promise_ids)
 
     try:
         gh.comment_issue(target.repo, target.pr, blocked_body)
@@ -2025,6 +2035,16 @@ class Dispatcher:
                 critic_exc.label,
                 info.get("comment_id"),
             )
+            # Codex on PR #1932: gather promise ids from BOTH the
+            # direct webhook claim AND ``context["reply_promise_id"]``
+            # / ``["reply_promise_ids"]``.  Queued / recovery paths
+            # leave ``direct_promise`` None but carry the actual
+            # promises in context; missing those ids meant the
+            # posted BLOCKED comment carried no marker and recovery
+            # could duplicate the post.
+            covered_promise_ids: list[str] = list(_reply_promise_ids(context))
+            if direct_promise is not None:
+                covered_promise_ids.append(direct_promise.promise_id)
             posted = False
             if target is not None:
                 posted = _route_critic_exhausted_blocked(
@@ -2032,20 +2052,23 @@ class Dispatcher:
                     target,
                     gh=gh,
                     executor=executor,
-                    promise_id=direct_promise.promise_id
-                    if direct_promise is not None
-                    else None,
+                    promise_ids=covered_promise_ids,
                 )
-            # Codex on PR #1932: only ack when the BLOCKED comment
-            # actually landed.  If the post failed,
-            # ``_route_critic_exhausted_blocked`` returns False and
-            # the promise stays claimed so recovery can re-fire on
-            # the next webhook delivery (or scan).  The embedded
-            # reply-promise marker in the BLOCKED body lets
-            # ``recover_from_bodies`` recognise a successful post on
-            # the next pass and ack the promise WITHOUT duplicating
-            # the comment.
-            if posted and direct_promise is not None:
+            if not posted:
+                # Codex on PR #1932: a failed post must propagate so
+                # queued callers (``queue_reply_tasks`` at l.1860 and
+                # the server's direct-webhook caller) hit their
+                # error branch and mark the promises FAILED rather
+                # than acking them silently.  Without the raise, a
+                # queued reply with ``context["reply_promise_id"]``
+                # would get acked unconditionally even though no
+                # BLOCKED comment landed — silently swallowing the
+                # user signal.
+                raise critic_exc
+            # Direct webhook path: ack ``direct_promise`` here since
+            # it's our managed claim (queued/recovery paths have no
+            # direct_promise; their caller handles the ack).
+            if direct_promise is not None:
                 FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
             # ``BLOCKED`` category signals the caller no action was
             # taken (no reply, no rescope) — server.py + worker
@@ -2316,6 +2339,9 @@ class Dispatcher:
                 _cid,
                 number,
             )
+            covered_promise_ids = list(_reply_promise_ids(context))
+            if direct_promise is not None:
+                covered_promise_ids.append(direct_promise.promise_id)
             posted = False
             if issue_target is not None:
                 posted = _route_critic_exhausted_blocked(
@@ -2323,13 +2349,13 @@ class Dispatcher:
                     issue_target,
                     gh=gh,
                     executor=executor,
-                    promise_id=direct_promise.promise_id
-                    if direct_promise is not None
-                    else None,
+                    promise_ids=covered_promise_ids,
                 )
-            # See the matching gated-ack in the review-comment path
-            # above (Codex on PR #1932).
-            if posted and direct_promise is not None:
+            if not posted:
+                # See the matching raise in the review-comment path
+                # above (Codex on PR #1932).
+                raise critic_exc
+            if direct_promise is not None:
                 FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
             return ("BLOCKED", [])
         except SynthesisExhaustedError:
