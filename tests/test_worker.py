@@ -13034,6 +13034,14 @@ class TestExecuteTask:
         # the budget and escalates.  Description gets prior gaps too
         # so the bug body's gap-chain assertions still see them.
         task["critic_retry_count"] = _HOL17_MAX_REPARK_BUDGET - 1
+        # Codex P2 on PR #1938: the gap chain is now a structured
+        # field on the task; seed it directly so the bug body sees
+        # the prior gaps (the regex-from-description path was
+        # deleted because it false-counted user-authored CRITIC:
+        # text in descriptions).
+        task["critic_gap_chain"] = [
+            f"prior gap {i}" for i in range(_HOL17_MAX_REPARK_BUDGET - 1)
+        ]
         prior_markers = "\n\n".join(
             f"CRITIC: prior gap {i}" for i in range(_HOL17_MAX_REPARK_BUDGET - 1)
         )
@@ -18073,6 +18081,7 @@ class TestEmitHol28TerminalReplyFor:
             "id": "t1",
             "status": "completed",
             "contributing_intents": [101, 202],
+            "thread": {"comment_type": "pulls", "comment_id": 101},
         }
         worker._tasks._task_list = [task]  # type: ignore[attr-defined]
         worker._emit_hol28_terminal_reply_for(
@@ -18094,9 +18103,42 @@ class TestEmitHol28TerminalReplyFor:
             "id": "t1",
             "status": "completed",
             "contributing_intents": [101],
+            "thread": {"comment_type": "pulls", "comment_id": 101},
         }
         worker._tasks._task_list = [task]  # type: ignore[attr-defined]
         # Must not raise — task completion can't be gated on per-reply errors.
         worker._emit_hol28_terminal_reply_for(
             task=task, prev_tasks=[{**task, "status": "in_progress"}], pr_number=42
         )
+
+    def test_skips_emission_when_task_thread_is_issue_comment(
+        self, tmp_path: Path
+    ) -> None:
+        # Codex P2 on PR #1938: contributing_intents has no per-intent
+        # comment_type, so the wire falls back to the task's thread
+        # metadata.  When that's an issues lane, skip emission rather
+        # than risk calling reply_to_review_comment with an issue-
+        # comment id.
+        dispatcher = self._StubDispatcher()
+        worker = self._make_worker(tmp_path, dispatcher, prompts=object())
+        task: dict[str, object] = {
+            "id": "t1",
+            "status": "completed",
+            "contributing_intents": [101],
+            "thread": {"comment_type": "issues", "comment_id": 101},
+        }
+        worker._tasks._task_list = [task]  # type: ignore[attr-defined]
+        worker._emit_hol28_terminal_reply_for(task=task, prev_tasks=[], pr_number=42)
+        assert dispatcher.calls == []
+
+    def test_skips_emission_when_thread_metadata_missing(self, tmp_path: Path) -> None:
+        dispatcher = self._StubDispatcher()
+        worker = self._make_worker(tmp_path, dispatcher, prompts=object())
+        task: dict[str, object] = {
+            "id": "t1",
+            "status": "completed",
+            "contributing_intents": [101],
+        }
+        worker._tasks._task_list = [task]  # type: ignore[attr-defined]
+        worker._emit_hol28_terminal_reply_for(task=task, prev_tasks=[], pr_number=42)
+        assert dispatcher.calls == []

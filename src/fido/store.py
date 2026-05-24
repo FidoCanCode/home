@@ -858,6 +858,83 @@ class FidoStore:
             assert retried is not None
             return self._pr_comment_record_from_row(retried)
 
+    def bump_task_creation_drop(self, intent_comment_id: int) -> tuple[int, bool]:
+        """HOL-16 follow-up / #1934 (codex P2 on PR #1938): record a
+        task-creation critic drop attributed to *intent_comment_id*.
+
+        Returns ``(new_count, already_escalated)``.  Atomically
+        increments the count and reports whether the escalator has
+        already fired for this intent — callers use the
+        already-escalated flag to suppress duplicate bug filings.
+        """
+        now = _utcnow()
+        with self._transaction() as conn:
+            row = conn.execute(
+                """
+                SELECT drop_count, escalated
+                FROM task_creation_drops
+                WHERE intent_comment_id = ?
+                """,
+                (int(intent_comment_id),),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO task_creation_drops
+                        (intent_comment_id, drop_count, escalated, updated_at)
+                    VALUES (?, 1, 0, ?)
+                    """,
+                    (int(intent_comment_id), now),
+                )
+                return (1, False)
+            new_count = int(row["drop_count"]) + 1
+            already_escalated = bool(int(row["escalated"]))
+            conn.execute(
+                """
+                UPDATE task_creation_drops
+                SET drop_count = ?, updated_at = ?
+                WHERE intent_comment_id = ?
+                """,
+                (new_count, now, int(intent_comment_id)),
+            )
+            return (new_count, already_escalated)
+
+    def mark_task_creation_drop_escalated(self, intent_comment_id: int) -> None:
+        """Set the escalated flag for *intent_comment_id* so subsequent
+        ``bump_task_creation_drop`` calls report ``already_escalated=True``
+        and the counter suppresses duplicate escalator fires until the
+        intent's drops are reset.
+        """
+        now = _utcnow()
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                UPDATE task_creation_drops
+                SET escalated = 1, updated_at = ?
+                WHERE intent_comment_id = ?
+                """,
+                (now, int(intent_comment_id)),
+            )
+
+    def reset_inactive_task_creation_drops(self, active_intent_ids: set[int]) -> int:
+        """Drop counter rows for any intent_comment_id NOT in
+        *active_intent_ids* — those intents have no live contributing
+        tasks anymore, so the drop streak is broken.  Returns the row
+        count cleared (for logging / tests)."""
+        with self._transaction() as conn:
+            if not active_intent_ids:
+                cursor = conn.execute("DELETE FROM task_creation_drops")
+                return cursor.rowcount
+            placeholders = ",".join("?" for _ in active_intent_ids)
+            cursor = conn.execute(
+                f"""
+                DELETE FROM task_creation_drops
+                WHERE intent_comment_id NOT IN ({placeholders})
+                """,
+                tuple(int(cid) for cid in active_intent_ids),
+            )
+            return cursor.rowcount
+
     def clear_pr_comment_queue(self, *, repo: str, pr_number: int) -> int:
         """Delete queued comment state for a PR after merge/close cleanup."""
         with self._transaction() as conn:
@@ -1418,6 +1495,19 @@ CREATE TABLE IF NOT EXISTS transition_audit_log (
     subject TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+
+-- HOL-16 follow-up / #1934 (codex P2 on PR #1938): durable per-
+-- ``intent_comment_id`` drop counter for the task-creation critic.
+-- The process-local counter was lost on Fido restart, which could
+-- prevent the exhaustion bug from ever filing.  Survives restarts;
+-- ``reset_inactive_task_creation_drops`` clears rows for intents
+-- with no live contributing tasks after each rescope batch.
+CREATE TABLE IF NOT EXISTS task_creation_drops (
+    intent_comment_id INTEGER PRIMARY KEY,
+    drop_count INTEGER NOT NULL,
+    escalated INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
 );
 """
 

@@ -1535,3 +1535,53 @@ def test_extracted_oracle_matches_recovery_lifecycle() -> None:
     )
     assert same_claims == claims
     assert same_promises == promises
+
+
+def test_task_creation_drops_persist_across_store_instances(tmp_path: Path) -> None:
+    # HOL-16 follow-up / #1934 (codex P2 on PR #1938): the durable
+    # drop counter table survives FidoStore object recreations so a
+    # Fido restart doesn't lose the streak.
+    store1 = FidoStore(tmp_path)
+    count, escalated = store1.bump_task_creation_drop(123)
+    assert (count, escalated) == (1, False)
+    count, escalated = store1.bump_task_creation_drop(123)
+    assert (count, escalated) == (2, False)
+    store2 = FidoStore(tmp_path)
+    count, escalated = store2.bump_task_creation_drop(123)
+    assert (count, escalated) == (3, False)
+
+
+def test_task_creation_drops_mark_escalated_persists(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    store.bump_task_creation_drop(123)
+    store.mark_task_creation_drop_escalated(123)
+    _, escalated = store.bump_task_creation_drop(123)
+    assert escalated is True
+
+
+def test_reset_inactive_task_creation_drops_keeps_active(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    store.bump_task_creation_drop(101)
+    store.bump_task_creation_drop(202)
+    store.bump_task_creation_drop(303)
+    # Only 202 remains active.
+    cleared = store.reset_inactive_task_creation_drops({202})
+    assert cleared == 2
+    # 202's counter preserved at 1.
+    count, _ = store.bump_task_creation_drop(202)
+    assert count == 2
+    # 101 starts fresh.
+    count, _ = store.bump_task_creation_drop(101)
+    assert count == 1
+
+
+def test_reset_inactive_task_creation_drops_empty_active_clears_all(
+    tmp_path: Path,
+) -> None:
+    store = FidoStore(tmp_path)
+    store.bump_task_creation_drop(101)
+    store.bump_task_creation_drop(202)
+    cleared = store.reset_inactive_task_creation_drops(set())
+    assert cleared == 2
+    count, _ = store.bump_task_creation_drop(101)
+    assert count == 1

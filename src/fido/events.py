@@ -1490,11 +1490,14 @@ class Dispatcher:
         self._insight_dedup_transport_counter = InsightDedupTransportCounter(
             escalator=self._escalate_insight_dedup_transport_failure,
         )
-        # HOL-16 follow-up / #1934: process-local per-intent
-        # task-creation-drop counter; escalates via the Dispatcher-
-        # bound method when an intent's drops cross threshold.
+        # HOL-16 follow-up / #1934 (codex P2 on PR #1938): per-intent
+        # task-creation-drop counter backed by ``FidoStore`` so the
+        # streak survives Fido restarts.  Escalates via the
+        # Dispatcher-bound method when an intent's drops cross
+        # threshold.
         self._task_creation_drop_counter = TaskCreationDropCounter(
             escalator=self._escalate_task_creation_drop_streak,
+            store=FidoStore(self._repo_cfg.work_dir),
         )
 
     def _escalate_task_creation_drop_streak(

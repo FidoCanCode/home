@@ -1774,3 +1774,65 @@ class TestTaskCreationDropCounter:
         counter.record_drop(101)
         counter.record_drop(101)
         counter.reset_inactive_intents(set())
+
+    def test_durable_store_backend_survives_counter_recreation(
+        self, tmp_path: object
+    ) -> None:
+        # Codex P2 on PR #1938 (#1934 acceptance): the counter MUST
+        # persist drops across counter object recreations (simulating
+        # a Fido restart between drops).  Wire a real ``FidoStore``
+        # backend and verify the streak carries across two counter
+        # instances.
+        from fido.critics import TaskCreationDropCounter
+        from fido.store import FidoStore
+
+        store = FidoStore(tmp_path)  # type: ignore[arg-type]
+        calls: list[tuple[int, int]] = []
+        counter1 = TaskCreationDropCounter(
+            threshold=3,
+            escalator=lambda cid, count: calls.append((cid, count)),
+            store=store,
+        )
+        counter1.record_drop(101)
+        counter1.record_drop(101)
+        assert calls == []
+        # Simulate a Fido restart: drop the in-memory counter object;
+        # construct a new one against the same durable store.
+        del counter1
+        counter2 = TaskCreationDropCounter(
+            threshold=3,
+            escalator=lambda cid, count: calls.append((cid, count)),
+            store=store,
+        )
+        # Streak survived — the third drop escalates.
+        counter2.record_drop(101)
+        assert calls == [(101, 3)]
+
+    def test_durable_store_escalated_latch_survives_recreation(
+        self, tmp_path: object
+    ) -> None:
+        # The already-escalated latch is also durable — re-firing the
+        # escalator across a "restart" must be suppressed until reset.
+        from fido.critics import TaskCreationDropCounter
+        from fido.store import FidoStore
+
+        store = FidoStore(tmp_path)  # type: ignore[arg-type]
+        calls: list[tuple[int, int]] = []
+        counter1 = TaskCreationDropCounter(
+            threshold=2,
+            escalator=lambda cid, count: calls.append((cid, count)),
+            store=store,
+        )
+        counter1.record_drop(101)
+        counter1.record_drop(101)
+        assert calls == [(101, 2)]
+        del counter1
+        counter2 = TaskCreationDropCounter(
+            threshold=2,
+            escalator=lambda cid, count: calls.append((cid, count)),
+            store=store,
+        )
+        counter2.record_drop(101)
+        counter2.record_drop(101)
+        # No re-fire — latch durably preserved.
+        assert calls == [(101, 2)]

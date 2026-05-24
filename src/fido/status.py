@@ -144,21 +144,49 @@ _CRITIC_EXHAUSTED_RE = re.compile(
 
 
 def _blocked_critic_tasks(task_list: list[dict[str, Any]]) -> list[BlockedTaskInfo]:
-    """Scan *task_list* for HOL-21-escalated BLOCKED tasks."""
+    """Scan *task_list* for HOL-21-escalated BLOCKED tasks.
+
+    Prefers the structured ``critic_gap_chain`` field (HOL-21 codex
+    P2 on PR #1938 / #1938 follow-up): the final gap is its last
+    entry and the attempt count is its length.  Falls back to the
+    free-form ``CRITIC EXHAUSTED (N attempts): gap`` marker for
+    legacy escalations recorded before the structured field landed —
+    and when falling back, takes the LAST match (not the first) so
+    a re-escalation after an unblock surfaces the current attempt's
+    trace rather than the carried-over old one.
+    """
     out: list[BlockedTaskInfo] = []
     for task in task_list:
         if task.get("status") != "blocked":
             continue
+        chain_raw = task.get("critic_gap_chain")
+        if isinstance(chain_raw, list) and chain_raw:
+            chain: list[str] = [str(g) for g in chain_raw if isinstance(g, str)]
+            if chain:
+                out.append(
+                    BlockedTaskInfo(
+                        task_id=str(task.get("id", "")),
+                        title=str(task.get("title", "")),
+                        final_gap=chain[-1].strip(),
+                        attempt_count=len(chain),
+                    )
+                )
+                continue
         desc = task.get("description") or ""
-        match = _CRITIC_EXHAUSTED_RE.search(desc)
-        if match is None:
+        # ``re.findall`` returns every match; take the LAST so post-
+        # unblock re-escalations don't surface the stale earlier
+        # marker (which the unblock-and-retry cycle didn't clear from
+        # the description text).
+        matches = list(_CRITIC_EXHAUSTED_RE.finditer(desc))
+        if not matches:
             continue
+        last = matches[-1]
         out.append(
             BlockedTaskInfo(
                 task_id=str(task.get("id", "")),
                 title=str(task.get("title", "")),
-                final_gap=match.group("gap").strip(),
-                attempt_count=int(match.group("count")),
+                final_gap=last.group("gap").strip(),
+                attempt_count=int(last.group("count")),
             )
         )
     return out

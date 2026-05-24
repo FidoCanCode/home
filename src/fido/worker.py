@@ -1111,13 +1111,6 @@ _BODY_TAG_RE = re.compile(r"<body>\s*(.*?)\s*</body>", re.DOTALL | re.IGNORECASE
 # 20) — same shape of "give up after N, file a bug for follow-up".
 _HOL17_MAX_REPARK_BUDGET = 3
 
-# Matches the ``CRITIC: <gap-text>`` lines appended to a task
-# description on each failed task-completion critic verdict.  Used
-# by the re-park-budget check above to count prior failures and by
-# the escalation path to build the gap chain for the auto-filed
-# bug body.
-_CRITIC_GAP_RE = re.compile(r"^CRITIC: (.+)$", re.MULTILINE)
-
 
 def _extract_body(raw: str | None) -> str:
     """Extract content between <body>...</body> tags from provider output.
@@ -3511,15 +3504,22 @@ class Worker:
                     decision = "skipped_terminal"
                     break
                 live_count = int(live_task.get("critic_retry_count") or 0)
+                # Codex P2 on PR #1938: store the gap chain as a
+                # structured field instead of regex-parsing free-form
+                # description text.  Prior retry cycles or unrelated
+                # quoted text containing "CRITIC:" used to inflate the
+                # bug body's attempt count and gap list; the
+                # structured chain is precise and gets reset alongside
+                # the retry counter on unblock.  Description still
+                # gets the gap appended for the next worker turn's
+                # guidance (informational only — the budget AND the
+                # bug body now use the structured fields).
+                live_chain_raw = live_task.get("critic_gap_chain") or ()
+                live_chain: tuple[str, ...] = tuple(
+                    str(g) for g in live_chain_raw if isinstance(g, str)
+                )
                 if live_count + 1 >= _HOL17_MAX_REPARK_BUDGET:
-                    # Escalate inline: mark BLOCKED + append exhaustion
-                    # marker.  Gap chain built from the LIVE description
-                    # so it reflects the current retry trace, not the
-                    # stale snapshot.
-                    live_gaps = _CRITIC_GAP_RE.findall(
-                        (live_task.get("description") or "").rstrip()
-                    )
-                    escalate_gap_chain = (*live_gaps, gap)
+                    escalate_gap_chain = (*live_chain, gap)
                     existing = (live_task.get("description") or "").rstrip()
                     appended_marker = (
                         f"CRITIC EXHAUSTED ({len(escalate_gap_chain)} attempts): {gap}"
@@ -3530,9 +3530,10 @@ class Worker:
                         else appended_marker
                     )
                     live_task["status"] = str(TaskStatus.BLOCKED)
+                    live_task["critic_gap_chain"] = list(escalate_gap_chain)
                     decision = "escalated"
                     break
-                # Re-park: append CRITIC gap, bump counter, IN_PROGRESS.
+                # Re-park: append CRITIC gap, bump counter + chain, IN_PROGRESS.
                 existing = (live_task.get("description") or "").rstrip()
                 appended = (
                     f"{existing}\n\nCRITIC: {gap}" if existing else f"CRITIC: {gap}"
@@ -3540,6 +3541,7 @@ class Worker:
                 live_task["description"] = appended
                 live_task["status"] = str(TaskStatus.IN_PROGRESS)
                 live_task["critic_retry_count"] = live_count + 1
+                live_task["critic_gap_chain"] = [*live_chain, gap]
                 decision = "reparked"
                 break
 
@@ -3814,6 +3816,29 @@ class Worker:
         contributing = task.get("contributing_intents") or ()
         prompts = self._prompts
         if not contributing or prompts is None:
+            return
+        # Codex P2 on PR #1938: ``contributing_intents`` is just a list
+        # of comment ids — no per-intent ``comment_type``.  Falling
+        # back to hardcoded ``"pulls"`` is wrong when the originating
+        # comment was a top-level issue comment (would call
+        # ``reply_to_review_comment`` with an issue-comment id).  The
+        # task's ``thread`` field DOES carry the comment_type of the
+        # task's origin thread, which is the correct fallback for
+        # tasks whose contributing intents share an origin lane.
+        # When the thread metadata is missing or the lane is
+        # ``"issues"``, skip the emission rather than risk a wrong-
+        # endpoint reply — the terminal task status is already the
+        # durable signal that work landed.
+        thread = task.get("thread") or {}
+        comment_type = thread.get("comment_type")
+        if comment_type != "pulls":
+            log.info(
+                "HOL-28: skipping terminal-thread emission for task %s "
+                "(thread.comment_type=%r — only review-comment threads "
+                "currently emit aggregate replies)",
+                task.get("id"),
+                comment_type,
+            )
             return
         batch_intents = [
             RescopeIntent(

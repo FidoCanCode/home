@@ -4436,6 +4436,11 @@ class Tasks(JsonFileStore):
                 if t.get("status") == TaskStatus.BLOCKED:
                     t["status"] = str(TaskStatus.PENDING)
                     t["critic_retry_count"] = 0
+                    # Codex P2 on PR #1938: clear the structured gap
+                    # chain alongside the counter so the next round of
+                    # retries starts with a clean trace, not the
+                    # carry-over from the previous escalation.
+                    t["critic_gap_chain"] = []
                     count += 1
         if count:
             log.info("unblocked %d task(s)", count)

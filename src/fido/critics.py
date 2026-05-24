@@ -18,7 +18,7 @@ import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from urllib.parse import urlparse
 
 from fido.prompts import Prompts
@@ -646,9 +646,61 @@ def _parse_insight_dedup_verdict(
     )
 
 
+class TaskCreationDropStore(Protocol):
+    """Minimal backend interface for :class:`TaskCreationDropCounter`.
+
+    Allows the counter to use ``FidoStore`` in production for durable
+    cross-restart accounting (#1934 acceptance criterion), and an
+    in-memory ``_InMemoryTaskCreationDropStore`` in tests that don't
+    need durability.
+    """
+
+    def bump_task_creation_drop(self, intent_comment_id: int) -> tuple[int, bool]: ...
+
+    def mark_task_creation_drop_escalated(self, intent_comment_id: int) -> None: ...
+
+    def reset_inactive_task_creation_drops(
+        self, active_intent_ids: set[int]
+    ) -> int: ...
+
+
+class _InMemoryTaskCreationDropStore:
+    """In-memory backend for tests.  Same semantics as the SQLite-
+    backed ``FidoStore`` implementation but loses state on restart.
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[int, int] = {}
+        self._escalated: set[int] = set()
+        self._lock = threading.Lock()
+
+    def bump_task_creation_drop(self, intent_comment_id: int) -> tuple[int, bool]:
+        with self._lock:
+            self._counts[intent_comment_id] = self._counts.get(intent_comment_id, 0) + 1
+            return (
+                self._counts[intent_comment_id],
+                intent_comment_id in self._escalated,
+            )
+
+    def mark_task_creation_drop_escalated(self, intent_comment_id: int) -> None:
+        with self._lock:
+            self._escalated.add(intent_comment_id)
+
+    def reset_inactive_task_creation_drops(self, active_intent_ids: set[int]) -> int:
+        with self._lock:
+            cleared = 0
+            for cid in list(self._counts):
+                if cid not in active_intent_ids:
+                    self._counts.pop(cid, None)
+                    self._escalated.discard(cid)
+                    cleared += 1
+            return cleared
+
+
 class TaskCreationDropCounter:
-    """HOL-16 follow-up / #1934: process-local per-``intent_comment_id``
-    drop counter for the task-creation critic.
+    """HOL-16 follow-up / #1934: per-``intent_comment_id`` drop counter
+    for the task-creation critic, backed by a durable
+    :class:`TaskCreationDropStore` (production: ``FidoStore``).
 
     Each ``_apply_task_creation_verdicts`` call records every drop
     attributed to an intent_comment_id (via the item's
@@ -657,18 +709,18 @@ class TaskCreationDropCounter:
     fires once and is suppressed until the counter resets for that
     intent.
 
-    Reset rule (per the #1934 issue body): when an intent's
-    contributing tasks reach zero — either the comment was successfully
-    covered by another task that DID land, or the system moved on and
-    no live proposal carries the intent anymore.  Callers invoke
-    ``reset_inactive_intents`` after each batch apply with the set of
-    intent ids that still appear in live task ``contributing_intents``.
+    Reset rule: when an intent's contributing tasks reach zero —
+    either the comment was successfully covered by another task that
+    DID land, or the system moved on and no live proposal carries the
+    intent anymore.  Callers invoke ``reset_inactive_intents`` after
+    each batch apply with the set of intent ids that still appear in
+    live task ``contributing_intents``.
 
-    Thread-safe: a lock guards every read-modify cycle.
-
-    Process-local persistence per the issue body ("isn't worth building
-    until we observe the pattern in production").  Survives across
-    rescope batches in one Fido process, resets on restart.
+    Codex P2 on PR #1938 (#1934 acceptance criterion): persistence in
+    a durable store — without it, a Fido restart between drops loses
+    the streak and can prevent the exhaustion bug from ever filing.
+    The default backend (no ``store=`` passed) is in-memory, suitable
+    for tests; production wires ``store=FidoStore(work_dir)``.
     """
 
     def __init__(
@@ -676,41 +728,32 @@ class TaskCreationDropCounter:
         *,
         threshold: int = 3,
         escalator: Callable[[int, int], None] | None = None,
+        store: TaskCreationDropStore | None = None,
     ) -> None:
         self._threshold = threshold
         self._escalator = escalator
-        self._drops_by_intent: dict[int, int] = {}
-        self._already_escalated: set[int] = set()
-        self._lock = threading.Lock()
+        self._store: TaskCreationDropStore = (
+            store if store is not None else _InMemoryTaskCreationDropStore()
+        )
 
     def record_drop(self, intent_comment_id: int) -> None:
-        escalator: Callable[[int, int], None] | None = None
-        count = 0
-        with self._lock:
-            self._drops_by_intent[intent_comment_id] = (
-                self._drops_by_intent.get(intent_comment_id, 0) + 1
-            )
-            count = self._drops_by_intent[intent_comment_id]
-            if (
-                count >= self._threshold
-                and intent_comment_id not in self._already_escalated
-                and self._escalator is not None
-            ):
-                self._already_escalated.add(intent_comment_id)
-                escalator = self._escalator
-        if escalator is not None:
-            escalator(intent_comment_id, count)
+        count, already_escalated = self._store.bump_task_creation_drop(
+            intent_comment_id
+        )
+        if (
+            count >= self._threshold
+            and not already_escalated
+            and self._escalator is not None
+        ):
+            self._store.mark_task_creation_drop_escalated(intent_comment_id)
+            self._escalator(intent_comment_id, count)
 
     def reset_inactive_intents(self, active_intent_ids: set[int]) -> None:
         """Drop counters for any intent_comment_id NOT in
         *active_intent_ids* — those intents have no live contributing
         tasks anymore, so the drop streak is broken.
         """
-        with self._lock:
-            for cid in list(self._drops_by_intent):
-                if cid not in active_intent_ids:
-                    self._drops_by_intent.pop(cid, None)
-                    self._already_escalated.discard(cid)
+        self._store.reset_inactive_task_creation_drops(active_intent_ids)
 
 
 class InsightDedupTransportCounter:
