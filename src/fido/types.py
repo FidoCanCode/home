@@ -372,6 +372,88 @@ class IntentVerdict:
             )
 
 
+_TERMINAL_TASK_STATUSES: frozenset[str] = frozenset(
+    {TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value}
+)
+
+
+def _task_status_terminal(task: Mapping[str, Any]) -> bool:
+    """True when *task*'s status is terminal (COMPLETED or SKIPPED).
+
+    Reads ``task["status"]`` and tolerates either the StrEnum instance
+    or the raw string form — both serialisations exist in tasks.json
+    today (tasks.py mixes them) and HOL-27 must work over both.
+    """
+    status = task.get("status")
+    if isinstance(status, TaskStatus):
+        return status.value in _TERMINAL_TASK_STATUSES
+    return str(status) in _TERMINAL_TASK_STATUSES
+
+
+def intent_thread_terminal(
+    intent_comment_id: int, tasks: list[Mapping[str, Any]]
+) -> bool:
+    """HOL-27 / #1921: True when every task carrying *intent_comment_id*
+    in its ``contributing_intents`` is in a terminal status
+    (``COMPLETED`` or ``SKIPPED``).
+
+    The "intent thread" terminal predicate: an intent is terminal when
+    every task it shaped has reached a terminal status — no pending,
+    no in-progress, no blocked work remains for that comment.  HOL-28
+    consumes this to emit one per-thread aggregate reply at the moment
+    of transition (so the requester hears one summary covering every
+    task their comment touched, not N replies as each task finishes).
+
+    A vacuous thread (no task lists this intent as a contributor) is
+    considered NOT terminal — the absence-of-contribution case means
+    the intent never actually entered the queue (a pre-rescope drop),
+    which HOL-24's verdict-based path already covers via no_op
+    notification.  This predicate is specifically about the
+    "everything-this-intent-shaped finished" transition.
+    """
+    contributing_tasks = [
+        t for t in tasks if intent_comment_id in (t.get("contributing_intents") or ())
+    ]
+    if not contributing_tasks:
+        return False
+    return all(_task_status_terminal(t) for t in contributing_tasks)
+
+
+def newly_terminal_intent_threads(
+    prev_tasks: list[Mapping[str, Any]],
+    new_tasks: list[Mapping[str, Any]],
+) -> tuple[int, ...]:
+    """HOL-27 helper: intent comment ids whose threads were NOT terminal
+    in *prev_tasks* but ARE terminal in *new_tasks*.
+
+    Insertion-ordered by first appearance across *new_tasks* (so the
+    HOL-28 emission loop posts replies in a stable, predictable order).
+    De-duplicated.
+
+    Both lists must be drawn from the same tasks.json snapshot timeline
+    (a before/after pair around a single reducer transition).  Used by
+    the task-completion path to detect "this complete-op was the last
+    one that intent thread T was waiting on" — exactly the moment a
+    terminal aggregate reply is owed.
+    """
+    candidates: list[int] = []
+    seen: set[int] = set()
+    for task in new_tasks:
+        for cid in task.get("contributing_intents") or ():
+            if cid in seen:
+                continue
+            seen.add(cid)
+            candidates.append(cid)
+    transitioned: list[int] = []
+    for cid in candidates:
+        if intent_thread_terminal(cid, prev_tasks):
+            # Already terminal before the transition — not newly so.
+            continue
+        if intent_thread_terminal(cid, new_tasks):
+            transitioned.append(cid)
+    return tuple(transitioned)
+
+
 def verdict_is_material(
     intent: "RescopeIntent",
     verdict: IntentVerdict,

@@ -590,3 +590,186 @@ class TestVerdictIsMaterial:
             self._verdict("honored"),
             task_descriptions=("anything",),
         )
+
+
+class TestIntentThreadTerminal:
+    """HOL-27 / #1921: an intent is terminal when every task in its
+    contributing_intents has reached a terminal status."""
+
+    def _task(
+        self,
+        tid: str,
+        status: str,
+        contributing_intents: tuple[int, ...] = (),
+    ) -> dict[str, object]:
+        return {
+            "id": tid,
+            "status": status,
+            "contributing_intents": list(contributing_intents),
+        }
+
+    def test_all_completed_is_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        tasks = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "completed", (101,)),
+        ]
+        assert intent_thread_terminal(101, tasks)
+
+    def test_all_skipped_is_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        tasks = [self._task("t1", "skipped", (101,))]
+        assert intent_thread_terminal(101, tasks)
+
+    def test_mixed_completed_and_skipped_is_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        tasks = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "skipped", (101,)),
+        ]
+        assert intent_thread_terminal(101, tasks)
+
+    def test_any_pending_is_not_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        tasks = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "pending", (101,)),
+        ]
+        assert not intent_thread_terminal(101, tasks)
+
+    def test_any_in_progress_is_not_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        tasks = [self._task("t1", "in_progress", (101,))]
+        assert not intent_thread_terminal(101, tasks)
+
+    def test_any_blocked_is_not_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        tasks = [self._task("t1", "blocked", (101,))]
+        assert not intent_thread_terminal(101, tasks)
+
+    def test_no_contributing_tasks_is_not_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        # Vacuous case: intent 101 never landed on any task.  HOL-24's
+        # no_op path already notified; this predicate must NOT also
+        # fire (otherwise HOL-28 double-replies).
+        tasks = [self._task("t1", "completed", (202,))]
+        assert not intent_thread_terminal(101, tasks)
+
+    def test_tolerates_taskstatus_enum_instance(self) -> None:
+        from fido.types import TaskStatus, intent_thread_terminal
+
+        tasks = [
+            {
+                "id": "t1",
+                "status": TaskStatus.COMPLETED,
+                "contributing_intents": [101],
+            }
+        ]
+        assert intent_thread_terminal(101, tasks)
+
+    def test_ignores_tasks_not_contributing(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        # t2 is pending but doesn't list intent 101 — must not block
+        # 101's terminal status.
+        tasks = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "pending", (202,)),
+        ]
+        assert intent_thread_terminal(101, tasks)
+
+
+class TestNewlyTerminalIntentThreads:
+    """HOL-27: identifies intent threads that transitioned from
+    non-terminal to terminal across a tasks.json before/after snapshot."""
+
+    def _task(
+        self,
+        tid: str,
+        status: str,
+        contributing_intents: tuple[int, ...] = (),
+    ) -> dict[str, object]:
+        return {
+            "id": tid,
+            "status": status,
+            "contributing_intents": list(contributing_intents),
+        }
+
+    def test_one_intent_transitioned(self) -> None:
+        from fido.types import newly_terminal_intent_threads
+
+        prev = [self._task("t1", "in_progress", (101,))]
+        new = [self._task("t1", "completed", (101,))]
+        assert newly_terminal_intent_threads(prev, new) == (101,)
+
+    def test_intent_already_terminal_excluded(self) -> None:
+        from fido.types import newly_terminal_intent_threads
+
+        # Intent 101 was already all-terminal before the transition,
+        # don't re-emit a reply for it.
+        prev = [self._task("t1", "completed", (101,))]
+        new = [self._task("t1", "completed", (101,))]
+        assert newly_terminal_intent_threads(prev, new) == ()
+
+    def test_intent_still_pending_excluded(self) -> None:
+        from fido.types import newly_terminal_intent_threads
+
+        prev = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "pending", (101,)),
+        ]
+        new = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "in_progress", (101,)),
+        ]
+        assert newly_terminal_intent_threads(prev, new) == ()
+
+    def test_multiple_intents_transitioned_in_insertion_order(self) -> None:
+        from fido.types import newly_terminal_intent_threads
+
+        prev = [
+            self._task("t1", "pending", (101,)),
+            self._task("t2", "pending", (202,)),
+        ]
+        new = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "completed", (202,)),
+        ]
+        # 101 first because t1 lists it first.
+        assert newly_terminal_intent_threads(prev, new) == (101, 202)
+
+    def test_de_duplicated(self) -> None:
+        from fido.types import newly_terminal_intent_threads
+
+        prev = [
+            self._task("t1", "pending", (101,)),
+            self._task("t2", "pending", (101,)),
+        ]
+        new = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "completed", (101,)),
+        ]
+        # 101 appears in both tasks but emitted once.
+        assert newly_terminal_intent_threads(prev, new) == (101,)
+
+    def test_partial_thread_transition_excluded(self) -> None:
+        from fido.types import newly_terminal_intent_threads
+
+        # Intent 101 contributes to t1 (now done) AND t2 (still pending)
+        # — thread is NOT yet terminal.
+        prev = [
+            self._task("t1", "pending", (101,)),
+            self._task("t2", "pending", (101,)),
+        ]
+        new = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "pending", (101,)),
+        ]
+        assert newly_terminal_intent_threads(prev, new) == ()
