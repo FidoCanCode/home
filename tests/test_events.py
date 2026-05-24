@@ -40,7 +40,7 @@ from fido.rocq import task_queue_rescope
 from fido.state import State
 from fido.store import FidoStore, ReplyPromiseRecord
 from fido.synthesis import CommentResponse, Insight
-from fido.synthesis_call import SynthesisExhaustedError
+from fido.synthesis_call import SynthesisCriticExhaustedError, SynthesisExhaustedError
 from fido.synthesis_executor import CommentTarget
 from fido.tasks import Tasks
 from fido.types import ActiveIssue, ActivePR, RescopeIntent
@@ -2707,6 +2707,114 @@ class TestReplyToCommentSynthesisFallback:
                 _executor=_FakeExecutor(),  # type: ignore[arg-type]
             )
         assert len(remove_eyes_calls) == 1
+
+    def test_review_comment_critic_exhausted_routes_to_blocked(
+        self, tmp_path: Path
+    ) -> None:
+        """HOL-20 / #1914: when ``call_synthesis`` raises the critic
+        subclass, ``reply_to_comment`` skips the "please rephrase"
+        fallback and routes through ``_route_critic_exhausted_blocked``
+        — BLOCKED comment + auto-filed bug, NO fallback reply."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="comment",
+            reply_to={"repo": "owner/repo", "pr": 1, "comment_id": 777},
+            comment_body="something the critic hates",
+            is_bot=False,
+        )
+        mock_gh = self._mock_gh()
+        mock_gh.fetch_comment_thread.return_value = [
+            {"id": 777, "author": "rhencke", "body": "x"},
+        ]
+        mock_gh.create_issue.return_value = (
+            "https://github.com/FidoCanCode/home/issues/1"
+        )
+
+        fallback_calls: list[object] = []
+
+        def fake_fallback(*args: object, **kwargs: object) -> object:
+            fallback_calls.append(args)
+            return _synthesis_response("should not be posted")
+
+        def _raise_critic_exhausted(*args: object, **kwargs: object) -> Never:
+            raise SynthesisCriticExhaustedError(
+                "intent-coverage",
+                ["missing X", "still missing X", "STILL missing X"],
+                ["v1 preview", "v2 preview", "v3 preview"],
+            )
+
+        cat, titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=_raise_critic_exhausted,
+            call_failure_explanation_fn=fake_fallback,
+        ).reply_to_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
+        # BLOCKED category, no fallback fired, no review reply posted.
+        assert cat == "BLOCKED"
+        assert titles == []
+        assert fallback_calls == []
+        assert not mock_gh.reply_to_review_comment.called
+        # BLOCKED comment posted on the source PR (issue-level comment).
+        assert mock_gh.comment_issue.called
+        blocked_args = mock_gh.comment_issue.call_args.args
+        assert blocked_args[0] == "owner/repo"
+        assert blocked_args[1] == 1
+        assert "BLOCKED" in blocked_args[2]
+        # Bug auto-filed against FidoCanCode/home.
+        bug_args = mock_gh.create_issue.call_args.args
+        assert bug_args[0] == "FidoCanCode/home"
+        assert "intent-coverage" in bug_args[1]
+
+    def test_issue_comment_critic_exhausted_routes_to_blocked(
+        self, tmp_path: Path
+    ) -> None:
+        """HOL-20 sibling for the top-level issue-comment path."""
+        cfg = self._cfg(tmp_path)
+        action = Action(
+            prompt="PR top-level comment on #7 by owner:\n\ntrigger",
+            comment_body="trigger",
+            is_bot=False,
+            context={"pr_title": "My PR", "comment_id": 888},
+        )
+        mock_gh = MagicMock()
+        mock_gh.get_repo_info.return_value = "owner/repo"
+        mock_gh.comment_issue.return_value = {"id": 8889}
+        mock_gh.create_issue.return_value = (
+            "https://github.com/FidoCanCode/home/issues/2"
+        )
+
+        def _raise_critic_exhausted(*args: object, **kwargs: object) -> Never:
+            raise SynthesisCriticExhaustedError(
+                "reply-prose",
+                ["bad SHA", "still bad SHA"],
+                ["v1", "v2"],
+            )
+
+        cat, _titles = Dispatcher(
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            call_synthesis_fn=_raise_critic_exhausted,
+            call_failure_explanation_fn=lambda *a, **kw: _synthesis_response(
+                "should-not-fire"
+            ),
+        ).reply_to_issue_comment(
+            action,
+            agent=_client(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
+        assert cat == "BLOCKED"
+        # comment_issue fires for the BLOCKED notice (no fallback post).
+        # The HOL-20 route also calls create_issue for the auto-filed bug.
+        assert mock_gh.comment_issue.called
+        assert mock_gh.create_issue.called
+        bug_args = mock_gh.create_issue.call_args.args
+        assert "reply-prose" in bug_args[1]
 
     def test_issue_comment_falls_back_when_synthesis_exhausted(
         self, tmp_path: Path
@@ -6711,6 +6819,145 @@ class TestGitHubInsightFiler:
         filer.file_insight(self._make_insight(), self._make_target())
 
         assert captured["recent_count"] == _INSIGHT_RECENT_LIMIT
+
+
+class TestRouteCriticExhaustedBlocked:
+    """HOL-20 / #1914: critic-exhaustion route — BLOCKED PR comment +
+    auto-filed bug carrying the full retry trace."""
+
+    def _make_exc(
+        self,
+        label: str = "intent-coverage",
+        gaps: list[str] | None = None,
+        attempts: list[str] | None = None,
+    ) -> SynthesisCriticExhaustedError:
+        return SynthesisCriticExhaustedError(
+            label,
+            gaps or ["missing tests", "still missing tests", "STILL missing tests"],
+            attempts or ["v1 preview", "v2 preview", "v3 preview"],
+        )
+
+    def _make_target(self) -> CommentTarget:
+        return CommentTarget(
+            repo="owner/repo", pr=42, comment_id=999, comment_type="pulls"
+        )
+
+    def _make_executor(self) -> MagicMock:
+        executor = MagicMock()
+        executor.remove_eyes_reaction = MagicMock()
+        return executor
+
+    def test_routes_eyes_blocked_comment_and_bug(self) -> None:
+        """Happy path: all three side effects fire in order — eyes
+        removed, BLOCKED comment posted on the source PR, bug filed
+        on FidoCanCode/home."""
+        from fido.events import _route_critic_exhausted_blocked
+
+        gh = MagicMock()
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/9"
+        executor = self._make_executor()
+        target = self._make_target()
+        exc = self._make_exc()
+
+        _route_critic_exhausted_blocked(exc, target, gh=gh, executor=executor)
+
+        # Eyes removed via executor (best-effort).
+        executor.remove_eyes_reaction.assert_called_once_with(target)
+        # BLOCKED comment posted on source PR (owner/repo#42).
+        comment_call = gh.comment_issue.call_args
+        assert comment_call.args[0] == "owner/repo"
+        assert comment_call.args[1] == 42
+        assert "BLOCKED" in comment_call.args[2]
+        assert "intent-coverage" in comment_call.args[2]
+        # Bug filed on FidoCanCode/home with Bug label.
+        bug_call = gh.create_issue.call_args
+        assert bug_call.args[0] == "FidoCanCode/home"
+        assert "intent-coverage" in bug_call.args[1]
+        assert "owner/repo" in bug_call.args[1]
+        assert "999" in bug_call.args[1]
+        # Body carries the full retry trace.
+        bug_body = bug_call.args[2]
+        for gap in exc.critic_gaps:
+            assert gap in bug_body
+        for preview in exc.synthesis_attempts:
+            assert preview in bug_body
+        assert bug_call.kwargs.get("labels") == ["Bug"]
+
+    def test_eyes_failure_still_posts_comment_and_files_bug(self) -> None:
+        """If eyes removal fails (transient GitHub), the BLOCKED
+        comment and bug filing must still proceed.  The failures are
+        independent — one of three signals can be lost without
+        cascading."""
+        from fido.events import _route_critic_exhausted_blocked
+
+        gh = MagicMock()
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/10"
+        executor = self._make_executor()
+        executor.remove_eyes_reaction.side_effect = RuntimeError("eyes 503")
+        exc = self._make_exc()
+
+        _route_critic_exhausted_blocked(
+            exc, self._make_target(), gh=gh, executor=executor
+        )
+
+        gh.comment_issue.assert_called_once()
+        gh.create_issue.assert_called_once()
+
+    def test_comment_failure_still_files_bug(self) -> None:
+        """If the BLOCKED comment fails (rate limit), the bug filing
+        is independent and still fires."""
+        from fido.events import _route_critic_exhausted_blocked
+
+        gh = MagicMock()
+        gh.comment_issue.side_effect = RuntimeError("comment 429")
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/11"
+        executor = self._make_executor()
+        exc = self._make_exc()
+
+        _route_critic_exhausted_blocked(
+            exc, self._make_target(), gh=gh, executor=executor
+        )
+
+        gh.create_issue.assert_called_once()
+
+    def test_bug_filing_failure_swallowed(self) -> None:
+        """If the bug-filing call fails (e.g. rate limit), the
+        exception is swallowed — the BLOCKED comment already landed,
+        which is the most user-visible signal.  Crashing here would
+        make the dispatcher loop fail."""
+        from fido.events import _route_critic_exhausted_blocked
+
+        gh = MagicMock()
+        gh.create_issue.side_effect = RuntimeError("create 500")
+        executor = self._make_executor()
+        exc = self._make_exc()
+
+        # Should NOT raise.
+        _route_critic_exhausted_blocked(
+            exc, self._make_target(), gh=gh, executor=executor
+        )
+
+        gh.comment_issue.assert_called_once()
+        gh.create_issue.assert_called_once()
+
+    def test_blocked_comment_includes_final_gap(self) -> None:
+        """The BLOCKED comment quotes the final critic gap so the
+        human reading the PR sees exactly what the critic complained
+        about, not just "blocked"."""
+        from fido.events import _route_critic_exhausted_blocked
+
+        gh = MagicMock()
+        executor = self._make_executor()
+        exc = self._make_exc(
+            gaps=["g1", "g2", "the very specific final complaint"],
+        )
+
+        _route_critic_exhausted_blocked(
+            exc, self._make_target(), gh=gh, executor=executor
+        )
+
+        body = gh.comment_issue.call_args.args[2]
+        assert "the very specific final complaint" in body
 
 
 class TestDispatcher:

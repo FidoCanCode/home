@@ -272,6 +272,45 @@ class SynthesisExhaustedError(Exception):
     """
 
 
+class SynthesisCriticExhaustedError(SynthesisExhaustedError):
+    """HOL-20 / #1914: synthesis exhausted specifically because a Layer 2
+    critic kept rejecting otherwise-valid responses.
+
+    Subclass of :class:`SynthesisExhaustedError` so legacy catches that
+    only know about generic exhaustion still work, but new catches can
+    distinguish critic-exhaustion to route through the BLOCKED PR +
+    auto-file-bug path (instead of the legacy "please rephrase"
+    fallback).
+
+    Carries the full retry history so the bug filer can attach it to
+    the auto-filed issue:
+
+    - ``label``: which critic exhausted (``"intent-coverage"``, etc).
+    - ``critic_gaps``: the gap text from each failed verdict, in
+      order.  Always one entry per attempt (after the reorder,
+      ``critic_gaps[i]`` corresponds to ``synthesis_attempts[i]``).
+    - ``synthesis_attempts``: a short preview of each synthesis
+      response the critic rejected.  Useful when the critic gap is
+      generic ("missing tests") and the human needs to see what Opus
+      actually proposed each time.
+    """
+
+    def __init__(
+        self,
+        label: str,
+        critic_gaps: list[str],
+        synthesis_attempts: list[str],
+    ) -> None:
+        self.label = label
+        self.critic_gaps = list(critic_gaps)
+        self.synthesis_attempts = list(synthesis_attempts)
+        final_gap = critic_gaps[-1] if critic_gaps else "(no gap recorded)"
+        super().__init__(
+            f"synthesis {label} critic exhausted {len(critic_gaps)} attempts — "
+            f"final gap: {final_gap!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Intent-coverage critic (HOL-15 / #1909)
 # ---------------------------------------------------------------------------
@@ -558,6 +597,16 @@ def call_synthesis(
 
     last_error: Exception | None = None
     last_critic_gap: str | None = None
+    # HOL-20 / #1914: per-attempt history so a critic-exhaustion can
+    # raise ``SynthesisCriticExhaustedError`` carrying the full retry
+    # trace.  ``critic_gaps[i]`` is the gap from attempt ``i``'s
+    # critic verdict (only populated when a critic actually fired and
+    # rejected); ``synthesis_attempts[i]`` is the response text the
+    # critic rejected.  Parse failures append ``None``/``""`` so the
+    # two lists stay aligned with attempt indices.
+    critic_label_at_exhaustion: str | None = None
+    critic_gaps: list[str] = []
+    synthesis_attempts: list[str] = []
     for attempt in range(MAX_RETRIES):
         # Per-attempt prompt suffix.  Critic gap takes priority over the
         # generic JSON-strictness nudge — the critic gap is more specific
@@ -633,6 +682,9 @@ def call_synthesis(
         if not verdict.passed:
             last_error = ValueError(f"intent-coverage critic: {verdict.gap}")
             last_critic_gap = verdict.gap
+            critic_label_at_exhaustion = "intent-coverage"
+            critic_gaps.append(verdict.gap)
+            synthesis_attempts.append(response.reply_text[:200])
             log.warning(
                 "synthesis attempt %d/%d critic gap — %s",
                 attempt + 1,
@@ -659,6 +711,9 @@ def call_synthesis(
             if not prose_verdict.passed:
                 last_error = ValueError(f"reply-prose critic: {prose_verdict.gap}")
                 last_critic_gap = prose_verdict.gap
+                critic_label_at_exhaustion = "reply-prose"
+                critic_gaps.append(prose_verdict.gap)
+                synthesis_attempts.append(response.reply_text[:200])
                 log.warning(
                     "synthesis attempt %d/%d reply-prose gap — %s",
                     attempt + 1,
@@ -671,6 +726,21 @@ def call_synthesis(
             log.info("synthesis: succeeded on attempt %d/%d", attempt + 1, MAX_RETRIES)
         return response
 
+    # HOL-20 / #1914: if the LAST failure was a critic gap (the
+    # response parsed cleanly but a Layer 2 critic kept rejecting it),
+    # raise the subclass that carries the gap chain so the executor
+    # can route through the BLOCKED PR + auto-file-bug path instead
+    # of the legacy "please rephrase" fallback.  Parse-only failures
+    # fall through to the generic SynthesisExhaustedError so the
+    # legacy fallback handles them — those represent a model that
+    # can't emit valid JSON, not a critic that won't accept what it
+    # emits.
+    if critic_label_at_exhaustion is not None and critic_gaps:
+        raise SynthesisCriticExhaustedError(
+            critic_label_at_exhaustion,
+            critic_gaps,
+            synthesis_attempts,
+        )
     raise SynthesisExhaustedError(
         f"synthesis exhausted {MAX_RETRIES} retries without a valid CommentResponse "
         f"(Constraint B violation) — last error: {last_error}"

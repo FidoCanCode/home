@@ -41,6 +41,7 @@ from fido.store import (
 )
 from fido.synthesis import Insight
 from fido.synthesis_call import (
+    SynthesisCriticExhaustedError,
     SynthesisExhaustedError,
     call_failure_explanation,
     call_synthesis,
@@ -361,6 +362,100 @@ def _insight_source_link(target: CommentTarget) -> str:
         f"https://github.com/{target.repo}/issues/{target.pr}"
         f"#issuecomment-{target.comment_id}"
     )
+
+
+_BUG_REPO = "FidoCanCode/home"
+_BUG_LABEL = "Bug"
+
+
+def _route_critic_exhausted_blocked(
+    exc: "SynthesisCriticExhaustedError",
+    target: CommentTarget,
+    *,
+    gh: GitHub,
+    executor: "SynthesisExecutor",
+) -> None:
+    """HOL-20 / #1914: route a critic-exhaustion through the BLOCKED
+    PR mechanism instead of the legacy "please rephrase" fallback.
+
+    Three side effects, in order so each can fail independently without
+    blocking the others:
+
+    1. Remove the eyes reaction — the triage decisively concluded and
+       Fido is no longer "looking" at this comment.  Best-effort: a
+       transient GitHub failure here mustn't block the user-visible
+       BLOCKED comment.
+    2. Post a BLOCKED comment on the source PR thread so the human
+       sees concrete feedback about what happened and what to do.
+    3. Auto-file a bug against :data:`_BUG_REPO` carrying the full
+       retry history (synthesis attempts + critic gaps), so future
+       triage-critic prompt tuning has the case to learn from.
+
+    Each step's failure is logged and swallowed: the worst case is
+    losing one of the three signals, but the comment-processing flow
+    must NOT crash on this path — the dispatcher already had to give
+    up on the synthesis, crashing on top of that wastes the eyes
+    reaction and the BLOCKED comment that DID land.
+    """
+    try:
+        executor.remove_eyes_reaction(target)
+    except Exception as cleanup_exc:
+        log.warning(
+            "critic-exhausted route: failed to remove eyes reaction "
+            "(%s) — continuing to post BLOCKED comment",
+            cleanup_exc,
+        )
+
+    source_link = _insight_source_link(target)
+    blocked_body = (
+        f"**BLOCKED**: synthesis {exc.label} critic exhausted "
+        f"{len(exc.critic_gaps)} attempts on this comment.\n\n"
+        f"The Layer 2 critic ({exc.label}) repeatedly rejected the "
+        f"triage response.  Final gap from the critic:\n\n"
+        f"> {exc.critic_gaps[-1] if exc.critic_gaps else '(no gap recorded)'}\n\n"
+        f"Auto-filed against `{_BUG_REPO}` for follow-up.  See the "
+        f"originating comment: {source_link}"
+    )
+    try:
+        gh.comment_issue(target.repo, target.pr, blocked_body)
+    except Exception as comment_exc:
+        log.warning(
+            "critic-exhausted route: failed to post BLOCKED comment on "
+            "%s#%d (%s) — continuing to file bug",
+            target.repo,
+            target.pr,
+            comment_exc,
+        )
+
+    bug_title = (
+        f"Bug: synthesis {exc.label} critic exhausted "
+        f"on {target.repo}#{target.pr} comment {target.comment_id}"
+    )
+    gap_lines = "\n".join(f"  {i + 1}. {gap}" for i, gap in enumerate(exc.critic_gaps))
+    attempt_lines = "\n".join(
+        f"  {i + 1}. {preview!r}" for i, preview in enumerate(exc.synthesis_attempts)
+    )
+    bug_body = (
+        f"## Critic exhaustion\n\n"
+        f"- Critic: `{exc.label}`\n"
+        f"- Source comment: {source_link}\n"
+        f"- Source repo / PR: `{target.repo}#{target.pr}`\n"
+        f"- Source comment id: `{target.comment_id}`\n"
+        f"- Attempts: {len(exc.synthesis_attempts)}\n\n"
+        f"## Critic gaps (one per attempt)\n\n{gap_lines}\n\n"
+        f"## Synthesis attempts (reply_text preview)\n\n{attempt_lines}\n"
+    )
+    try:
+        gh.create_issue(_BUG_REPO, bug_title, bug_body, labels=[_BUG_LABEL])
+    except Exception as file_exc:
+        log.warning(
+            "critic-exhausted route: failed to auto-file bug for "
+            "%s#%d comment %d (%s) — the BLOCKED comment still landed",
+            target.repo,
+            target.pr,
+            target.comment_id,
+            file_exc,
+        )
 
 
 # Per-work_dir coalescing state for Dispatcher.reorder_tasks_background.
@@ -1888,6 +1983,27 @@ class Dispatcher:
                 # PR #1858's "in commit ABC" lies against actual git.
                 claim_grounding_state=_gather_claim_grounding_state(repo_cfg.work_dir),
             )
+        except SynthesisCriticExhaustedError as critic_exc:
+            # HOL-20 / #1914: critic-exhaustion → BLOCKED PR + auto-file
+            # bug.  Skip the "please rephrase" fallback because the
+            # critic gap is more informative than a generic apology
+            # and we don't want to spam the thread with an LLM-
+            # generated message that the same critic would just
+            # reject again.
+            log.warning(
+                "synthesis %s critic exhausted for comment %s — routing to "
+                "BLOCKED PR + auto-file path",
+                critic_exc.label,
+                info.get("comment_id"),
+            )
+            if target is not None:
+                _route_critic_exhausted_blocked(
+                    critic_exc, target, gh=gh, executor=executor
+                )
+            # ``BLOCKED`` category signals the caller no action was
+            # taken (no reply, no rescope) — server.py + worker
+            # callers discard the value, so this is informational.
+            return ("BLOCKED", [])
         except SynthesisExhaustedError:
             log.warning(
                 "synthesis exhausted retries for comment %s — falling back to "
@@ -2144,6 +2260,20 @@ class Dispatcher:
                 # PR #1858's "in commit ABC" lies against actual git.
                 claim_grounding_state=_gather_claim_grounding_state(repo_cfg.work_dir),
             )
+        except SynthesisCriticExhaustedError as critic_exc:
+            # HOL-20 / #1914: same routing as the review-comment path.
+            log.warning(
+                "synthesis %s critic exhausted for issue comment %s on PR "
+                "#%s — routing to BLOCKED PR + auto-file path",
+                critic_exc.label,
+                _cid,
+                number,
+            )
+            if issue_target is not None:
+                _route_critic_exhausted_blocked(
+                    critic_exc, issue_target, gh=gh, executor=executor
+                )
+            return ("BLOCKED", [])
         except SynthesisExhaustedError:
             log.warning(
                 "synthesis exhausted retries for issue comment %s on PR #%s — "

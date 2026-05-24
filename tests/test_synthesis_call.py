@@ -11,6 +11,7 @@ from fido.synthesis_call import (
     MAX_RETRIES,
     CriticExhaustedError,
     CriticVerdict,
+    SynthesisCriticExhaustedError,
     SynthesisExhaustedError,
     _parse_comment_response,
     call_failure_explanation,
@@ -980,8 +981,9 @@ class TestIntentCoverageCritic:
 
     def test_critic_exhaustion_raises_synthesis_exhausted_error(self) -> None:
         """When MAX_RETRIES critic-fail/synthesis cycles all fail, the
-        outer call raises ``SynthesisExhaustedError`` so the executor
-        can route to the failure-explanation fallback (Constraint B:
+        outer call raises ``SynthesisCriticExhaustedError`` (HOL-20
+        subclass of ``SynthesisExhaustedError``) so the executor can
+        route to the BLOCKED PR + auto-file path (Constraint B:
         never silently default to empty).
 
         After the PR #1932 reorder, each attempt is synth → verify (cr
@@ -993,9 +995,37 @@ class TestIntentCoverageCritic:
         agent = _make_agent(side_effects)
         prompts = _make_prompts()
 
-        with pytest.raises(SynthesisExhaustedError, match="intent-coverage critic"):
+        # The subclass still satisfies the parent type assertion so
+        # legacy catches stay compatible; HOL-20 catches can narrow.
+        with pytest.raises(
+            SynthesisCriticExhaustedError, match="intent-coverage critic"
+        ) as caught:
             call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
         assert agent.run_turn.call_count == 3 * MAX_RETRIES
+        # HOL-20 retry history is attached to the exception.
+        assert caught.value.label == "intent-coverage"
+        assert len(caught.value.critic_gaps) == MAX_RETRIES
+        assert all("still wrong" in gap for gap in caught.value.critic_gaps)
+        assert len(caught.value.synthesis_attempts) == MAX_RETRIES
+        assert all("Promise." in preview for preview in caught.value.synthesis_attempts)
+
+    def test_parse_only_exhaustion_raises_generic_synthesis_exhausted(self) -> None:
+        """Parse-only failures (model can't emit valid JSON) raise the
+        generic ``SynthesisExhaustedError``, NOT the HOL-20 critic
+        subclass — that path falls back to the "please rephrase"
+        explanation, not the BLOCKED PR routing.  The two paths must
+        stay distinct so a flaky-model day doesn't auto-file a
+        critic-exhaustion bug."""
+        # Every attempt returns garbage that _parse_comment_response
+        # rejects.  No critic ever fires because there's no parsed
+        # response to critique.
+        agent = _make_agent(["not json"] * MAX_RETRIES)
+        prompts = _make_prompts()
+
+        with pytest.raises(SynthesisExhaustedError) as caught:
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        # The exception is the BASE class, not the critic subclass.
+        assert not isinstance(caught.value, SynthesisCriticExhaustedError)
 
     def test_critic_transport_failure_fails_open(self) -> None:
         """A transport error in the critic turn must not block a valid
