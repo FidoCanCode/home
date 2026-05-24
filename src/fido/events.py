@@ -12,6 +12,7 @@ from typing import Any
 
 from fido.config import Config, RepoConfig
 from fido.critics import (
+    INSIGHT_REPO,
     InsightDedupVerdict,
     run_insight_dedup_critic,
 )
@@ -111,7 +112,7 @@ class _BackgroundRescopeTrigger:
         )
 
 
-_INSIGHT_REPO = "FidoCanCode/home"
+_INSIGHT_REPO = INSIGHT_REPO
 _INSIGHT_LABEL = "Insight"
 
 
@@ -231,16 +232,19 @@ class _GitHubInsightFiler:
         the next dispatch from filing it; only an actual fail-open
         replay loses durability).
         """
+        # Codex on PR #1932 (follow-up): the critic parser in
+        # ``fido.critics`` now requires the duplicate_url to target
+        # ``INSIGHT_REPO`` specifically, so any verdict that reaches
+        # here has a URL the marker regex below will accept.  Use a
+        # hard assertion rather than a fail-open branch — if the two
+        # layers ever drift, surfacing the bug loudly is better than
+        # silently swallowing the durability record.
         number = _parse_insight_issue_number(verdict.duplicate_url)
-        if number is None:
-            log.warning(
-                "insight-dedup critic returned non-parseable duplicate_url %r — "
-                "skipping marker record for comment %d (replay could still "
-                "file a duplicate if the critic later fails open)",
-                verdict.duplicate_url,
-                target.comment_id,
-            )
-            return
+        assert number is not None, (
+            f"InsightDedupVerdict.duplicate_url {verdict.duplicate_url!r} "
+            f"passed the critic parser but failed the marker URL regex — "
+            f"the two validators have drifted"
+        )
         source_link = _insight_source_link(target)
         body = f"Also covered: {source_link}\n\n{marker}"
         # Codex on PR #1932: this marker write is best-effort
@@ -295,11 +299,29 @@ class _GitHubInsightFiler:
         Returns ``[{title, body, url}, ...]`` shaped for the critic
         prompt formatter.  An empty list is returned when the search
         yields nothing — the critic prompt treats that as a pass.
+
+        Codex on PR #1932: the search itself is wrapped in fail-open.
+        Without it, a transient ``gh.search_issues`` failure
+        (rate limit, network blip) raised out of ``file_insight`` and
+        aborted the entire dispatch — a flaky GitHub couldn't be
+        allowed to BLOCK legitimate insight filing.  On error, return
+        an empty list so the critic sees "no peers" (and the prompt's
+        "passes by default when recent list is empty" rule lets the
+        insight file normally).
         """
-        results = self._gh.search_issues(
-            _INSIGHT_REPO,
-            f"label:{_INSIGHT_LABEL} is:issue is:open",
-        )
+        try:
+            results = self._gh.search_issues(
+                _INSIGHT_REPO,
+                f"label:{_INSIGHT_LABEL} is:issue is:open",
+            )
+        except Exception as exc:
+            log.warning(
+                "insight-dedup recent-corpus search failed (%s) — "
+                "falling open with empty corpus so the critic doesn't "
+                "block the insight on a flaky GitHub",
+                exc,
+            )
+            return []
         out: list[dict[str, str]] = []
         for item in results[:_INSIGHT_RECENT_LIMIT]:
             out.append(
@@ -314,7 +336,15 @@ class _GitHubInsightFiler:
 
 _INSIGHT_URL_RE = re.compile(
     r"^https://github\.com/(?P<owner_repo>[^/]+/[^/]+)/issues/"
-    r"(?P<number>\d+)(?:[#/?].*)?$"
+    r"(?P<number>\d+)(?:[#/?].*)?$",
+    # Codex on PR #1932: GitHub URLs are case-insensitive on
+    # scheme/host AND owner/repo names, so the marker-write boundary
+    # must use the same case-insensitive match as the critic parser
+    # above.  Otherwise a verdict with ``HTTPS://GITHUB.COM/...``
+    # passes parser validation, the filer skips filing, and this
+    # regex rejects the marker target — silently losing the
+    # durability record.
+    re.IGNORECASE,
 )
 
 

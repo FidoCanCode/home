@@ -6736,29 +6736,17 @@ class TestGitHubInsightFiler:
         # markers (posted as comments) are searchable on replay.
         assert "in:body,comments" in query
 
-    def test_critic_duplicate_cross_repo_url_skips_marker(self) -> None:
-        """A SHAPE-valid GitHub issue URL that points at a DIFFERENT
-        repo (not ``FidoCanCode/home``) survives parser validation
-        (``_DEDUP_URL_RE`` is repo-agnostic) but is rejected by the
-        per-repo strict check in ``_parse_insight_issue_number`` at
-        marker-write time.  Filing is still skipped (critic decision
-        honoured) but the durability marker can't be written —
-        logged and continued.
-
-        Two-layer validation by design: the parser keeps malformed
-        verdicts off the filer's path, while the marker-writer
-        defends ``_INSIGHT_REPO`` from cross-repo marker pollution."""
+    def test_critic_duplicate_cross_repo_url_files_anyway(self) -> None:
+        """Codex on PR #1932 (follow-up): the corpus the critic sees
+        only contains ``_INSIGHT_REPO`` insights, so a cross-repo
+        ``duplicate_url`` is hallucination — parser rejects it,
+        runner fails open, insight files normally.  The previous
+        two-layer "shape here, repo downstream" design let cross-
+        repo URLs silently lose insights (filer skipped while the
+        marker-writer also skipped on the wrong repo)."""
         gh = MagicMock()
-        gh.search_issues.side_effect = [
-            [],
-            [
-                {
-                    "title": "x",
-                    "body": "y",
-                    "html_url": "https://github.com/some-other-org/repo/issues/9",
-                }
-            ],
-        ]
+        gh.search_issues.return_value = []  # parser rejects → no marker lookup
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/99"
         filer = self._make_critic_filer(
             gh,
             agent_response=(
@@ -6771,10 +6759,9 @@ class TestGitHubInsightFiler:
 
         filer.file_insight(self._make_insight(), self._make_target())
 
-        # Filing skipped — the critic verdict was parser-valid.
-        gh.create_issue.assert_not_called()
-        # Marker NOT written — the cross-repo URL was rejected at
-        # the strict per-repo boundary.
+        # Insight files normally — the cross-repo URL is hallucination
+        # and the runner failed open with is_duplicate=False.
+        gh.create_issue.assert_called_once()
         gh.comment_issue.assert_not_called()
 
     def test_critic_duplicate_with_unparseable_url_files_anyway(self) -> None:
@@ -6940,6 +6927,33 @@ class TestGitHubInsightFiler:
             )
             is None
         )
+
+    def test_recent_insights_search_failure_falls_open(self) -> None:
+        """Codex on PR #1932: the recent-corpus search runs OUTSIDE
+        any fail-open guard in ``run_insight_dedup_critic`` (the
+        runner only wraps the agent call).  A transient
+        ``gh.search_issues`` failure here used to propagate out of
+        ``file_insight`` and abort the entire dispatch.  The fix
+        wraps the search itself so a flaky GitHub degrades to "no
+        peers" and the critic's "passes by default on empty corpus"
+        rule lets the insight file normally."""
+        gh = MagicMock()
+        # First call (marker lookup): no existing marker.
+        # Second call (recent-insights search): fails.
+        gh.search_issues.side_effect = [
+            [],
+            RuntimeError("GitHub 503"),
+        ]
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/16"
+        filer = self._make_critic_filer(
+            gh, agent_response='{"is_duplicate": false, "rationale": "distinct"}'
+        )
+
+        # Should NOT raise — the search failure must not abort dispatch.
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        # Insight still files normally.
+        gh.create_issue.assert_called_once()
 
     def test_recent_insights_capped(self) -> None:
         """Caller-supplied search may return more than the cap — the

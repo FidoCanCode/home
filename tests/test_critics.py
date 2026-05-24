@@ -1165,18 +1165,27 @@ class TestParseInsightDedupVerdict:
 
     def test_malformed_url_treated_as_malformed_verdict(self) -> None:
         """Codex on PR #1932: a duplicate verdict with a malformed
-        ``duplicate_url`` (not a GitHub /issues/N URL) used to be
-        accepted, causing the filer to skip the insight while the
-        marker-writer silently dropped the durability record — the
-        insight was lost entirely.  Parser now returns None for
-        non-GitHub-issue URLs so the runner fails open and the
-        insight files normally."""
+        ``duplicate_url`` (not a GitHub /issues/N URL on the insight
+        repo) used to be accepted, causing the filer to skip the
+        insight while the marker-writer silently dropped the
+        durability record — the insight was lost entirely.  Parser
+        now returns None for any URL that doesn't target the insight
+        repo's issue path, so the runner fails open and the insight
+        files normally.
+
+        Cross-repo URLs count as malformed too (codex follow-up): the
+        critic only sees insights from ``_INSIGHT_REPO``, so a URL
+        pointing anywhere else is hallucination."""
         for malformed in (
             "not a real URL at all",
             "https://example.com/FidoCanCode/home/issues/42",  # wrong host
             "https://github.com/FidoCanCode/home/pull/42",  # PR not issue
             "https://github.com/FidoCanCode/home/discussions/42",  # discussion
             "https://github.com/FidoCanCode/home/issues/notanumber",
+            # Cross-repo: corpus only contains _INSIGHT_REPO insights
+            # so any other repo is hallucination.
+            "https://github.com/some-other-org/repo/issues/9",
+            "https://github.com/rhencke/confusio/issues/5",
         ):
             assert (
                 _parse_insight_dedup_verdict(

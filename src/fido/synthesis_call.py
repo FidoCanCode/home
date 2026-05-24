@@ -704,6 +704,16 @@ def call_synthesis(
             last_error = ValueError(f"intent-coverage critic: {verdict.gap}")
             last_critic_gap = verdict.gap
             last_critic_label = "intent-coverage"
+            # Codex on PR #1932: when the failing critic LABEL changes
+            # mid-retry (e.g. intent-coverage failed earlier, now it's
+            # reply-prose — or vice versa), reset the chain so the
+            # exhaustion's gap chain reflects ONLY the trailing run of
+            # same-label failures.  Mixing labels in one
+            # ``SynthesisCriticExhaustedError`` misfiled the BLOCKED
+            # bug context with unrelated gaps.
+            if critic_label_at_exhaustion != "intent-coverage":
+                critic_gaps = []
+                synthesis_attempts = []
             critic_label_at_exhaustion = "intent-coverage"
             critic_gaps.append(verdict.gap)
             synthesis_attempts.append(response.reply_text[:200])
@@ -734,6 +744,11 @@ def call_synthesis(
                 last_error = ValueError(f"reply-prose critic: {prose_verdict.gap}")
                 last_critic_gap = prose_verdict.gap
                 last_critic_label = "reply-prose"
+                # See the matching label-change reset in the
+                # intent-coverage arm above (Codex on PR #1932).
+                if critic_label_at_exhaustion != "reply-prose":
+                    critic_gaps = []
+                    synthesis_attempts = []
                 critic_label_at_exhaustion = "reply-prose"
                 critic_gaps.append(prose_verdict.gap)
                 synthesis_attempts.append(response.reply_text[:200])

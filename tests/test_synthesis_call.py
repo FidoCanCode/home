@@ -1040,6 +1040,67 @@ class TestIntentCoverageCritic:
         # the parse failures reset the trailing-critic chain.
         assert not isinstance(caught.value, SynthesisCriticExhaustedError)
 
+    def test_label_change_resets_critic_chain(self) -> None:
+        """Codex on PR #1932: when the failing critic LABEL changes
+        mid-retry, the gap chain must reset so the final
+        ``SynthesisCriticExhaustedError`` carries ONLY the trailing
+        run of same-label gaps.  Previously a sequence like
+        intent-coverage fail → reply-prose fail attached the
+        unrelated intent gap to the reply-prose exhaustion's
+        ``critic_gaps`` list, misfiling the BLOCKED bug context."""
+        raw_v1 = _make_raw(reply_text="Fixed in commit deadbeef.", change_request="x")
+        raw_v2 = _make_raw(reply_text="Fixed in commit abc1234.", change_request="x")
+        raw_v3 = _make_raw(reply_text="Fixed in commit abc1234.", change_request="x")
+        prose_fail = json.dumps(
+            {
+                "passed": False,
+                "gap": "prose gap A",
+                "rationale": "x",
+            }
+        )
+        prose_fail_2 = json.dumps(
+            {
+                "passed": False,
+                "gap": "prose gap B",
+                "rationale": "x",
+            }
+        )
+        # Attempt 1: intent-coverage fails (chain = [intent-gap])
+        # Attempt 2: intent-coverage passes, reply-prose fails
+        #            → chain must RESET to [prose gap A]
+        # Attempt 3: intent passes, reply-prose fails again
+        #            → chain APPENDS [prose gap A, prose gap B]
+        agent = _make_agent(
+            [
+                raw_v1,
+                _critic_fail("intent gap (should be reset)"),
+                raw_v2,
+                _CRITIC_PASS,
+                prose_fail,
+                raw_v3,
+                _CRITIC_PASS,
+                prose_fail_2,
+            ]
+        )
+        prompts = _make_prompts()
+        prompts.reply_prose_claim_grounding_prompt.return_value = "prose-p"
+
+        with pytest.raises(SynthesisCriticExhaustedError) as caught:
+            call_synthesis(
+                "comment",
+                is_bot=False,
+                agent=agent,
+                prompts=prompts,
+                claim_grounding_state={"recent_commit_shas": ["abc1234"]},
+            )
+
+        # The final exception's label is reply-prose AND its
+        # critic_gaps contains ONLY the trailing reply-prose gaps,
+        # not the earlier intent-coverage gap.
+        assert caught.value.label == "reply-prose"
+        assert caught.value.critic_gaps == ["prose gap A", "prose gap B"]
+        assert "intent gap" not in " ".join(caught.value.critic_gaps)
+
     def test_critic_after_parse_routes_to_blocked(self) -> None:
         """Mirror case: parse-fail early, then trailing critic-fail
         attempts.  The LAST failure IS a critic gap, so exhaustion

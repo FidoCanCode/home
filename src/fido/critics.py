@@ -582,19 +582,29 @@ class InsightDedupVerdict:
             )
 
 
-# Codex on PR #1932: validate the URL SHAPE at parse time so a
-# malformed ``duplicate_url`` is treated as a malformed verdict (the
-# parser returns None and the runner fails open → insight files
-# normally) rather than as a valid "skip this filing" verdict that
-# the filer would honor while the marker-writer silently dropped the
-# durability record.  Loose check by design — the strict per-repo
-# match (the URL must target ``_INSIGHT_REPO``) lives in
-# ``fido.events._parse_insight_issue_number`` at the marker-write
-# boundary, so a hallucinated cross-repo URL still skips the marker
-# (and only the marker) without crashing dispatch.  Case-insensitive
-# to match GitHub's case-insensitive owner/repo names.
+# Repo that owns the corpus of insights ``_recent_insights_for_critic``
+# feeds in.  A duplicate_url pointing anywhere else is hallucination —
+# the critic was only ever shown insights from this repo, so any
+# claim of duplication against another repo is malformed output and
+# the verdict must fail open (let the insight file normally).
+# Shared with ``fido.events`` so the filer's marker-write boundary
+# stays in lockstep with this validator.
+INSIGHT_REPO = "FidoCanCode/home"
+
+
+# Codex on PR #1932: validate the URL at parse time so a malformed
+# ``duplicate_url`` is treated as a malformed verdict (parser
+# returns None → runner fails open → insight files normally) rather
+# than as a valid "skip this filing" verdict that the filer would
+# honor while the marker-writer silently dropped the durability
+# record.  The check requires both the shape AND the target repo —
+# splitting them into "shape here, repo downstream" let a
+# cross-repo URL silently lose the insight too (the filer skipped
+# while the marker-writer rejected the cross-repo target).
+# Case-insensitive to match GitHub's case-insensitive owner/repo
+# names.
 _DEDUP_URL_RE = re.compile(
-    r"^https://github\.com/[^/]+/[^/]+/issues/\d+(?:[#/?].*)?$",
+    r"^https://github\.com/" + re.escape(INSIGHT_REPO) + r"/issues/\d+(?:[#/?].*)?$",
     re.IGNORECASE,
 )
 
