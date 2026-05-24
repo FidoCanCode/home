@@ -102,6 +102,11 @@ def render_active_context(
         "in_progress": "[~]",
         "pending": "[ ]",
         "blocked": "[!]",
+        # HOL-5/HOL-6 marker matches the PR-body ⊘ glyph (HOL-7) so the
+        # worker context surface treats SKIPPED as terminal too rather
+        # than falling back to "[ ]" and appearing pending (Rob review
+        # on PR #1932).
+        "skipped": "[⊘]",
     }
     parts: list[str] = []
 
@@ -402,17 +407,33 @@ class Prompts:
         malformation in one pass and feeds them back via
         :meth:`rescope_parse_nudge` for retries.
         """
-        pending = [t for t in task_list if t.get("status") != "completed"]
+        # SKIPPED tasks are terminal (HOL-5/HOL-6 marker lineage records)
+        # and must NOT be sent to Opus as "pending" — that lets later
+        # rescopes rewrite or remove the no_op lineage and reintroduces
+        # the silent-drop pattern HOL-6 closes (Rob review on PR #1932).
+        pending = [
+            t for t in task_list if t.get("status") not in ("completed", "skipped")
+        ]
         completed = [t for t in task_list if t.get("status") == "completed"]
 
         def _fmt(t: dict[str, Any]) -> dict[str, Any]:
-            return {
+            out: dict[str, Any] = {
                 "id": t.get("id", ""),
                 "type": t.get("type", "spec"),
                 "status": t.get("status", "pending"),
                 "title": t.get("title", ""),
                 "description": t.get("description", ""),
             }
+            # HOL-8 / #1902: render narrative_chain so Opus sees the
+            # history of verdicts that touched this task across prior
+            # rescopes — lets the next-rescope reasoning explain WHY
+            # each task got the work it has (and not just the current
+            # title/description).  Omitted when empty so the prompt
+            # stays compact for fresh tasks.
+            chain = t.get("narrative_chain") or []
+            if chain:
+                out["narrative_chain"] = chain
+            return out
 
         pending_json = json.dumps([_fmt(t) for t in pending], indent=2)
         completed_titles = [t.get("title", "") for t in completed]
@@ -508,12 +529,25 @@ class Prompts:
             '"title": "...", "description": "..."}\n'
             "      — fold each source's lineage into the target; sources close\n"
             '  {"op": "split", "id": "<existing-id>", "children": '
-            '[{"title": "...", "description": "..."}, ...]}\n'
+            '[{"title": "...", "description": "...", '
+            '"invariant": "..."}, ...]}\n'
             "      — close the source and spawn N children inheriting its lineage\n"
             '  {"op": "new", "title": "...", "description": "...", '
-            '"type": "spec"}\n'
+            '"type": "spec", "invariant": "..."}\n'
             "      — create a brand-new task (fresh id assigned by the runtime)\n"
             "\n"
+            "One invariant per task (HOL-12 / #1906) — every ``new`` op and "
+            "every ``split`` child MUST carry a one-line ``invariant``: the "
+            "single property the resulting commit will establish (a Rocq "
+            "lemma name, a Python assertion, a CI rule that starts failing, "
+            "or one behavioural change the reviewer can verify in isolation).  "
+            "If you can't name one invariant for a proposed task, the task "
+            "is too big — split it into multiple ``new`` ops, one per "
+            'invariant.  Examples: "rescope ops are typed values, not raw '
+            'dicts" / "no_op verdicts produce SKIPPED marker tasks" / '
+            '"comment-stream backlog drains before next webhook".  Counter-'
+            'examples (too broad): "refactor the rescope reducer" / "fix '
+            'all the bugs from PR review" / "improve test coverage".\n\n'
             "Provenance — every op above accepts an optional "
             '"contributing_intents": [<intent comment_id>, ...] field listing '
             "the change-request comment ids from the intents block above that "
@@ -585,17 +619,32 @@ class Prompts:
         Parses via :func:`fido.tasks._parse_rescope_verdicts`; on
         errors, retries via :meth:`rescope_verdicts_parse_nudge`.
         """
-        pending = [t for t in task_list if t.get("status") != "completed"]
+        # Same SKIPPED exclusion as the operations-envelope rescope
+        # above — SKIPPED markers are terminal lineage records, not
+        # active work for Opus to re-process (Rob review on PR #1932).
+        pending = [
+            t for t in task_list if t.get("status") not in ("completed", "skipped")
+        ]
         completed = [t for t in task_list if t.get("status") == "completed"]
 
         def _fmt(t: dict[str, Any]) -> dict[str, Any]:
-            return {
+            out: dict[str, Any] = {
                 "id": t.get("id", ""),
                 "type": t.get("type", "spec"),
                 "status": t.get("status", "pending"),
                 "title": t.get("title", ""),
                 "description": t.get("description", ""),
             }
+            # HOL-8 / #1902: render narrative_chain so Opus sees the
+            # history of verdicts that touched this task across prior
+            # rescopes — lets the next-rescope reasoning explain WHY
+            # each task got the work it has (and not just the current
+            # title/description).  Omitted when empty so the prompt
+            # stays compact for fresh tasks.
+            chain = t.get("narrative_chain") or []
+            if chain:
+                out["narrative_chain"] = chain
+            return out
 
         pending_json = json.dumps([_fmt(t) for t in pending], indent=2)
         completed_titles = [t.get("title", "") for t in completed]
@@ -660,26 +709,31 @@ class Prompts:
             '    "ops": [<op record>, ...],\n'
             '    "affected_task_ids": ["<task-id>", ...],\n'
             '    "by_intent_comment_id": <int | null>,\n'
-            '    "narrative": "<prose explanation>" | null\n'
+            '    "narrative": "<prose explanation>"   // REQUIRED on every outcome (HOL-3 / #1897)\n'
             "  }\n\n"
             "Outcome semantics (drives whether INV-E posts a follow-up "
             "reply-back):\n"
             "  honored    — ops fulfill the intent as asked.  Triage "
-            "already replied, no follow-up.\n"
+            "already replied, no follow-up.  Narrative still REQUIRED — "
+            "it lands in the per-task narrative chain so future rescopes "
+            "see why each task got the work it has.\n"
             "  reshaped   — ops fulfill part of the intent, framing "
             "changed (e.g. split into prereq + feature).  Material — "
-            "reply-back required.  Narrative MUST be non-empty.\n"
+            "reply-back required.  Narrative REQUIRED.\n"
             "  superseded — another intent in this batch overrode this "
             "one in whole or part.  Set ``by_intent_comment_id`` to "
             "the winning intent's comment id.  Material when authors "
             "differ; self-correction (no reply) when same author.  "
-            "Narrative MUST be non-empty.  ``ops`` may be non-empty "
+            "Narrative REQUIRED.  ``ops`` may be non-empty "
             'for *partial* supersedence (e.g. "paint and make it '
             'red" → "no, green": keep the paint op, supersede only '
             "the color component).\n"
             "  no_op      — intent acknowledged but produces no task "
             "changes (chat ack, or request already satisfied).  ``ops`` "
-            "and ``affected_task_ids`` MUST be empty.\n\n"
+            "and ``affected_task_ids`` MUST be empty.  Narrative "
+            "REQUIRED — the user's request is being dropped, so the "
+            "reason has to land in the reply-back; without a narrative "
+            "we'd silently drop the ask (PR #1890 / HOL-3).\n\n"
             "Op schema (each entry of a verdict's ``ops`` array):\n"
             '  {"op": "keep", "id": "<existing-id>"}\n'
             "      — leave the task unchanged\n"
@@ -696,12 +750,25 @@ class Prompts:
             '"title": "...", "description": "..."}\n'
             "      — fold each source's lineage into target; sources close\n"
             '  {"op": "split", "id": "<existing-id>", "children": '
-            '[{"title": "...", "description": "..."}, ...]}\n'
+            '[{"title": "...", "description": "...", '
+            '"invariant": "..."}, ...]}\n'
             "      — close the source and spawn N children inheriting its lineage\n"
             '  {"op": "new", "title": "...", "description": "...", '
-            '"type": "spec"}\n'
+            '"type": "spec", "invariant": "..."}\n'
             "      — create a brand-new task (fresh id assigned by the runtime)\n"
             "\n"
+            "One invariant per task (HOL-12 / #1906) — every ``new`` op and "
+            "every ``split`` child MUST carry a one-line ``invariant``: the "
+            "single property the resulting commit will establish (a Rocq "
+            "lemma name, a Python assertion, a CI rule that starts failing, "
+            "or one behavioural change the reviewer can verify in isolation).  "
+            "If you can't name one invariant for a proposed task, the task "
+            "is too big — split it into multiple ``new`` ops, one per "
+            'invariant.  Examples: "rescope ops are typed values, not raw '
+            'dicts" / "no_op verdicts produce SKIPPED marker tasks" / '
+            '"comment-stream backlog drains before next webhook".  Counter-'
+            'examples (too broad): "refactor the rescope reducer" / "fix '
+            'all the bugs from PR review" / "improve test coverage".\n\n'
             "Constraints:\n"
             "1. Exactly one verdict per intent (no missing, no duplicates).\n"
             "2. ``by_intent_comment_id`` must reference another intent in this "
@@ -753,8 +820,7 @@ class Prompts:
             '    "ops": [<op>, ...],\n'
             '    "affected_task_ids": ["<task-id>", ...],\n'
             '    "by_intent_comment_id": <int | null — only when superseded>,\n'
-            '    "narrative": "<prose>" | null '
-            "(required when reshaped/superseded)\n"
+            '    "narrative": "<prose>"                 // REQUIRED on every outcome\n'
             "  }\n\n"
             "Op schema (recap):\n"
             '  {"op": "keep", "id": "<existing-id>"}\n'
@@ -895,6 +961,34 @@ class Prompts:
             "as asked: no JSON, no markdown, no preamble."
         )
 
+    def critic_system_prompt(
+        self,
+        issue: ActiveIssue | None = None,
+        pr: ActivePR | None = None,
+    ) -> str:
+        """Return the JSON-capable system prompt for Layer 2 critic turns
+        (HOL-15..HOL-19 / #1894).
+
+        Shares the persona and active-work framing with the main
+        synthesis turn so the agent stays anchored, but anti-instructs
+        the plain-text directive that
+        :meth:`synthesis_followup_system_prompt` carries — every
+        critic emits a JSON verdict envelope and the followup prompt's
+        "no JSON" rule directly contradicts that (codex r3293399801 /
+        r3293399806 on PR #1932: critics that used the followup prompt
+        silently failed open because the model honored "no JSON" and
+        the parser found no envelope).
+        """
+        return (
+            f"{self._synthesis_base_system_prompt(issue, pr)}"
+            "You are in a Layer 2 critic turn — a brief verdict on "
+            "an LLM emission (intent coverage, task creation, task "
+            "completion, reply prose, or insight filing).  Answer "
+            "with exactly ONE JSON object on one line matching the "
+            "envelope the user prompt names — no preamble, no markdown "
+            "fence, no trailing text."
+        )
+
     def _synthesis_base_system_prompt(
         self,
         issue: ActiveIssue | None,
@@ -986,6 +1080,421 @@ class Prompts:
             '("I\'ll", "I will", "I\'m going to") are reserved for replies '
             "where change_request is also populated.\n\n"
             "Respond with ONLY the JSON object.  No text before or after it."
+        )
+
+    def intent_coverage_critic_prompt(
+        self,
+        comment_body: str,
+        reply_text: str,
+        change_request: str | None,
+    ) -> str:
+        """Build the HOL-15 / #1909 critic prompt.
+
+        Asks the model to verify intent-coverage of a synthesis response
+        in **both** directions:
+        - missing: the prose promises something the change request
+          doesn't capture (work will be missed — #1862's shape).
+        - invented: the prose claims to do something the comment
+          didn't actually ask for (invented promise).
+        - mismatched: the change request is too narrow vs the comment's
+          actual ask.
+
+        Returns a fixed JSON envelope so the caller can parse with one
+        shape regardless of which axis tripped::
+
+            {"passed": true}
+            {"passed": false, "gap": "<one-line description>"}
+
+        The bare Yes/No verification turn (legacy ``_check_and_promote``,
+        #1218) only catches the "missing change_request" axis; this
+        broader critic catches inventions and mismatches too.
+        """
+        cr_block = (
+            change_request
+            if change_request and change_request.strip()
+            else "(none — no work queued)"
+        )
+        return (
+            "You wrote a reply to a PR comment.  Verify intent-coverage.\n\n"
+            "ORIGINAL COMMENT:\n"
+            f"{comment_body}\n\n"
+            "YOUR REPLY (the prose you proposed to post):\n"
+            f"{reply_text}\n\n"
+            "REGISTERED CHANGE REQUEST "
+            "(what you queued as actionable work, or none):\n"
+            f"{cr_block}\n\n"
+            "QUESTION: Do the registered change request + your reply "
+            "prose faithfully cover this comment, with no invented "
+            "promises and no missing work?\n\n"
+            "A pass requires ALL of:\n"
+            "  - missing: every action your prose promises is captured by "
+            "the change request (or already done — describe completed work "
+            "in past tense without a change request).\n"
+            "  - invented: your prose claims only what the comment actually "
+            "asked for; you did not invent a promise the commenter did "
+            "not request.\n"
+            "  - mismatched: the change request scope matches what the "
+            "comment is asking for (not narrower, not broader).\n\n"
+            "Reply with ONLY one JSON object on one line:\n"
+            '  {"passed": true}\n'
+            "OR\n"
+            '  {"passed": false, "gap": "<one-line description of what '
+            'is missing, invented, or mismatched>"}\n\n'
+            "No other text before or after the JSON."
+        )
+
+    def task_creation_critic_prompt(
+        self,
+        proposed_task: dict[str, Any],
+        current_queue: list[dict[str, Any]],
+    ) -> str:
+        """Build the HOL-16 / #1910 critic prompt.
+
+        Per-``new``-op critic that asks Opus to verdict a proposed new
+        task against the current queue along two axes:
+
+        - **Relationship**: ``distinct`` (genuinely new), ``duplicate_of``
+          (already exists), or ``supersedes`` (replaces an existing task).
+        - **Scope**: ``single`` (one statable invariant — HOL-12 contract)
+          or ``multi`` (proposed task spans multiple invariants and
+          should be fanned out into ``proposed_splits``).
+
+        Verdict JSON shape::
+
+            {
+              "relationship": "distinct" | "duplicate_of" | "supersedes",
+              "duplicate_of_id": "<task-id>" | null,
+              "supersedes_id": "<task-id>" | null,
+              "scope": "single" | "multi",
+              "proposed_splits": [
+                {"title": "...", "description": "...", "invariant": "..."}
+              ],
+              "rationale": "<one-line plain English>"
+            }
+
+        ``duplicate_of``/``supersedes`` triggers a drop; ``multi`` triggers
+        a fan-out into the proposed splits.  ``distinct`` + ``single``
+        passes through.  See ``fido.tasks._apply_task_creation_critics``
+        for the wiring.
+        """
+
+        def _fmt_queue_entry(t: dict[str, Any]) -> str:
+            tid = t.get("id", "?")
+            title = t.get("title", "")
+            desc = t.get("description", "") or ""
+            invariant = t.get("invariant", "") or ""
+            line = f'  - id={tid}: "{title}"'
+            if desc:
+                line += f"\n    description: {desc}"
+            if invariant:
+                line += f"\n    invariant: {invariant}"
+            return line
+
+        if current_queue:
+            queue_block = "\n".join(_fmt_queue_entry(t) for t in current_queue)
+        else:
+            queue_block = "  (queue is empty)"
+
+        proposed_title = proposed_task.get("title", "")
+        proposed_description = proposed_task.get("description", "") or ""
+        proposed_invariant = proposed_task.get("invariant", "") or ""
+        proposed_block = f"  title:       {proposed_title}"
+        if proposed_description:
+            proposed_block += f"\n  description: {proposed_description}"
+        if proposed_invariant:
+            proposed_block += f"\n  invariant:   {proposed_invariant}"
+
+        return (
+            "You proposed a NEW task to add to a pull request's work "
+            "queue.  Verify it against the existing queue along TWO "
+            "axes.\n\n"
+            "CURRENT QUEUE (existing tasks Opus already knows about):\n"
+            f"{queue_block}\n\n"
+            "PROPOSED NEW TASK:\n"
+            f"{proposed_block}\n\n"
+            "QUESTION: Does this proposed task belong in the queue as a "
+            "distinct, single-invariant new entry — or is it a duplicate, "
+            "a supersession, or too broad?\n\n"
+            "Axis 1 — RELATIONSHIP to existing queue:\n"
+            '  "distinct"      — genuinely new work, no existing task '
+            "covers it.\n"
+            '  "duplicate_of"  — an existing task already covers this '
+            "scope; the new task is redundant.  Set "
+            "``duplicate_of_id`` to the existing task id.\n"
+            '  "supersedes"    — the new task replaces an existing task '
+            "whose scope has shifted.  Set ``supersedes_id`` to the "
+            "existing task id.\n\n"
+            "Axis 2 — SCOPE (one invariant per task, HOL-12 contract):\n"
+            '  "single"  — the task establishes one statable property '
+            "(a Rocq lemma, a Python assertion, a CI rule that starts "
+            "failing, or one behavioural change a reviewer can verify "
+            "in isolation).\n"
+            '  "multi"   — the task spans multiple invariants and should '
+            "be fanned out.  Populate ``proposed_splits`` with one entry "
+            "per child invariant, each carrying its own ``title`` / "
+            "``description`` / ``invariant``.\n\n"
+            "Reply with ONLY one JSON object on one line:\n"
+            "  {\n"
+            '    "relationship": "distinct" | "duplicate_of" | "supersedes",\n'
+            '    "duplicate_of_id": "<task-id>" | null,\n'
+            '    "supersedes_id": "<task-id>" | null,\n'
+            '    "scope": "single" | "multi",\n'
+            '    "proposed_splits": [\n'
+            '      {"title": "...", "description": "...", "invariant": "..."}\n'
+            "    ],\n"
+            '    "rationale": "<one-line plain English>"\n'
+            "  }\n\n"
+            "No other text before or after the JSON."
+        )
+
+    def task_completion_critic_prompt(
+        self,
+        task_invariant: str,
+        task_description: str,
+        diff: str,
+    ) -> str:
+        """Build the HOL-17 / #1911 critic prompt.
+
+        Runs after the worker emits ``commit-task-complete`` and the
+        harness has staged + committed.  Asks Opus to verify the
+        committed diff against the task's named invariant:
+
+          - **establishes**: does the diff actually establish the
+            invariant?  (Catches PR #1858's "13 tasks marked complete
+            without any code change" pattern — empty diff, claimed done.)
+          - **only**: does the diff do ONLY that work?  (Catches
+            scope-creep where a fix invariant pulls in unrelated
+            refactors / dependency bumps / drive-by cleanups.)
+
+        Verdict JSON shape::
+
+            {
+              "passed": true,
+              "rationale": "<one-line>"
+            }
+            OR
+            {
+              "passed": false,
+              "gap": "<one-line description of what's missing or
+                      out-of-scope>",
+              "rationale": "<longer prose>"
+            }
+
+        On ``passed=false`` the worker handler resets the commit
+        (``git reset --soft HEAD~1`` — changes stay staged), marks the
+        task back to ``in_progress``, appends the gap to the task
+        description, and the worker re-picks next cycle.
+        """
+        invariant_block = task_invariant or "(no invariant declared)"
+        description_block = task_description or "(no description)"
+        diff_block = diff.strip() or "(empty diff)"
+        return (
+            "You declared a task complete and committed a diff.  Verify "
+            "the diff against the named invariant along TWO axes.\n\n"
+            "TASK INVARIANT (the single property this commit should "
+            "establish — HOL-12 contract):\n"
+            f"  {invariant_block}\n\n"
+            "TASK DESCRIPTION (full context for the task):\n"
+            f"{description_block}\n\n"
+            "COMMITTED DIFF (everything in the just-landed commit):\n"
+            f"{diff_block}\n\n"
+            "QUESTION: Did the diff establish the named invariant — and "
+            "only that invariant?\n\n"
+            "A pass requires BOTH of:\n"
+            "  - establishes: the diff makes the invariant true.  An "
+            "empty diff or a diff that doesn't touch the invariant's "
+            "subject is a fail (closes PR #1858's empty-commit pattern).\n"
+            "  - only: the diff does ONLY the named work.  Unrelated "
+            "refactors, dependency bumps, drive-by cleanups, or work "
+            "that belongs to a different invariant are scope-creep and "
+            "fail this axis.  An exception: trivial co-changes that the "
+            "invariant work demands (e.g. import additions, format "
+            "tweaks the formatter mandates) are part of the invariant, "
+            "not scope-creep.\n\n"
+            "Reply with ONLY one JSON object on one line:\n"
+            '  {"passed": true, "rationale": "<one-line>"}\n'
+            "OR\n"
+            '  {"passed": false, "gap": "<what is missing or '
+            'out-of-scope>", "rationale": "<longer prose>"}\n\n'
+            "No other text before or after the JSON."
+        )
+
+    def reply_prose_claim_grounding_prompt(
+        self,
+        reply_text: str,
+        structured_state: dict[str, Any],
+    ) -> str:
+        """Build the HOL-18 / #1912 critic prompt.
+
+        Fires at every reply prose emission — triage replies,
+        material-divergence replies, terminal aggregate replies — to
+        verify the prose's specific claims (commit SHAs, issue/PR
+        numbers, file paths, "I filed issue #N", "the work is in
+        commit ABC") match the structured state the caller knows is
+        true.
+
+        Closes #1855 at the prose-verification layer (insights filed
+        with no URL claimed) and PR #1858's "the work is in a recent
+        commit" lies (prose claiming a SHA that wasn't in git).
+
+        ``structured_state`` is a dict of ground-truth references the
+        caller has gathered.  Recognised keys:
+
+          * ``recent_commit_shas``: list[str] of SHAs known to exist in
+            the local repo.
+          * ``open_issue_numbers``: list[int] of issue/PR numbers known
+            to exist in the repo.
+          * ``filed_insights``: list[{title, number, url}] of insights
+            filed in this turn (#1855's anchor).
+          * ``referenced_files``: list[str] of file paths the LLM may
+            cite as touched/created/modified by the work.
+
+        Verdict JSON shape::
+
+            {"passed": true, "rationale": "<one-line>"}
+            OR
+            {"passed": false,
+             "gap": "<one-line description of the unverified claim>",
+             "rationale": "<longer prose>"}
+        """
+
+        def _fmt(value: object) -> str:
+            if isinstance(value, list) and not value:
+                return "(none)"
+            return json.dumps(value, indent=2)
+
+        recent_shas = structured_state.get("recent_commit_shas", [])
+        open_issues = structured_state.get("open_issue_numbers", [])
+        filed_insights = structured_state.get("filed_insights", [])
+        referenced_files = structured_state.get("referenced_files", [])
+        ground_truth_block = (
+            "GROUND TRUTH (every claim must map to one of these):\n"
+            f"  recent_commit_shas: {_fmt(recent_shas)}\n"
+            f"  open_issue_numbers: {_fmt(open_issues)}\n"
+            f"  filed_insights: {_fmt(filed_insights)}\n"
+            f"  referenced_files: {_fmt(referenced_files)}"
+        )
+        return (
+            "You wrote a reply.  Verify every specific claim in the "
+            "prose against the ground truth below.\n\n"
+            f"REPLY PROSE:\n{reply_text}\n\n"
+            f"{ground_truth_block}\n\n"
+            "QUESTION: Does every specific claim in the prose — every "
+            "commit SHA, every ``#NN`` issue/PR reference, every "
+            "``commit ABC``, every ``I filed`` / ``the work is in`` "
+            "claim, every file path the prose attributes to this work "
+            "— map to an entry in the ground truth above?\n\n"
+            "A pass requires ALL of:\n"
+            "  - commit claims: when ``recent_commit_shas`` is non-empty, "
+            "every SHA the prose names matches an entry as a PREFIX (the "
+            "prose's SHA must be a leading substring of one of the listed "
+            "SHAs, OR be a known abbreviated form of one — git's "
+            "abbreviations vary by repo size so accept any 4-to-40 char "
+            "hex prefix that uniquely identifies a listed full SHA).  "
+            "Catches PR #1858's empty-commit lies while accepting both "
+            "the full ``%H`` form and short ``%h`` abbreviations.  If "
+            "``recent_commit_shas`` is empty, the caller hasn't gathered "
+            "commit ground truth — this axis passes by default rather "
+            "than rejecting every commit mention.\n"
+            "  - issue/PR claims: when ``open_issue_numbers`` OR "
+            "``filed_insights`` is non-empty, every ``#NN`` or ``filed "
+            "issue`` claim must appear in one of them (closes #1855 at "
+            "the prose-verification layer).  If BOTH are empty, the "
+            "caller hasn't gathered issue ground truth — this axis "
+            "passes by default rather than rejecting normal #NN mentions.\n"
+            "  - file claims: file paths the prose attributes to this "
+            "work appear in ``referenced_files`` (or, if the structured "
+            "state is silent on files, this axis passes by default).\n\n"
+            "Generic claims (no specific SHA / number / path) pass — "
+            "this critic only catches falsifiable specifics, not "
+            "qualitative prose.\n\n"
+            "Reply with ONLY one JSON object on one line:\n"
+            '  {"passed": true, "rationale": "<one-line>"}\n'
+            "OR\n"
+            '  {"passed": false, "gap": "<the unverified claim>", '
+            '"rationale": "<longer>"}\n\n'
+            "No other text before or after the JSON."
+        )
+
+    def insight_dedup_critic_prompt(
+        self,
+        proposed_insight: dict[str, str],
+        recent_insights: list[dict[str, str]],
+    ) -> str:
+        """Build the HOL-19 / #1913 insight-filing critic prompt.
+
+        Layer-2 gate that runs AFTER the cheap per-comment idempotency
+        marker check in ``_GitHubInsightFiler.file_insight`` and BEFORE
+        the GitHub issue is created.  Asks Opus whether the proposed
+        insight is a near-duplicate of any recently-filed insight,
+        catching cross-comment near-duplicates the per-comment marker
+        can't see.
+
+        ``proposed_insight`` carries ``title``, ``hook``, ``why`` —
+        the fields that will land in the issue body.
+        ``recent_insights`` is a list of ``{title, body, url}`` dicts
+        for previously filed insights (typically the last 30 open
+        ``Insight``-labelled issues, sorted newest-first by the caller).
+
+        Verdict JSON shape::
+
+            {"is_duplicate": false, "rationale": "<one-line>"}
+            {"is_duplicate": true, "duplicate_url": "<URL of dup>",
+             "rationale": "<one-line>"}
+
+        ``duplicate_url`` MUST be set when ``is_duplicate=true`` so the
+        filer can log a pointer to the existing insight.  When the
+        ``recent_insights`` list is empty the model still must reply —
+        any insight is non-duplicate by default in that case.
+        """
+
+        def _fmt(entry: dict[str, str]) -> str:
+            title = entry.get("title", "").strip()
+            body = (entry.get("body", "") or "").strip()
+            url = entry.get("url", "")
+            # Keep each entry compact — the model only needs enough to
+            # judge near-duplicate, not the full body.  Cap the body at
+            # 400 chars so a single oversized insight can't crowd out
+            # the rest of the comparison set.
+            if len(body) > 400:
+                body = body[:400] + "…"
+            return f"  - {url}\n    title: {title}\n    body: {body}"
+
+        if recent_insights:
+            recent_block = "\n".join(_fmt(e) for e in recent_insights)
+        else:
+            recent_block = "  (none — no recent insights to compare against)"
+        proposed_title = proposed_insight.get("title", "").strip()
+        proposed_hook = proposed_insight.get("hook", "").strip()
+        proposed_why = (proposed_insight.get("why", "") or "").strip()
+        return (
+            "You proposed filing a new insight issue.  Verify it is "
+            "not a near-duplicate of an insight already on file.\n\n"
+            "PROPOSED INSIGHT:\n"
+            f"  title: {proposed_title}\n"
+            f"  hook: {proposed_hook}\n"
+            f"  why: {proposed_why}\n\n"
+            "RECENT FILED INSIGHTS (newest first):\n"
+            f"{recent_block}\n\n"
+            "QUESTION: Is the proposed insight a near-duplicate of any "
+            "of the recent filed insights above?  Two insights are "
+            "near-duplicates when they make the SAME core claim — the "
+            "lesson learned, the invariant noticed, or the surprise "
+            "reported — even if the wording, the example given, or the "
+            "linked source differs.  Different angles on the same "
+            "underlying point ARE duplicates.  Different points that "
+            "happen to share vocabulary are NOT.\n\n"
+            "Pass (is_duplicate=false) requires: the proposed insight's "
+            "core claim does not appear in the recent list.  When the "
+            "recent list is empty, every proposal passes by default.\n\n"
+            "Reply with ONLY one JSON object on one line:\n"
+            '  {"is_duplicate": false, "rationale": "<one-line>"}\n'
+            "OR\n"
+            '  {"is_duplicate": true, '
+            '"duplicate_url": "<URL of the recent insight it duplicates>", '
+            '"rationale": "<one-line — which prior insight and why it '
+            'is the same core claim>"}\n\n'
+            "No other text before or after the JSON."
         )
 
     def synthesis_failure_explanation_prompt(self, comment_body: str) -> str:

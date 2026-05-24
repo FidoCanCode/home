@@ -56,6 +56,14 @@ Definition harness_commit_decision (o : TurnOutcome) (env : GitEnv) : CommitResu
   match o with
   | SkipTaskWithReason reason   => CommitSkipped reason
   | StuckOnTask reason          => CommitSkipped reason
+  | SplitTask reason            => CommitSkipped reason
+    (* HOL-13 / #1907: [SplitTask] is non-commit like [StuckOnTask] —
+       the LLM declared the task scope exceeds one invariant, so no
+       working-tree changes belong on this commit.  Reusing
+       [CommitSkipped] keeps the commit-decision branch trivial; the
+       branch that distinguishes "park for re-decomposition" from
+       "park as BLOCKED" lives upstream in the worker handler, not
+       inside the commit decision. *)
   | CommitTaskComplete _
   | CommitTaskInProgress _      =>
       if negb (has_staged env) then
@@ -138,6 +146,7 @@ Lemma non_commit_is_skipped :
 Proof.
   intros o env H.
   destruct o; simpl in *; try discriminate.
+  - exists reason. reflexivity.
   - exists reason. reflexivity.
   - exists reason. reflexivity.
 Qed.

@@ -17,6 +17,15 @@ class TaskStatus(StrEnum):
     COMPLETED = "completed"
     IN_PROGRESS = "in_progress"
     BLOCKED = "blocked"
+    # SKIPPED (HOL-5 / #1899): marker status for tasks created from
+    # ``no_op`` rescope verdicts.  Carries the verdict narrative so the
+    # requestor's "why was my ask dropped?" question has an answer on
+    # the queue; treated as terminal by the picker (never picked,
+    # never blocks) but distinct from COMPLETED so the PR-body
+    # formatter can render it under its own "Skipped" block (HOL-7).
+    # See PR #1890 for the no_op-silent-drop failure that motivated
+    # this status, and epic #1894 for the broader gate architecture.
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
@@ -183,11 +192,14 @@ class IntentVerdict:
         prove this in Rocq; runtime asserts here).
     narrative:
         Opus's prose explanation of what happened.  Verbatim source
-        for the optional reply-back posted by INV-E (#1803) —
-        per the project memory ``voice_text_opus_not_templated``,
+        for the reply-back posted by INV-E (#1803) and the per-task
+        narrative chain Opus reads on subsequent rescopes (#1894
+        HOL-8) — per the project memory ``voice_text_opus_not_templated``,
         Fido-voice text is per-call Opus prose, not templated.
-        Required when ``outcome`` is ``reshaped`` or ``superseded``
-        (reply-back needs prose); optional otherwise.
+        Required on every outcome (HOL-3 / #1897): without a
+        narrative on ``honored`` and ``no_op`` verdicts the per-task
+        lineage loses history and the no_op-silent-drop pattern can
+        recur (PR #1890).
     """
 
     intent_comment_id: int
@@ -336,13 +348,12 @@ class IntentVerdict:
                 "supersedence pointer (codex P2 on #1802: reject contradictory "
                 "metadata at the boundary)"
             )
-        if (
-            self.outcome in ("reshaped", "superseded")
-            and not (self.narrative or "").strip()
-        ):
+        if not (self.narrative or "").strip():
             raise ValueError(
                 f"IntentVerdict outcome={self.outcome!r} requires non-empty "
-                "narrative — reply-back posts narrative verbatim per "
+                "narrative on every outcome (HOL-3 / #1897) — the per-task "
+                "narrative chain (#1894 HOL-8) accumulates every verdict's "
+                "narrative and Fido-voice reply-back posts it verbatim per "
                 "the voice-text-opus-not-templated convention"
             )
         if self.outcome == "no_op" and (self.ops or self.affected_task_ids):

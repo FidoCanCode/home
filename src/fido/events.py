@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from fido.config import Config, RepoConfig
+from fido.critics import (
+    INSIGHT_REPO,
+    InsightDedupVerdict,
+    run_insight_dedup_critic,
+)
 from fido.github import GitHub
 from fido.prompts import NO_TOOLS_CLAUSE, Prompts
 from fido.provider import (
@@ -37,6 +42,7 @@ from fido.store import (
 )
 from fido.synthesis import Insight
 from fido.synthesis_call import (
+    SynthesisCriticExhaustedError,
     SynthesisExhaustedError,
     call_failure_explanation,
     call_synthesis,
@@ -106,30 +112,76 @@ class _BackgroundRescopeTrigger:
         )
 
 
-_INSIGHT_REPO = "FidoCanCode/home"
+_INSIGHT_REPO = INSIGHT_REPO
 _INSIGHT_LABEL = "Insight"
+
+
+_INSIGHT_RECENT_LIMIT = 30
 
 
 class _GitHubInsightFiler:
     """InsightFiler implementation that creates GitHub issues on :data:`_INSIGHT_REPO`.
 
-    Idempotent: before filing, searches for an existing issue carrying the
-    ``<!-- insight-source: {comment_id} -->`` marker in its body.  If one is
-    found the filing is skipped so replaying the same comment never creates
-    duplicate insights.
+    Two-layer dedup:
+
+    1. **Per-comment idempotency marker** — the cheap path.  Every
+       insight body carries ``<!-- insight-source: {comment_id} -->``;
+       a GitHub search for that marker catches same-comment replays
+       (e.g. the same webhook re-delivered, or a comment re-processed
+       after a worker restart).
+    2. **Cross-comment near-duplicate critic (HOL-19 / #1913)** — the
+       slow path.  Runs Opus over the proposed insight plus the
+       recent ``Insight``-labelled issues; skips filing when the
+       critic verdicts ``is_duplicate=true``.  Fail-open: a critic
+       transport/parse failure proceeds to file (the marker check
+       still prevents the dumbest duplicates).
+
+    The critic dependencies are optional so legacy call sites without
+    an agent (and the bulk of the existing tests) still file
+    unchanged.  Production wiring in ``Dispatcher`` passes the live
+    agent + prompts so the critic actually runs.
     """
 
-    def __init__(self, gh: GitHub) -> None:
+    def __init__(
+        self,
+        gh: GitHub,
+        *,
+        agent: ProviderAgent | None = None,
+        prompts: Prompts | None = None,
+        critic_system_prompt: str | None = None,
+    ) -> None:
+        # All three of agent / prompts / critic_system_prompt are
+        # required for the HOL-19 critic to fire.  If any is None the
+        # critic is disabled and we fall back to marker-only dedup —
+        # matches the legacy no-critic behaviour for any caller that
+        # hasn't migrated.
         self._gh = gh
+        self._agent = agent
+        self._prompts = prompts
+        self._critic_system_prompt = critic_system_prompt
 
     def file_insight(self, insight: Insight, target: CommentTarget) -> None:
         """File *insight* as a GitHub issue against :data:`_INSIGHT_REPO`.
 
-        Skips creation if an issue with the idempotency marker for
-        *target.comment_id* already exists.
+        Skips creation when EITHER:
+        - The same-comment idempotency marker is already on record (a
+          replay of this exact comment) — looked up in BOTH issue
+          bodies and comments so dedup-skip markers (see below) count.
+        - The HOL-19 critic verdicts the insight as a near-duplicate
+          of a recent filed insight (catches cross-comment duplicates
+          the marker can't see).
+
+        When the dedup critic skips, a durable marker is recorded as a
+        comment on the duplicate-of issue (codex on PR #1932: without
+        this, a later replay + fail-open critic could file the
+        duplicate after all — the marker lookup needs a record of
+        every comment_id we considered, not just the ones we actually
+        filed).
         """
         marker = f"<!-- insight-source: {target.comment_id} -->"
-        existing = self._gh.search_issues(_INSIGHT_REPO, f'"{marker}" in:body is:issue')
+        existing = self._gh.search_issues(
+            _INSIGHT_REPO, f'"{marker}" in:body,comments is:issue'
+        )
         if existing:
             log.info(
                 "insight already filed for comment %d — skipping: %s",
@@ -137,11 +189,206 @@ class _GitHubInsightFiler:
                 existing[0].get("html_url", ""),
             )
             return
+        verdict = self._dedup_critic_verdict(insight)
+        if verdict.is_duplicate:
+            self._record_dedup_skip_marker(verdict, marker, target)
+            log.info(
+                "insight-dedup critic verdicted near-duplicate of %s — "
+                "skipping filing for comment %d: %s",
+                verdict.duplicate_url,
+                target.comment_id,
+                verdict.rationale or "(no rationale)",
+            )
+            return
         source_link = _insight_source_link(target)
         title = f"Insight: {insight.title}"
         body = f"{insight.hook}\n\n{insight.why}\n\nSource: {source_link}\n\n{marker}"
         url = self._gh.create_issue(_INSIGHT_REPO, title, body, labels=[_INSIGHT_LABEL])
         log.info("filed insight issue for comment %d: %s", target.comment_id, url)
+
+    def _record_dedup_skip_marker(
+        self,
+        verdict: InsightDedupVerdict,
+        marker: str,
+        target: CommentTarget,
+    ) -> None:
+        """Post a comment carrying ``marker`` on the duplicate-of issue
+        named by ``verdict.duplicate_url``.
+
+        Without this record, a future webhook replay of the SAME
+        comment + a fail-open critic outcome would find no marker and
+        file the duplicate insight that the critic just rejected.  The
+        comment-body marker plus the ``in:body,comments`` search above
+        closes that race.
+
+        The comment is human-readable too: the GitHub UI shows "Also
+        covered: <source-link>" so a human reviewing the duplicate-of
+        issue can trace back to every source comment that surfaced
+        this insight.
+
+        URL parsing failures are logged and swallowed — we'd rather
+        skip the durable record than crash the synthesis dispatch on
+        a malformed critic URL (the cheap marker check still prevents
+        the next dispatch from filing it; only an actual fail-open
+        replay loses durability).
+        """
+        # Codex on PR #1932 (follow-up): the critic parser in
+        # ``fido.critics`` now requires the duplicate_url to target
+        # ``INSIGHT_REPO`` specifically, so any verdict that reaches
+        # here has a URL the marker regex below will accept.  Use a
+        # hard assertion rather than a fail-open branch — if the two
+        # layers ever drift, surfacing the bug loudly is better than
+        # silently swallowing the durability record.
+        number = _parse_insight_issue_number(verdict.duplicate_url)
+        assert number is not None, (
+            f"InsightDedupVerdict.duplicate_url {verdict.duplicate_url!r} "
+            f"passed the critic parser but failed the marker URL regex — "
+            f"the two validators have drifted"
+        )
+        source_link = _insight_source_link(target)
+        body = f"Also covered: {source_link}\n\n{marker}"
+        # Codex on PR #1932: this marker write is best-effort
+        # bookkeeping at an external-system boundary — a transient
+        # GitHub failure (rate limit, network blip, the target issue
+        # was closed/transferred between the critic's lookup and now,
+        # etc.) must not abort the whole comment-processing flow.
+        # The critic's primary decision (skip filing the duplicate)
+        # is already honoured by the early return above; only the
+        # replay-durability marker is at risk.  Log and continue.
+        try:
+            self._gh.comment_issue(_INSIGHT_REPO, number, body)
+        except Exception as exc:
+            log.warning(
+                "insight-dedup skip-marker write failed (%s) — falling "
+                "open: comment_id=%d, target issue=%s#%d.  Replay could "
+                "still file a duplicate if the critic later fails open.",
+                exc,
+                target.comment_id,
+                _INSIGHT_REPO,
+                number,
+            )
+
+    def _dedup_critic_verdict(self, insight: Insight) -> InsightDedupVerdict:
+        """Run the HOL-19 critic when the agent/prompts collaborators
+        were injected; otherwise return the default pass-through
+        verdict so the legacy no-critic path is preserved exactly.
+        """
+        if (
+            self._agent is None
+            or self._prompts is None
+            or self._critic_system_prompt is None
+        ):
+            return InsightDedupVerdict()
+        recent = self._recent_insights_for_critic()
+        return run_insight_dedup_critic(
+            proposed_insight={
+                "title": insight.title,
+                "hook": insight.hook,
+                "why": insight.why,
+            },
+            recent_insights=recent,
+            agent=self._agent,
+            prompts=self._prompts,
+            critic_system_prompt=self._critic_system_prompt,
+        )
+
+    def _recent_insights_for_critic(self) -> list[dict[str, str]]:
+        """Fetch the most-recent open ``Insight``-labelled issues from
+        :data:`_INSIGHT_REPO`, capped at :data:`_INSIGHT_RECENT_LIMIT`.
+
+        Returns ``[{title, body, url}, ...]`` shaped for the critic
+        prompt formatter.  An empty list is returned when the search
+        yields nothing — the critic prompt treats that as a pass.
+
+        Codex on PR #1932: the search itself is wrapped in fail-open.
+        Without it, a transient ``gh.search_issues`` failure
+        (rate limit, network blip) raised out of ``file_insight`` and
+        aborted the entire dispatch — a flaky GitHub couldn't be
+        allowed to BLOCK legitimate insight filing.  On error, return
+        an empty list so the critic sees "no peers" (and the prompt's
+        "passes by default when recent list is empty" rule lets the
+        insight file normally).
+        """
+        try:
+            # Codex on PR #1932: GitHub issue-search defaults to
+            # best-match ranking, so slicing the first
+            # :data:`_INSIGHT_RECENT_LIMIT` results could omit the
+            # newest insights entirely (and feed stale comparison
+            # examples to the dedup critic, raising false-"distinct"
+            # rates).  Explicit ``sort:created-desc`` makes the
+            # "most recent" claim in the docstring above actually
+            # true.
+            results = self._gh.search_issues(
+                _INSIGHT_REPO,
+                f"label:{_INSIGHT_LABEL} is:issue is:open sort:created-desc",
+            )
+        except Exception as exc:
+            log.warning(
+                "insight-dedup recent-corpus search failed (%s) — "
+                "falling open with empty corpus so the critic doesn't "
+                "block the insight on a flaky GitHub",
+                exc,
+            )
+            return []
+        out: list[dict[str, str]] = []
+        for item in results[:_INSIGHT_RECENT_LIMIT]:
+            out.append(
+                {
+                    "title": str(item.get("title", "")),
+                    "body": str(item.get("body", "") or ""),
+                    "url": str(item.get("html_url", "")),
+                }
+            )
+        return out
+
+
+_INSIGHT_URL_RE = re.compile(
+    r"^https://github\.com/(?P<owner_repo>[^/]+/[^/]+)/issues/"
+    r"(?P<number>\d+)(?:[#/?].*)?$",
+    # Codex on PR #1932: GitHub URLs are case-insensitive on
+    # scheme/host AND owner/repo names, so the marker-write boundary
+    # must use the same case-insensitive match as the critic parser
+    # above.  Otherwise a verdict with ``HTTPS://GITHUB.COM/...``
+    # passes parser validation, the filer skips filing, and this
+    # regex rejects the marker target — silently losing the
+    # durability record.
+    re.IGNORECASE,
+)
+
+
+def _parse_insight_issue_number(url: str) -> int | None:
+    """Extract the issue number from a duplicate insight URL that
+    targets :data:`_INSIGHT_REPO`.
+
+    Returns ``None`` when the URL doesn't end in ``/issues/{NN}`` on
+    that repo specifically (codex on PR #1932: a previous version
+    accepted any ``/issues/{NN}`` URL, so a critic that returned a
+    valid issue URL from a different repo would land the replay
+    marker on the wrong issue in ``FidoCanCode/home``).
+
+    Rejects:
+
+    - non-GitHub URLs (hallucinated by a flaky critic)
+    - PR URLs (``/pull/N``) — we don't comment on PRs from this path
+    - issue URLs targeting any other ``owner/repo``
+    - plain garbage
+
+    Caller treats ``None`` as "skip the durable record" rather than
+    crashing dispatch — the critic's primary decision (skip the
+    filing) is still honoured.
+    """
+    match = _INSIGHT_URL_RE.match(url.strip())
+    if match is None:
+        return None
+    # GitHub owner/repo names are case-insensitive — codex on PR
+    # #1932 flagged that a critic URL like
+    # ``https://github.com/fidocancode/home/issues/123`` was treated
+    # as cross-repo under strict equality, which dropped the durable
+    # skip-marker write and let a later fail-open replay file the
+    # duplicate insight after all.  Normalize both sides.
+    if match.group("owner_repo").lower() != _INSIGHT_REPO.lower():
+        return None
+    return int(match.group("number"))
 
 
 def _insight_source_link(target: CommentTarget) -> str:
@@ -159,6 +406,176 @@ def _insight_source_link(target: CommentTarget) -> str:
         f"https://github.com/{target.repo}/issues/{target.pr}"
         f"#issuecomment-{target.comment_id}"
     )
+
+
+_BUG_REPO = "FidoCanCode/home"
+_BUG_LABEL = "Bug"
+
+
+def _route_critic_exhausted_blocked(
+    exc: "SynthesisCriticExhaustedError",
+    target: CommentTarget,
+    *,
+    gh: GitHub,
+    executor: "SynthesisExecutor",
+    promise_ids: Iterable[str],
+) -> bool:
+    """HOL-20 / #1914: route a critic-exhaustion through the BLOCKED
+    PR mechanism instead of the legacy "please rephrase" fallback.
+
+    Returns ``True`` iff the BLOCKED comment actually landed on
+    GitHub.  Caller acks the covered promises only on ``True`` —
+    codex on PR #1932: swallowing a failed post and then acking
+    would mark the comment "handled" with no visible signal,
+    silently losing the user-facing notice.  Returning ``False``
+    keeps the promises recoverable so the next webhook delivery
+    (or recovery scan) re-fires the route.
+
+    ``promise_ids`` is every covered promise — recovery / queued
+    paths pass in the full set from ``context["reply_promise_id"]``
+    + ``context["reply_promise_ids"]``, direct webhook paths pass
+    just ``direct_promise.promise_id``.  All of them are embedded
+    into the BLOCKED comment body so ``recover_from_bodies`` can
+    dedup against any of them on the next pass.
+
+    Order of operations (codex on PR #1932):
+
+    1. File the bug against :data:`_BUG_REPO` FIRST so the BLOCKED
+       comment's claim of "auto-filed" is grounded in the actual
+       result (URL embedded when filing succeeded; wording softened
+       when it didn't).  Bug filing is best-effort: a transient
+       GitHub error here mustn't block the user-visible BLOCKED
+       comment.
+    2. Build the BLOCKED comment body, embed the reply-promise
+       recovery markers, and post.  This step is the durability
+       boundary — if the post raises, return ``False`` so the
+       promises stay claimed and recovery's ``recover_from_bodies``
+       scan can re-detect the situation.  If the post LANDED but
+       a crash interrupts before ack, the embedded markers let
+       ``recover_from_bodies`` recognise the work as already done
+       and ack the promises (no duplicate BLOCKED comment).
+    3. Remove the eyes reaction — pure UX cleanup, best-effort.
+    """
+    source_link = _insight_source_link(target)
+
+    bug_title = (
+        f"Bug: synthesis {exc.label} critic exhausted "
+        f"on {target.repo}#{target.pr} comment {target.comment_id}"
+    )
+    gap_lines = "\n".join(f"  {i + 1}. {gap}" for i, gap in enumerate(exc.critic_gaps))
+    attempt_lines = "\n".join(
+        f"  {i + 1}. {preview!r}" for i, preview in enumerate(exc.synthesis_attempts)
+    )
+    # Codex on PR #1932: idempotency marker keyed on
+    # ``(critic_label, source_repo, source_pr, source_comment_id)``
+    # so a retry of this route (e.g. comment-post failed and the
+    # promise stayed claimed) doesn't file a SECOND bug for the same
+    # exhaustion.  Without this, transient GitHub failures spamming
+    # ``_BUG_REPO`` with duplicate Bug issues that obscure real
+    # incidents.  Two different critics exhausting on the same
+    # comment file separate bugs (different root causes) because the
+    # label is part of the key.
+    bug_marker = (
+        f"<!-- critic-exhaustion: {exc.label}:"
+        f"{target.repo}#{target.pr}:{target.comment_id} -->"
+    )
+    bug_body = (
+        f"## Critic exhaustion\n\n"
+        f"- Critic: `{exc.label}`\n"
+        f"- Source comment: {source_link}\n"
+        f"- Source repo / PR: `{target.repo}#{target.pr}`\n"
+        f"- Source comment id: `{target.comment_id}`\n"
+        f"- Attempts: {len(exc.synthesis_attempts)}\n\n"
+        f"## Critic gaps (one per attempt)\n\n{gap_lines}\n\n"
+        f"## Synthesis attempts (reply_text preview)\n\n{attempt_lines}\n\n"
+        f"{bug_marker}\n"
+    )
+    bug_url: str | None = None
+    try:
+        existing_bugs = gh.search_issues(_BUG_REPO, f'"{bug_marker}" in:body is:issue')
+    except Exception as search_exc:
+        log.warning(
+            "critic-exhausted route: bug-marker search failed (%s) — "
+            "proceeding to file (may create a duplicate)",
+            search_exc,
+        )
+        existing_bugs = []
+    if existing_bugs:
+        bug_url = existing_bugs[0].get("html_url")
+        log.info(
+            "critic-exhausted route: existing bug found for %s#%d "
+            "comment %d critic=%s — reusing %s",
+            target.repo,
+            target.pr,
+            target.comment_id,
+            exc.label,
+            bug_url,
+        )
+    else:
+        try:
+            bug_url = gh.create_issue(
+                _BUG_REPO, bug_title, bug_body, labels=[_BUG_LABEL]
+            )
+        except Exception as file_exc:
+            log.warning(
+                "critic-exhausted route: failed to auto-file bug for "
+                "%s#%d comment %d (%s) — BLOCKED comment will note the "
+                "filing failure instead of claiming a URL",
+                target.repo,
+                target.pr,
+                target.comment_id,
+                file_exc,
+            )
+
+    if bug_url:
+        filing_line = f"Auto-filed against `{_BUG_REPO}` for follow-up: {bug_url}"
+    else:
+        filing_line = (
+            f"Auto-filing against `{_BUG_REPO}` FAILED — see Fido logs for "
+            f"the full gap chain."
+        )
+    blocked_body = (
+        f"**BLOCKED**: synthesis {exc.label} critic exhausted "
+        f"{len(exc.critic_gaps)} attempts on this comment.\n\n"
+        f"The Layer 2 critic ({exc.label}) repeatedly rejected the "
+        f"triage response.  Final gap from the critic:\n\n"
+        f"> {exc.critic_gaps[-1] if exc.critic_gaps else '(no gap recorded)'}\n\n"
+        f"{filing_line}\n\n"
+        f"See the originating comment: {source_link}"
+    )
+    # Codex on PR #1932: embed every covered reply-promise marker so
+    # a crash between the successful post and the ack doesn't leave
+    # recovery blind.  ``recover_from_bodies`` finds the markers in
+    # the posted comment, recognises the work as done, and acks the
+    # promises — no duplicate BLOCKED comment on the next dispatch.
+    # Plural is essential: queued/recovery paths can carry multiple
+    # promise ids in ``context["reply_promise_ids"]`` for grouped
+    # comments, and ALL of them need to map back to the same posted
+    # comment for dedup to fire on any redelivery.
+    blocked_body = append_reply_promise_markers(blocked_body, promise_ids)
+
+    try:
+        gh.comment_issue(target.repo, target.pr, blocked_body)
+    except Exception as comment_exc:
+        log.warning(
+            "critic-exhausted route: failed to post BLOCKED comment on "
+            "%s#%d (%s) — leaving promise unacked so recovery retries",
+            target.repo,
+            target.pr,
+            comment_exc,
+        )
+        return False
+
+    try:
+        executor.remove_eyes_reaction(target)
+    except Exception as cleanup_exc:
+        log.warning(
+            "critic-exhausted route: failed to remove eyes reaction "
+            "(%s) — BLOCKED comment already landed",
+            cleanup_exc,
+        )
+
+    return True
 
 
 # Per-work_dir coalescing state for Dispatcher.reorder_tasks_background.
@@ -863,6 +1280,46 @@ def _is_allowed(user: str, repo_cfg: RepoConfig, config: Config) -> bool:
     (``server.populate_memberships``) and excludes the bot itself.
     """
     return user in repo_cfg.membership.collaborators or user in config.allowed_bots
+
+
+def _gather_claim_grounding_state(work_dir: Path) -> dict[str, Any]:
+    """HOL-18 / #1912: gather ground-truth state for the reply-prose
+    claim-grounding critic.
+
+    Populates ``recent_commit_shas`` from the last 20 commits on the
+    current branch.  Both the full 40-char form (``%H``) AND the
+    7-char abbreviated form (``%h``) are included because replies
+    routinely cite short SHAs (``commit abc1234``) — the critic needs
+    to find a match for either form (Rob review on PR #1932).
+
+    Returns an empty dict when git is unavailable for any reason —
+    ``OSError`` (and every subclass: FileNotFoundError when git isn't
+    installed, NotADirectoryError when work_dir is a file,
+    PermissionError on locked paths, etc.) is swallowed alongside
+    CalledProcessError (Rob review on PR #1932: the original narrow
+    catch crashed dispatch on the other subclasses instead of
+    degrading).
+
+    Future leaves can extend the returned dict with
+    ``open_issue_numbers`` / ``filed_insights`` / ``referenced_files``
+    as those sources of ground truth become cheap to gather here.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "--pretty=format:%H %h", "-n", "20"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError, OSError:
+        return {}
+    shas: list[str] = []
+    for line in result.stdout.splitlines():
+        for token in line.split():
+            if token:
+                shas.append(token)
+    return {"recent_commit_shas": shas}
 
 
 class Dispatcher:
@@ -1606,7 +2063,14 @@ class Dispatcher:
             else SynthesisExecutor(
                 gh,
                 rescope=rescope_trigger,
-                insight_filer=_GitHubInsightFiler(gh),
+                insight_filer=_GitHubInsightFiler(
+                    gh,
+                    agent=agent,
+                    prompts=prompts,
+                    critic_system_prompt=prompts.critic_system_prompt(
+                        issue=issue_ctx, pr=pr_ctx
+                    ),
+                ),
                 fido_logins=FIDO_LOGINS,
             )
         )
@@ -1634,7 +2098,63 @@ class Dispatcher:
                 pr=pr_ctx,
                 agent=agent,
                 prompts=prompts,
+                # HOL-18 / #1912: ground-truth state for the
+                # reply-prose claim-grounding critic so it can catch
+                # PR #1858's "in commit ABC" lies against actual git.
+                claim_grounding_state=_gather_claim_grounding_state(repo_cfg.work_dir),
             )
+        except SynthesisCriticExhaustedError as critic_exc:
+            # HOL-20 / #1914: critic-exhaustion → BLOCKED PR + auto-file
+            # bug.  Skip the "please rephrase" fallback because the
+            # critic gap is more informative than a generic apology
+            # and we don't want to spam the thread with an LLM-
+            # generated message that the same critic would just
+            # reject again.
+            log.warning(
+                "synthesis %s critic exhausted for comment %s — routing to "
+                "BLOCKED PR + auto-file path",
+                critic_exc.label,
+                info.get("comment_id"),
+            )
+            # Codex on PR #1932: gather promise ids from BOTH the
+            # direct webhook claim AND ``context["reply_promise_id"]``
+            # / ``["reply_promise_ids"]``.  Queued / recovery paths
+            # leave ``direct_promise`` None but carry the actual
+            # promises in context; missing those ids meant the
+            # posted BLOCKED comment carried no marker and recovery
+            # could duplicate the post.
+            covered_promise_ids: list[str] = list(_reply_promise_ids(context))
+            if direct_promise is not None:
+                covered_promise_ids.append(direct_promise.promise_id)
+            posted = False
+            if target is not None:
+                posted = _route_critic_exhausted_blocked(
+                    critic_exc,
+                    target,
+                    gh=gh,
+                    executor=executor,
+                    promise_ids=covered_promise_ids,
+                )
+            if not posted:
+                # Codex on PR #1932: a failed post must propagate so
+                # queued callers (``queue_reply_tasks`` at l.1860 and
+                # the server's direct-webhook caller) hit their
+                # error branch and mark the promises FAILED rather
+                # than acking them silently.  Without the raise, a
+                # queued reply with ``context["reply_promise_id"]``
+                # would get acked unconditionally even though no
+                # BLOCKED comment landed — silently swallowing the
+                # user signal.
+                raise critic_exc
+            # Direct webhook path: ack ``direct_promise`` here since
+            # it's our managed claim (queued/recovery paths have no
+            # direct_promise; their caller handles the ack).
+            if direct_promise is not None:
+                FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
+            # ``BLOCKED`` category signals the caller no action was
+            # taken (no reply, no rescope) — server.py + worker
+            # callers discard the value, so this is informational.
+            return ("BLOCKED", [])
         except SynthesisExhaustedError:
             log.warning(
                 "synthesis exhausted retries for comment %s — falling back to "
@@ -1848,7 +2368,14 @@ class Dispatcher:
             else SynthesisExecutor(
                 gh,
                 rescope=rescope_trigger,
-                insight_filer=_GitHubInsightFiler(gh),
+                insight_filer=_GitHubInsightFiler(
+                    gh,
+                    agent=agent,
+                    prompts=prompts,
+                    critic_system_prompt=prompts.critic_system_prompt(
+                        issue=issue_ctx, pr=pr_ctx
+                    ),
+                ),
                 fido_logins=FIDO_LOGINS,
             )
         )
@@ -1879,7 +2406,39 @@ class Dispatcher:
                 pr=pr_ctx,
                 agent=agent,
                 prompts=prompts,
+                # HOL-18 / #1912: ground-truth state for the
+                # reply-prose claim-grounding critic so it can catch
+                # PR #1858's "in commit ABC" lies against actual git.
+                claim_grounding_state=_gather_claim_grounding_state(repo_cfg.work_dir),
             )
+        except SynthesisCriticExhaustedError as critic_exc:
+            # HOL-20 / #1914: same routing as the review-comment path.
+            log.warning(
+                "synthesis %s critic exhausted for issue comment %s on PR "
+                "#%s — routing to BLOCKED PR + auto-file path",
+                critic_exc.label,
+                _cid,
+                number,
+            )
+            covered_promise_ids = list(_reply_promise_ids(context))
+            if direct_promise is not None:
+                covered_promise_ids.append(direct_promise.promise_id)
+            posted = False
+            if issue_target is not None:
+                posted = _route_critic_exhausted_blocked(
+                    critic_exc,
+                    issue_target,
+                    gh=gh,
+                    executor=executor,
+                    promise_ids=covered_promise_ids,
+                )
+            if not posted:
+                # See the matching raise in the review-comment path
+                # above (Codex on PR #1932).
+                raise critic_exc
+            if direct_promise is not None:
+                FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
+            return ("BLOCKED", [])
         except SynthesisExhaustedError:
             log.warning(
                 "synthesis exhausted retries for issue comment %s on PR #%s — "

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from fido.critics import TaskCompletionVerdict
     from fido.events import Action, Dispatcher
 
 import requests as _requests
@@ -67,6 +68,7 @@ from fido.rocq.commit_result import (
     CommitSuccess,
 )
 from fido.rocq.turn_outcome import (
+    SplitTask,
     StuckOnTask,
 )
 from fido.setup_outcome import NoTasksNeeded, parse_setup_outcome
@@ -929,7 +931,11 @@ def _ci_oracle_task_kind(task: Mapping[str, object]) -> ci_oracle.TaskKind:
 
 def _ci_oracle_task_status(task: Mapping[str, object]) -> ci_oracle.TaskStatus:
     match task.get("status", TaskStatus.PENDING):
-        case TaskStatus.COMPLETED | "completed":
+        case TaskStatus.COMPLETED | "completed" | TaskStatus.SKIPPED | "skipped":
+            # SKIPPED (HOL-5 / #1899) projects to StatusCompleted: the
+            # CI oracle's terminal predicate treats both as "no longer
+            # needs work" so a skipped marker task can't be a barrier
+            # to CI work going first.
             return ci_oracle.StatusCompleted()
         case TaskStatus.BLOCKED | "blocked":
             return ci_oracle.StatusBlocked()
@@ -3351,6 +3357,144 @@ class Worker:
             )
             log.info("filed out-of-scope ask from turn sentinel: %s", ask.title[:60])
 
+    def _run_task_completion_critic(
+        self, task: dict[str, Any], commit_sha: str
+    ) -> "TaskCompletionVerdict":
+        """HOL-17 / #1911: run the task-completion critic on the just-landed
+        commit's diff.
+
+        Returns the parsed verdict (fail-open default ``passed=True`` if
+        the critic is unreachable, malformed, or transport-erroring —
+        matches HOL-15/HOL-16 posture).  Reads the diff via
+        ``git show <sha>`` so the critic sees exactly what landed on
+        disk, not a re-derived approximation.
+        """
+        from fido.critics import run_task_completion_critic
+
+        # ``git show`` on a SHA we just committed is reliable; if it
+        # fails, something is very wrong (corrupt repo, missing HEAD)
+        # and crashing here lets the watchdog restart cleanly rather
+        # than shipping an uncritiqued commit.
+        diff = self._git(["show", "--no-color", commit_sha]).stdout or ""
+        invariant = (task.get("invariant") or "").strip()
+        description = (task.get("description") or "").strip()
+        prompts = self._get_prompts()
+        return run_task_completion_critic(
+            task_invariant=invariant,
+            task_description=description,
+            diff=diff,
+            agent=self._provider_agent,
+            prompts=prompts,
+            # JSON-capable critic system prompt — using
+            # synthesis_followup_system_prompt would tell the model
+            # "no JSON" which silently disables the gate
+            # (codex r3293399801/r3293399806 on PR #1932).
+            critic_system_prompt=prompts.critic_system_prompt(issue=None, pr=None),
+        )
+
+    def _handle_task_completion_critic_failure(
+        self, task: dict[str, Any], gap: str
+    ) -> None:
+        """HOL-17 / #1911: handle a failed task-completion critic verdict.
+
+        Reverses the just-landed commit (``git reset --soft HEAD~1`` —
+        changes remain staged so the worker's next turn sees them),
+        appends the critic gap to the task description so the next
+        worker turn has guidance, and marks the task IN_PROGRESS so
+        the picker re-selects it on the next cycle.
+
+        The reset is destructive on the LOCAL commit only — nothing
+        was pushed yet, so no remote state changes.  The staged
+        changes survive: the worker can refine them, ``git restore
+        --staged`` selected files to drop scope-creep, or amend its
+        approach based on the gap.
+        """
+        log.warning(
+            "task-completion critic FAILED for %s — soft-resetting "
+            "commit, appending gap to description: %s",
+            task["id"],
+            gap,
+        )
+        # ``git reset --soft HEAD~1`` on a SHA we just committed is
+        # equally reliable; same fail-fast rationale as ``git show``
+        # above.  Letting a reset failure crash here surfaces the
+        # corruption rather than papering over it with an in_progress
+        # task that has a phantom commit ahead of upstream.
+        self._git(["reset", "--soft", "HEAD~1"])
+        # Append the critic gap to the task description so the next
+        # worker turn reads it as guidance.  Markdown bullet under a
+        # CRITIC: header keeps existing description content intact.
+        #
+        # Rob review on PR #1932: if a concurrent rescope closed, split,
+        # merged, or removed this task while the critic was running, we
+        # must NOT force the stale row back to in_progress — that would
+        # silently overwrite the rescope's decision.  Only re-park when
+        # the row still exists AND is in a non-terminal status (the
+        # rescope hasn't moved it).  Terminal statuses (COMPLETED,
+        # SKIPPED, BLOCKED) mean the row was claimed by concurrent
+        # work; leave it alone and log the no-op.
+        nonterminal = (
+            str(TaskStatus.PENDING),
+            str(TaskStatus.IN_PROGRESS),
+        )
+        reparked = False
+        repark_target_found = False
+        with self._tasks.modify() as live:
+            for live_task in live:
+                if live_task["id"] != task["id"]:
+                    continue
+                repark_target_found = True
+                current_status = live_task.get("status")
+                if current_status not in nonterminal:
+                    log.warning(
+                        "task-completion critic re-park skipped for %s: "
+                        "concurrent rescope moved it to %r",
+                        task["id"],
+                        current_status,
+                    )
+                    break
+                existing = (live_task.get("description") or "").rstrip()
+                appended = (
+                    f"{existing}\n\nCRITIC: {gap}" if existing else f"CRITIC: {gap}"
+                )
+                live_task["description"] = appended
+                live_task["status"] = str(TaskStatus.IN_PROGRESS)
+                reparked = True
+                break
+        if not repark_target_found:
+            log.warning(
+                "task-completion critic re-park skipped for %s: task no "
+                "longer in queue (concurrent rescope removed it)",
+                task["id"],
+            )
+        # Rob follow-up review on PR #1932: when re-park is skipped
+        # (terminal status OR row removed), the soft-reset above left
+        # the rolled-back commit's changes staged.  Without that
+        # context this becomes an orphan staged diff the NEXT task
+        # would inherit — silently picking up work from a task the
+        # queue no longer intends to run.  Discard it.  ``git reset
+        # --hard HEAD`` resets working tree + index to match the
+        # post-soft-reset HEAD, dropping every change we just rolled
+        # back.  Only fires on the no-repark branches — the normal
+        # re-park path preserves the staged changes for the retry.
+        if not reparked:
+            log.warning(
+                "discarding orphan staged changes from rolled-back commit "
+                "(rescope already moved task %s)",
+                task["id"],
+            )
+            self._git(["reset", "--hard", "HEAD"])
+        # codex r3293424367 on PR #1932: clear ``current_task_id``
+        # after re-parking.  Otherwise a stale "active task" marker
+        # lets ``_maybe_abort_for_new_task`` fire on unrelated incoming
+        # work, which routes through ``_cleanup_aborted_task`` and
+        # calls ``git_clean()`` — destroying the staged changes we
+        # just preserved for the worker's retry turn.  The task is
+        # marked IN_PROGRESS so the picker still resumes it first
+        # next cycle.
+        with self._state.modify() as state:
+            state.pop("current_task_id", None)
+
     def _finish_task(
         self,
         task: dict[str, Any],
@@ -4127,6 +4271,31 @@ class Worker:
                     with self._state.modify() as state:
                         state.pop("current_task_id", None)
                     return True
+                if isinstance(outcome, SplitTask):
+                    # HOL-13 / #1907: LLM picked up the task and declared
+                    # its scope exceeds one statable invariant.  Same
+                    # parking shape as StuckOnTask (BLOCKED + comment,
+                    # current_task_id cleared), but the comment is
+                    # labelled so the next rescope pass (or the human)
+                    # can fan it into invariant-sized children.  The
+                    # "routes to rescope" arrow is via the BLOCKED
+                    # comment text — the next rescope reads the queue,
+                    # sees the labelled marker, and Opus emits a split
+                    # op replacing the parked task with HOL-12-sized
+                    # children.
+                    log.info("task needs re-decomposition: %s", outcome.reason)
+                    self._tasks.update(task["id"], TaskStatus.BLOCKED)
+                    self.gh.comment_issue(
+                        repo_ctx.repo,
+                        pr_number,
+                        (
+                            "BLOCKED (needs re-decomposition — HOL-13): "
+                            f"{outcome.reason}"
+                        ),
+                    )
+                    with self._state.modify() as state:
+                        state.pop("current_task_id", None)
+                    return True
                 helped_by_identities: list[GitIdentity] = []
                 thread_author = thread.get("author")
                 if thread_author:
@@ -4187,6 +4356,34 @@ class Worker:
                         log.info("task pre-commit hook rejected commit — nudging")
                     case cra_oracle.ActionPushAndComplete():
                         assert isinstance(commit_result, CommitSuccess)
+                        # HOL-17 / #1911: task-completion critic.  Verifies
+                        # the just-landed commit against the task's named
+                        # invariant before push.  On fail: ``git reset
+                        # --soft HEAD~1`` to undo the commit (changes stay
+                        # staged), append the gap to the task description,
+                        # mark task IN_PROGRESS so the picker re-selects
+                        # it next cycle, and return without pushing.
+                        completion_verdict = self._run_task_completion_critic(
+                            task, commit_result.sha
+                        )
+                        if not completion_verdict.passed:
+                            self._handle_task_completion_critic_failure(
+                                task, completion_verdict.gap
+                            )
+                            # Rob review on PR #1932: the rolled-back turn
+                            # may have leaked top-level PR comments via the
+                            # LLM's tool calls; delete them on the way out
+                            # so the user doesn't see ghost comments from
+                            # a commit that never shipped.  Same cleanup
+                            # the push-and-complete + BLOCKED-push-failed
+                            # branches already do.
+                            self._delete_leaked_task_comments(
+                                repo_ctx.repo,
+                                pr_number,
+                                repo_ctx.gh_user,
+                                leak_before_ids,
+                            )
+                            return True
                         # Task complete: push and advance the queue.
                         pushed = self._push_with_retry("origin", slug)
                         if pushed:
@@ -4275,13 +4472,18 @@ class Worker:
     def seed_tasks_from_pr_body(self, repo: str, pr_number: int) -> None:
         """Seed tasks.json from the PR body work-queue markers if tasks.json is empty.
 
-        Extracts **both** unchecked (``- [ ] ...``) and checked
-        (``- [x] ...``) task items between ``WORK_QUEUE_START`` and
-        ``WORK_QUEUE_END`` markers.  Unchecked items are added as pending;
-        checked items are added with status=COMPLETED so the downstream
-        "all tasks done → promote the PR" logic can see them (fix for #646 —
-        previously completed items were skipped, and a PR whose work queue
-        held only completed items looked like a fresh PR needing setup).
+        Extracts three checkbox forms between ``WORK_QUEUE_START`` and
+        ``WORK_QUEUE_END`` markers:
+
+        - ``- [ ] ...`` → ``TaskStatus.PENDING``
+        - ``- [x] ...`` → ``TaskStatus.COMPLETED`` (fix for #646 —
+          previously completed items were skipped, and a PR whose work
+          queue held only completed items looked like a fresh PR
+          needing setup)
+        - ``- ⊘ ...`` → ``TaskStatus.SKIPPED`` (HOL-7 / #1901 —
+          marker tasks from ``no_op`` rescope verdicts; treated as
+          terminal so re-seed preserves the "this intent was dropped"
+          record on PR body round-trip)
 
         Lines without a ``<!-- type:X -->`` comment are skipped with a
         warning (e.g. stale multi-line task bodies from older PR bodies).
@@ -4300,41 +4502,74 @@ class Worker:
         )
         if not match:
             return
-        parsed: list[tuple[str, TaskType, TaskStatus]] = []
+        import base64 as _base64
+
+        parsed: list[tuple[str, TaskType, TaskStatus, str]] = []
         for line in match.group(1).splitlines():
-            check = re.match(r"^- \[( |x)\] (.+)$", line)
+            check = re.match(r"^- (\[( |x)\]|⊘) (.+)$", line)
             if not check:
                 continue
-            status = (
-                TaskStatus.COMPLETED if check.group(1) == "x" else TaskStatus.PENDING
-            )
-            rest = check.group(2)
+            marker = check.group(1)
+            if marker == "[x]":
+                status = TaskStatus.COMPLETED
+            elif marker == "⊘":
+                status = TaskStatus.SKIPPED
+            else:
+                status = TaskStatus.PENDING
+            rest = check.group(3)
             type_match = re.search(r"<!-- type:(\w+) -->", rest)
             if not type_match:
                 log.warning("skipping task line without type marker: %r", line)
                 continue
             raw_type = type_match.group(1)
             task_type = TaskType(raw_type)
+            # Rob review on PR #1932: skipped markers carry the no_op
+            # rationale in description via a ``<!-- desc:base64 -->``
+            # comment so PR-body round-trip preserves the "why this
+            # intent was dropped" record.  Only SKIPPED lines have
+            # this comment (the format renderer only emits it for
+            # SKIPPED) but the parser is permissive and accepts it
+            # on any line.
+            description = ""
+            desc_match = re.search(r"<!-- desc:([A-Za-z0-9+/=]*) -->", rest)
+            if desc_match:
+                try:
+                    description = _base64.b64decode(
+                        desc_match.group(1), validate=True
+                    ).decode("utf-8")
+                except ValueError, UnicodeDecodeError:
+                    description = ""
             title = re.sub(r"\s*<!-- type:\w+ -->\s*", "", rest)
+            title = re.sub(r"\s*<!-- desc:[A-Za-z0-9+/=]* -->\s*", "", title)
             title = re.sub(r"\s*\*\*→ next\*\*\s*", "", title).strip()
             if not title:
                 continue
-            parsed.append((title, task_type, status))
+            parsed.append((title, task_type, status, description))
         if not parsed:
             return
-        pending = 0
-        completed = 0
-        for title, task_type, status in parsed:
-            self._tasks.add(title, task_type, status=status)
-            if status == TaskStatus.COMPLETED:
-                completed += 1
+        counts: dict[TaskStatus, int] = {
+            TaskStatus.PENDING: 0,
+            TaskStatus.COMPLETED: 0,
+            TaskStatus.SKIPPED: 0,
+        }
+        for title, task_type, status, description in parsed:
+            # Pass description only when non-empty so legacy seed paths
+            # (no desc comment on the line) call ``add()`` with the
+            # same shape they always did — keeps callers' .assert_called_with
+            # patterns from breaking on the new keyword.
+            if description:
+                self._tasks.add(
+                    title, task_type, description=description, status=status
+                )
             else:
-                pending += 1
+                self._tasks.add(title, task_type, status=status)
+            counts[status] = counts.get(status, 0) + 1
         log.info(
-            "seeded %d tasks from PR body (%d pending, %d completed)",
+            "seeded %d tasks from PR body (%d pending, %d completed, %d skipped)",
             len(parsed),
-            pending,
-            completed,
+            counts[TaskStatus.PENDING],
+            counts[TaskStatus.COMPLETED],
+            counts[TaskStatus.SKIPPED],
         )
 
     def post_pickup_comment(

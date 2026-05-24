@@ -19,6 +19,7 @@ from fido.rocq.turn_outcome import (
     CommitTaskInProgress,
     SkipTaskWithReason,
     StuckOnTask,
+    SplitTask,
     TurnOutcomeT,
 )
 from fido.rocq.commit_result import (
@@ -64,6 +65,8 @@ def harness_commit_decision(
         case SkipTaskWithReason(reason):
             return CommitSkipped(reason)
         case StuckOnTask(reason):
+            return CommitSkipped(reason)
+        case SplitTask(reason):
             return CommitSkipped(reason)
         case __impossible:
             assert_never(__impossible)

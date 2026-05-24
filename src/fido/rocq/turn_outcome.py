@@ -43,8 +43,18 @@ class StuckOnTask(TurnOutcome):
     reason: str
 
 
+@final
+@dataclass(frozen=True)
+class SplitTask(TurnOutcome):
+    reason: str
+
+
 TurnOutcomeT = (
-    CommitTaskComplete | CommitTaskInProgress | SkipTaskWithReason | StuckOnTask
+    CommitTaskComplete
+    | CommitTaskInProgress
+    | SkipTaskWithReason
+    | StuckOnTask
+    | SplitTask
 )
 
 
@@ -57,6 +67,8 @@ def outcome_summary(o: TurnOutcome) -> str:
         case SkipTaskWithReason(reason):
             return ""
         case StuckOnTask(reason):
+            return ""
+        case SplitTask(reason):
             return ""
         case __impossible:
             assert_never(__impossible)
@@ -72,6 +84,8 @@ def outcome_is_commit(o: TurnOutcome) -> bool:
             return False
         case StuckOnTask(reason):
             return False
+        case SplitTask(reason):
+            return False
         case __impossible:
             assert_never(__impossible)
 
@@ -86,6 +100,8 @@ def outcome_is_terminal(o: TurnOutcome) -> bool:
             return True
         case StuckOnTask(reason):
             return True
+        case SplitTask(reason):
+            return False
         case __impossible:
             assert_never(__impossible)
 
@@ -104,4 +120,6 @@ def parse_sentinel(
         return SkipTaskWithReason(payload)
     if kind == "stuck-on-task":
         return StuckOnTask(payload)
+    if kind == "split-task":
+        return SplitTask(payload)
     return None

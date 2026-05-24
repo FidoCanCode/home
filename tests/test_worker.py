@@ -7545,6 +7545,141 @@ class TestSeedTasksFromPrBody:
         for c in mock_add.call_args_list:
             assert c.kwargs["status"] == TaskStatus.COMPLETED
 
+    def test_seeds_skipped_marker_tasks(self, tmp_path: Path) -> None:
+        # HOL-7 / #1901: ``- ⊘ ...`` checkbox form round-trips back to
+        # ``TaskStatus.SKIPPED`` on seed.  Without this, a re-seed
+        # (PR-body → tasks.json) would silently drop the skipped
+        # marker tasks the original rescope created, losing the
+        # "this intent was dropped" record.
+        from fido.types import TaskStatus
+
+        worker, gh = self._make_worker(tmp_path)
+        gh.get_pr.return_value = {
+            "body": (
+                "<!-- WORK_QUEUE_START -->\n"
+                "- [ ] Active work <!-- type:spec -->\n"
+                "- [x] Done thing <!-- type:spec -->\n"
+                "- ⊘ Skipped: drop A <!-- type:spec -->\n"
+                "- ⊘ Skipped: drop B <!-- type:spec -->\n"
+                "<!-- WORK_QUEUE_END -->"
+            )
+        }
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
+        assert mock_add.call_count == 4
+        statuses = [c.kwargs["status"] for c in mock_add.call_args_list]
+        assert statuses == [
+            TaskStatus.PENDING,
+            TaskStatus.COMPLETED,
+            TaskStatus.SKIPPED,
+            TaskStatus.SKIPPED,
+        ]
+
+    def test_seeds_skipped_marker_tasks_decodes_description(
+        self, tmp_path: Path
+    ) -> None:
+        """Rob review on PR #1932: a SKIPPED task whose
+        ``_format_work_queue`` rendering carried a ``<!-- desc:BASE64
+        -->`` payload must round-trip its description back into the
+        seeded task — otherwise the rescope narrative is lost on
+        restart.  Empty/missing desc comment must not crash; the bare
+        line still yields a SKIPPED task without description (matching
+        the legacy add() signature)."""
+        import base64
+
+        from fido.types import TaskStatus, TaskType
+
+        worker, gh = self._make_worker(tmp_path)
+        desc_payload = "Rescope verdict: duplicate of #1234."
+        encoded = base64.b64encode(desc_payload.encode("utf-8")).decode("ascii")
+        gh.get_pr.return_value = {
+            "body": (
+                "<!-- WORK_QUEUE_START -->\n"
+                f"- ⊘ Skipped: with desc <!-- type:spec --> "
+                f"<!-- desc:{encoded} -->\n"
+                "- ⊘ Skipped: no desc <!-- type:spec -->\n"
+                "<!-- WORK_QUEUE_END -->"
+            )
+        }
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
+
+        # First skip: full roundtrip — description kwarg present and
+        # decoded back to the original payload.
+        assert mock_add.call_args_list[0] == (
+            (
+                "Skipped: with desc",
+                TaskType.SPEC,
+            ),
+            {"description": desc_payload, "status": TaskStatus.SKIPPED},
+        )
+        # Second skip: no desc comment → legacy 3-arg shape (no
+        # ``description`` kwarg).  Pins the empty-description boundary
+        # so a future refactor doesn't accidentally pass description="".
+        assert mock_add.call_args_list[1] == (
+            (
+                "Skipped: no desc",
+                TaskType.SPEC,
+            ),
+            {"status": TaskStatus.SKIPPED},
+        )
+
+    def test_seeds_skipped_marker_ignores_malformed_description(
+        self, tmp_path: Path
+    ) -> None:
+        """If the ``<!-- desc:... -->`` payload is base64-shaped but
+        either decodes to invalid UTF-8 or has bad padding, the seeder
+        must NOT crash — it falls back to the no-description path and
+        the task still seeds.  Belt-and-braces guard for a hand-edited
+        PR body."""
+        import base64
+
+        from fido.types import TaskStatus, TaskType
+
+        worker, gh = self._make_worker(tmp_path)
+        # Valid base64 alphabet, decodes successfully, but the decoded
+        # bytes (0xff 0xff) are not valid UTF-8 — exercises the
+        # UnicodeDecodeError arm of the except clause.
+        utf8_invalid_payload = base64.b64encode(b"\xff\xff").decode("ascii")
+        # Single base64 char — passes the regex but fails
+        # ``b64decode(validate=True)`` on the length check; exercises
+        # the ValueError arm.
+        bad_padding_payload = "A"
+        gh.get_pr.return_value = {
+            "body": (
+                "<!-- WORK_QUEUE_START -->\n"
+                f"- ⊘ Skipped bad utf <!-- type:spec --> "
+                f"<!-- desc:{utf8_invalid_payload} -->\n"
+                f"- ⊘ Skipped bad pad <!-- type:spec --> "
+                f"<!-- desc:{bad_padding_payload} -->\n"
+                "<!-- WORK_QUEUE_END -->"
+            )
+        }
+        worker._tasks.list = MagicMock(return_value=[])
+        mock_add = MagicMock()
+        worker._tasks.add = mock_add
+        worker.seed_tasks_from_pr_body("owner/repo", 1)
+        # Both malformed payloads fall through to the no-desc shape —
+        # task is still seeded, no crash.
+        assert mock_add.call_args_list[0] == (
+            (
+                "Skipped bad utf",
+                TaskType.SPEC,
+            ),
+            {"status": TaskStatus.SKIPPED},
+        )
+        assert mock_add.call_args_list[1] == (
+            (
+                "Skipped bad pad",
+                TaskType.SPEC,
+            ),
+            {"status": TaskStatus.SKIPPED},
+        )
+
     def test_strips_next_marker(self, tmp_path: Path) -> None:
         worker, gh = self._make_worker(tmp_path)
         gh.get_pr.return_value = {
@@ -10422,6 +10557,19 @@ class TestPickNextTask:
         pending = self._task("Pending task")
         assert _pick_next_task([completed, pending]) is pending
 
+    def test_ignores_skipped_when_selecting(self) -> None:
+        # HOL-5 / #1899: SKIPPED is terminal — picker walks past it
+        # the same way it walks past completed.  Skipped marker tasks
+        # (from no_op rescope verdicts) must never become work.
+        skipped = self._task("Dropped ask", status="skipped")
+        pending = self._task("Real work")
+        assert _pick_next_task([skipped, pending]) is pending
+
+    def test_returns_none_when_only_skipped(self) -> None:
+        # An all-skipped queue has no work — never pick.
+        skipped = self._task("Dropped ask", status="skipped")
+        assert _pick_next_task([skipped]) is None
+
     def test_task_with_spec_type_not_prioritised(self) -> None:
         """A task with spec type is not treated as thread-originated."""
         spec = self._task("Regular task", task_type="spec")
@@ -11143,6 +11291,11 @@ class TestExecuteTask:
     def _stuck_output(reason: str = "need API credentials") -> str:
         """JSON sentinel for stuck-on-task."""
         return f'{{"turn_outcome":"stuck-on-task","reason":"{reason}"}}'
+
+    @staticmethod
+    def _split_output(reason: str = "task spans 3 invariants") -> str:
+        """JSON sentinel for split-task (HOL-13 / #1907)."""
+        return f'{{"turn_outcome":"split-task","reason":"{reason}"}}'
 
     def test_returns_false_when_no_tasks(self, tmp_path: Path) -> None:
         worker, _ = self._make_worker(tmp_path)
@@ -12456,6 +12609,484 @@ class TestExecuteTask:
         _repo, _pr, comment_body = worker.gh.comment_issue.call_args[0]
         assert "BLOCKED:" in comment_body
         assert "need API credentials" in comment_body
+
+    def test_split_task_posts_redecomp_blocked_and_parks(self, tmp_path: Path) -> None:
+        """HOL-13 / #1907: split-task sentinel parks the task with a
+        BLOCKED comment whose body distinguishes the "needs
+        re-decomposition" cause from generic stuck-on-task — that label
+        is what future rescope passes (or the human) read to act on the
+        marker."""
+        from fido.types import TaskStatus
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Refactor the whole rescope reducer")
+        fake_runner = _FakeProviderRunner(
+            "sid",
+            self._split_output(
+                "scope spans 3 invariants: typed ops + skipped lift + chain merge"
+            ),
+        )
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [task]
+        worker.set_status = MagicMock()
+        worker._git = self._simple_git_mock()
+        result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert result is True
+        # Same parking shape as StuckOnTask: not completed, marked BLOCKED.
+        worker._tasks.complete_with_resolve.assert_not_called()
+        worker._tasks.update.assert_any_call("t1", TaskStatus.BLOCKED)
+        # Comment body carries the HOL-13 marker so downstream detection
+        # can distinguish "needs re-decomposition" from generic stuck.
+        worker.gh.comment_issue.assert_called_once()
+        _repo, _pr, comment_body = worker.gh.comment_issue.call_args[0]
+        assert "BLOCKED (needs re-decomposition" in comment_body
+        assert "HOL-13" in comment_body
+        assert "spans 3 invariants" in comment_body
+
+    def test_task_completion_critic_failure_soft_resets_and_reparks(
+        self, tmp_path: Path
+    ) -> None:
+        """HOL-17 / #1911: when the task-completion critic returns
+        ``passed=false``, the just-landed commit is soft-reset (changes
+        stay staged), the gap is appended to the task description, and
+        the task goes back to IN_PROGRESS so the picker re-selects it.
+        Closes PR #1858's "task marked complete without code" pattern
+        and its scope-creep sibling."""
+        import subprocess as _subprocess
+
+        from fido.types import TaskStatus
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "transient failures retry up to 3 times"
+        task["description"] = "Wire retry on the network layer."
+        # Pre-mark the target as IN_PROGRESS so the picker selects it
+        # regardless of list order; the sibling lives at position 0 so
+        # the description-mutation loop iterates past it (covering the
+        # ``if live_task["id"] != task["id"]: continue`` arm) before
+        # matching the target.
+        task["status"] = str(TaskStatus.IN_PROGRESS)
+        sibling = self._pending_task("Sibling task")
+        sibling["id"] = "t-sibling"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [sibling, task]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+
+        # Critic LLM call goes through ``self._provider_agent.run_turn``.
+        # Return a failing verdict envelope so the worker's HOL-17
+        # handler triggers (soft-reset + reparking).
+        worker._provider_agent.run_turn = MagicMock(
+            return_value=(
+                '{"passed": false, "gap": "diff also touches '
+                'unrelated retry log formatting", '
+                '"rationale": "scope-creep"}'
+            )
+        )
+
+        git_calls: list[list[str]] = []
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            git_calls.append(args)
+            if args[:2] == ["show", "--no-color"]:
+                return _subprocess.CompletedProcess(
+                    args=["git", *args],
+                    returncode=0,
+                    stdout="diff --git a/x b/x\n+changed\n",
+                    stderr="",
+                )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout="", stderr=""
+            )
+
+        worker._git = git_stub
+        result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        assert result is True
+        # NOT completed — the critic blocked the push.
+        worker._tasks.complete_with_resolve.assert_not_called()
+        worker.ensure_pushed.assert_not_called()
+        # Soft reset was invoked on the just-landed commit.
+        assert ["reset", "--soft", "HEAD~1"] in git_calls
+        # Re-park succeeded — the staged changes must be preserved for
+        # the worker's retry turn, so the orphan-discard ``reset --hard
+        # HEAD`` must NOT fire on this branch.  Pins the happy-path
+        # boundary of the discard added in PR #1932.
+        assert ["reset", "--hard", "HEAD"] not in git_calls
+        # Task is back to IN_PROGRESS with the gap appended.
+        live = worker._tasks._task_list
+        affected = next(t for t in live if t["id"] == task["id"])
+        assert affected["status"] == str(TaskStatus.IN_PROGRESS)
+        assert (
+            "CRITIC: diff also touches unrelated retry log formatting"
+            in (affected["description"])
+        )
+        assert "Wire retry on the network layer." in affected["description"]
+
+    def test_task_completion_critic_failure_clears_current_task_id(
+        self, tmp_path: Path
+    ) -> None:
+        """codex r3293424367 on PR #1932: after the critic fails and
+        we re-park, ``current_task_id`` must be cleared.  Otherwise
+        ``_maybe_abort_for_new_task`` may fire on incoming higher-
+        priority work, which routes through ``_cleanup_aborted_task``
+        and calls ``git_clean()`` — destroying the staged changes
+        we just preserved for the retry turn."""
+        import subprocess as _subprocess
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "transient failures retry up to 3 times"
+        task["status"] = "in_progress"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [task]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+        # Seed durable state with current_task_id pointing at our task
+        # — that's the marker the bug leaves stale.
+        with worker._state.modify() as state:
+            state["current_task_id"] = task["id"]
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": false, "gap": "scope-creep"}'
+        )
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            stdout = (
+                "diff --git a/x b/x\n+changed\n"
+                if args[:2] == ["show", "--no-color"]
+                else ""
+            )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout=stdout, stderr=""
+            )
+
+        worker._git = git_stub
+        worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        # After the critic-failure re-park, the durable state must not
+        # carry a stale current_task_id pointer that could later route
+        # to git_clean and destroy the preserved staged work.
+        with worker._state.modify() as state:
+            assert state.get("current_task_id") is None
+
+    def test_task_completion_critic_failure_skips_repark_when_concurrently_completed(
+        self, tmp_path: Path
+    ) -> None:
+        """Rob review on PR #1932: if a webhook-triggered rescope
+        moved this task to COMPLETED while the critic was running,
+        the failure handler must NOT force the row back to
+        IN_PROGRESS — that would silently overwrite the rescope
+        decision.  Leave the task alone and log the no-op."""
+        import subprocess as _subprocess
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "transient failures retry up to 3 times"
+        task["status"] = "in_progress"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        # Pre-mark the task as COMPLETED to simulate a concurrent
+        # rescope having closed it during the critic LLM call.
+        completed_clone = dict(task)
+        completed_clone["status"] = "completed"
+        worker._tasks._task_list = [completed_clone]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+        # Need the picker to still pick this task — pre-mark it
+        # IN_PROGRESS first so the picker selects it, then flip to
+        # COMPLETED via a custom modify before the failure handler.
+        # Simpler: stub agent.run_turn to fail critic, and check
+        # that the post-handler status is still COMPLETED.
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": false, "gap": "scope-creep"}'
+        )
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            stdout = (
+                "diff --git a/x b/x\n+changed\n"
+                if args[:2] == ["show", "--no-color"]
+                else ""
+            )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout=stdout, stderr=""
+            )
+
+        worker._git = git_stub
+
+        # Use a task already in IN_PROGRESS so the picker selects it.
+        worker._tasks._task_list = [task]
+        # Patch _handle_task_completion_critic_failure to flip the
+        # in-place task to COMPLETED before calling the real handler —
+        # simulates a rescope landing between the critic turn and the
+        # re-park logic.
+        real_handler = worker._handle_task_completion_critic_failure
+
+        def racing_handler(t: dict, gap: str) -> None:
+            # Concurrent rescope arrives "now".
+            worker._tasks._task_list[0]["status"] = "completed"
+            real_handler(t, gap)
+
+        worker._handle_task_completion_critic_failure = racing_handler
+        worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        # The task must still be COMPLETED — not forced back to
+        # IN_PROGRESS.
+        assert worker._tasks._task_list[0]["status"] == "completed"
+
+    def test_task_completion_critic_failure_skips_repark_when_task_removed(
+        self, tmp_path: Path
+    ) -> None:
+        """Rob review (companion to the concurrent-completion case):
+        if a concurrent rescope REMOVED the task entirely (not just
+        moved it to a terminal status), the failure handler must not
+        crash trying to mutate a missing row.  Log the no-op and move
+        on."""
+        import subprocess as _subprocess
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "x"
+        task["status"] = "in_progress"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [task]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": false, "gap": "scope-creep"}'
+        )
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            stdout = (
+                "diff --git a/x b/x\n+changed\n"
+                if args[:2] == ["show", "--no-color"]
+                else ""
+            )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout=stdout, stderr=""
+            )
+
+        worker._git = git_stub
+        real_handler = worker._handle_task_completion_critic_failure
+
+        def racing_handler(t: dict, gap: str) -> None:
+            # Concurrent rescope removed the task entirely.
+            worker._tasks._task_list.clear()
+            real_handler(t, gap)
+
+        worker._handle_task_completion_critic_failure = racing_handler
+        # Should not crash; task simply gone from the list afterward.
+        worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+        assert worker._tasks._task_list == []
+
+    def test_task_completion_critic_failure_discards_staged_when_repark_skipped(
+        self, tmp_path: Path
+    ) -> None:
+        """Rob follow-up review on PR #1932: when the critic fails AND a
+        concurrent rescope already moved the task to a terminal status
+        (so re-park is skipped), the soft-reset above left the rolled-
+        back commit's changes staged in the index.  Without an explicit
+        discard those become orphan staged work the NEXT task would
+        silently inherit.  The handler must invoke ``git reset --hard
+        HEAD`` on the skipped-repark branches to drop them."""
+        import subprocess as _subprocess
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "x"
+        task["status"] = "in_progress"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [task]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": false, "gap": "scope-creep"}'
+        )
+
+        git_calls: list[list[str]] = []
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            git_calls.append(args)
+            stdout = (
+                "diff --git a/x b/x\n+changed\n"
+                if args[:2] == ["show", "--no-color"]
+                else ""
+            )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout=stdout, stderr=""
+            )
+
+        worker._git = git_stub
+        real_handler = worker._handle_task_completion_critic_failure
+
+        def racing_handler(t: dict, gap: str) -> None:
+            # Concurrent rescope flipped the row to COMPLETED before the
+            # critic-failure handler reached its re-park step.  Forces
+            # the no-repark branch — which must then hard-reset to drop
+            # the orphan staged work.
+            worker._tasks._task_list[0]["status"] = "completed"
+            real_handler(t, gap)
+
+        worker._handle_task_completion_critic_failure = racing_handler
+        worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        # Soft reset still fired first (rolls the commit back).
+        assert ["reset", "--soft", "HEAD~1"] in git_calls
+        # Then the orphan-discard hard reset fired because re-park was
+        # skipped on the terminal-status branch.
+        assert ["reset", "--hard", "HEAD"] in git_calls
+
+    def test_task_completion_critic_failure_discards_staged_when_task_removed(
+        self, tmp_path: Path
+    ) -> None:
+        """Companion to the terminal-status case: when a concurrent
+        rescope REMOVED the row entirely (not just moved it to a
+        terminal status), the handler also skips the re-park.  Same
+        orphan-discard rule must fire — the staged changes from the
+        rolled-back commit have nothing to retry against."""
+        import subprocess as _subprocess
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "x"
+        task["status"] = "in_progress"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [task]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": false, "gap": "scope-creep"}'
+        )
+
+        git_calls: list[list[str]] = []
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            git_calls.append(args)
+            stdout = (
+                "diff --git a/x b/x\n+changed\n"
+                if args[:2] == ["show", "--no-color"]
+                else ""
+            )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout=stdout, stderr=""
+            )
+
+        worker._git = git_stub
+        real_handler = worker._handle_task_completion_critic_failure
+
+        def racing_handler(t: dict, gap: str) -> None:
+            # Row removed by concurrent rescope.
+            worker._tasks._task_list.clear()
+            real_handler(t, gap)
+
+        worker._handle_task_completion_critic_failure = racing_handler
+        worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        assert ["reset", "--soft", "HEAD~1"] in git_calls
+        assert ["reset", "--hard", "HEAD"] in git_calls
+
+    def test_task_completion_critic_failure_cleans_up_leaked_comments(
+        self, tmp_path: Path
+    ) -> None:
+        """Rob review on PR #1932: the rolled-back turn may have leaked
+        top-level PR comments via the LLM's tool calls.  The
+        critic-failure return must clean them up before exiting,
+        matching the push-and-complete + BLOCKED-push-failed branches
+        that already do this."""
+        import subprocess as _subprocess
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "transient failures retry up to 3 times"
+        task["status"] = "in_progress"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [task]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+        # Spy on the leak-cleanup helper.
+        worker._delete_leaked_task_comments = MagicMock()
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": false, "gap": "scope-creep"}'
+        )
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            stdout = (
+                "diff --git a/x b/x\n+changed\n"
+                if args[:2] == ["show", "--no-color"]
+                else ""
+            )
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout=stdout, stderr=""
+            )
+
+        worker._git = git_stub
+        worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        # _delete_leaked_task_comments must have been called on the
+        # critic-failure exit path so ghost comments from the
+        # rolled-back turn don't stay visible.
+        worker._delete_leaked_task_comments.assert_called_once()
+
+    def test_task_completion_critic_pass_pushes_and_completes(
+        self, tmp_path: Path
+    ) -> None:
+        """The happy-path critic pass must not regress the legacy
+        push-and-complete behaviour."""
+        import subprocess as _subprocess
+
+        worker, _ = self._make_worker(tmp_path)
+        fido_dir = self._fido_dir(tmp_path)
+        task = self._pending_task("Add retry logic")
+        task["invariant"] = "transient failures retry up to 3 times"
+        fake_runner = _FakeProviderRunner("sid", self._commit_complete_output())
+        worker._provider_runner = fake_runner
+        worker._tasks._task_list = [task]
+        worker.set_status = MagicMock()
+        worker.ensure_pushed = MagicMock(return_value=True)
+
+        worker._provider_agent.run_turn = MagicMock(
+            return_value='{"passed": true, "rationale": "diff covers invariant"}'
+        )
+
+        def git_stub(
+            args: list[str], check: bool = True, **_kw: object
+        ) -> _subprocess.CompletedProcess[str]:
+            return _subprocess.CompletedProcess(
+                args=["git", *args], returncode=0, stdout="", stderr=""
+            )
+
+        worker._git = git_stub
+        result = worker.execute_task(fido_dir, self._repo_ctx(), 1, "branch")
+
+        assert result is True
+        worker._tasks.complete_with_resolve.assert_called_once()
 
     def test_commit_in_progress_continues_session(self, tmp_path: Path) -> None:
         """commit-task-in-progress sentinel causes the loop to continue with

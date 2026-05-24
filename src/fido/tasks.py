@@ -16,6 +16,7 @@ from typing import IO, TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from fido.appstate import FidoState, TaskListSnapshot
     from fido.atomic import AtomicUpdater
+    from fido.critics import TaskCreationVerdict
 
 from fido.claude import ClaudeClient
 from fido.github import GitHub
@@ -60,7 +61,13 @@ def _task_kind_for_oracle(task: dict[str, Any]) -> task_store_oracle.TaskKind:
 
 def _task_status_for_oracle(task: dict[str, Any]) -> task_store_oracle.TaskStatus:
     match task.get("status", TaskStatus.PENDING):
-        case TaskStatus.COMPLETED | "completed":
+        case TaskStatus.COMPLETED | "completed" | TaskStatus.SKIPPED | "skipped":
+            # SKIPPED (HOL-5 / #1899) projects to StatusCompleted at the
+            # oracle boundary: both are terminal for the picker (never
+            # selected, never block).  The SKIPPED-vs-COMPLETED
+            # distinction matters only for UI rendering (HOL-7) and
+            # reply-back narrative; the oracle's terminal predicate
+            # treats them identically.
             return task_store_oracle.StatusCompleted()
         case TaskStatus.BLOCKED | "blocked":
             return task_store_oracle.StatusBlocked()
@@ -79,7 +86,11 @@ def _thread_task_status_for_oracle(
     task: dict[str, Any],
 ) -> thread_resolve_oracle.TaskStatus:
     match task.get("status", TaskStatus.PENDING):
-        case TaskStatus.COMPLETED | "completed":
+        case TaskStatus.COMPLETED | "completed" | TaskStatus.SKIPPED | "skipped":
+            # SKIPPED (HOL-5 / #1899) projects to StatusCompleted: a
+            # skipped marker task doesn't block thread auto-resolve any
+            # more than a completed task does (auto-resolve already
+            # treats both as terminal via this projection).
             return thread_resolve_oracle.StatusCompleted()
         case TaskStatus.BLOCKED | "blocked":
             return thread_resolve_oracle.StatusBlocked()
@@ -354,7 +365,10 @@ def _rescope_task_status_for_oracle(
     task: dict[str, Any],
 ) -> rescope_oracle.TaskStatus:
     match task.get("status", TaskStatus.PENDING):
-        case TaskStatus.COMPLETED | "completed":
+        case TaskStatus.COMPLETED | "completed" | TaskStatus.SKIPPED | "skipped":
+            # SKIPPED (HOL-5 / #1899) projects to StatusCompleted: the
+            # rescope oracle's snapshot order treats both as terminal
+            # (already-handled tasks the rescope shouldn't re-touch).
             return rescope_oracle.StatusCompleted()
         case TaskStatus.BLOCKED | "blocked":
             return rescope_oracle.StatusBlocked()
@@ -509,6 +523,7 @@ def _split_child_synthetic_task(
     child_description: str,
     created_at: str,
     op_contributing_intents: list[int],
+    child_invariant: str = "",
 ) -> dict[str, Any]:
     """Build the synthetic original task dict for a split child.
 
@@ -532,6 +547,12 @@ def _split_child_synthetic_task(
     source task, so a downstream classifier can decide whether the
     split materially affected each commenter.
 
+    ``child_invariant`` (HOL-12 / #1906) is the per-child invariant
+    statement from the rescope prompt.  Empty when Opus didn't supply
+    one (legacy responses); when present, stamped on the child task so
+    HOL-13's worker pickup rule and HOL-11's PR-body serialisation see
+    the scope marker (codex r3293319645 on PR #1932).
+
     The thread is shallow-copied per child: every ``lineage_comment_ids``
     write in this codebase rebuilds the list and re-assigns the slot
     rather than mutating in place, so the inherited list reference is
@@ -548,9 +569,23 @@ def _split_child_synthetic_task(
         "created_at": created_at,
         "contributing_intents": _union_intents(source_intents, op_contributing_intents),
     }
+    if child_invariant:
+        child["invariant"] = child_invariant
     source_thread = source_task.get("thread")
     if isinstance(source_thread, dict):
         child["thread"] = dict(source_thread)
+    # HOL-10 / #1904: split children inherit a snapshot of the parent's
+    # ``narrative_chain`` at split time.  Each child gets its OWN copy
+    # of the list (not a shared reference) so subsequent rescope
+    # appends on one child don't bleed into siblings.  After the split
+    # the children's chains diverge — they accumulate independent
+    # post-split history while sharing the pre-split prefix.  Without
+    # this, the rationale for why the parent task existed in the first
+    # place would be lost on every split, weakening the per-task
+    # history Opus reads on the next rescope.
+    source_chain = source_task.get("narrative_chain") or []
+    if source_chain:
+        child["narrative_chain"] = [dict(entry) for entry in source_chain]
     return child
 
 
@@ -665,6 +700,34 @@ def _rescope_releases_for_oracle(
                     tasks_by_oracle_id[oracle_id]["contributing_intents"] = (
                         merged_intents
                     )
+                # HOL-9 / #1903: fold every source task's
+                # ``narrative_chain`` (HOL-8) into the merge target's
+                # chain, deduped by ``(intent_comment_id, ts)``.  Source
+                # entries land in source-iteration order, preserving
+                # the chronological prior-rescope history Opus reads
+                # on the next iteration.  Without this, prior verdict
+                # history that explained why each source task existed
+                # would be lost on merge.
+                target_chain: list[dict[str, Any]] = list(
+                    tasks_by_oracle_id[oracle_id].get("narrative_chain") or []
+                )
+                seen_keys: set[tuple[int | None, str | None]] = {
+                    (e.get("intent_comment_id"), e.get("ts")) for e in target_chain
+                }
+                for src_oracle_id in merge_sources:
+                    # ``merge_sources`` is derived from ``ids_by_task_id``
+                    # via ``_merge_source_oracle_ids``; every id MUST be
+                    # in ``tasks_by_oracle_id``.  Direct indexing
+                    # fail-closed per CLAUDE.md no-defensive-code rule.
+                    src_task = tasks_by_oracle_id[src_oracle_id]
+                    for entry in src_task.get("narrative_chain") or []:
+                        key = (entry.get("intent_comment_id"), entry.get("ts"))
+                        if key in seen_keys:
+                            continue
+                        target_chain.append(entry)
+                        seen_keys.add(key)
+                if target_chain:
+                    tasks_by_oracle_id[oracle_id]["narrative_chain"] = target_chain
             elif split_targets:
                 # Allocator and validator both iterate the same
                 # ``split_targets`` list, so the pre-allocated child
@@ -678,6 +741,16 @@ def _rescope_releases_for_oracle(
                     next_oracle_id += 1
                     child_title = _normalize_title(str(target.get("title") or ""))
                     child_description = str(target.get("description") or "")
+                    # HOL-12 / #1906: carry the per-child invariant from
+                    # the lowered ``split_targets`` (set by
+                    # ``_operations_to_items``) onto the materialised
+                    # child (codex r3293319645 on PR #1932).
+                    child_invariant_raw = target.get("invariant")
+                    child_invariant = (
+                        child_invariant_raw
+                        if isinstance(child_invariant_raw, str)
+                        else ""
+                    )
                     tasks_by_oracle_id[child_oracle_id] = _split_child_synthetic_task(
                         task,
                         child_string_id,
@@ -685,6 +758,7 @@ def _rescope_releases_for_oracle(
                         child_description,
                         child_created_at,
                         op_intents,
+                        child_invariant=child_invariant,
                     )
                     children_specs.append(
                         rescope_oracle.SplitChild(
@@ -732,7 +806,21 @@ def _materialize_rescope_oracle_result(
         task["title"] = row.title
         task["description"] = row.description
         if isinstance(row.status, rescope_oracle.StatusCompleted):
-            task["status"] = str(TaskStatus.COMPLETED)
+            # HOL-5 round-trip (codex r3293249256 on PR #1932): a SKIPPED
+            # row projects to StatusCompleted on the way INTO the rescope
+            # oracle (both are terminal for the picker — see
+            # ``_rescope_task_status_for_oracle``), so on the way back we
+            # must preserve the original SKIPPED marker.  Without this
+            # branch, the next rescope pass rewrites every no_op-derived
+            # task to plain ``"completed"`` and the HOL-6 dedicated
+            # rendering + lineage behaviour silently decay.  Only the
+            # original-status path is restored — a fresh remove op that
+            # the oracle just promoted to StatusCompleted (input status:
+            # pending) still serialises to COMPLETED.
+            if task.get("status") in (str(TaskStatus.SKIPPED), TaskStatus.SKIPPED):
+                task["status"] = str(TaskStatus.SKIPPED)
+            else:
+                task["status"] = str(TaskStatus.COMPLETED)
         elif isinstance(row.status, rescope_oracle.StatusBlocked):
             task["status"] = str(TaskStatus.BLOCKED)
         else:
@@ -1007,12 +1095,26 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
 
     Priority order: CI failures → everything else (preserving list order).
     Completed tasks appear in a collapsible ``<details>`` section.
-    Each line includes a ``<!-- type:X -->`` HTML comment for round-tripping.
+    Skipped tasks (HOL-7 / #1901) appear in a separate ``<details>``
+    block below completed — they're terminal but distinct from
+    completed (no work happened, only a narrative explaining why the
+    intent was dropped).  Each line includes a ``<!-- type:X -->``
+    HTML comment for round-tripping.
+
+    Skipped lines additionally carry the no_op rationale as a
+    base64-encoded ``<!-- desc:... -->`` comment so PR-body reseeding
+    (``seed_tasks_from_pr_body``) can recover the "why this intent was
+    dropped" prose — for skipped markers, the description IS the
+    durable record (Rob review on PR #1932).
     """
+    import base64 as _base64
+
     store, tasks_by_oracle_id = _task_store_for_oracle(task_list)
     projected_rows = task_store_oracle.project_task_store(store)
     pending: list[tuple[str, str]] = []
     completed: list[tuple[str, str]] = []
+    # Skipped entries carry (display, task_type, encoded_description).
+    skipped: list[tuple[str, str, str]] = []
 
     def _fmt(row: task_store_oracle.PRBodyRow) -> tuple[str, str]:
         task = tasks_by_oracle_id[row.task]
@@ -1023,11 +1125,23 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
         return display, task_type
 
     for row in projected_rows:
-        display = _fmt(row)
-        if isinstance(row.status, task_store_oracle.PRCompleted):
-            completed.append(display)
+        task = tasks_by_oracle_id[row.task]
+        # HOL-7: the oracle projects SKIPPED → StatusCompleted (both are
+        # terminal for picker purposes — HOL-5 mapping), so distinguish
+        # via the underlying task dict's status field.
+        if task.get("status") == str(TaskStatus.SKIPPED):
+            display, task_type = _fmt(row)
+            description = task.get("description") or ""
+            encoded_desc = (
+                _base64.b64encode(description.encode("utf-8")).decode("ascii")
+                if description
+                else ""
+            )
+            skipped.append((display, task_type, encoded_desc))
+        elif isinstance(row.status, task_store_oracle.PRCompleted):
+            completed.append(_fmt(row))
         else:
-            pending.append(display)
+            pending.append(_fmt(row))
 
     lines: list[str] = []
     for i, (display, task_type) in enumerate(pending):
@@ -1040,6 +1154,30 @@ def _format_work_queue(task_list: list[dict[str, Any]]) -> str:
         lines.append("")
         for display, task_type in completed:
             lines.append(f"- [x] {display} <!-- type:{task_type} -->")
+        lines.append("</details>")
+
+    if skipped:
+        lines.append("")
+        lines.append(f"<details><summary>Skipped ({len(skipped)})</summary>")
+        lines.append("")
+        for display, task_type, encoded_desc in skipped:
+            # Skipped-marker rendering uses the unicode ⊘ "circled
+            # division slash" as the checkbox glyph so the line is
+            # visually distinct from both pending ``[ ]`` and completed
+            # ``[x]`` at a glance.  ASCII ``[~]`` would also work but
+            # would conflict with the existing IN_PROGRESS marker.
+            #
+            # Description rides in a ``<!-- desc:base64 -->`` comment
+            # (only when non-empty) so PR-body reseed can recover the
+            # no_op rationale — for skipped markers, the description
+            # IS the durable record of why the intent was dropped.
+            # Base64 avoids embedded ``-->`` / control-character /
+            # multi-line escape issues that plaintext-in-comment would
+            # need to handle.
+            line = f"- ⊘ {display} <!-- type:{task_type} -->"
+            if encoded_desc:
+                line += f" <!-- desc:{encoded_desc} -->"
+            lines.append(line)
         lines.append("</details>")
 
     return "\n".join(lines)
@@ -1290,6 +1428,14 @@ class _RescopeOpMerge:
 class _RescopeOpSplitChild:
     title: str
     description: str
+    # HOL-12 / #1906: one-invariant-per-task contract.  Required by the
+    # rescope prompt on every split child; defaults to empty for legacy
+    # responses that predate the contract (Opus running an older prompt,
+    # CLI-built items, hand-built test fixtures).  Carries through
+    # ``_operations_to_items`` → ``_make_new_tasks_from_opus`` →
+    # ``Tasks.add(..., invariant=...)`` so the materialised child task
+    # stamps the field (codex r3293319645 on PR #1932).
+    invariant: str = ""
 
 
 @dataclass(frozen=True)
@@ -1309,6 +1455,31 @@ class _RescopeOpNew:
     description: str
     type: str  # noqa: A003 — schema field name
     contributing_intents: _RescopeIntentIds
+    # HOL-12 / #1906: same one-invariant-per-task contract as split
+    # children.  Carries from the rescope prompt through the typed
+    # pipeline to the materialised task (codex r3293319645 on PR #1932).
+    invariant: str = ""
+
+
+@dataclass(frozen=True)
+class _RescopeOpSkip:
+    """Create a SKIPPED marker task for a ``no_op`` verdict (HOL-6 / #1900).
+
+    Synthesised internally by :func:`_skip_ops_for_no_op_verdicts` — NOT
+    a kind Opus can emit directly through the verdict envelope.  Keeping
+    the synthesis on the Python side means we never have to teach the
+    Opus prompt schema about ``"skipped"``; the ``no_op`` outcome IS the
+    instruction and the runtime materialises the marker.
+
+    Each entry produces one task with ``status=SKIPPED``, the verdict's
+    narrative as the description, and ``contributing_intents`` carrying
+    the originating intent's comment id.  See PR #1890 for the
+    no_op-silent-drop failure pattern this closes.
+    """
+
+    title: str
+    description: str
+    contributing_intents: _RescopeIntentIds
 
 
 _RescopeOp = (
@@ -1319,6 +1490,7 @@ _RescopeOp = (
     | _RescopeOpMerge
     | _RescopeOpSplit
     | _RescopeOpNew
+    | _RescopeOpSkip
 )
 
 
@@ -1461,7 +1633,7 @@ def _parse_rescope_verdicts(
             "ops": [<op record>, ...],            // optional, default []
             "affected_task_ids": ["T1", ...],     // optional, default []
             "by_intent_comment_id": <int | null>, // optional, null default
-            "narrative": "..." | null             // optional, null default
+            "narrative": "..."                    // REQUIRED on every outcome (HOL-3 / #1897)
           },
           ...
         ]}
@@ -1643,6 +1815,149 @@ def _find_supersedence_cycle(
             seen.append(cursor)
             cursor = by_pointer.get(cursor)
     return None
+
+
+_SKIP_TITLE_PREFIX = "Skipped: "
+_SKIP_TITLE_MAX_BODY = 60
+
+
+def _narrative_chain_entry(verdict: IntentVerdict, ts: str) -> dict[str, Any]:
+    """Build one ``narrative_chain`` entry for *verdict* at timestamp *ts*.
+
+    Entry shape (HOL-8 / #1902):
+
+    .. code-block:: python
+
+        {
+            "outcome": "honored" | "reshaped" | "superseded" | "no_op",
+            "narrative": <verdict.narrative — non-empty per HOL-3>,
+            "intent_comment_id": <verdict.intent_comment_id>,
+            "ts": <ISO-8601 UTC timestamp of the rescope apply>,
+        }
+
+    These accumulate on each task across rescopes so the next rescope
+    prompt can render the chain and let Opus reason about WHY each
+    task got the work it has.  The chain is append-only and stored
+    deep-copied into the task dict on every apply pass.
+    """
+    return {
+        "outcome": verdict.outcome,
+        "narrative": verdict.narrative,
+        "intent_comment_id": verdict.intent_comment_id,
+        "ts": ts,
+    }
+
+
+def _append_narrative_chain_entries(
+    result: list[dict[str, Any]],
+    verdicts: list[IntentVerdict],
+    snapshot_ids: frozenset[str] = frozenset(),
+) -> None:
+    """Append per-verdict ``narrative_chain`` entries to touched tasks (HOL-8 / #1902).
+
+    For each verdict, finds the tasks the verdict touched in *result* and
+    appends one chain entry per (verdict, task) pair.  Two attribution
+    sources are unioned:
+
+    1. ``verdict.affected_task_ids`` — Opus's explicit "this verdict
+       acted on these existing task ids" attribution.  Authoritative
+       for tasks Opus already knew about (i.e. in *snapshot_ids*).
+    2. ``task.contributing_intents`` containing
+       ``verdict.intent_comment_id`` AND task id NOT in *snapshot_ids*
+       — covers freshly-created tasks (Opus ``new`` ops and HOL-6
+       SKIPPED markers) which by definition have no pre-existing id
+       for Opus to name in ``affected_task_ids``.  The snapshot
+       filter is the codex r3293359039 fix: without it, an intent
+       already split/fanned across multiple existing tasks would have
+       its narrative re-appended to every sibling carrying the intent
+       id, polluting chains that this verdict didn't actually touch.
+
+    Mutates *result* in place — caller already holds the tasks-list
+    lock and slice-assigns the modified list back.
+
+    No-op when *verdicts* is empty (e.g. ops-mode rescope without
+    intent envelope).
+    """
+    if not verdicts:
+        return
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    tasks_by_id: dict[str, dict[str, Any]] = {t["id"]: t for t in result if "id" in t}
+    for verdict in verdicts:
+        entry = _narrative_chain_entry(verdict, ts)
+        # Resolve the (id) set of tasks this verdict touched: union of
+        # explicit affected_task_ids and freshly-created tasks whose
+        # contributing_intents include this verdict's intent id.
+        touched: set[str] = set()
+        for tid in verdict.affected_task_ids:
+            if tid in tasks_by_id:
+                touched.add(tid)
+        for tid, task in tasks_by_id.items():
+            if tid in snapshot_ids:
+                # Pre-existing task — explicit attribution is the only
+                # authoritative source; ``contributing_intents`` membership
+                # is a historical marker that the intent INFLUENCED this
+                # task at some prior rescope, not that THIS verdict did.
+                continue
+            intents_field = task.get("contributing_intents") or []
+            if verdict.intent_comment_id in intents_field:
+                touched.add(tid)
+        for tid in touched:
+            task = tasks_by_id[tid]
+            chain = task.setdefault("narrative_chain", [])
+            chain.append(entry)
+
+
+def _skip_title_from_narrative(narrative: str) -> str:
+    """Build the title for a HOL-6 SKIPPED marker task.
+
+    The narrative is Opus's prose explanation of WHY the intent was
+    dropped.  The first non-empty line, truncated to
+    :data:`_SKIP_TITLE_MAX_BODY` characters, gives a queue-readable
+    one-liner.  Empty / all-whitespace narratives fall back to a bare
+    ``"Skipped"`` rather than producing an empty title (which
+    ``_make_new_tasks_from_opus`` would drop entirely).
+    """
+    first_line = next(
+        (line.strip() for line in narrative.splitlines() if line.strip()),
+        "",
+    )
+    if not first_line:
+        return _SKIP_TITLE_PREFIX.rstrip(": ")
+    body = first_line[:_SKIP_TITLE_MAX_BODY]
+    if len(first_line) > _SKIP_TITLE_MAX_BODY:
+        body += "…"
+    return f"{_SKIP_TITLE_PREFIX}{body}"
+
+
+def _skip_ops_for_no_op_verdicts(
+    verdicts: list[IntentVerdict],
+) -> list[_RescopeOpSkip]:
+    """Synthesise one :class:`_RescopeOpSkip` per ``no_op`` verdict (HOL-6 / #1900).
+
+    Each no_op verdict produces a marker task so the lineage is uniform:
+    every verdict terminates at a task (real for honored/reshaped/superseded,
+    SKIPPED marker for no_op).  Without this, no_op verdicts silently
+    dropped the intent — the PR #1890 failure pattern this slice exists
+    to close.
+
+    ``IntentVerdict`` already requires non-empty narrative on every
+    outcome (HOL-3 / #1897), so the synthesised marker always has a
+    real description; the title is derived from the narrative's first
+    line via :func:`_skip_title_from_narrative`.
+    """
+    out: list[_RescopeOpSkip] = []
+    for verdict in verdicts:
+        if verdict.outcome != "no_op":
+            continue
+        narrative = verdict.narrative or ""
+        out.append(
+            _RescopeOpSkip(
+                title=_skip_title_from_narrative(narrative),
+                description=narrative,
+                contributing_intents=[verdict.intent_comment_id],
+            )
+        )
+    return out
 
 
 def _flatten_verdicts_to_ops(
@@ -1918,10 +2233,21 @@ def _parse_op_split(
             child_description = _require_string_field_allow_empty(
                 raw_child, "description", child_path, errors
             )
+            # HOL-12 / #1906: invariant is optional at the parser layer
+            # (defaults empty for legacy responses) but encouraged via
+            # the rescope prompt.  When Opus supplies a string, carry
+            # it through; non-string values are ignored rather than
+            # rejected so a slightly malformed older response still
+            # parses (the title/description gate is the load-bearing
+            # one).  codex r3293319645 on PR #1932.
+            raw_invariant = raw_child.get("invariant")
+            child_invariant = raw_invariant if isinstance(raw_invariant, str) else ""
             if child_title is not None and child_description is not None:
                 children.append(
                     _RescopeOpSplitChild(
-                        title=child_title, description=child_description
+                        title=child_title,
+                        description=child_description,
+                        invariant=child_invariant,
                     )
                 )
         if not children:
@@ -1946,6 +2272,11 @@ def _parse_op_new(
     description = _require_string_field_allow_empty(raw_op, "description", path, errors)
     task_type = _require_string_field(raw_op, "type", path, errors)
     intents = _parse_contributing_intents(raw_op, path, errors)
+    # HOL-12 / #1906: invariant is optional at the parser layer.  See
+    # the matching note on ``_parse_op_split`` children for the
+    # legacy-compatibility rationale.  codex r3293319645 on PR #1932.
+    raw_invariant = raw_op.get("invariant")
+    invariant = raw_invariant if isinstance(raw_invariant, str) else ""
     if title is None or description is None or task_type is None:
         return None, errors
     return (
@@ -1954,6 +2285,7 @@ def _parse_op_new(
             description=description,
             type=task_type,
             contributing_intents=intents,
+            invariant=invariant,
         ),
         errors,
     )
@@ -2010,7 +2342,9 @@ def _find_cross_op_errors(
                     _claim(src, index)
             case _RescopeOpSplit(id=tid):
                 _claim(tid, index)
-            case _RescopeOpNew():
+            case _RescopeOpNew() | _RescopeOpSkip():
+                # Neither claims an existing snapshot id — both create
+                # brand-new tasks (PENDING for New, SKIPPED for Skip).
                 pass
 
     for tid, count in claim_count.items():
@@ -2105,13 +2439,25 @@ def _operations_to_items(operations: list[_RescopeOp]) -> list[dict[str, Any]]:
             case _RescopeOpSplit(
                 id=tid, children=children, contributing_intents=intents
             ):
+                # HOL-12 / #1906: carry each child's ``invariant`` into
+                # the lowered ``split_targets`` so the downstream
+                # synthesis path (split → N children) can stamp it on
+                # the materialised children (codex r3293319645 on
+                # PR #1932).  Omit when empty so legacy children that
+                # didn't supply one don't pollute the dict shape.
+                child_dicts: list[dict[str, Any]] = []
+                for c in children:
+                    child_dict: dict[str, Any] = {
+                        "title": c.title,
+                        "description": c.description,
+                    }
+                    if c.invariant:
+                        child_dict["invariant"] = c.invariant
+                    child_dicts.append(child_dict)
                 items.append(
                     {
                         "id": tid,
-                        "split_targets": [
-                            {"title": c.title, "description": c.description}
-                            for c in children
-                        ],
+                        "split_targets": child_dicts,
                         "contributing_intents": list(intents),
                     }
                 )
@@ -2120,13 +2466,41 @@ def _operations_to_items(operations: list[_RescopeOp]) -> list[dict[str, Any]]:
                 description=desc,
                 type=task_type,
                 contributing_intents=intents,
+                invariant=invariant,
             ):
+                # HOL-12 / #1906: ``invariant`` lowers into the same
+                # item dict so ``_make_new_tasks_from_opus`` stamps it
+                # on the new task (codex r3293319645 on PR #1932).
+                # Omitted when empty so legacy new ops don't carry an
+                # empty placeholder field.
+                item: dict[str, Any] = {
+                    "id": None,
+                    "title": title,
+                    "description": desc,
+                    "type": task_type,
+                    "contributing_intents": list(intents),
+                }
+                if invariant:
+                    item["invariant"] = invariant
+                items.append(item)
+            case _RescopeOpSkip(
+                title=title, description=desc, contributing_intents=intents
+            ):
+                # HOL-6 / #1900: SKIPPED marker.  Same shape as a New
+                # item but with an explicit ``status`` so
+                # ``_make_new_tasks_from_opus`` materialises the task
+                # with ``TaskStatus.SKIPPED`` instead of PENDING.  Type
+                # is always ``spec`` — a skipped intent isn't CI work
+                # and doesn't anchor a comment thread by itself (the
+                # thread anchor still flows through ``contributing_intents``
+                # → ``_derive_thread_from_intents``).
                 items.append(
                     {
                         "id": None,
                         "title": title,
                         "description": desc,
-                        "type": task_type,
+                        "type": "spec",
+                        "status": str(TaskStatus.SKIPPED),
                         "contributing_intents": list(intents),
                     }
                 )
@@ -2159,6 +2533,187 @@ def _derive_thread_from_intents(
             "comment_id": intent.comment_id,
         }
     return None
+
+
+def _pending_queue_ids(current: list[dict[str, Any]]) -> set[str]:
+    """Pending-only id set from a task list — terminal tasks (COMPLETED,
+    SKIPPED) don't represent live scope competition for the critic's
+    duplicate_of/supersedes target check."""
+    return {
+        str(t["id"])
+        for t in current
+        if "id" in t
+        and t.get("status") not in (str(TaskStatus.COMPLETED), str(TaskStatus.SKIPPED))
+    }
+
+
+def _gather_task_creation_verdicts(
+    ordered_items: list[dict[str, Any]],
+    snapshot_queue: list[dict[str, Any]],
+    *,
+    critic_fn: "Callable[[dict[str, Any], list[dict[str, Any]]], TaskCreationVerdict] | None",
+) -> list["TaskCreationVerdict | None"]:
+    """Run the HOL-16 critic over every ``new`` op and return a verdict
+    list aligned with ``ordered_items`` (one entry per item).
+
+    A verdict is ``None`` when the critic was NOT asked (item has an
+    id, item has a blank title, item is a synthetic SKIPPED marker,
+    or ``critic_fn`` itself is None).  These items must always pass
+    through unchanged in the apply step.
+
+    Designed to be called OUTSIDE the tasks.json flock (codex
+    r3293399803 on PR #1932) — each verdict is a slow LLM call and
+    holding the lock for that blocks every concurrent webhook handler.
+    The companion :func:`_apply_task_creation_verdicts` runs inside
+    the lock and re-validates each drop against the current queue
+    (Rob review on PR #1932 — addresses the race where a drop target
+    is deleted between the unlocked verdict and the locked apply).
+    """
+    if critic_fn is None:
+        return [None] * len(ordered_items)
+    pending_queue = [
+        t
+        for t in snapshot_queue
+        if t.get("status") not in (str(TaskStatus.COMPLETED), str(TaskStatus.SKIPPED))
+    ]
+    verdicts: list[TaskCreationVerdict | None] = []
+    for item in ordered_items:
+        if (
+            item.get("id") is not None
+            or not (item.get("title") or "").strip()
+            or item.get("status") == str(TaskStatus.SKIPPED)
+        ):
+            verdicts.append(None)
+            continue
+        verdicts.append(critic_fn(item, pending_queue))
+    return verdicts
+
+
+def _apply_task_creation_verdicts(
+    ordered_items: list[dict[str, Any]],
+    verdicts: list["TaskCreationVerdict | None"],
+    current: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply pre-gathered task-creation verdicts against the CURRENT
+    queue, dropping/fanning items per verdict.
+
+    Re-validates drop targets against ``current`` at apply time so a
+    concurrent deletion of the target task between the unlocked
+    critic call and the locked apply doesn't silently delete the
+    proposed task (Rob review on PR #1932).  When the named
+    duplicate_of/supersedes target is no longer in the queue, the
+    proposed task is KEPT — fail-open just like the hallucinated-id
+    case.
+    """
+    assert len(ordered_items) == len(verdicts), (
+        f"verdict/item count mismatch: {len(ordered_items)} items vs "
+        f"{len(verdicts)} verdicts"
+    )
+    out: list[dict[str, Any]] = []
+    pending_queue_ids = _pending_queue_ids(current)
+    # Codex on PR #1932: a drop verdict whose target is being CLOSED
+    # by the same batch (status="completed", absorbed by another
+    # item's merge_sources, or split via split_targets) must NOT
+    # honor the drop — the named "duplicate of"/"supersedes" target
+    # won't survive the batch, so dropping the proposal too would
+    # leave no live task carrying that scope.  Compute the
+    # batch-closing id set once and treat closing targets the same
+    # way as missing targets (KEEP the proposal, fail-open).
+    batch_closing_ids: set[str] = set()
+    for it in ordered_items:
+        it_id = it.get("id")
+        if isinstance(it_id, str) and it_id:
+            if it.get("status") == str(TaskStatus.COMPLETED):
+                batch_closing_ids.add(it_id)
+            elif it.get("split_targets"):
+                batch_closing_ids.add(it_id)
+        merge_sources = it.get("merge_sources") or []
+        if isinstance(merge_sources, list):
+            for source in merge_sources:
+                if isinstance(source, str) and source:
+                    batch_closing_ids.add(source)
+    for item, verdict in zip(ordered_items, verdicts, strict=True):
+        if verdict is None:
+            out.append(item)
+            continue
+        if verdict.drops_proposal:
+            target_id = verdict.duplicate_of_id or verdict.supersedes_id
+            # codex r3293399805 (hallucinated id) + Rob review (target
+            # deleted between unlocked critic and locked apply) +
+            # codex on PR #1932 (target closed BY this batch): same
+            # safe behaviour — when the target won't survive the
+            # batch, KEEP the proposed task instead of silently
+            # dropping legitimate work.
+            target_alive = (
+                target_id is not None
+                and target_id in pending_queue_ids
+                and target_id not in batch_closing_ids
+            )
+            if not target_alive:
+                log.warning(
+                    "task-creation critic %r references target id %r "
+                    "that won't survive the batch (missing or closing) — "
+                    "keeping proposed task",
+                    verdict.relationship,
+                    target_id,
+                )
+                out.append(item)
+                continue
+            log.info(
+                "task-creation critic dropped new task %r (%s of %s): %s",
+                item.get("title"),
+                verdict.relationship,
+                target_id,
+                verdict.rationale,
+            )
+            continue
+        if verdict.fans_out:
+            log.info(
+                "task-creation critic fanned new task %r into %d splits: %s",
+                item.get("title"),
+                len(verdict.proposed_splits),
+                verdict.rationale,
+            )
+            # Each split becomes its own ``new`` item, inheriting the
+            # original's contributing_intents so reply-back attribution
+            # is preserved across the fan-out.
+            inherited_intents = item.get("contributing_intents") or []
+            inherited_type = item.get("type") or "spec"
+            for split in verdict.proposed_splits:
+                child_item: dict[str, Any] = {
+                    "id": None,
+                    "title": split.title,
+                    "description": split.description,
+                    "type": inherited_type,
+                    "invariant": split.invariant,
+                    "contributing_intents": list(inherited_intents),
+                }
+                out.append(child_item)
+            continue
+        # distinct + single: pass through.
+        out.append(item)
+    return out
+
+
+def _apply_task_creation_critics(
+    ordered_items: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+    *,
+    critic_fn: "Callable[[dict[str, Any], list[dict[str, Any]]], TaskCreationVerdict] | None" = None,
+) -> list[dict[str, Any]]:
+    """Combined gather+apply wrapper for the HOL-16 critic.
+
+    Convenience entry point for tests and any caller that doesn't need
+    the two-phase outside-lock / inside-lock split.  Production wiring
+    in ``reorder_tasks`` calls :func:`_gather_task_creation_verdicts`
+    and :func:`_apply_task_creation_verdicts` separately so the slow
+    LLM verdict calls happen outside the tasks.json flock while the
+    apply still revalidates drop targets against the live queue.
+    """
+    verdicts = _gather_task_creation_verdicts(
+        ordered_items, current, critic_fn=critic_fn
+    )
+    return _apply_task_creation_verdicts(ordered_items, verdicts, current)
 
 
 def _make_new_tasks_from_opus(
@@ -2217,7 +2772,14 @@ def _make_new_tasks_from_opus(
         if not title:
             slots.append(None)
             continue
-        if skipped < covered_intents:
+        # HOL-6 / #1900 SKIPPED markers must be exempt from this
+        # post-snapshot dedup (Rob review on PR #1932).  The marker IS
+        # the durable record that an intent's no_op verdict landed —
+        # dropping it because some other thread task covers the same
+        # intent reintroduces the silent-drop pattern HOL-6 closes.
+        item_status = item.get("status")
+        is_skipped_marker = item_status == str(TaskStatus.SKIPPED)
+        if not is_skipped_marker and skipped < covered_intents:
             log.info(
                 "rescope: dropping duplicate new task %r — already serviced "
                 "by a post-snapshot thread task (#1337)",
@@ -2226,14 +2788,34 @@ def _make_new_tasks_from_opus(
             skipped += 1
             slots.append(None)
             continue
+        # HOL-6 / #1900: synthetic ``_RescopeOpSkip`` items carry an
+        # explicit ``status: "skipped"`` so the marker task lands with
+        # ``TaskStatus.SKIPPED`` instead of PENDING.  Opus-emitted
+        # ``new`` ops never carry ``status`` (``_parse_op_new`` doesn't
+        # read it), so the .get() defaults to PENDING for honest new
+        # tasks.  Only ``SKIPPED`` is honoured here — any other
+        # synthetic status would be a coding bug, not user input.
+        # (``item_status`` and ``is_skipped_marker`` were already
+        # computed above for the dedup-exemption check.)
+        status = (
+            str(TaskStatus.SKIPPED) if is_skipped_marker else str(TaskStatus.PENDING)
+        )
         task: dict[str, Any] = {
             "id": str(uuid.uuid7()),
             "title": title,
             "type": item.get("type") or "spec",
             "description": item.get("description") or "",
-            "status": str(TaskStatus.PENDING),
+            "status": status,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        # HOL-11 / #1905: carry the invariant Opus named (if any) onto
+        # the materialised task.  Today this is best-effort — empty is
+        # accepted to avoid breaking legacy ``new`` ops that predate
+        # the schema.  HOL-12 will tighten the rescope prompt so every
+        # Opus-emitted ``new`` op carries a non-empty invariant.
+        invariant_value = item.get("invariant") or ""
+        if invariant_value:
+            task["invariant"] = invariant_value
         # #1722: a brand-new task carries the originating intents the
         # `new` op declared so a downstream classifier can route the
         # eventual completion notification to the right commenter(s).
@@ -2252,6 +2834,40 @@ def _make_new_tasks_from_opus(
             task["thread"] = thread
         slots.append(task)
     return slots
+
+
+_SKIPPED_KEEP_FIELDS = frozenset({"id"})
+
+
+def _mutates_skipped_row(item: dict[str, Any]) -> bool:
+    """True when ``item`` would change the SKIPPED row's content.
+
+    A bare ``{id}`` item is the ``keep`` no-op shape — preserves the
+    row exactly, the right semantic for a terminal lineage record on
+    every rescope pass.  Any other field (title, description, status,
+    merge_sources, split_targets, anchor_comment_id, …) signals a
+    mutating op the SKIPPED guard must reject.
+
+    Empty-list sentinels (``merge_sources=[]``, ``split_targets=[]``,
+    ``contributing_intents=[]``) are treated as absent so a wrapper
+    that always emits these keys with empty lists isn't falsely
+    flagged.  Non-empty ``contributing_intents`` IS a mutation —
+    ``_rescope_releases_for_oracle`` unions those intents into the
+    persisted task (codex on PR #1932:
+    ``src/fido/tasks.py:650``), so a "keep" item carrying new
+    intents would silently expand the SKIPPED marker's lineage
+    metadata, contradicting the terminal-record invariant.
+    """
+    for key, value in item.items():
+        if key in _SKIPPED_KEEP_FIELDS:
+            continue
+        if (
+            key in ("merge_sources", "split_targets", "contributing_intents")
+            and value == []
+        ):
+            continue
+        return True
+    return False
 
 
 def _validate_rescope_batch(
@@ -2323,6 +2939,17 @@ def _validate_rescope_batch(
         for t in current
         if "id" in t and t.get("status") == str(TaskStatus.BLOCKED)
     }
+    # SKIPPED tasks are terminal lineage records — they project to
+    # StatusCompleted at the rescope oracle (HOL-5), so merge/split/
+    # rewrite/remove ops targeting them would silently lose the no_op
+    # marker without any user-visible effect (Rob review on PR #1932).
+    # Treat SKIPPED with the same merge/split rejection shape as
+    # COMPLETED.
+    currently_skipped_ids = {
+        t["id"]
+        for t in current
+        if "id" in t and t.get("status") == str(TaskStatus.SKIPPED)
+    }
     # Kind classification is title-prefix driven (ASK:/DEFER:/CI FAILURE:),
     # so a split that copies child titles literally would silently
     # reclassify an ASK/DEFER source's children to executable spec
@@ -2387,6 +3014,25 @@ def _validate_rescope_batch(
                 f"item[{index}].id={item_id!r}: duplicate (already appears earlier)"
             )
         seen_ids.add(item_id)
+        # codex on PR #1932: SKIPPED is terminal — the marker is the
+        # durable record that an intent's no_op verdict landed.  The
+        # earlier merge/split-only guard caught two op shapes but
+        # rewrite (mutated title/description against the same id),
+        # status changes (remove/demote), merge, and split would
+        # silently corrupt the marker too.  Reject ANY MUTATING op
+        # targeting a SKIPPED row; the cheap ``keep`` no-op shape
+        # (bare ``{id, contributing_intents}``) stays allowed because
+        # it's just "this row is still here, no change" — exactly the
+        # right semantic for a terminal lineage record on every
+        # rescope pass.
+        if item_id in currently_skipped_ids and _mutates_skipped_row(item):
+            errors.append(
+                f"item[{index}].id={item_id!r}: target is a SKIPPED "
+                "marker (HOL-6 no_op lineage record); SKIPPED is "
+                "terminal and any op on it (rewrite, status change, "
+                "merge, split) would corrupt the no_op record"
+            )
+            continue
         if item.get("status") == str(TaskStatus.COMPLETED):
             explicitly_completed_ids.add(item_id)
         merge_sources = item.get("merge_sources")
@@ -2669,7 +3315,11 @@ def _inprogress_was_demoted(
       — the picker filters them; the magic-prefix smell that motivates
       this duplication is #1848.
     """
-    skip_statuses = (str(TaskStatus.COMPLETED), str(TaskStatus.BLOCKED))
+    skip_statuses = (
+        str(TaskStatus.COMPLETED),
+        str(TaskStatus.BLOCKED),
+        str(TaskStatus.SKIPPED),  # HOL-5 / #1899
+    )
     inprogress_id = inprogress_row.get("id")
     for task in result:
         if task.get("status") in skip_statuses:
@@ -2687,7 +3337,16 @@ def _apply_reorder(
     ordered_items: list[dict[str, Any]],
     original_ids: frozenset[str] = frozenset(),
     intents: list[RescopeIntent] | None = None,
+    *,
+    task_creation_critic_fn: "Callable[[dict[str, Any], list[dict[str, Any]]], TaskCreationVerdict] | None" = None,
 ) -> list[dict[str, Any]]:
+    """Pure apply path.
+
+    ``task_creation_critic_fn`` kept for back-compat with direct tests
+    that exercise the critic-mutate behaviour through ``_apply_reorder``
+    — production callers run the critic outside the flock via
+    :func:`_apply_task_creation_critics` and pass ``None`` here.
+    """
     """Apply Opus-synthesised items to the current task list.
 
     Rules (in priority order):
@@ -2711,6 +3370,15 @@ def _apply_reorder(
     """
     snapshot_ids = original_ids or frozenset(
         t["id"] for t in current if t.get("status") != TaskStatus.COMPLETED
+    )
+    # HOL-16 / #1910: run the task-creation critic over every ``new``
+    # op before materialisation.  Drops duplicate/supersedes proposals
+    # and replaces multi-invariant proposals with one new-op per split.
+    # When ``task_creation_critic_fn`` is None (test path, no agent
+    # wired), the helper is a pass-through and the legacy no-critic
+    # behaviour is preserved.
+    ordered_items = _apply_task_creation_critics(
+        ordered_items, current, critic_fn=task_creation_critic_fn
     )
     # Pre-allocate split children's ``(id, created_at)`` tuples once
     # so the apply and verify passes mint identical metadata even
@@ -3023,6 +3691,15 @@ def reorder_tasks(
                 flat_ops = _flatten_verdicts_to_ops(verdicts)
                 synthetic = json.dumps({"operations": flat_ops})
                 operations, parse_errors = _parse_rescope_operations(synthetic)
+                if not parse_errors:
+                    # HOL-6 / #1900: append synthetic SKIPPED-marker ops
+                    # for every no_op verdict.  Bypassing the parse path
+                    # is intentional — ``_RescopeOpSkip`` is not exposed
+                    # in ``_OP_PARSERS`` so Opus cannot fabricate one
+                    # via the verdict envelope.  Materialisation lands
+                    # in ``_make_new_tasks_from_opus`` via the explicit
+                    # ``status: "skipped"`` item field.
+                    operations.extend(_skip_ops_for_no_op_verdicts(verdicts))
         else:
             operations, parse_errors = _parse_rescope_operations(raw)
         if not parse_errors:
@@ -3132,6 +3809,43 @@ def reorder_tasks(
             break
         ordered_items = _operations_to_items(nudge_ops)
 
+    # HOL-16 / #1910: run the task-creation critic OUTSIDE the
+    # tasks.json flock (codex r3293399803 on PR #1932).  Each critic
+    # round makes an Opus call that can take seconds; holding the
+    # lock for that would block every concurrent webhook handler and
+    # worker reading/writing tasks.json.
+    #
+    # Verdict gathering and verdict APPLICATION are split (Rob review
+    # on PR #1932): the slow LLM calls run here against a snapshot,
+    # but the actual drop/fan-out decisions happen INSIDE the lock
+    # below against the CURRENT queue.  Without that split, a drop
+    # target that gets deleted between snapshot and lock acquisition
+    # would silently delete the proposed task even though its named
+    # target no longer exists.  ``_apply_task_creation_verdicts``
+    # re-checks drop targets against ``current`` and keeps the proposal
+    # when the target is gone.
+    snapshot_for_critic = tasks.list()
+
+    def _task_creation_critic_fn(
+        proposed: dict[str, Any], queue: list[dict[str, Any]]
+    ) -> "TaskCreationVerdict":
+        from fido.critics import run_task_creation_critic
+
+        return run_task_creation_critic(
+            proposed,
+            queue,
+            agent=agent,
+            prompts=prompts,
+            # JSON-capable critic prompt — codex r3293399806.
+            critic_system_prompt=prompts.critic_system_prompt(issue=issue, pr=pr),
+        )
+
+    task_creation_verdicts = _gather_task_creation_verdicts(
+        ordered_items,
+        snapshot_for_critic,
+        critic_fn=_task_creation_critic_fn,
+    )
+
     # Route the write through Tasks's public modify() — its on_mutate
     # hook (e.g. the SCADA snapshot publisher) fires automatically on
     # exit while the flock is still held, so concurrent writers
@@ -3148,6 +3862,14 @@ def reorder_tasks(
         # back the same content, so the durable list is unchanged.
         # Partial commits aren't safe: they'd leave tasks.json in a
         # state Opus didn't propose, breaking snapshot/replay reasoning.
+        # Apply the pre-gathered task-creation verdicts against the
+        # CURRENT queue (not the snapshot above) so drop targets that
+        # got deleted between gather and lock acquisition cause the
+        # proposed task to be KEPT, not silently dropped (Rob review
+        # on PR #1932).
+        ordered_items = _apply_task_creation_verdicts(
+            ordered_items, task_creation_verdicts, current
+        )
         validation_errors = _validate_rescope_batch(current, ordered_items)
         if validation_errors:
             rejected = True
@@ -3163,9 +3885,22 @@ def reorder_tasks(
             inprogress = next(
                 (t for t in current if t.get("status") == TaskStatus.IN_PROGRESS), None
             )
+
+            # Critic already ran outside the lock above; ``_apply_reorder``
+            # gets the pre-filtered ``ordered_items`` and applies them
+            # under flock without further LLM calls.
             result = _apply_reorder(
-                current, ordered_items, original_ids, intents=intents
+                current,
+                ordered_items,
+                original_ids,
+                intents=intents,
             )
+            # HOL-8 / #1902: append narrative_chain entries for every
+            # verdict that touched a task in the result.  Runs before
+            # the in-progress check so the chain is part of the
+            # durable state that gets compared and slice-assigned
+            # below.  No-op when verdicts is empty (ops-mode rescope).
+            _append_narrative_chain_entries(result, verdicts, original_ids)
             if inprogress is not None:
                 # The omission ⇒ completed branch is gone (#1357 case A): the
                 # rescope reducer now uses KeepTask for omitted snapshot
@@ -3460,8 +4195,21 @@ class Tasks(JsonFileStore):
         description: str = "",
         status: TaskStatus = TaskStatus.PENDING,
         thread: dict[str, Any] | None = None,
+        invariant: str = "",
     ) -> dict[str, Any]:
-        """Add a task. Returns the new (or existing duplicate) task."""
+        """Add a task. Returns the new (or existing duplicate) task.
+
+        ``invariant`` (HOL-11 / #1905) is the one-line statement of the
+        property this task establishes — Rocq lemma / Python assertion
+        / CI rule / behavioural change.  Defaults to empty string so
+        legacy callers (CLI, seed-from-PR-body, ``events.create_task``)
+        keep working; HOL-12 tightens this at the rescope prompt by
+        requiring Opus to name an invariant on every ``new`` op, and
+        HOL-13 wires the worker pickup ``split-task`` sentinel for
+        tasks whose invariant doesn't fit a single commit boundary.
+        Legacy empty-invariant tasks are exempted from the new rule
+        — the field is the carrier, the enforcement layers come next.
+        """
         if not isinstance(task_type, TaskType):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise TypeError(
                 f"task_type must be TaskType, got {type(task_type).__name__}"
@@ -3475,6 +4223,8 @@ class Tasks(JsonFileStore):
             "status": str(status),
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        if invariant:
+            task["invariant"] = invariant
         if thread:
             task["thread"] = thread
         comment_id = (thread or {}).get("comment_id")

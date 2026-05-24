@@ -16,7 +16,9 @@ prose promises always correspond to queued tasks (fixes #1218).
 
 import json
 import logging
-from typing import Any
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, TypeVar
 
 from fido.prompts import Prompts
 from fido.provider import (
@@ -36,6 +38,120 @@ log = logging.getLogger(__name__)
 
 #: Maximum number of synthesis LLM attempts before raising.
 MAX_RETRIES: int = 3
+
+
+# ---------------------------------------------------------------------------
+# Critic loop helper (HOL-14 / #1908)
+# ---------------------------------------------------------------------------
+#
+# The same shape — generate → verify → loop on gap → exhaust — repeats at
+# every LLM emission point in the holistic-gate architecture (#1894 / Layer 2):
+# intent registration, new-task creation, task completion, reply prose,
+# insight filing.  HOL-15..HOL-19 each instantiate this with their own
+# narrow verify question.  HOL-14 owns the helper; downstream leaves only
+# supply ``generate`` and ``verify``.
+
+_T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class CriticVerdict:
+    """One verdict from a critic over a proposed LLM emission.
+
+    ``passed`` is the dispatch axis: ``True`` short-circuits the loop and
+    returns the proposal; ``False`` records ``gap`` as a hint for the next
+    ``generate`` attempt.
+
+    ``gap`` is a one-line plain-English description of why the proposal
+    failed — fed back into ``generate`` as the retry nudge so the next
+    proposal can address the specific complaint.  Empty when ``passed``;
+    required when ``not passed``.
+    """
+
+    passed: bool
+    gap: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.passed and not self.gap.strip():
+            raise ValueError(
+                "CriticVerdict.gap is required when passed=False — "
+                "the gap is what the next generate() attempt needs to address"
+            )
+
+
+class CriticExhaustedError(Exception):
+    """All :func:`critic_loop` attempts failed verification.
+
+    Carries the chain of gaps so the caller can route the exhaustion to the
+    appropriate sentinel (HOL-20/21: bug-and-block via the existing
+    ``stuck-on-task`` BLOCKED path).
+    """
+
+    def __init__(self, label: str, gaps: list[str]) -> None:
+        self.label = label
+        self.gaps = list(gaps)
+        msg = (
+            f"critic_loop({label!r}) exhausted {len(gaps)} attempts — "
+            f"final gap: {gaps[-1]!r}"
+        )
+        super().__init__(msg)
+
+
+def critic_loop(
+    generate: Callable[[int, str], _T],
+    verify: Callable[[_T], CriticVerdict],
+    *,
+    label: str,
+    max_attempts: int = MAX_RETRIES,
+) -> _T:
+    """Run the generate → verify → loop pattern over an LLM emission.
+
+    ``generate(attempt, gap_so_far)`` produces a candidate of type ``_T``.
+    On the first attempt ``gap_so_far`` is the empty string.  On later
+    attempts it is the gap from the previous failed verdict, which the
+    generator weaves into its prompt nudge so the next candidate addresses
+    the specific complaint.
+
+    ``verify(candidate)`` returns a :class:`CriticVerdict`.  ``passed=True``
+    immediately returns the candidate; ``passed=False`` records the gap and
+    loops.
+
+    ``label`` is a short identifier (e.g. ``"intent-coverage"``,
+    ``"task-completion"``) used in the exhaustion error and log lines so
+    HOL-20/21 can route by emission point.
+
+    Raises :class:`CriticExhaustedError` when ``max_attempts`` candidates
+    all fail verification.  The error carries every gap so the bug-and-block
+    routing can attach the full retry history to the auto-filed issue.
+
+    ``generate`` is allowed to raise — its exception propagates out
+    untouched.  Only verification gaps drive the loop.
+    """
+    gaps: list[str] = []
+    gap_so_far = ""
+    for attempt in range(max_attempts):
+        candidate = generate(attempt, gap_so_far)
+        verdict = verify(candidate)
+        if verdict.passed:
+            if attempt > 0:
+                log.info(
+                    "critic_loop[%s]: passed on attempt %d/%d",
+                    label,
+                    attempt + 1,
+                    max_attempts,
+                )
+            return candidate
+        gaps.append(verdict.gap)
+        gap_so_far = verdict.gap
+        log.warning(
+            "critic_loop[%s]: attempt %d/%d failed — gap: %s",
+            label,
+            attempt + 1,
+            max_attempts,
+            verdict.gap,
+        )
+    raise CriticExhaustedError(label, gaps)
+
 
 _RETRY_SUFFIX = (
     "\n\n---\n"
@@ -156,7 +272,153 @@ class SynthesisExhaustedError(Exception):
     """
 
 
-def _extract_json_objects(raw: str) -> list[dict[str, Any]]:
+class SynthesisCriticExhaustedError(SynthesisExhaustedError):
+    """HOL-20 / #1914: synthesis exhausted specifically because a Layer 2
+    critic kept rejecting otherwise-valid responses.
+
+    Subclass of :class:`SynthesisExhaustedError` so legacy catches that
+    only know about generic exhaustion still work, but new catches can
+    distinguish critic-exhaustion to route through the BLOCKED PR +
+    auto-file-bug path (instead of the legacy "please rephrase"
+    fallback).
+
+    Carries the full retry history so the bug filer can attach it to
+    the auto-filed issue:
+
+    - ``label``: which critic exhausted (``"intent-coverage"``, etc).
+    - ``critic_gaps``: the gap text from each failed verdict, in
+      order.  Always one entry per attempt (after the reorder,
+      ``critic_gaps[i]`` corresponds to ``synthesis_attempts[i]``).
+    - ``synthesis_attempts``: a short preview of each synthesis
+      response the critic rejected.  Useful when the critic gap is
+      generic ("missing tests") and the human needs to see what Opus
+      actually proposed each time.
+    """
+
+    def __init__(
+        self,
+        label: str,
+        critic_gaps: list[str],
+        synthesis_attempts: list[str],
+    ) -> None:
+        self.label = label
+        self.critic_gaps = list(critic_gaps)
+        self.synthesis_attempts = list(synthesis_attempts)
+        final_gap = critic_gaps[-1] if critic_gaps else "(no gap recorded)"
+        super().__init__(
+            f"synthesis {label} critic exhausted {len(critic_gaps)} attempts — "
+            f"final gap: {final_gap!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Intent-coverage critic (HOL-15 / #1909)
+# ---------------------------------------------------------------------------
+#
+# After a synthesis response parses, this critic asks the model to verify
+# that the registered intents (``change_request``) + reply prose faithfully
+# cover the original comment.  Catches:
+#
+#   - missing : prose promises work the change_request doesn't capture
+#               (#1862's shape — closes that bug).
+#   - invented: prose claims to do something the comment didn't ask for.
+#   - mismatched: change_request scope doesn't match the comment's ask.
+#
+# The bare Yes/No verification turn (``_check_and_promote`` / #1218) only
+# catches "missing change_request"; this broader critic covers all three
+# axes.  It runs ADDITIVELY today — both gates fire per attempt.  A future
+# leaf removes ``_check_and_promote`` once the critic has earned its keep.
+
+_CRITIC_RETRY_SUFFIX_TEMPLATE = (
+    "\n\n---\n"
+    "Your previous response failed the {label} critic with this gap:\n\n"
+    "  {gap}\n\n"
+    "Rewrite the synthesis response to address the gap.  Same JSON schema "
+    "as before."
+)
+
+
+def _run_intent_coverage_critic(
+    response: CommentResponse,
+    comment_body: str,
+    agent: ProviderAgent,
+    prompts: Prompts,
+    critic_system_prompt: str,
+) -> CriticVerdict:
+    """Ask the model whether ``response`` faithfully covers ``comment_body``.
+
+    Returns ``CriticVerdict(passed=True)`` on a clean pass, or
+    ``CriticVerdict(passed=False, gap=...)`` when the critic spots a
+    coverage problem.  Parse failures or unrecognised JSON from the critic
+    fail OPEN (return ``passed=True``) — the critic is an additional gate,
+    not the only one, so a flaky critic turn must not block a valid
+    response from shipping.  ``ContextOverflowError`` / ``SessionLeakError``
+    still propagate per project convention.
+
+    ``critic_system_prompt`` must be the JSON-capable variant
+    (:meth:`fido.prompts.Prompts.critic_system_prompt`) — passing the
+    plain-text follow-up prompt makes the model emit non-envelope
+    responses that ``extract_json_objects`` can't see, silently failing
+    open (codex r3293399801 on PR #1932).
+    """
+    prompt = prompts.intent_coverage_critic_prompt(
+        comment_body=comment_body,
+        reply_text=response.reply_text,
+        change_request=response.change_request,
+    )
+    try:
+        raw = agent.run_turn(
+            prompt,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            system_prompt=critic_system_prompt,
+            retry_on_preempt=True,
+        )
+    except ContextOverflowError, SessionLeakError:
+        raise
+    except Exception as exc:
+        log.warning(
+            "intent-coverage critic transport failure (%s) — failing open",
+            exc,
+        )
+        return CriticVerdict(passed=True)
+
+    objs = extract_json_objects(raw or "")
+    if not objs:
+        log.warning("intent-coverage critic returned no parseable JSON — failing open")
+        return CriticVerdict(passed=True)
+    # codex r3293359040 on PR #1932: scan ALL extracted JSON objects for
+    # the first one that matches the verdict envelope.  A response that
+    # leads with an unrelated ``{}`` followed by a real verdict would
+    # otherwise be treated as malformed and fail open — silently letting
+    # an intent-coverage failure ship.
+    # codex r3293424368 on PR #1932: a malformed early envelope
+    # (e.g. ``{"passed": false}`` without a gap) must NOT short-circuit
+    # the scan — a later object may carry the real verdict with its
+    # gap.  Track the first malformed-fail we saw; only return its
+    # fail-open verdict after the whole scan finds no usable envelope.
+    saw_malformed_fail = False
+    for obj in objs:
+        if obj.get("passed") is True:
+            return CriticVerdict(passed=True)
+        if obj.get("passed") is False:
+            gap = obj.get("gap")
+            if isinstance(gap, str) and gap.strip():
+                return CriticVerdict(passed=False, gap=gap.strip())
+            # Critic claimed fail but gave no gap — remember and keep
+            # scanning in case a later object has the real verdict.
+            saw_malformed_fail = True
+    if saw_malformed_fail:
+        log.warning("intent-coverage critic failed without a gap — failing open")
+    else:
+        log.warning(
+            "intent-coverage critic returned no envelope-shaped JSON in %d "
+            "objects — failing open",
+            len(objs),
+        )
+    return CriticVerdict(passed=True)
+
+
+def extract_json_objects(raw: str) -> list[dict[str, Any]]:
     """Return all JSON objects found in *raw* using a consume loop.
 
     Scans *raw* for ``{``, attempts :meth:`json.JSONDecoder.raw_decode`
@@ -190,13 +452,13 @@ def _extract_json_objects(raw: str) -> list[dict[str, Any]]:
 def _parse_comment_response(raw: str) -> CommentResponse:
     """Parse *raw* model output into a :class:`~fido.synthesis.CommentResponse`.
 
-    Extracts all JSON objects from *raw* via :func:`_extract_json_objects`
+    Extracts all JSON objects from *raw* via :func:`extract_json_objects`
     and returns the first that validates as a ``CommentResponse``.
     Raises :exc:`ValueError` if none does; the caller
     (:func:`call_synthesis`) catches this and retries.
     """
     last_error: Exception = ValueError("no JSON objects found in model output")
-    for obj in _extract_json_objects(raw):
+    for obj in extract_json_objects(raw):
         reasoning = obj.get("reasoning", "")
         reply_text = obj.get("reply_text", "")
 
@@ -278,6 +540,7 @@ def call_synthesis(
     pr: ActivePR | None = None,
     agent: ProviderAgent,
     prompts: Prompts,
+    claim_grounding_state: dict[str, Any] | None = None,
 ) -> CommentResponse:
     """Run the unified comment-handling synthesis turn.
 
@@ -308,20 +571,63 @@ def call_synthesis(
         LLM agent with a ``run_turn(content, *, system_prompt)`` method.
     prompts:
         Prompt builder (``Prompts`` instance).
+    claim_grounding_state:
+        HOL-18 / #1912 — ground-truth references the caller has gathered
+        (``recent_commit_shas`` / ``open_issue_numbers`` / etc.).  When
+        non-empty, the reply-prose claim-grounding critic fires after
+        intent-coverage and gates the response on falsifiable specifics
+        (PR #1858's empty-commit lies, #1855's no-URL filed-issue
+        claims).  ``None`` or empty dict skips the critic — preserves
+        legacy callers that haven't gathered structured state yet.
     """
     system_prompt = prompts.synthesis_system_prompt(issue=issue, pr=pr)
     followup_system_prompt = prompts.synthesis_followup_system_prompt(
         issue=issue, pr=pr
     )
+    # HOL-15 critic needs a JSON-capable system prompt — the followup
+    # prompt above explicitly forbids JSON (it's for plain-text Yes/No
+    # turns), so wiring the critic through it makes the model emit
+    # non-envelope responses that ``extract_json_objects`` can't see,
+    # silently failing open (codex r3293399801 on PR #1932).
+    critic_system_prompt = prompts.critic_system_prompt(issue=issue, pr=pr)
     base_user_prompt = prompts.synthesis_prompt(
         comment_body, is_bot=is_bot, context=context
     )
 
     last_error: Exception | None = None
+    last_critic_gap: str | None = None
+    last_critic_label: str | None = None
+    # HOL-20 / #1914: per-attempt history so a critic-exhaustion can
+    # raise ``SynthesisCriticExhaustedError`` carrying the full retry
+    # trace.  Only contiguous trailing critic-failure attempts are
+    # accumulated — a parse failure RESETS the chain (codex on PR
+    # #1932: a mixed critic-then-parse failure sequence used to leave
+    # stale critic state intact, incorrectly routing to BLOCKED even
+    # when the LAST attempt was a parse failure).  ``last_critic_label``
+    # being non-None is the signal that the most-recent attempt
+    # exited the critic gate, so the trailing run reflects exactly
+    # what caused the final exhaustion.
+    critic_label_at_exhaustion: str | None = None
+    critic_gaps: list[str] = []
+    synthesis_attempts: list[str] = []
     for attempt in range(MAX_RETRIES):
-        user_prompt = (
-            base_user_prompt if attempt == 0 else base_user_prompt + _RETRY_SUFFIX
-        )
+        # Per-attempt prompt suffix.  Critic gap takes priority over the
+        # generic JSON-strictness nudge — the critic gap is more specific
+        # and addresses a successful-parse-but-bad-coverage problem.
+        # The label is parameterised so a reply-prose critic retry
+        # nudges toward grounded claims, not toward intent coverage
+        # (codex on PR #1932: the suffix used to hard-code "intent-
+        # coverage critic" even when the failure was reply-prose,
+        # pushing the model toward the wrong failure mode).
+        if last_critic_gap is not None:
+            user_prompt = base_user_prompt + _CRITIC_RETRY_SUFFIX_TEMPLATE.format(
+                label=last_critic_label or "intent-coverage",
+                gap=last_critic_gap,
+            )
+        elif attempt > 0:
+            user_prompt = base_user_prompt + _RETRY_SUFFIX
+        else:
+            user_prompt = base_user_prompt
         # ``retry_on_preempt=True`` (#1687): a preempted (cancelled)
         # turn returns an empty string from the drain.  Without this,
         # ``_parse_comment_response`` below would raise "no JSON
@@ -345,6 +651,19 @@ def call_synthesis(
             response = _parse_comment_response(raw)
         except ValueError as exc:
             last_error = exc
+            last_critic_gap = None
+            last_critic_label = None
+            # Codex on PR #1932: a parse failure means the FINAL
+            # failure (if exhausted here) is "model couldn't emit
+            # valid JSON" — NOT a critic exhaustion.  Reset the
+            # critic chain so the exhaustion check below picks the
+            # right path; the legacy "please rephrase" fallback is
+            # the correct response to a model that can't parse, not
+            # the BLOCKED PR route (which is for "the critic won't
+            # accept what the model emits").
+            critic_label_at_exhaustion = None
+            critic_gaps = []
+            synthesis_attempts = []
             log.warning(
                 "synthesis attempt %d/%d parse failure — %s",
                 attempt + 1,
@@ -353,12 +672,113 @@ def call_synthesis(
             )
             continue
 
-        if attempt > 0:
-            log.info("synthesis: succeeded on attempt %d/%d", attempt + 1, MAX_RETRIES)
-        return _check_and_promote(
+        # Legacy ``_check_and_promote`` (#1218) backstop fires FIRST so
+        # any derived ``change_request`` is part of the response the
+        # critics see (codex on PR #1932: previously the critics ran
+        # on the pre-promote response, then ``_check_and_promote``
+        # could mutate ``change_request`` post-critic — a hallucinated
+        # or over-broad derivation bypassed every gate).  Reordering
+        # costs at most ``_check_and_promote``'s two extra LLM turns
+        # per attempt on retry paths; the correctness win is that
+        # what ships is exactly what was critiqued.  A follow-up leaf
+        # removes ``_check_and_promote`` once the HOL-15 critic has
+        # earned its keep.
+        response = _check_and_promote(
             response, agent, followup_system_prompt=followup_system_prompt
         )
 
+        # HOL-15 / #1909: intent-coverage critic gate.  Fires for every
+        # parsed response and can demand a retry with a specific gap.
+        # Fails open on transport/parse problems (see
+        # ``_run_intent_coverage_critic`` docstring) — the gate is
+        # additional, not the only one, so a flaky critic must not
+        # block a valid response from shipping.
+        verdict = _run_intent_coverage_critic(
+            response,
+            comment_body=comment_body,
+            agent=agent,
+            prompts=prompts,
+            critic_system_prompt=critic_system_prompt,
+        )
+        if not verdict.passed:
+            last_error = ValueError(f"intent-coverage critic: {verdict.gap}")
+            last_critic_gap = verdict.gap
+            last_critic_label = "intent-coverage"
+            # Codex on PR #1932: when the failing critic LABEL changes
+            # mid-retry (e.g. intent-coverage failed earlier, now it's
+            # reply-prose — or vice versa), reset the chain so the
+            # exhaustion's gap chain reflects ONLY the trailing run of
+            # same-label failures.  Mixing labels in one
+            # ``SynthesisCriticExhaustedError`` misfiled the BLOCKED
+            # bug context with unrelated gaps.
+            if critic_label_at_exhaustion != "intent-coverage":
+                critic_gaps = []
+                synthesis_attempts = []
+            critic_label_at_exhaustion = "intent-coverage"
+            critic_gaps.append(verdict.gap)
+            synthesis_attempts.append(response.reply_text[:200])
+            log.warning(
+                "synthesis attempt %d/%d critic gap — %s",
+                attempt + 1,
+                MAX_RETRIES,
+                verdict.gap,
+            )
+            continue
+
+        # HOL-18 / #1912: reply-prose claim-grounding critic.  Fires
+        # only when the caller has gathered ground-truth state (commit
+        # SHAs, issue/PR numbers, etc.) so legacy callers that haven't
+        # wired structured_state yet keep their existing behaviour.
+        # Same gap-drives-retry shape as the intent-coverage critic.
+        if claim_grounding_state:
+            from fido.critics import run_reply_prose_critic
+
+            prose_verdict = run_reply_prose_critic(
+                reply_text=response.reply_text,
+                structured_state=claim_grounding_state,
+                agent=agent,
+                prompts=prompts,
+                critic_system_prompt=critic_system_prompt,
+            )
+            if not prose_verdict.passed:
+                last_error = ValueError(f"reply-prose critic: {prose_verdict.gap}")
+                last_critic_gap = prose_verdict.gap
+                last_critic_label = "reply-prose"
+                # See the matching label-change reset in the
+                # intent-coverage arm above (Codex on PR #1932).
+                if critic_label_at_exhaustion != "reply-prose":
+                    critic_gaps = []
+                    synthesis_attempts = []
+                critic_label_at_exhaustion = "reply-prose"
+                critic_gaps.append(prose_verdict.gap)
+                synthesis_attempts.append(response.reply_text[:200])
+                log.warning(
+                    "synthesis attempt %d/%d reply-prose gap — %s",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    prose_verdict.gap,
+                )
+                continue
+
+        if attempt > 0:
+            log.info("synthesis: succeeded on attempt %d/%d", attempt + 1, MAX_RETRIES)
+        return response
+
+    # HOL-20 / #1914: if the LAST failure was a critic gap (the
+    # response parsed cleanly but a Layer 2 critic kept rejecting it),
+    # raise the subclass that carries the gap chain so the executor
+    # can route through the BLOCKED PR + auto-file-bug path instead
+    # of the legacy "please rephrase" fallback.  Parse-only failures
+    # fall through to the generic SynthesisExhaustedError so the
+    # legacy fallback handles them — those represent a model that
+    # can't emit valid JSON, not a critic that won't accept what it
+    # emits.
+    if critic_label_at_exhaustion is not None and critic_gaps:
+        raise SynthesisCriticExhaustedError(
+            critic_label_at_exhaustion,
+            critic_gaps,
+            synthesis_attempts,
+        )
     raise SynthesisExhaustedError(
         f"synthesis exhausted {MAX_RETRIES} retries without a valid CommentResponse "
         f"(Constraint B violation) — last error: {last_error}"
