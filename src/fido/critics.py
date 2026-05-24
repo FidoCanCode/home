@@ -14,6 +14,7 @@ output from shipping.
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -581,13 +582,35 @@ class InsightDedupVerdict:
             )
 
 
+# Codex on PR #1932: validate the URL SHAPE at parse time so a
+# malformed ``duplicate_url`` is treated as a malformed verdict (the
+# parser returns None and the runner fails open → insight files
+# normally) rather than as a valid "skip this filing" verdict that
+# the filer would honor while the marker-writer silently dropped the
+# durability record.  Loose check by design — the strict per-repo
+# match (the URL must target ``_INSIGHT_REPO``) lives in
+# ``fido.events._parse_insight_issue_number`` at the marker-write
+# boundary, so a hallucinated cross-repo URL still skips the marker
+# (and only the marker) without crashing dispatch.  Case-insensitive
+# to match GitHub's case-insensitive owner/repo names.
+_DEDUP_URL_RE = re.compile(
+    r"^https://github\.com/[^/]+/[^/]+/issues/\d+(?:[#/?].*)?$",
+    re.IGNORECASE,
+)
+
+
 def _parse_insight_dedup_verdict(
     obj: dict[str, Any],
 ) -> InsightDedupVerdict | None:
     """Parse a verdict envelope dict into :class:`InsightDedupVerdict`.
 
     Returns ``None`` when the envelope is malformed — caller treats as
-    fail-open (default verdict: ``is_duplicate=False``).
+    fail-open (default verdict: ``is_duplicate=False``), which lets
+    the insight file normally.  A duplicate verdict with no URL OR a
+    URL that doesn't match the GitHub issue shape both count as
+    malformed; without the URL-shape check, the filer would skip
+    the filing while the marker-writer silently dropped the
+    durability record, losing the insight entirely.
     """
     is_duplicate = obj.get("is_duplicate")
     if not isinstance(is_duplicate, bool):
@@ -598,6 +621,8 @@ def _parse_insight_dedup_verdict(
         return InsightDedupVerdict(is_duplicate=False, rationale=rationale)
     url = obj.get("duplicate_url")
     if not isinstance(url, str) or not url.strip():
+        return None
+    if not _DEDUP_URL_RE.match(url.strip()):
         return None
     return InsightDedupVerdict(
         is_duplicate=True,

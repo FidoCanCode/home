@@ -1153,13 +1153,51 @@ class TestParseInsightDedupVerdict:
         verdict = _parse_insight_dedup_verdict(
             {
                 "is_duplicate": True,
-                "duplicate_url": "https://x/issues/42",
+                "duplicate_url": "https://github.com/FidoCanCode/home/issues/42",
                 "rationale": "covers same invariant",
             }
         )
         assert verdict is not None
         assert verdict.is_duplicate
-        assert verdict.duplicate_url == "https://x/issues/42"
+        assert verdict.duplicate_url == (
+            "https://github.com/FidoCanCode/home/issues/42"
+        )
+
+    def test_malformed_url_treated_as_malformed_verdict(self) -> None:
+        """Codex on PR #1932: a duplicate verdict with a malformed
+        ``duplicate_url`` (not a GitHub /issues/N URL) used to be
+        accepted, causing the filer to skip the insight while the
+        marker-writer silently dropped the durability record — the
+        insight was lost entirely.  Parser now returns None for
+        non-GitHub-issue URLs so the runner fails open and the
+        insight files normally."""
+        for malformed in (
+            "not a real URL at all",
+            "https://example.com/FidoCanCode/home/issues/42",  # wrong host
+            "https://github.com/FidoCanCode/home/pull/42",  # PR not issue
+            "https://github.com/FidoCanCode/home/discussions/42",  # discussion
+            "https://github.com/FidoCanCode/home/issues/notanumber",
+        ):
+            assert (
+                _parse_insight_dedup_verdict(
+                    {"is_duplicate": True, "duplicate_url": malformed}
+                )
+                is None
+            ), f"expected malformed URL to fail parse: {malformed!r}"
+
+    def test_case_insensitive_github_url_accepted(self) -> None:
+        """The shape check is case-insensitive to match GitHub's
+        case-insensitive owner/repo names; the strict per-repo
+        equality lives downstream at the marker-write boundary."""
+        for url in (
+            "https://github.com/fidocancode/home/issues/42",
+            "https://GITHUB.COM/FidoCanCode/home/issues/42",
+        ):
+            verdict = _parse_insight_dedup_verdict(
+                {"is_duplicate": True, "duplicate_url": url}
+            )
+            assert verdict is not None, f"expected accepted: {url!r}"
+            assert verdict.is_duplicate
 
     def test_missing_is_duplicate_returns_none(self) -> None:
         assert _parse_insight_dedup_verdict({}) is None
@@ -1298,7 +1336,8 @@ class TestRunInsightDedupCritic:
         without a URL must not mask a later well-formed verdict."""
         raw = (
             '{"is_duplicate": true} '
-            '{"is_duplicate": true, "duplicate_url": "https://x/issues/7", '
+            '{"is_duplicate": true, '
+            '"duplicate_url": "https://github.com/FidoCanCode/home/issues/7", '
             '"rationale": "real dup"}'
         )
         verdict = run_insight_dedup_critic(
@@ -1309,7 +1348,7 @@ class TestRunInsightDedupCritic:
             critic_system_prompt="critic-sys",
         )
         assert verdict.is_duplicate
-        assert verdict.duplicate_url == "https://x/issues/7"
+        assert verdict.duplicate_url == ("https://github.com/FidoCanCode/home/issues/7")
 
     def test_uses_critic_system_prompt(self) -> None:
         agent = _FakeAgent(run_turn_responses=['{"is_duplicate": false}'])

@@ -6736,11 +6736,18 @@ class TestGitHubInsightFiler:
         # markers (posted as comments) are searchable on replay.
         assert "in:body,comments" in query
 
-    def test_critic_duplicate_with_unparseable_url_skips_marker(self) -> None:
-        """A critic that returns a non-GitHub or otherwise non-parseable
-        ``duplicate_url`` must NOT crash dispatch — we log and skip
-        the marker recording.  The filing is still skipped (the
-        critic's primary decision is honoured)."""
+    def test_critic_duplicate_cross_repo_url_skips_marker(self) -> None:
+        """A SHAPE-valid GitHub issue URL that points at a DIFFERENT
+        repo (not ``FidoCanCode/home``) survives parser validation
+        (``_DEDUP_URL_RE`` is repo-agnostic) but is rejected by the
+        per-repo strict check in ``_parse_insight_issue_number`` at
+        marker-write time.  Filing is still skipped (critic decision
+        honoured) but the durability marker can't be written —
+        logged and continued.
+
+        Two-layer validation by design: the parser keeps malformed
+        verdicts off the filer's path, while the marker-writer
+        defends ``_INSIGHT_REPO`` from cross-repo marker pollution."""
         gh = MagicMock()
         gh.search_issues.side_effect = [
             [],
@@ -6748,10 +6755,48 @@ class TestGitHubInsightFiler:
                 {
                     "title": "x",
                     "body": "y",
-                    "html_url": "https://x/issues/1",
+                    "html_url": "https://github.com/some-other-org/repo/issues/9",
                 }
             ],
         ]
+        filer = self._make_critic_filer(
+            gh,
+            agent_response=(
+                '{"is_duplicate": true, '
+                '"duplicate_url": '
+                '"https://github.com/some-other-org/repo/issues/9", '
+                '"rationale": "x"}'
+            ),
+        )
+
+        filer.file_insight(self._make_insight(), self._make_target())
+
+        # Filing skipped — the critic verdict was parser-valid.
+        gh.create_issue.assert_not_called()
+        # Marker NOT written — the cross-repo URL was rejected at
+        # the strict per-repo boundary.
+        gh.comment_issue.assert_not_called()
+
+    def test_critic_duplicate_with_unparseable_url_files_anyway(self) -> None:
+        """Codex on PR #1932: a duplicate verdict with a malformed
+        ``duplicate_url`` (not a GitHub issue URL) is now treated as
+        a malformed verdict at parse time — the runner fails open
+        with ``is_duplicate=False`` and the insight files normally.
+        Previously the filer would skip the filing while the
+        marker-writer silently dropped the durability record,
+        losing the insight entirely."""
+        gh = MagicMock()
+        gh.search_issues.side_effect = [
+            [],
+            [
+                {
+                    "title": "x",
+                    "body": "y",
+                    "html_url": "https://github.com/FidoCanCode/home/issues/1",
+                }
+            ],
+        ]
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/99"
         filer = self._make_critic_filer(
             gh,
             agent_response=(
@@ -6763,9 +6808,10 @@ class TestGitHubInsightFiler:
 
         filer.file_insight(self._make_insight(), self._make_target())
 
-        # No new issue filed (critic decision honoured) AND no comment
-        # posted (URL couldn't be parsed).
-        gh.create_issue.assert_not_called()
+        # Filing PROCEEDED (malformed verdict → fail open) — no
+        # silently-lost insight.  No marker comment because the
+        # filer didn't skip.
+        gh.create_issue.assert_called_once()
         gh.comment_issue.assert_not_called()
 
     def test_critic_duplicate_marker_write_failure_falls_open(self) -> None:
