@@ -18056,23 +18056,23 @@ class TestEmitHol28TerminalReplyFor:
         worker._prompts = prompts  # type: ignore[assignment]
         return worker
 
-    def test_no_contributing_intents_skips_dispatcher(self, tmp_path: Path) -> None:
-        dispatcher = self._StubDispatcher()
-        worker = self._make_worker(tmp_path, dispatcher, prompts=object())
-        task: dict[str, object] = {"id": "t1", "contributing_intents": []}
-        worker._emit_hol28_terminal_reply_for(task=task, prev_tasks=[], pr_number=42)
-        assert dispatcher.calls == []
-
     def test_no_prompts_skips_dispatcher(self, tmp_path: Path) -> None:
         dispatcher = self._StubDispatcher()
         worker = self._make_worker(tmp_path, dispatcher, prompts=None)
-        task: dict[str, object] = {"id": "t1", "contributing_intents": [101]}
+        task: dict[str, object] = {
+            "id": "t1",
+            "thread": {"comment_type": "pulls", "comment_id": 101},
+        }
         worker._emit_hol28_terminal_reply_for(task=task, prev_tasks=[], pr_number=42)
         assert dispatcher.calls == []
 
-    def test_contributing_intents_synthesizes_stubs_and_calls(
-        self, tmp_path: Path
-    ) -> None:
+    def test_emits_one_reply_anchored_at_task_thread(self, tmp_path: Path) -> None:
+        # Codex P1 (second round) on PR #1938: HOL-28 emits ONE reply
+        # at the task's primary thread anchor, not per
+        # contributing_intent.  Per-contributing emission needed
+        # per-intent comment_type metadata that the tasks.json schema
+        # doesn't carry; HOL-24's verdict-based reply path already
+        # handles cross-author divergence at rescope time.
         from fido.types import RescopeIntent
 
         dispatcher = self._StubDispatcher()
@@ -18080,8 +18080,8 @@ class TestEmitHol28TerminalReplyFor:
         task: dict[str, object] = {
             "id": "t1",
             "status": "completed",
-            "contributing_intents": [101, 202],
-            "thread": {"comment_type": "pulls", "comment_id": 101},
+            "contributing_intents": [101, 202, 303],
+            "thread": {"comment_type": "pulls", "comment_id": 999},
         }
         worker._tasks._task_list = [task]  # type: ignore[attr-defined]
         worker._emit_hol28_terminal_reply_for(
@@ -18091,8 +18091,10 @@ class TestEmitHol28TerminalReplyFor:
         call = dispatcher.calls[0]
         assert call["pr"] == 42
         intents = call["batch_intents"]
-        assert all(isinstance(i, RescopeIntent) for i in intents)
-        assert [i.comment_id for i in intents] == [101, 202]
+        # ONE synthetic intent anchored at the task's thread.
+        assert len(intents) == 1
+        assert isinstance(intents[0], RescopeIntent)
+        assert intents[0].comment_id == 999
         assert intents[0].comment_type == "pulls"
 
     def test_dispatcher_failure_logged_not_raised(self, tmp_path: Path) -> None:
@@ -18102,7 +18104,6 @@ class TestEmitHol28TerminalReplyFor:
         task: dict[str, object] = {
             "id": "t1",
             "status": "completed",
-            "contributing_intents": [101],
             "thread": {"comment_type": "pulls", "comment_id": 101},
         }
         worker._tasks._task_list = [task]  # type: ignore[attr-defined]
@@ -18124,7 +18125,6 @@ class TestEmitHol28TerminalReplyFor:
         task: dict[str, object] = {
             "id": "t1",
             "status": "completed",
-            "contributing_intents": [101],
             "thread": {"comment_type": "issues", "comment_id": 101},
         }
         worker._tasks._task_list = [task]  # type: ignore[attr-defined]
@@ -18137,7 +18137,6 @@ class TestEmitHol28TerminalReplyFor:
         task: dict[str, object] = {
             "id": "t1",
             "status": "completed",
-            "contributing_intents": [101],
         }
         worker._tasks._task_list = [task]  # type: ignore[attr-defined]
         worker._emit_hol28_terminal_reply_for(task=task, prev_tasks=[], pr_number=42)

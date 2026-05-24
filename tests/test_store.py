@@ -410,7 +410,7 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == 6
+    assert version == 7
     assert {
         "comment_claims",
         "reply_promises",
@@ -429,7 +429,37 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
         "issue_cache_snapshots",
         "restart_metadata",
         "transition_audit_log",
+        # codex P1 (fourth round) on PR #1938: durable
+        # task-creation drop counter requires schema version bump
+        # so existing v6 installations create the new table.
+        "task_creation_drops",
     } <= tables
+
+
+def test_schema_bumps_from_version_6_creates_new_tables(tmp_path: Path) -> None:
+    # Codex P1 (fourth round) on PR #1938: an installation already at
+    # schema version 6 (e.g. existing production Fido databases) must
+    # pick up the v7 task_creation_drops table when ensure_schema
+    # runs.  Without the version bump, ``if version < _SCHEMA_VERSION``
+    # would skip the CREATE TABLE statements and the first
+    # bump_task_creation_drop() query would fail with "no such table".
+    import sqlite3
+
+    store = FidoStore(tmp_path)
+    # Simulate an existing v6 installation: ensure_schema once, then
+    # roll the version backwards to 6 so the next ensure_schema must
+    # actually run the v7 statements (and re-running v6 statements
+    # is idempotent thanks to CREATE TABLE IF NOT EXISTS).
+    store.ensure_schema()
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("PRAGMA user_version = 6")
+        conn.execute("DROP TABLE task_creation_drops")
+        conn.commit()
+    # Re-run ensure_schema on the simulated old database.
+    FidoStore(tmp_path).ensure_schema()
+    # The bump query now works against the recreated table.
+    count, escalated = FidoStore(tmp_path).bump_task_creation_drop(42)
+    assert (count, escalated) == (1, False)
 
 
 def test_record_deferred_issue_is_idempotent(tmp_path: Path) -> None:

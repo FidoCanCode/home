@@ -3813,41 +3813,48 @@ class Worker:
         completion.  The terminal task status is already the durable
         signal that work landed.
         """
-        contributing = task.get("contributing_intents") or ()
         prompts = self._prompts
-        if not contributing or prompts is None:
+        if prompts is None:
             return
-        # Codex P2 on PR #1938: ``contributing_intents`` is just a list
-        # of comment ids — no per-intent ``comment_type``.  Falling
-        # back to hardcoded ``"pulls"`` is wrong when the originating
-        # comment was a top-level issue comment (would call
-        # ``reply_to_review_comment`` with an issue-comment id).  The
-        # task's ``thread`` field DOES carry the comment_type of the
-        # task's origin thread, which is the correct fallback for
-        # tasks whose contributing intents share an origin lane.
-        # When the thread metadata is missing or the lane is
-        # ``"issues"``, skip the emission rather than risk a wrong-
-        # endpoint reply — the terminal task status is already the
-        # durable signal that work landed.
+        # Codex P1 (second round) on PR #1938: emit ONE reply at the
+        # task's PRIMARY thread anchor (``task["thread"]``) rather
+        # than per-contributing-intent.  The earlier "synthesize an
+        # intent per contributing_intent with comment_type='pulls'"
+        # was wrong on two axes:
+        #
+        # 1. ``contributing_intents`` is a flat ``list[int]`` with no
+        #    per-intent ``comment_type``, so a hardcoded fallback
+        #    routed issue-comment ids through ``reply_to_review_comment``.
+        # 2. Mixed-contributor tasks would have produced N replies
+        #    across N threads with the same body — noisy and lossy.
+        #
+        # The canonical thread a requester follows for a task is the
+        # one anchored on the task itself.  HOL-24's verdict-based
+        # reply path already covers cross-author divergence
+        # notifications at rescope time; HOL-28 is the closing summary
+        # at the primary thread.  Per-contributing-intent emission
+        # would require a tasks.json schema change to carry per-intent
+        # ``comment_type`` — left as a separate follow-up.
         thread = task.get("thread") or {}
         comment_type = thread.get("comment_type")
-        if comment_type != "pulls":
+        anchor_comment_id = thread.get("comment_id")
+        if comment_type != "pulls" or not isinstance(anchor_comment_id, int):
             log.info(
                 "HOL-28: skipping terminal-thread emission for task %s "
-                "(thread.comment_type=%r — only review-comment threads "
-                "currently emit aggregate replies)",
+                "(thread=%r — only PR review-comment anchors emit "
+                "aggregate replies; HOL-24 already handles issue-"
+                "comment and cross-author cases)",
                 task.get("id"),
-                comment_type,
+                thread,
             )
             return
         batch_intents = [
             RescopeIntent(
-                change_request="(reconstructed from contributing_intents)",
-                comment_id=int(cid),
+                change_request="(task-anchor reconstruction)",
+                comment_id=int(anchor_comment_id),
                 timestamp="",
                 comment_type="pulls",
             )
-            for cid in contributing
         ]
         try:
             self._dispatcher.notify_newly_terminal_intent_threads(

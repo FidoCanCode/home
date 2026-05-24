@@ -18,7 +18,7 @@ ReplyOutboxEffectState = Literal["prepared", "claimed", "delivered", "failed"]
 
 REPLY_PROMISE_MARKER_PREFIX = "fido:reply-promise:"
 _PROMISE_MARKER_RE = re.compile(r"<!--\s*fido:reply-promise:([0-9a-fA-F-]{36})\s*-->")
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)
