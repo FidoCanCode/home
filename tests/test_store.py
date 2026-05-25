@@ -410,7 +410,7 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == 7
+    assert version == 8
     assert {
         "comment_claims",
         "reply_promises",
@@ -433,6 +433,10 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
         # task-creation drop counter requires schema version bump
         # so existing v6 installations create the new table.
         "task_creation_drops",
+        # codex P1 ninth round on PR #1938: durable rescope-
+        # triggered set (per intent_comment_id) makes the rescope
+        # trigger replay-safe.
+        "rescope_triggered",
     } <= tables
 
 
@@ -1615,3 +1619,40 @@ def test_reset_inactive_task_creation_drops_empty_active_clears_all(
     assert cleared == 2
     count, _ = store.bump_task_creation_drop(101)
     assert count == 1
+
+
+def test_claim_rescope_trigger_first_caller_succeeds(tmp_path: Path) -> None:
+    # HOL-26 / #1920 (codex P1 ninth round on PR #1938): the first
+    # claim per intent_comment_id returns True; subsequent claims
+    # (this process or after restart) return False.  Enforces
+    # at-most-once rescope per originating comment.
+    store = FidoStore(tmp_path)
+    assert store.claim_rescope_trigger(42) is True
+    assert store.claim_rescope_trigger(42) is False
+    # Different intent claim succeeds independently.
+    assert store.claim_rescope_trigger(99) is True
+
+
+def test_claim_rescope_trigger_persists_across_store_instances(tmp_path: Path) -> None:
+    store1 = FidoStore(tmp_path)
+    assert store1.claim_rescope_trigger(42) is True
+    # Simulate Fido restart: drop the in-memory store; the durable
+    # row should still suppress a second claim.
+    del store1
+    store2 = FidoStore(tmp_path)
+    assert store2.claim_rescope_trigger(42) is False
+
+
+def test_claim_rescope_trigger_schema_bumps_from_version_7(tmp_path: Path) -> None:
+    # Codex P1 ninth round on PR #1938: schema-version migration
+    # from v7 picks up the new rescope_triggered table.
+    import sqlite3
+
+    store = FidoStore(tmp_path)
+    store.ensure_schema()
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("PRAGMA user_version = 7")
+        conn.execute("DROP TABLE rescope_triggered")
+        conn.commit()
+    FidoStore(tmp_path).ensure_schema()
+    assert FidoStore(tmp_path).claim_rescope_trigger(123) is True

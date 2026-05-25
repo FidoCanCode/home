@@ -93,11 +93,17 @@ class _BackgroundRescopeTrigger:
         agent: ProviderAgent,
         prompts: Prompts,
         dispatcher: "Dispatcher",
+        store: "FidoStore",
     ) -> None:
         self._registry = registry
         self._agent = agent
         self._prompts = prompts
         self._dispatcher = dispatcher
+        # Codex P1 (ninth round) on PR #1938: durable dedup store
+        # injected at construction so the trigger has its own
+        # collaborator instead of reaching into the dispatcher's
+        # private ``_repo_cfg`` (single-root composition rule).
+        self._store = store
 
     def trigger_rescope(self, intent: RescopeIntent) -> None:
         """Trigger :meth:`Dispatcher.reorder_tasks_background` with the given rescope intent.
@@ -107,7 +113,25 @@ class _BackgroundRescopeTrigger:
         changed.  The full intent (including *comment_id* and *timestamp*) is
         forwarded so the rescoper can reference the originating comment and
         accumulate multiple concurrent intents correctly.
+
+        Codex P1 (ninth round) on PR #1938: the rescope trigger is
+        now durably idempotent per ``intent.comment_id``.  Without
+        this, a replay of an already-acked reply (artifact recorded,
+        but ``execute_effects_only`` re-running because of the
+        unified replay-runs-everything path) would re-fire
+        rescope/preempt every pass.  ``FidoStore.claim_rescope_trigger``
+        atomically inserts the comment_id into a durable set and
+        returns ``True`` only on the first claim; subsequent calls
+        (this Fido process or a different one after restart) get
+        ``False`` and skip the trigger.
         """
+        if not self._store.claim_rescope_trigger(intent.comment_id):
+            log.info(
+                "RescopeTrigger: rescope already triggered for comment %d "
+                "(durable dedup) — skipping",
+                intent.comment_id,
+            )
+            return
         log.info(
             "RescopeTrigger: triggering background rescope for comment %d: %s",
             intent.comment_id,
@@ -2264,6 +2288,7 @@ class Dispatcher:
             agent=agent,
             prompts=prompts,
             dispatcher=self,
+            store=FidoStore(repo_cfg.work_dir),
         )
         executor = (
             _executor
@@ -2489,34 +2514,24 @@ class Dispatcher:
         if direct_promise is not None:
             FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
+        # Codex P1 (ninth round) on PR #1938: always run the full
+        # post-reply effects sequence — even on the replay branch
+        # (existing_artifact_id is not None).  The previous eighth-
+        # round fix skipped effects on replay to avoid re-firing
+        # rescope; that traded the duplicate-rescope bug for a
+        # "crashed mid-effects → effects never run on replay" bug.
+        # Now ``_BackgroundRescopeTrigger.trigger_rescope`` is
+        # durably idempotent (via
+        # ``FidoStore.claim_rescope_trigger``), so replay can safely
+        # re-run eyes/emoji/rescope/insight-file: the rescope dedup
+        # is enforced inside the trigger, and the other effects are
+        # idempotent or already-marker-deduped.
         if target is not None:
-            if existing_artifact_id is None:
-                # Original (non-replay) pass: run the full post-reply
-                # effects sequence — eyes removal, final emoji,
-                # rescope trigger, and (when ``insights_already_filed``
-                # is False) the insight filing retry that didn't get
-                # to land pre-reply.
-                executor.execute_effects_only(
-                    synthesis_response,
-                    target,
-                    insights_already_filed=pre_reply_insights_filed,
-                )
-            else:
-                # Codex P1 (eighth round) on PR #1938: replay path.
-                # The original pass already ran the full post-reply
-                # sequence — eyes/emoji/rescope all fired against the
-                # now-already-recorded reply artifact.  Running
-                # ``execute_effects_only`` again would re-trigger
-                # ``trigger_rescope``, which is NOT idempotent — one
-                # actionable comment would rescope/preempt every time
-                # the replay path runs.  Retry ONLY the insight
-                # filing.
-                _safe_retry_file_insights(
-                    executor,
-                    synthesis_response,
-                    target,
-                    where=(f"PR #{info.get('pr')} comment {info.get('comment_id')}"),
-                )
+            executor.execute_effects_only(
+                synthesis_response,
+                target,
+                insights_already_filed=pre_reply_insights_filed,
+            )
 
         return (category, titles)
 
@@ -2608,6 +2623,7 @@ class Dispatcher:
             agent=agent,
             prompts=prompts,
             dispatcher=self,
+            store=FidoStore(repo_cfg.work_dir),
         )
         executor = (
             _executor
@@ -2764,23 +2780,16 @@ class Dispatcher:
         if direct_promise is not None:
             FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
-        # Codex P1 (eighth round) on PR #1938: split original vs.
-        # replay paths — see the matching comment on
-        # ``reply_to_comment``.
+        # Codex P1 (ninth round) on PR #1938: always run full
+        # effects — see the matching comment on ``reply_to_comment``.
+        # ``trigger_rescope`` is durably idempotent, so replay can
+        # re-run safely.
         if issue_target is not None:
-            if existing_artifact_id is None:
-                executor.execute_effects_only(
-                    synthesis_response,
-                    issue_target,
-                    insights_already_filed=pre_reply_insights_filed,
-                )
-            else:
-                _safe_retry_file_insights(
-                    executor,
-                    synthesis_response,
-                    issue_target,
-                    where=f"{repo_full} #{number} comment {comment_id}",
-                )
+            executor.execute_effects_only(
+                synthesis_response,
+                issue_target,
+                insights_already_filed=pre_reply_insights_filed,
+            )
 
         log.info(
             "reply_to_issue_comment: complete for PR #%s (category=%s)",
@@ -3906,33 +3915,6 @@ def _intent_arrival_indices(intents: list[RescopeIntent]) -> dict[int, int]:
     """
     ordered = sorted(intents, key=lambda i: i.timestamp)
     return {intent.comment_id: idx for idx, intent in enumerate(ordered)}
-
-
-def _safe_retry_file_insights(
-    executor: "SynthesisExecutor",
-    response: "CommentResponse",
-    target: "CommentTarget",
-    *,
-    where: str,
-) -> None:
-    """HOL-26 / #1920 (codex P1 eighth round on PR #1938): wrap
-    :meth:`SynthesisExecutor.retry_file_insights` in a best-effort
-    guard for the replay-path insight-only retry.
-
-    Catches and logs — the original reply post landed in a prior
-    pass, so a failure here just leaves the insight not-yet-filed
-    (HOL-18's claim-grounding critic remains the verification
-    backstop).
-    """
-    try:
-        executor.retry_file_insights(response, target)
-    except Exception:
-        log.exception(
-            "HOL-26: insight-filing replay retry failed for %s — "
-            "original reply remains posted; HOL-18 prose-grounding "
-            "critic is the verification backstop",
-            where,
-        )
 
 
 def _safe_file_insights_pre_reply(

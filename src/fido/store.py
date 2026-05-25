@@ -18,7 +18,7 @@ ReplyOutboxEffectState = Literal["prepared", "claimed", "delivered", "failed"]
 
 REPLY_PROMISE_MARKER_PREFIX = "fido:reply-promise:"
 _PROMISE_MARKER_RE = re.compile(r"<!--\s*fido:reply-promise:([0-9a-fA-F-]{36})\s*-->")
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True)
@@ -858,6 +858,35 @@ class FidoStore:
             assert retried is not None
             return self._pr_comment_record_from_row(retried)
 
+    def claim_rescope_trigger(self, intent_comment_id: int) -> bool:
+        """HOL-26 / #1920 (codex P1 ninth round on PR #1938):
+        atomically claim "rescope-triggered for this intent_comment_id".
+
+        Returns ``True`` when this call is the first to claim the
+        intent (caller should fire the rescope), ``False`` when an
+        earlier claim already exists (caller should skip — the
+        rescope was already triggered, even across Fido restarts).
+
+        Used by ``_BackgroundRescopeTrigger.trigger_rescope`` to make
+        rescope firing durably idempotent per intent.  Without this,
+        a replay of an already-acked reply re-fires rescope/preempt;
+        the previous P1 fix (skip-effects-on-replay) traded that
+        bug for "effects never run if crash happens between artifact
+        record and effects" (codex P1 ninth round).  Durable rescope
+        dedup lets the replay path safely re-run all effects.
+        """
+        now = _utcnow()
+        with self._transaction() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO rescope_triggered
+                    (intent_comment_id, triggered_at)
+                VALUES (?, ?)
+                """,
+                (int(intent_comment_id), now),
+            )
+            return cursor.rowcount > 0
+
     def bump_task_creation_drop(self, intent_comment_id: int) -> tuple[int, bool]:
         """HOL-16 follow-up / #1934 (codex P2 on PR #1938): record a
         task-creation critic drop attributed to *intent_comment_id*.
@@ -1495,6 +1524,11 @@ CREATE TABLE IF NOT EXISTS transition_audit_log (
     subject TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rescope_triggered (
+    intent_comment_id INTEGER PRIMARY KEY,
+    triggered_at TEXT NOT NULL
 );
 
 -- HOL-16 follow-up / #1934 (codex P2 on PR #1938): durable per-

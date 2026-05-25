@@ -4872,46 +4872,6 @@ class TestHol28TerminalThreadFraming:
         assert "t1: (untitled)" in framing
 
 
-class TestSafeRetryFileInsights:
-    """HOL-26 / #1920 (codex P1 eighth round on PR #1938): replay-
-    path insight-only retry swallows exceptions so a transient
-    failure on retry doesn't propagate up the reply handler."""
-
-    def test_swallows_exception(self) -> None:
-        from fido.events import _safe_retry_file_insights
-
-        class _Boom:
-            def retry_file_insights(self, _r: object, _t: object) -> None:
-                raise RuntimeError("GitHub down")
-
-        # Must not raise.
-        _safe_retry_file_insights(
-            _Boom(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            where="test",
-        )
-
-    def test_passes_through_on_success(self) -> None:
-        from fido.events import _safe_retry_file_insights
-
-        seen: list[tuple[object, object]] = []
-
-        class _Spy:
-            def retry_file_insights(self, r: object, t: object) -> None:
-                seen.append((r, t))
-
-        resp = object()
-        target = object()
-        _safe_retry_file_insights(
-            _Spy(),  # type: ignore[arg-type]
-            resp,  # type: ignore[arg-type]
-            target,  # type: ignore[arg-type]
-            where="test",
-        )
-        assert seen == [(resp, target)]
-
-
 class TestSafeFileInsightsPreReply:
     """HOL-26 / #1920 (codex P1 sixth round on PR #1938): the
     production reply paths wrap ``file_insights_pre_reply`` so a
@@ -5924,6 +5884,20 @@ class TestDispatchReviewCommentNoNumber:
         assert result is None
 
 
+class _FakeRescopeTriggerStore:
+    """Codex P1 ninth round on PR #1938: hand-rolled stand-in for
+    ``FidoStore.claim_rescope_trigger`` used in
+    ``_BackgroundRescopeTrigger`` tests."""
+
+    def __init__(self, *, claims_succeed: bool) -> None:
+        self._claims_succeed = claims_succeed
+        self.claimed_ids: list[int] = []
+
+    def claim_rescope_trigger(self, intent_comment_id: int) -> bool:
+        self.claimed_ids.append(intent_comment_id)
+        return self._claims_succeed
+
+
 class TestBackgroundRescopeTrigger:
     """_BackgroundRescopeTrigger delegates to Dispatcher.reorder_tasks_background."""
 
@@ -5949,6 +5923,7 @@ class TestBackgroundRescopeTrigger:
             agent=MagicMock(),
             prompts=Prompts("p"),
             dispatcher=fake_dispatcher,
+            store=_FakeRescopeTriggerStore(claims_succeed=True),
         )
         trigger.trigger_rescope(intent)
 
@@ -5966,6 +5941,7 @@ class TestBackgroundRescopeTrigger:
             agent=MagicMock(),
             prompts=Prompts("p"),
             dispatcher=fake_dispatcher,
+            store=_FakeRescopeTriggerStore(claims_succeed=True),
         )
         trigger.trigger_rescope(intent)
 
@@ -5984,12 +5960,49 @@ class TestBackgroundRescopeTrigger:
             agent=fake_agent,
             prompts=fake_prompts,
             dispatcher=fake_dispatcher,
+            store=_FakeRescopeTriggerStore(claims_succeed=True),
         )
         trigger.trigger_rescope(self._make_intent("Refactor the parser"))
 
         _, kwargs = fake_dispatcher.reorder_tasks_background_calls[0]
         assert kwargs["agent"] is fake_agent
         assert kwargs["prompts"] is fake_prompts
+
+    def test_trigger_rescope_skips_when_store_claims_fail(self) -> None:
+        # Codex P1 (ninth round) on PR #1938: when the durable
+        # ``claim_rescope_trigger`` returns False, the rescope was
+        # already triggered (this Fido process or another after a
+        # restart) — skip the dispatch.  Prevents replay of the
+        # post-reply effects from re-firing rescope/preempt.
+        fake_dispatcher = _FakeDispatcher()
+        store = _FakeRescopeTriggerStore(claims_succeed=False)
+        trigger = _BackgroundRescopeTrigger(
+            MagicMock(spec=ActivityReporter),
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            dispatcher=fake_dispatcher,
+            store=store,
+        )
+        trigger.trigger_rescope(self._make_intent(comment_id=42))
+        assert store.claimed_ids == [42]
+        # No dispatch — duplicate rescope was suppressed.
+        assert fake_dispatcher.reorder_tasks_background_calls == []
+
+    def test_trigger_rescope_claims_before_dispatch(self) -> None:
+        # Claim happens before the dispatch so a crash mid-dispatch
+        # doesn't leave the claim un-set (replay would re-fire).
+        fake_dispatcher = _FakeDispatcher()
+        store = _FakeRescopeTriggerStore(claims_succeed=True)
+        trigger = _BackgroundRescopeTrigger(
+            MagicMock(spec=ActivityReporter),
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            dispatcher=fake_dispatcher,
+            store=store,
+        )
+        trigger.trigger_rescope(self._make_intent(comment_id=99))
+        assert store.claimed_ids == [99]
+        assert len(fake_dispatcher.reorder_tasks_background_calls) == 1
 
 
 class TestReplyToCommentElseBranch:

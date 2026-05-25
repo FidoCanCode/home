@@ -141,25 +141,6 @@ class SynthesisExecutor:
         self._insight_filer = insight_filer
         self._fido_logins = fido_logins
 
-    def retry_file_insights(
-        self,
-        response: CommentResponse,
-        target: CommentTarget,
-    ) -> None:
-        """HOL-26 / #1920 (codex P1 eighth round on PR #1938): retry
-        ONLY the insight-filing step, without replaying any other
-        post-reply effects (eyes, emoji, rescope).
-
-        Use this on the reply-artifact-already-recorded replay path:
-        the original pass posted the reply AND ran the eyes/emoji/
-        rescope side effects; only the insight file may still need to
-        complete.  Running the full :meth:`execute_effects_only` on
-        replay would re-trigger ``trigger_rescope``, which is NOT
-        idempotent — one actionable comment would rescope/preempt
-        more than once.
-        """
-        self._file_insights(response, target)
-
     def file_insights_pre_reply(
         self,
         response: CommentResponse,
