@@ -85,9 +85,11 @@ from fido.types import (
     ClosedPR,
     ClosedSubIssue,
     GitIdentity,
+    RescopeIntent,
     TaskSnapshot,
     TaskStatus,
     TaskType,
+    hol28_anchor_key,
 )
 
 
@@ -1100,6 +1102,15 @@ def ci_ready_for_review(
 
 
 _BODY_TAG_RE = re.compile(r"<body>\s*(.*?)\s*</body>", re.DOTALL | re.IGNORECASE)
+
+# HOL-21 / #1915: task-completion critic re-park budget.  Each
+# failed critic verdict re-parks the task IN_PROGRESS and appends
+# ``CRITIC: <gap>`` to the description for the next worker turn.
+# After this many failures on the SAME task, escalate to BLOCKED +
+# auto-file bug instead of cycling indefinitely.  Matches the
+# spirit of ``MAX_RETRIES`` for synthesis-critic exhaustion (HOL-
+# 20) — same shape of "give up after N, file a bug for follow-up".
+_HOL17_MAX_REPARK_BUDGET = 3
 
 
 def _extract_body(raw: str | None) -> str:
@@ -3393,21 +3404,45 @@ class Worker:
         )
 
     def _handle_task_completion_critic_failure(
-        self, task: dict[str, Any], gap: str
+        self,
+        task: dict[str, Any],
+        gap: str,
+        *,
+        repo: str | None = None,
+        pr_number: int | None = None,
     ) -> None:
-        """HOL-17 / #1911: handle a failed task-completion critic verdict.
+        """HOL-17 / #1911 + HOL-21 / #1915: handle a failed task-
+        completion critic verdict.
 
-        Reverses the just-landed commit (``git reset --soft HEAD~1`` —
+        On the first ``_HOL17_MAX_REPARK_BUDGET`` failures: reverse
+        the just-landed commit (``git reset --soft HEAD~1`` —
         changes remain staged so the worker's next turn sees them),
-        appends the critic gap to the task description so the next
-        worker turn has guidance, and marks the task IN_PROGRESS so
+        append the critic gap to the task description so the next
+        worker turn has guidance, and mark the task IN_PROGRESS so
         the picker re-selects it on the next cycle.
 
+        When the budget is exhausted (the task description already
+        carries ``_HOL17_MAX_REPARK_BUDGET`` ``CRITIC:`` markers
+        from prior failures): stop re-parking, mark the task BLOCKED,
+        post a BLOCKED comment on the PR, auto-file a bug via the
+        shared HOL-21 ``file_stuck_on_critic_bug`` helper.  The
+        task no longer cycles indefinitely on the same complaint —
+        a human (or a future re-decomposition rescope) has to
+        intervene.
+
         The reset is destructive on the LOCAL commit only — nothing
-        was pushed yet, so no remote state changes.  The staged
-        changes survive: the worker can refine them, ``git restore
-        --staged`` selected files to drop scope-creep, or amend its
-        approach based on the gap.
+        was pushed yet, so no remote state changes.  In the re-park
+        case the staged changes survive: the worker can refine them
+        or amend.  In the escalation case the staged changes are
+        discarded (``git reset --hard HEAD``) because there's no
+        retry to keep them for.
+
+        ``repo`` / ``pr_number`` are optional only for legacy callers
+        (and the migrating tests); production paths pass them so the
+        escalation branch can post the BLOCKED comment and build the
+        bug-file source link.  When omitted on the escalation path
+        we still file the bug (with a placeholder source link) but
+        skip the PR comment.
         """
         log.warning(
             "task-completion critic FAILED for %s — soft-resetting "
@@ -3421,79 +3456,297 @@ class Worker:
         # corruption rather than papering over it with an in_progress
         # task that has a phantom commit ahead of upstream.
         self._git(["reset", "--soft", "HEAD~1"])
-        # Append the critic gap to the task description so the next
-        # worker turn reads it as guidance.  Markdown bullet under a
-        # CRITIC: header keeps existing description content intact.
+        # HOL-21 / #1915: track retry count in a structured field on
+        # the task itself (``critic_retry_count``) — not by parsing
+        # ``CRITIC:`` markers in the description, which would
+        # miscount a user-authored description that happens to
+        # contain "CRITIC:" text (codex on PR #1933).  Gap chain
+        # still gets appended to the description below for the next
+        # worker turn's guidance, but the BUDGET decision uses the
+        # counter.
         #
-        # Rob review on PR #1932: if a concurrent rescope closed, split,
-        # merged, or removed this task while the critic was running, we
-        # must NOT force the stale row back to in_progress — that would
-        # silently overwrite the rescope's decision.  Only re-park when
-        # the row still exists AND is in a non-terminal status (the
-        # rescope hasn't moved it).  Terminal statuses (COMPLETED,
-        # SKIPPED, BLOCKED) mean the row was claimed by concurrent
-        # work; leave it alone and log the no-op.
+        # Budget interpretation (codex on PR #1933): exceeding the
+        # configured budget on THIS failure triggers escalation
+        # immediately, not on the next one.  With
+        # ``_HOL17_MAX_REPARK_BUDGET = 3``: the 1st/2nd re-parks
+        # bump the count to 1/2; the 3rd failure is THE escalation
+        # (we don't re-park a 3rd time and then escalate on a 4th).
+        # HOL-21 / #1915, codex P1 on PR #1938: the budget decision
+        # MUST read the live counter under the same lock that mutates
+        # state.  Reading ``task["critic_retry_count"]`` (the stale
+        # snapshot the worker passed in) and deciding outside the lock
+        # races against a concurrent rescope / counter reset, so a
+        # stale at-budget snapshot could escalate even when the live
+        # counter was just reset.
+        #
+        # Single modify() block decides both branches based on live
+        # state and atomically mutates the row.  Side effects (bug
+        # filing, BLOCKED PR comment, git-reset, current_task_id
+        # clearing) run AFTER the lock releases, keyed off the
+        # decision captured in the loop.
         nonterminal = (
             str(TaskStatus.PENDING),
             str(TaskStatus.IN_PROGRESS),
         )
-        reparked = False
-        repark_target_found = False
+        decision: str = "missing"
+        escalate_gap_chain: tuple[str, ...] = ()
         with self._tasks.modify() as live:
             for live_task in live:
                 if live_task["id"] != task["id"]:
                     continue
-                repark_target_found = True
                 current_status = live_task.get("status")
                 if current_status not in nonterminal:
                     log.warning(
-                        "task-completion critic re-park skipped for %s: "
+                        "task-completion critic skipped for %s: "
                         "concurrent rescope moved it to %r",
                         task["id"],
                         current_status,
                     )
+                    decision = "skipped_terminal"
                     break
+                live_count = int(live_task.get("critic_retry_count") or 0)
+                # Codex P2 on PR #1938: store the gap chain as a
+                # structured field instead of regex-parsing free-form
+                # description text.  Prior retry cycles or unrelated
+                # quoted text containing "CRITIC:" used to inflate the
+                # bug body's attempt count and gap list; the
+                # structured chain is precise and gets reset alongside
+                # the retry counter on unblock.  Description still
+                # gets the gap appended for the next worker turn's
+                # guidance (informational only — the budget AND the
+                # bug body now use the structured fields).
+                live_chain_raw = live_task.get("critic_gap_chain") or ()
+                live_chain: tuple[str, ...] = tuple(
+                    str(g) for g in live_chain_raw if isinstance(g, str)
+                )
+                if live_count + 1 >= _HOL17_MAX_REPARK_BUDGET:
+                    escalate_gap_chain = (*live_chain, gap)
+                    existing = (live_task.get("description") or "").rstrip()
+                    appended_marker = (
+                        f"CRITIC EXHAUSTED ({len(escalate_gap_chain)} attempts): {gap}"
+                    )
+                    live_task["description"] = (
+                        f"{existing}\n\n{appended_marker}"
+                        if existing
+                        else appended_marker
+                    )
+                    live_task["status"] = str(TaskStatus.BLOCKED)
+                    live_task["critic_gap_chain"] = list(escalate_gap_chain)
+                    decision = "escalated"
+                    break
+                # Re-park: append CRITIC gap, bump counter + chain, IN_PROGRESS.
                 existing = (live_task.get("description") or "").rstrip()
                 appended = (
                     f"{existing}\n\nCRITIC: {gap}" if existing else f"CRITIC: {gap}"
                 )
                 live_task["description"] = appended
                 live_task["status"] = str(TaskStatus.IN_PROGRESS)
-                reparked = True
+                live_task["critic_retry_count"] = live_count + 1
+                live_task["critic_gap_chain"] = [*live_chain, gap]
+                decision = "reparked"
                 break
-        if not repark_target_found:
+
+        if decision == "missing":
             log.warning(
                 "task-completion critic re-park skipped for %s: task no "
                 "longer in queue (concurrent rescope removed it)",
                 task["id"],
             )
-        # Rob follow-up review on PR #1932: when re-park is skipped
-        # (terminal status OR row removed), the soft-reset above left
-        # the rolled-back commit's changes staged.  Without that
-        # context this becomes an orphan staged diff the NEXT task
-        # would inherit — silently picking up work from a task the
-        # queue no longer intends to run.  Discard it.  ``git reset
-        # --hard HEAD`` resets working tree + index to match the
-        # post-soft-reset HEAD, dropping every change we just rolled
-        # back.  Only fires on the no-repark branches — the normal
-        # re-park path preserves the staged changes for the retry.
-        if not reparked:
+
+        if decision == "escalated":
+            log.warning(
+                "task-completion critic budget exhausted for %s (%d "
+                "attempts): BLOCKED + auto-file bug",
+                task["id"],
+                len(escalate_gap_chain),
+            )
+            self._file_critic_exhaustion_signals(
+                task=task,
+                gap_chain=escalate_gap_chain,
+                repo=repo,
+                pr_number=pr_number,
+            )
+
+        # When NOT re-parked (terminal, missing, or escalated), the
+        # soft-reset above left the rolled-back commit's changes staged
+        # — no retry is coming, so discard them to avoid feeding them
+        # to the next unrelated task.  The re-park path preserves the
+        # staged changes for the worker's next turn.
+        if decision != "reparked":
             log.warning(
                 "discarding orphan staged changes from rolled-back commit "
-                "(rescope already moved task %s)",
+                "(task %s, decision=%s)",
                 task["id"],
+                decision,
             )
             self._git(["reset", "--hard", "HEAD"])
-        # codex r3293424367 on PR #1932: clear ``current_task_id``
-        # after re-parking.  Otherwise a stale "active task" marker
-        # lets ``_maybe_abort_for_new_task`` fire on unrelated incoming
-        # work, which routes through ``_cleanup_aborted_task`` and
-        # calls ``git_clean()`` — destroying the staged changes we
-        # just preserved for the worker's retry turn.  The task is
-        # marked IN_PROGRESS so the picker still resumes it first
-        # next cycle.
+
+        # codex r3293424367 on PR #1932: clear ``current_task_id`` so
+        # ``_maybe_abort_for_new_task`` doesn't fire on unrelated
+        # incoming work between turns.  The re-parked task is marked
+        # IN_PROGRESS so the picker resumes it first next cycle anyway.
         with self._state.modify() as state:
             state.pop("current_task_id", None)
+
+    def _file_critic_exhaustion_signals(
+        self,
+        *,
+        task: dict[str, Any],
+        gap_chain: tuple[str, ...],
+        repo: str | None,
+        pr_number: int | None,
+    ) -> None:
+        """HOL-21 side-effect helper — file a bug + post BLOCKED PR
+        comment after the caller has ALREADY mutated the task row to
+        BLOCKED under its own lock.
+
+        Split out from ``_escalate_task_completion_critic_exhausted``
+        per codex P1 on PR #1938 so the production path
+        (``_handle_task_completion_critic_failure``) can do BOTH the
+        budget decision AND the BLOCKED state mutation inside ONE
+        ``self._tasks.modify()`` block — without a stale-snapshot race
+        between the budget check and the state mutation.
+
+        Bug filing is idempotent (the helper checks for an existing
+        bug body marker before creating).  PR comment is best-effort:
+        a transient GitHub failure mustn't crash the worker loop —
+        the BLOCKED task status + bug filing are already the durable
+        signals.
+        """
+        # Local import to avoid the worker → events → worker cycle.
+        from fido.events import (
+            StuckOnCriticContext,
+            file_stuck_on_critic_bug,
+        )
+
+        if repo and pr_number:
+            source_link = f"https://github.com/{repo}/pull/{pr_number}"
+        else:
+            source_link = "(worker context — no PR link available)"
+
+        bug_url = file_stuck_on_critic_bug(
+            StuckOnCriticContext(
+                emission_point="task-completion",
+                source_repo=repo or "(unknown)",
+                source_pr=pr_number or 0,
+                target_kind="task",
+                target_id=str(task["id"]),
+                source_link=source_link,
+                gaps=tuple(gap_chain),
+            ),
+            gh=self.gh,
+        )
+
+        if repo and pr_number:
+            blocked_body = (
+                f"**BLOCKED**: task-completion critic exhausted "
+                f"{len(gap_chain)} attempts on task `{task['id']}` "
+                f"({task.get('title', '(no title)')!r}).\n\n"
+                f"The Layer 2 critic kept rejecting the commit.  Final gap:\n\n"
+                f"> {gap_chain[-1] if gap_chain else '(no gap recorded)'}\n\n"
+            )
+            if bug_url:
+                blocked_body += (
+                    f"Auto-filed against `FidoCanCode/home` for follow-up: {bug_url}\n"
+                )
+            else:
+                blocked_body += (
+                    "Auto-filing against `FidoCanCode/home` FAILED — see "
+                    "Fido logs for the full gap chain.\n"
+                )
+            try:
+                self.gh.comment_issue(repo, pr_number, blocked_body)
+            except Exception as exc:
+                log.warning(
+                    "HOL-21: failed to post BLOCKED comment on %s#%d "
+                    "for task %s (%s) — task is still marked BLOCKED, "
+                    "bug at %s",
+                    repo,
+                    pr_number,
+                    task["id"],
+                    exc,
+                    bug_url or "(none)",
+                )
+
+    def _escalate_task_completion_critic_exhausted(
+        self,
+        *,
+        task: dict[str, Any],
+        gap_chain: tuple[str, ...],
+        repo: str | None,
+        pr_number: int | None,
+    ) -> None:
+        """HOL-21 / #1915: end the re-park cycle when the task-
+        completion critic has rejected the same task
+        ``_HOL17_MAX_REPARK_BUDGET`` times in a row.
+
+        Side effects:
+
+        1. Discard the staged changes from the just-rolled-back
+           commit (``git reset --hard HEAD``).  No retry is coming,
+           so leaving the staged diff would feed it to the next
+           unrelated task.
+        2. Mark the task BLOCKED so the picker skips it.  Clear
+           ``current_task_id`` so the next worker cycle picks fresh.
+        3. Auto-file a bug on ``_BUG_REPO`` via the shared HOL-21
+           helper (idempotent — repeated escalation on the same
+           task reuses the existing bug rather than spamming).
+        4. When ``repo`` / ``pr_number`` are known, post a BLOCKED
+           comment on the PR pointing at the bug.  Best-effort: a
+           transient GitHub failure here mustn't crash the worker
+           loop, the BLOCKED task status + bug filing are already
+           the durable signals.
+        """
+        self._git(["reset", "--hard", "HEAD"])
+
+        # Codex on PR #1933: guard the BLOCKED-marking the same way
+        # the re-park path guards re-park.  If a concurrent rescope
+        # already moved this task to a terminal state or removed it,
+        # overwriting to BLOCKED would clobber the rescope's decision.
+        nonterminal = (
+            str(TaskStatus.PENDING),
+            str(TaskStatus.IN_PROGRESS),
+        )
+        blocked_locally = False
+        with self._tasks.modify() as live:
+            for live_task in live:
+                if live_task["id"] != task["id"]:
+                    continue
+                current_status = live_task.get("status")
+                if current_status not in nonterminal:
+                    log.warning(
+                        "task-completion critic escalation skipped for %s: "
+                        "concurrent rescope moved it to %r — leaving alone",
+                        task["id"],
+                        current_status,
+                    )
+                    break
+                live_task["status"] = str(TaskStatus.BLOCKED)
+                existing = (live_task.get("description") or "").rstrip()
+                final_gap = gap_chain[-1] if gap_chain else "(no gap recorded)"
+                appended_marker = (
+                    f"CRITIC EXHAUSTED ({len(gap_chain)} attempts): {final_gap}"
+                )
+                live_task["description"] = (
+                    f"{existing}\n\n{appended_marker}" if existing else appended_marker
+                )
+                blocked_locally = True
+                break
+
+        with self._state.modify() as state:
+            state.pop("current_task_id", None)
+
+        if not blocked_locally:
+            log.info(
+                "task-completion critic escalation: no external signals "
+                "fired for %s (row was already terminal or removed)",
+                task["id"],
+            )
+            return
+
+        self._file_critic_exhaustion_signals(
+            task=task, gap_chain=gap_chain, repo=repo, pr_number=pr_number
+        )
 
     def _finish_task(
         self,
@@ -3513,6 +3766,10 @@ class Worker:
         """
         config = self._config
         allowed_bots = config.allowed_bots if config is not None else frozenset()
+        # HOL-28 / #1922 (codex P1 on PR #1938): snapshot the task list
+        # BEFORE completion so the post-completion diff can identify
+        # which intent threads just transitioned to fully-terminal.
+        prev_tasks = self._tasks.list()
         self._tasks.complete_with_resolve(
             task["id"],
             self.gh,
@@ -3529,6 +3786,98 @@ class Worker:
             repo_ctx.gh_user,
             leak_before_ids,
         )
+
+        self._emit_hol28_terminal_reply_for(
+            task=task, prev_tasks=prev_tasks, pr_number=pr_number
+        )
+
+    def _emit_hol28_terminal_reply_for(
+        self,
+        *,
+        task: dict[str, Any],
+        prev_tasks: list[dict[str, Any]],
+        pr_number: int,
+    ) -> None:
+        """HOL-28 / #1922 wire: emit ONE aggregate reply at the task's
+        primary thread anchor when *task* just transitioned from non-
+        terminal to terminal across the *prev_tasks* → current snapshot.
+
+        Codex P1 (fifth round) on PR #1938: the previous shape called
+        a dispatcher method that iterated ``contributing_intents`` and
+        skipped any not in ``batch_intents``.  Passing only the task
+        anchor meant secondary contributing threads were silently
+        dropped; passing every contributing_intent re-opened the
+        wrong-endpoint hole.  The reconciled contract is per-task,
+        not per-contributing-intent — HOL-28 is the closing summary
+        at the task's primary thread; HOL-24's verdict-based path
+        already covers cross-author divergence at rescope time.
+        Per-secondary-thread closing summaries need per-intent
+        ``comment_type`` schema work; a future leaf.
+
+        Best-effort: a transient GitHub failure mustn't crash task
+        completion.  The terminal task status is already the durable
+        signal that work landed.
+        """
+        prompts = self._prompts
+        if prompts is None:
+            return
+        thread = task.get("thread") or {}
+        comment_type = thread.get("comment_type")
+        # Codex P2 (eighth round) on PR #1938: normalize the anchor
+        # via ``hol28_anchor_key`` so a string-typed comment_id in
+        # the persisted task (other task code round-trips through
+        # ``int(...)``) doesn't skip the emission or — worse — make
+        # a sibling task invisible during the transition check.
+        anchor_comment_id = hol28_anchor_key(thread)
+        if comment_type != "pulls" or anchor_comment_id is None:
+            log.info(
+                "HOL-28: skipping terminal-thread emission for task %s "
+                "(thread=%r — only PR review-comment anchors emit "
+                "aggregate replies; HOL-24 already handles issue-"
+                "comment and cross-author cases)",
+                task.get("id"),
+                thread,
+            )
+            return
+        # Codex P1 (sixth round) on PR #1938: the transition predicate
+        # is THREAD-level, not task-level.  When one comment shaped
+        # multiple tasks (e.g. rescope splits), completing the first
+        # task previously fired the closing summary while sibling
+        # tasks were still pending — and the second task's completion
+        # fired ANOTHER closing summary for the same thread.  Fire
+        # only when EVERY task anchored at this thread is terminal in
+        # the new snapshot AND wasn't all-terminal in the prev one.
+        new_tasks = self._tasks.list()
+        if not _hol28_anchor_thread_just_became_terminal(
+            anchor_comment_id, prev_tasks, new_tasks
+        ):
+            return
+        # Codex P2 (seventh round) on PR #1938:
+        # ``change_request=""`` (not a placeholder string) so a
+        # downstream framing that interpolates the field can't leak
+        # fabricated request text into the user-visible reply.  The
+        # framing also reads task titles/descriptions for the per-
+        # task story, so an empty change_request degrades cleanly to
+        # "no original ask recorded" instead of inventing one.
+        anchor_intent = RescopeIntent(
+            change_request="",
+            comment_id=anchor_comment_id,
+            timestamp="",
+            comment_type="pulls",
+        )
+        try:
+            self._dispatcher.notify_terminal_task_thread(
+                new_tasks,
+                anchor_intent,
+                pr=pr_number,
+                agent=self._provider_agent,
+                prompts=prompts,
+            )
+        except Exception:
+            log.exception(
+                "HOL-28: per-thread terminal aggregate reply failed for task %s",
+                task["id"],
+            )
 
     def _apply_setup_outcome(self, output: str) -> tuple[str, bool, str]:
         """Parse the setup_outcome sentinel from *output* and CRUD the task list.
@@ -4368,7 +4717,10 @@ class Worker:
                         )
                         if not completion_verdict.passed:
                             self._handle_task_completion_critic_failure(
-                                task, completion_verdict.gap
+                                task,
+                                completion_verdict.gap,
+                                repo=repo_ctx.repo,
+                                pr_number=pr_number,
                             )
                             # Rob review on PR #1932: the rolled-back turn
                             # may have leaked top-level PR comments via the
@@ -5127,6 +5479,15 @@ class Worker:
             assert self._registry is not None, (
                 "Worker._registry is required for recover_reply_promises"
             )
+            # Seed the PR-body work queue BEFORE either recovery path
+            # so any rescope they spawn operates on a seeded
+            # ``tasks.json``.  ``recover_reply_promises`` re-runs
+            # synthesis on queued ACT replies — synthesis can trigger
+            # a rescope (see ``execute_effects_only``) — so seeding
+            # only before ``replay_pending_rescope_intents`` is not
+            # enough.  Codex P2 (thirteenth/fourteenth rounds) on
+            # PR #1938.
+            self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
             recovered_promises = self._dispatcher.recover_reply_promises(
                 ctx.fido_dir,
                 pr_number,
@@ -5134,7 +5495,25 @@ class Worker:
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
             )
-            self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
+            if self._first_iteration:
+                # Codex P1 (twelfth round) on PR #1938: drain orphan
+                # pending rescope intents (visible ACT reply succeeded
+                # but ``_on_done`` never fired because Fido crashed
+                # between).  GitHub will not redeliver the original
+                # webhook, so startup replay is the only path that
+                # closes the lost-rescope window.
+                replayed = self._dispatcher.replay_pending_rescope_intents(
+                    self._registry,
+                    pr_number,
+                    agent=self._provider_agent,
+                    prompts=self._get_prompts(),
+                )
+                if replayed:
+                    log.warning(
+                        "replayed %d pending rescope intent(s) for %s",
+                        replayed,
+                        repo_ctx.repo,
+                    )
             if self._first_iteration and not pr_is_fresh:
                 # One-shot replay of missed issue_comment webhooks (fix #794).
                 # Runs only on the first iteration per WorkerThread lifetime
@@ -5701,3 +6080,37 @@ class WorkerThread(threading.Thread):
                     provider = self._provider
                 if provider is not None:
                     provider.agent.stop_session()
+
+
+def _hol28_anchor_thread_just_became_terminal(
+    anchor_comment_id: int,
+    prev_tasks: list[dict[str, Any]],
+    new_tasks: list[dict[str, Any]],
+) -> bool:
+    """HOL-28 / #1922 transition predicate at the thread level.
+
+    Returns ``True`` iff every task anchored at ``anchor_comment_id``
+    (i.e. ``task["thread"]["comment_id"] == anchor_comment_id``) is
+    in a terminal status (COMPLETED or SKIPPED) in *new_tasks* AND
+    wasn't all-terminal in *prev_tasks*.
+
+    Codex P1 (sixth round) on PR #1938: per-task transition was the
+    wrong granularity — completing the first of several
+    same-thread tasks would fire the closing summary while sibling
+    tasks were still pending.  Thread-level transition fires once
+    per thread, when the LAST contributing task completes.
+
+    Vacuous case (no tasks anchored at this comment_id) returns
+    False — there's nothing to summarize.
+    """
+    terminal = {TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value}
+
+    def _all_terminal(tasks: list[dict[str, Any]]) -> bool:
+        anchored = [
+            t for t in tasks if hol28_anchor_key(t.get("thread")) == anchor_comment_id
+        ]
+        if not anchored:
+            return False
+        return all(str(t.get("status")) in terminal for t in anchored)
+
+    return _all_terminal(new_tasks) and not _all_terminal(prev_tasks)

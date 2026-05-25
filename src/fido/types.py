@@ -1,6 +1,6 @@
 """Shared type definitions for fido."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal
@@ -370,6 +370,167 @@ class IntentVerdict:
                 f"ops={list(self.ops)!r}, "
                 f"affected_task_ids={list(self.affected_task_ids)!r}"
             )
+
+
+_TERMINAL_TASK_STATUSES: frozenset[str] = frozenset(
+    {TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value}
+)
+
+
+def _task_status_terminal(task: Mapping[str, Any]) -> bool:
+    """True when *task*'s status is terminal (COMPLETED or SKIPPED).
+
+    Reads ``task["status"]`` and tolerates either the StrEnum instance
+    or the raw string form — both serialisations exist in tasks.json
+    today (tasks.py mixes them) and HOL-27 must work over both.
+    """
+    status = task.get("status")
+    if isinstance(status, TaskStatus):
+        return status.value in _TERMINAL_TASK_STATUSES
+    return str(status) in _TERMINAL_TASK_STATUSES
+
+
+def intent_thread_terminal(
+    intent_comment_id: int, tasks: Sequence[Mapping[str, Any]]
+) -> bool:
+    """HOL-27 / #1921: True when every task carrying *intent_comment_id*
+    in its ``contributing_intents`` is in a terminal status
+    (``COMPLETED`` or ``SKIPPED``).
+
+    The "intent thread" terminal predicate: an intent is terminal when
+    every task it shaped has reached a terminal status — no pending,
+    no in-progress, no blocked work remains for that comment.  HOL-28
+    consumes this to emit one per-thread aggregate reply at the moment
+    of transition (so the requester hears one summary covering every
+    task their comment touched, not N replies as each task finishes).
+
+    A vacuous thread (no task lists this intent as a contributor) is
+    considered NOT terminal — the absence-of-contribution case means
+    the intent never actually entered the queue (a pre-rescope drop),
+    which HOL-24's verdict-based path already covers via no_op
+    notification.  This predicate is specifically about the
+    "everything-this-intent-shaped finished" transition.
+    """
+    contributing_tasks = [
+        t for t in tasks if intent_comment_id in (t.get("contributing_intents") or ())
+    ]
+    if not contributing_tasks:
+        return False
+    return all(_task_status_terminal(t) for t in contributing_tasks)
+
+
+def hol28_anchor_key(thread: object) -> int | None:
+    """HOL-28 / #1922 (codex P2 eighth round on PR #1938): normalize
+    a task's ``thread["comment_id"]`` to an ``int`` for consistent
+    anchor matching across worker + dispatcher.
+
+    Persisted tasks.json can store the comment id as either ``int``
+    or ``str`` (other task code already round-trips through
+    ``int(...)``), so a strict ``isinstance(int)`` check skips
+    string-id rows and a strict ``==`` compare misses string-vs-int
+    sibling matches.  Returns ``None`` when the thread is missing,
+    not a mapping, has no comment_id, or the id can't be coerced —
+    callers treat ``None`` as "no anchor" rather than as a match.
+    """
+    if not isinstance(thread, Mapping):
+        return None
+    raw = thread.get("comment_id")
+    # ``bool`` is an ``int`` subclass; reject so ``True``/``False``
+    # can't sneak in as a fake comment id.
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)  # type: ignore[arg-type]
+    except TypeError, ValueError:
+        return None
+
+
+def newly_terminal_intent_threads(
+    prev_tasks: Sequence[Mapping[str, Any]],
+    new_tasks: Sequence[Mapping[str, Any]],
+) -> tuple[int, ...]:
+    """HOL-27 helper: intent comment ids whose threads were NOT terminal
+    in *prev_tasks* but ARE terminal in *new_tasks*.
+
+    Insertion-ordered by first appearance across *new_tasks* (so the
+    HOL-28 emission loop posts replies in a stable, predictable order).
+    De-duplicated.
+
+    Both lists must be drawn from the same tasks.json snapshot timeline
+    (a before/after pair around a single reducer transition).  Used by
+    the task-completion path to detect "this complete-op was the last
+    one that intent thread T was waiting on" — exactly the moment a
+    terminal aggregate reply is owed.
+    """
+    candidates: list[int] = []
+    seen: set[int] = set()
+    for task in new_tasks:
+        for cid in task.get("contributing_intents") or ():
+            if cid in seen:
+                continue
+            seen.add(cid)
+            candidates.append(cid)
+    transitioned: list[int] = []
+    for cid in candidates:
+        if intent_thread_terminal(cid, prev_tasks):
+            # Already terminal before the transition — not newly so.
+            continue
+        if intent_thread_terminal(cid, new_tasks):
+            transitioned.append(cid)
+    return tuple(transitioned)
+
+
+def verdict_is_material(
+    intent: "RescopeIntent",
+    verdict: IntentVerdict,
+    *,
+    task_descriptions: tuple[str, ...] = (),
+) -> bool:
+    """HOL-23 / #1917: True when *verdict* warrants a per-thread reply
+    posted back to *intent*'s origin comment.
+
+    Used by HOL-24 to gate which verdicts in a rescope batch produce
+    outbox reply effects.  The triage reply already covered the
+    user-visible acknowledgement for the comment; this predicate
+    decides whether the rescope's actual decision diverged enough
+    from "I queued exactly what you asked" to warrant a follow-up
+    voice reply.
+
+    Rules:
+
+    - ``outcome != "honored"`` (``reshaped`` / ``superseded`` /
+      ``no_op``) → always material.  These are user-visible
+      decisions the triage reply couldn't have anticipated.
+    - ``outcome == "honored"`` with ``task_descriptions`` supplied:
+      material when NO task description contains
+      ``intent.change_request`` verbatim (case-insensitive).  Per
+      HOL-23's "**Open**: should honored-with-divergence count as
+      material? Default yes ('you said X, I queued Y')" — yes by
+      default; the caller can pass the descriptions of the tasks
+      this verdict's ``affected_task_ids`` produced so the
+      heuristic can answer.  Without ``task_descriptions`` the
+      caller is signalling "don't try" and we fall back to "honored
+      = not material" (triage reply was enough).
+
+    The change_request → task-description containment check is a
+    deliberately simple heuristic; it catches the obvious
+    "you said X, I queued <much-longer-thing>" divergence without
+    needing LLM judgement.  A future leaf could refine with a
+    similarity-based check if false negatives appear in practice.
+    """
+    if verdict.outcome != "honored":
+        return True
+    if not task_descriptions:
+        return False
+    request = intent.change_request.strip().lower()
+    if not request:
+        return False
+    for desc in task_descriptions:
+        if request in (desc or "").strip().lower():
+            # The change_request text is verbatim in this task's
+            # description — not divergent enough to be material.
+            return False
+    return True
 
 
 @dataclass(frozen=True)

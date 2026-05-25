@@ -43,7 +43,7 @@ from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import SynthesisCriticExhaustedError, SynthesisExhaustedError
 from fido.synthesis_executor import CommentTarget
 from fido.tasks import Tasks
-from fido.types import ActiveIssue, ActivePR, RescopeIntent
+from fido.types import ActiveIssue, ActivePR, IntentVerdict, RescopeIntent
 from fido.worker import ActivityReporter
 from tests.fakes import _FakeDispatcher
 
@@ -135,6 +135,11 @@ def _make_mock_gh() -> MagicMock:
     # through ``uuid.uuid5`` (events.py:403), which would TypeError on
     # an auto-mocked sub-MagicMock.
     gh.create_issue.return_value = "https://github.com/owner/repo/issues/0"
+    # ``get_repo_info`` returns the repo slug; production sites pass it
+    # as a string into ``CommentTarget.repo`` (and downstream into the
+    # ``rescope_intent_outbox`` SQLite row), which would TypeError on an
+    # auto-mocked sub-MagicMock.
+    gh.get_repo_info.return_value = "owner/repo"
     return gh
 
 
@@ -1165,6 +1170,105 @@ class TestRecoverReplyPromises:
         assert result is True
         assert len(synthesis_calls) == 2
         assert FidoStore(tmp_path).recoverable_promises() == []
+
+
+class TestReplayPendingRescopeIntents:
+    """Codex P1 (twelfth round) on PR #1938: startup replay drains any
+    pending rescope intents orphaned by a crash between the visible
+    ACT reply and ``_on_done``.  GitHub will not redeliver a
+    successful webhook, so this is the only path that closes the
+    lost-rescope window.
+    """
+
+    def test_no_pending_returns_zero(self, tmp_path: Path) -> None:
+        gh = _make_mock_gh()
+        replayed = Dispatcher(
+            _config(tmp_path), _repo_cfg(tmp_path), gh
+        ).replay_pending_rescope_intents(
+            MagicMock(spec=ActivityReporter),
+            7,
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+        )
+        assert replayed == 0
+
+    def test_intents_for_other_pr_are_skipped(self, tmp_path: Path) -> None:
+        # Codex P1 (sixteenth round) on PR #1938: orphan pending
+        # intents from a now-closed/different PR must not rescope
+        # the currently-active PR's task queue with stale change-
+        # request text.  Replay filters by the active pr_number.
+        store = FidoStore(tmp_path)
+        assert store.claim_rescope_intent(
+            intent_comment_id=111,
+            change_request="stale request from a different PR",
+            intent_timestamp="2024-01-15T10:00:00+00:00",
+            author="owner",
+            comment_type="issues",
+            repo="owner/repo",
+            pr_number=99,
+        )
+        gh = _make_mock_gh()
+        thread_starts: list[object] = []
+        replayed = Dispatcher(
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            thread_start_fn=thread_starts.append,
+            reorder_coalesce_state={},
+        ).replay_pending_rescope_intents(
+            MagicMock(spec=ActivityReporter),
+            7,
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+        )
+        assert replayed == 0
+        assert thread_starts == []
+        # Row still pending — not consumed, just skipped.
+        assert [i.comment_id for i in store.pending_rescope_intents()] == [111]
+
+    def test_pending_intent_is_redispatched(self, tmp_path: Path) -> None:
+        # Seed a pending row directly via the store: this is the
+        # state that a crash-between-claim-and-_on_done leaves
+        # behind.
+        store = FidoStore(tmp_path)
+        assert store.claim_rescope_intent(
+            intent_comment_id=909,
+            change_request="please refactor the parser",
+            intent_timestamp="2024-01-15T10:00:00+00:00",
+            author="owner",
+            comment_type="issues",
+            repo="owner/repo",
+            pr_number=7,
+        )
+        gh = _make_mock_gh()
+        thread_starts: list[object] = []
+        coalesce_state: dict[str, object] = {}
+
+        replayed = Dispatcher(
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            thread_start_fn=thread_starts.append,
+            reorder_coalesce_state=coalesce_state,
+        ).replay_pending_rescope_intents(
+            MagicMock(spec=ActivityReporter),
+            7,
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+        )
+
+        assert replayed == 1
+        # reorder_tasks_background was called for the pending row —
+        # the coalesce state has an entry for this work_dir and the
+        # thread-start fn was invoked (without actually starting a
+        # daemon thread).
+        assert len(thread_starts) == 1
+        assert str(tmp_path) in coalesce_state
+        # _on_done has not fired (thread never ran), so the outbox
+        # row is still pending — exactly what the next restart
+        # would replay again until the rescope completes.
+        pending = store.pending_rescope_intents()
+        assert [intent.comment_id for intent in pending] == [909]
 
 
 class TestIsAllowed:
@@ -4103,6 +4207,126 @@ class TestReorderTasksBackground:
         # Second call: intent2 and intent3 accumulated
         assert calls[1][2].get("intents") == [intent2, intent3]
 
+    def test_coalesced_batch_uses_latest_callers_kwargs(self, tmp_path: Path) -> None:
+        # Codex P2 (fifteenth round) on PR #1938: the coalesced batch
+        # runs with the LATEST caller's kwargs (fresh issue/pr context
+        # for the rescope prompt and reply notifier), even though the
+        # ``_on_done`` and shared ``_after_applies`` list come from
+        # the existing batch.  Verified through ``agent``, which is a
+        # per-call kwarg that flows straight through to the reorder
+        # call site.
+        state: dict[str, object] = {}
+        started: list[object] = []
+        calls, mock_reorder = self._capture_reorder_calls()
+
+        agent_a = MagicMock(name="agent_a")
+        agent_b = MagicMock(name="agent_b")
+        agent_c = MagicMock(name="agent_c")
+        gh = MagicMock()
+        self._dispatcher(
+            tmp_path,
+            gh,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "csA",
+            registry=MagicMock(spec=ActivityReporter),
+            agent=agent_a,
+        )
+        self._dispatcher(
+            tmp_path,
+            MagicMock(),
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "csB",
+            registry=MagicMock(spec=ActivityReporter),
+            agent=agent_b,
+        )
+        self._dispatcher(
+            tmp_path,
+            MagicMock(),
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "csC",
+            registry=MagicMock(spec=ActivityReporter),
+            agent=agent_c,
+        )
+        self._run_thread(started)
+        assert len(calls) == 2
+        # First iteration ran with A's agent.
+        assert calls[0][2].get("agent") is agent_a
+        # Coalesced iteration ran with C's agent (latest), NOT B's.
+        assert calls[1][2].get("agent") is agent_c
+
+    def test_on_done_chains_across_coalesced_calls(self, tmp_path: Path) -> None:
+        # Codex P1 (thirteenth round) on PR #1938: when multiple
+        # rescope triggers coalesce while a batch is running, every
+        # caller's ``_on_done`` must fire after the coalesced batch
+        # lands.  Without chaining, only the latest caller's
+        # ``mark_rescope_intent_applied`` runs and intermediate
+        # coalesced intents stay durably ``pending`` forever — a
+        # later restart re-runs them and duplicates effects.
+        state: dict[str, object] = {}
+        started: list[object] = []
+        fired: list[str] = []
+
+        # Real ``reorder_tasks`` invokes the ``_on_done`` kwarg after
+        # a successful reorder; the mock reproduces that contract so
+        # the chaining is observable end-to-end.
+        def mock_reorder(work_dir: Path, commit_summary: str, **kwargs: object) -> None:
+            on_done = kwargs.get("_on_done")
+            if callable(on_done):
+                on_done()
+
+        gh = MagicMock()
+        # Call A: starts the thread.  Its _on_done fires after the
+        # FIRST iteration.
+        self._dispatcher(
+            tmp_path,
+            gh,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "csA",
+            registry=MagicMock(spec=ActivityReporter),
+            _on_done=lambda: fired.append("A"),
+        )
+        # Calls B and C coalesce — both must fire after the coalesced
+        # batch lands.
+        self._dispatcher(
+            tmp_path,
+            MagicMock(),
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "csB",
+            registry=MagicMock(spec=ActivityReporter),
+            _on_done=lambda: fired.append("B"),
+        )
+        self._dispatcher(
+            tmp_path,
+            MagicMock(),
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "csC",
+            registry=MagicMock(spec=ActivityReporter),
+            _on_done=lambda: fired.append("C"),
+        )
+        assert len(started) == 1
+        self._run_thread(started)
+        # A fired from its own iteration; B and C both fired from the
+        # coalesced iteration via the chained _on_done.
+        assert fired == ["A", "B", "C"]
+
     def test_running_flag_cleared_after_no_pending(self, tmp_path: Path) -> None:
         """After a normal run with no pending call, running is set to False."""
         state: dict = {}
@@ -4550,6 +4774,548 @@ class TestBuildOnRescopeApply:
             ),
         ]
         cb(result, op_inputs, {"t1": 1, "t2": 2}, [])
+        gh.reply_to_review_comment.assert_not_called()
+
+    def test_no_op_verdict_notifies_via_hol24_path(self, tmp_path: Path) -> None:
+        # HOL-24 / #1918: the oracle doesn't fire for no_op verdicts
+        # (nothing reorganized), so the verdict-based pass picks them
+        # up and notifies the requester their ask was silently dropped.
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        alice = self._intent(101, author="alice")
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
+            intents=[alice],
+            pr_ctx=self._pr(),
+            agent=_client("Reply text"),
+            prompts=Prompts("p"),
+        )
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="no_op",
+            narrative="dropped because the requested change conflicts with the spec",
+        )
+        cb([], [], {}, [verdict])
+        comment_ids = [c.args[3] for c in gh.reply_to_review_comment.call_args_list]
+        assert comment_ids == [101]
+
+    def test_honored_non_divergent_verdict_silent(self, tmp_path: Path) -> None:
+        # HOL-24: an honored verdict whose task description contains
+        # the change_request verbatim is NOT material — triage reply
+        # was enough, no second voice reply.
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        alice = self._intent(101, author="alice")
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
+            intents=[alice],
+            pr_ctx=self._pr(),
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
+        result = [
+            {
+                "id": "t1",
+                "title": "t",
+                "description": "implement req 101 exactly as written",
+                "contributing_intents": [101],
+            }
+        ]
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="honored",
+            narrative="queued as asked",
+            affected_task_ids=("t1",),
+        )
+        cb(result, [], {"t1": 1}, [verdict])
+        gh.reply_to_review_comment.assert_not_called()
+
+    def test_hol25_no_op_framing_carries_narrative(self) -> None:
+        # HOL-25 / #1919: no_op verdict framing names the outcome
+        # explicitly AND includes the verdict's narrative so Opus has
+        # the rescope's reasoning to weave into the reply.
+        from fido.events import _hol25_verdict_framing
+
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="no_op",
+            narrative="duplicates work already queued as #42",
+        )
+        framing = _hol25_verdict_framing(verdict)
+        assert "NOT queued" in framing
+        assert "duplicates work already queued as #42" in framing
+        assert "in flight" in framing  # negative-claim guard
+
+    def test_hol25_honored_framing_carries_narrative(self) -> None:
+        from fido.events import _hol25_verdict_framing
+
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="honored",
+            narrative="scoped to the parser only, not the whole pipeline",
+        )
+        framing = _hol25_verdict_framing(verdict)
+        assert "queued" in framing
+        assert "scoped to the parser only" in framing
+        assert "verbatim" in framing  # negative-claim guard
+
+    def test_hol25_reshaped_framing_carries_narrative(self) -> None:
+        from fido.events import _hol25_verdict_framing
+
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="reshaped",
+            narrative="merged with adjacent typo fix as one commit",
+        )
+        framing = _hol25_verdict_framing(verdict)
+        assert "RESHAPED" in framing
+        assert "merged with adjacent typo fix as one commit" in framing
+
+    def test_hol25_superseded_framing_renders_by_intent_link(self) -> None:
+        from fido.events import _hol25_verdict_framing
+
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="superseded",
+            narrative="overridden by a later directive",
+            by_intent_comment_id=202,
+        )
+        framing = _hol25_verdict_framing(verdict)
+        assert "SUPERSEDED" in framing
+        assert "#202" in framing
+        assert "overridden by a later directive" in framing
+
+    def test_honored_verdict_falls_back_to_contributing_intents(
+        self, tmp_path: Path
+    ) -> None:
+        # Codex P2 on PR #1938: an honored verdict that omits
+        # ``affected_task_ids`` would skip the divergence check (no
+        # task descriptions to compare against → not material → silent
+        # drop), even when the resulting task text diverges.  Fall
+        # back to every task whose contributing_intents lists this
+        # intent's comment_id.
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        alice = self._intent(101, author="alice")
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
+            intents=[alice],
+            pr_ctx=self._pr(),
+            agent=_client("Reply text"),
+            prompts=Prompts("p"),
+        )
+        result = [
+            {
+                "id": "t1",
+                "title": "Renamed",
+                "description": "completely different from the ask",
+                "contributing_intents": [101],
+            }
+        ]
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="honored",
+            narrative="queued as asked",
+            affected_task_ids=(),  # omitted
+        )
+        cb(result, [], {"t1": 1}, [verdict])
+        # Divergence detected via the fallback — reply fires.
+        comment_ids = [c.args[3] for c in gh.reply_to_review_comment.call_args_list]
+        assert comment_ids == [101]
+
+    def test_verdict_dedupes_against_oracle_path(self, tmp_path: Path) -> None:
+        # HOL-24: if the oracle already notified intent 101 (cross-author
+        # rewrite), a material verdict for the same intent_comment_id
+        # must NOT double-notify.
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        alice = self._intent(101, "2024-01-15T10:00:00+00:00", author="alice")
+        bob = self._intent(202, "2024-01-15T10:01:00+00:00", author="bob")
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
+            intents=[alice, bob],
+            pr_ctx=self._pr(),
+            agent=_client("Reply text"),
+            prompts=Prompts("p"),
+        )
+        result = [
+            {
+                "id": "t1",
+                "title": "Renamed by bob",
+                "description": "",
+                "contributing_intents": [101, 202],
+            }
+        ]
+        op_inputs = [
+            task_queue_rescope.OpInput(
+                oi_op=task_queue_rescope.RewriteTask(1, "Renamed by bob", ""),
+                oi_intents=[202],
+            )
+        ]
+        verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="reshaped",
+            narrative="rewritten",
+            affected_task_ids=("t1",),
+        )
+        cb(result, op_inputs, {"t1": 1}, [verdict])
+        comment_ids = [c.args[3] for c in gh.reply_to_review_comment.call_args_list]
+        assert comment_ids == [101]  # once, not twice
+
+
+class TestHol34NoOpSilentDropRegression:
+    """HOL-34 / #1928: end-to-end regression for PR #1890's
+    no_op-silent-drop pattern.
+
+    Original failure (pre-epic): a rescope verdict of ``no_op`` for a
+    user's change request silently dropped the intent — no SKIPPED
+    marker, no reply-back, the requester never knew.  Once the HOL
+    chain landed (HOL-3 enforces narrative, HOL-6 creates SKIPPED
+    marker, HOL-23/24/25 emit per-thread reply with narrative), this
+    pattern can't recur.
+
+    This test pins the reply-back leg of the closure: a no_op verdict
+    in the rescope batch MUST produce a notification to the
+    originating commenter carrying the verdict's narrative.  HOL-6 +
+    SKIPPED marker is tested in test_tasks.py around the reducer
+    transition; this test is the events-side regression that closes
+    the whole story.
+    """
+
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _intent(self, comment_id: int) -> RescopeIntent:
+        return RescopeIntent(
+            change_request="Please add retry logic to the cache lookup",
+            comment_id=comment_id,
+            timestamp="2024-01-15T10:00:00+00:00",
+            author="alice",
+        )
+
+    def _pr(self) -> ActivePR:
+        return ActivePR(
+            number=42,
+            title="t",
+            url="https://github.com/owner/repo/pull/42",
+            body="",
+        )
+
+    def test_pr_1890_no_op_drop_now_replies_with_narrative(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        gh.reply_to_review_comment.return_value = {"id": 999}
+        intent = self._intent(101)
+        cb = Dispatcher(cfg, cfg.repos["owner/repo"], gh)._build_on_rescope_apply(
+            intents=[intent],
+            pr_ctx=self._pr(),
+            agent=_client("Heard you — couldn't queue this; here's why."),
+            prompts=Prompts("p"),
+        )
+
+        # Rescope decided the request didn't fit the spec — no_op
+        # verdict with a narrative.  PRE-EPIC: silently dropped.
+        # POST-EPIC: HOL-24 sees the no_op via ``verdict_is_material``
+        # and emits a reply through ``_notify_intent_outcome``
+        # (HOL-25 framing carries the narrative).
+        no_op_verdict = IntentVerdict(
+            intent_comment_id=101,
+            outcome="no_op",
+            narrative=(
+                "Retry logic is intentionally out-of-scope for the cache "
+                "layer per ARCH-7; routing this to the resilience epic "
+                "instead"
+            ),
+        )
+
+        cb([], [], {}, [no_op_verdict])
+
+        # The reply fires — the failure pattern is closed.
+        gh.reply_to_review_comment.assert_called_once()
+        # And it targets the originating commenter (alice's comment id).
+        assert gh.reply_to_review_comment.call_args.args[3] == 101
+
+
+class TestHol28TerminalThreadFraming:
+    """HOL-28 / #1922: per-thread terminal aggregate framing names
+    landed commits + skipped tasks + carries the requester's ask."""
+
+    def _intent(self, comment_id: int = 101) -> RescopeIntent:
+        return RescopeIntent(
+            change_request="please rename the parser",
+            comment_id=comment_id,
+            timestamp="2024-01-15T10:00:00+00:00",
+        )
+
+    def test_lists_landed_commits(self) -> None:
+        from fido.events import _hol28_terminal_thread_framing
+
+        completed = [{"id": "t1", "title": "rename parser module"}]
+        framing = _hol28_terminal_thread_framing(self._intent(), completed, [])
+        assert "LANDED" in framing
+        assert "t1: rename parser module" in framing
+
+    def test_lists_skipped_tasks_with_reason(self) -> None:
+        from fido.events import _hol28_terminal_thread_framing
+
+        skipped = [
+            {
+                "id": "t2",
+                "title": "rename internal helper",
+                "description": "redundant with t1; skipping",
+            }
+        ]
+        framing = _hol28_terminal_thread_framing(self._intent(), [], skipped)
+        assert "SKIPPED" in framing
+        assert "t2: rename internal helper — redundant with t1; skipping" in framing
+
+    def test_carries_intent_change_request(self) -> None:
+        from fido.events import _hol28_terminal_thread_framing
+
+        framing = _hol28_terminal_thread_framing(self._intent(), [], [])
+        assert "please rename the parser" in framing
+        assert "comment id: 101" in framing
+
+    def test_skipped_with_no_reason_uses_fallback(self) -> None:
+        from fido.events import _hol28_terminal_thread_framing
+
+        skipped = [{"id": "t1", "title": "x", "description": ""}]
+        framing = _hol28_terminal_thread_framing(self._intent(), [], skipped)
+        assert "(no reason recorded)" in framing
+
+    def test_untitled_task_uses_fallback(self) -> None:
+        from fido.events import _hol28_terminal_thread_framing
+
+        completed = [{"id": "t1", "title": ""}]
+        framing = _hol28_terminal_thread_framing(self._intent(), completed, [])
+        assert "t1: (untitled)" in framing
+
+
+class TestSafeFileInsightsPreReply:
+    """HOL-26 / #1920 (codex P1 sixth round on PR #1938): the
+    production reply paths wrap ``file_insights_pre_reply`` so a
+    transient insight-filer failure does NOT drop the user-visible
+    reply."""
+
+    def test_swallows_exception(self) -> None:
+        from fido.events import _safe_file_insights_pre_reply
+
+        class _Boom:
+            def file_insights_pre_reply(self, _r: object, _t: object) -> None:
+                raise RuntimeError("GitHub down")
+
+        # Must not raise.
+        _safe_file_insights_pre_reply(
+            _Boom(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            where="test",
+        )
+
+    def test_passes_response_and_target_on_success(self) -> None:
+        from fido.events import _safe_file_insights_pre_reply
+
+        seen: list[tuple[object, object]] = []
+
+        class _Spy:
+            def file_insights_pre_reply(self, r: object, t: object) -> None:
+                seen.append((r, t))
+
+        resp = object()
+        target = object()
+        _safe_file_insights_pre_reply(
+            _Spy(),  # type: ignore[arg-type]
+            resp,  # type: ignore[arg-type]
+            target,  # type: ignore[arg-type]
+            where="test",
+        )
+        assert seen == [(resp, target)]
+
+
+class TestNotifyTerminalTaskThread:
+    """HOL-28 wire: ``Dispatcher.notify_terminal_task_thread`` posts
+    the aggregate reply at *anchor_intent*'s comment for the
+    just-terminal task.  Caller-side transition check moved to the
+    worker per codex P1 (fifth round) on PR #1938 — the dispatcher
+    method is now a focused post-with-framing helper."""
+
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def _anchor(self, comment_id: int = 999) -> RescopeIntent:
+        return RescopeIntent(
+            change_request="(task-anchor reconstruction)",
+            comment_id=comment_id,
+            timestamp="",
+            comment_type="pulls",
+        )
+
+    def _pulls_task(
+        self, tid: str, status: str, anchor_cid: int = 999, **extra: object
+    ) -> dict[str, object]:
+        row: dict[str, object] = {
+            "id": tid,
+            "status": status,
+            "thread": {"comment_type": "pulls", "comment_id": anchor_cid},
+        }
+        row.update(extra)
+        return row
+
+    def test_completed_task_fires_reply_at_anchor(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        new_tasks = [self._pulls_task("t1", "completed", title="did it")]
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            new_tasks,
+            self._anchor(999),
+            pr=42,
+            agent=_client("Done."),
+            prompts=Prompts("p"),
+        )
+        gh.reply_to_review_comment.assert_called_once()
+        assert gh.reply_to_review_comment.call_args.args[3] == 999
+
+    def test_skipped_task_fires_reply(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        new_tasks = [
+            self._pulls_task(
+                "t1",
+                "skipped",
+                title="y",
+                description="no longer needed",
+            )
+        ]
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            new_tasks,
+            self._anchor(),
+            pr=42,
+            agent=_client("Done."),
+            prompts=Prompts("p"),
+        )
+        gh.reply_to_review_comment.assert_called_once()
+
+    def test_non_terminal_anchored_task_skips_dispatch(self, tmp_path: Path) -> None:
+        # Even if SOME anchored tasks are terminal, a single sibling
+        # still pending blocks the closing summary.
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        new_tasks = [
+            self._pulls_task("t1", "completed"),
+            self._pulls_task("t2", "pending"),
+        ]
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            new_tasks,
+            self._anchor(),
+            pr=42,
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
+        gh.reply_to_review_comment.assert_not_called()
+
+    def test_aggregate_includes_all_sibling_tasks(self, tmp_path: Path) -> None:
+        # Codex P2 (seventh round) on PR #1938: when the closing
+        # summary fires for a multi-task thread, it must mention ALL
+        # sibling terminal tasks, not just one.
+        cfg = self._cfg(tmp_path)
+        captured: list[str] = []
+
+        class _CapturingAgent:
+            voice_model = "claude-opus-4-7"
+
+            def run_turn(self, prompt: str, **_kw: object) -> str:
+                captured.append(prompt)
+                return "Done."
+
+        gh = MagicMock()
+        new_tasks = [
+            self._pulls_task("t1", "completed", title="first commit"),
+            self._pulls_task("t2", "completed", title="second commit"),
+            self._pulls_task("t3", "skipped", title="dropped", description="why"),
+        ]
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            new_tasks,
+            self._anchor(),
+            pr=42,
+            agent=_CapturingAgent(),  # type: ignore[arg-type]
+            prompts=Prompts("p"),
+        )
+        assert captured, "agent.run_turn was not called"
+        framing = captured[0]
+        assert "t1: first commit" in framing
+        assert "t2: second commit" in framing
+        assert "t3: dropped — why" in framing
+
+    def test_anchor_empty_change_request_not_leaked(self, tmp_path: Path) -> None:
+        # Codex P2 (seventh round) on PR #1938: the worker constructs
+        # the anchor intent with ``change_request=""`` to avoid
+        # leaking a placeholder string into the reply.  The framing
+        # must NOT include the change_request line when the field is
+        # empty.
+        cfg = self._cfg(tmp_path)
+        captured: list[str] = []
+
+        class _CapturingAgent:
+            voice_model = "claude-opus-4-7"
+
+            def run_turn(self, prompt: str, **_kw: object) -> str:
+                captured.append(prompt)
+                return "Done."
+
+        gh = MagicMock()
+        anchor = RescopeIntent(
+            change_request="",
+            comment_id=999,
+            timestamp="",
+            comment_type="pulls",
+        )
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            [self._pulls_task("t1", "completed", title="x")],
+            anchor,
+            pr=42,
+            agent=_CapturingAgent(),  # type: ignore[arg-type]
+            prompts=Prompts("p"),
+        )
+        framing = captured[0]
+        assert "change request" not in framing.lower()
+        # And the placeholder string from older versions must not appear.
+        assert "task-anchor reconstruction" not in framing
+
+    def test_post_failure_logged_not_raised(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        gh.reply_to_review_comment.side_effect = RuntimeError("api down")
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            [self._pulls_task("t1", "completed", title="x")],
+            self._anchor(),
+            pr=42,
+            agent=_client("Done."),
+            prompts=Prompts("p"),
+        )
+
+    def test_no_anchored_tasks_skips_dispatch(self, tmp_path: Path) -> None:
+        cfg = self._cfg(tmp_path)
+        gh = MagicMock()
+        # Anchor is comment 999 but no tasks live at that anchor.
+        Dispatcher(cfg, cfg.repos["owner/repo"], gh).notify_terminal_task_thread(
+            [self._pulls_task("t1", "completed", anchor_cid=12345)],
+            self._anchor(999),
+            pr=42,
+            agent=_client("nope"),
+            prompts=Prompts("p"),
+        )
         gh.reply_to_review_comment.assert_not_called()
 
 
@@ -5342,6 +6108,38 @@ class TestDispatchReviewCommentNoNumber:
         assert result is None
 
 
+class _FakeRescopeTriggerStore:
+    """Codex P1 ninth/tenth rounds on PR #1938: hand-rolled stand-in
+    for the rescope-intent outbox used in
+    ``_BackgroundRescopeTrigger`` tests."""
+
+    def __init__(self, *, claims_succeed: bool) -> None:
+        self._claims_succeed = claims_succeed
+        self.claimed_ids: list[int] = []
+        self.applied_ids: list[int] = []
+        self.released_ids: list[int] = []
+
+    def claim_rescope_intent(
+        self,
+        *,
+        intent_comment_id: int,
+        change_request: str,
+        intent_timestamp: str,
+        author: str,
+        comment_type: str,
+        repo: str,
+        pr_number: int,
+    ) -> bool:
+        self.claimed_ids.append(intent_comment_id)
+        return self._claims_succeed
+
+    def mark_rescope_intent_applied(self, intent_comment_id: int) -> None:
+        self.applied_ids.append(intent_comment_id)
+
+    def release_rescope_intent_claim(self, intent_comment_id: int) -> None:
+        self.released_ids.append(intent_comment_id)
+
+
 class TestBackgroundRescopeTrigger:
     """_BackgroundRescopeTrigger delegates to Dispatcher.reorder_tasks_background."""
 
@@ -5367,6 +6165,7 @@ class TestBackgroundRescopeTrigger:
             agent=MagicMock(),
             prompts=Prompts("p"),
             dispatcher=fake_dispatcher,
+            store=_FakeRescopeTriggerStore(claims_succeed=True),
         )
         trigger.trigger_rescope(intent)
 
@@ -5384,6 +6183,7 @@ class TestBackgroundRescopeTrigger:
             agent=MagicMock(),
             prompts=Prompts("p"),
             dispatcher=fake_dispatcher,
+            store=_FakeRescopeTriggerStore(claims_succeed=True),
         )
         trigger.trigger_rescope(intent)
 
@@ -5402,12 +6202,102 @@ class TestBackgroundRescopeTrigger:
             agent=fake_agent,
             prompts=fake_prompts,
             dispatcher=fake_dispatcher,
+            store=_FakeRescopeTriggerStore(claims_succeed=True),
         )
         trigger.trigger_rescope(self._make_intent("Refactor the parser"))
 
         _, kwargs = fake_dispatcher.reorder_tasks_background_calls[0]
         assert kwargs["agent"] is fake_agent
         assert kwargs["prompts"] is fake_prompts
+
+    def test_trigger_rescope_skips_when_store_claims_fail(self) -> None:
+        # Codex P1 (ninth round) on PR #1938: when the durable
+        # ``claim_rescope_trigger`` returns False, the rescope was
+        # already triggered (this Fido process or another after a
+        # restart) — skip the dispatch.  Prevents replay of the
+        # post-reply effects from re-firing rescope/preempt.
+        fake_dispatcher = _FakeDispatcher()
+        store = _FakeRescopeTriggerStore(claims_succeed=False)
+        trigger = _BackgroundRescopeTrigger(
+            MagicMock(spec=ActivityReporter),
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            dispatcher=fake_dispatcher,
+            store=store,
+        )
+        trigger.trigger_rescope(self._make_intent(comment_id=42))
+        assert store.claimed_ids == [42]
+        # No dispatch — duplicate rescope was suppressed.
+        assert fake_dispatcher.reorder_tasks_background_calls == []
+
+    def test_trigger_rescope_marks_applied_via_on_done(self) -> None:
+        # Codex P1 (tenth round) on PR #1938: the durable
+        # ``applied`` state advances only after the rescope's
+        # ``_on_done`` callback fires (i.e. tasks.json has been
+        # synced and the PR description rewritten).  The trigger
+        # wires ``_on_done`` to ``mark_rescope_intent_applied`` so
+        # the applied marker matches "work durably landed."
+        fake_dispatcher = _FakeDispatcher()
+        store = _FakeRescopeTriggerStore(claims_succeed=True)
+        trigger = _BackgroundRescopeTrigger(
+            MagicMock(spec=ActivityReporter),
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            dispatcher=fake_dispatcher,
+            store=store,
+        )
+        trigger.trigger_rescope(self._make_intent(comment_id=77))
+        # The trigger should have passed an _on_done callable.
+        assert len(fake_dispatcher.reorder_tasks_background_calls) == 1
+        _, kwargs = fake_dispatcher.reorder_tasks_background_calls[0]
+        on_done = kwargs["_on_done"]
+        # Applied marker fires only AFTER the on_done callback runs.
+        assert store.applied_ids == []
+        on_done()
+        assert store.applied_ids == [77]
+
+    def test_trigger_rescope_preserves_pending_row_on_synchronous_failure(
+        self,
+    ) -> None:
+        # Codex P1 (sixteenth round) on PR #1938: a synchronous
+        # dispatch failure MUST leave the pending row intact — it
+        # is the only durable recovery signal once a webhook has
+        # been acked.  Startup replay (or the next trigger, since
+        # ``claim_rescope_intent`` treats pending rows as
+        # retryable) re-fires from this row.
+        class _BoomDispatcher:
+            def reorder_tasks_background(self, *_args: object, **_kw: object) -> None:
+                raise RuntimeError("thread-start failed")
+
+        store = _FakeRescopeTriggerStore(claims_succeed=True)
+        trigger = _BackgroundRescopeTrigger(
+            MagicMock(spec=ActivityReporter),
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            dispatcher=_BoomDispatcher(),  # type: ignore[arg-type]
+            store=store,
+        )
+        with pytest.raises(RuntimeError, match="thread-start failed"):
+            trigger.trigger_rescope(self._make_intent(comment_id=88))
+        assert store.claimed_ids == [88]
+        assert store.released_ids == []
+        assert store.applied_ids == []
+
+    def test_trigger_rescope_claims_before_dispatch(self) -> None:
+        # Claim happens before the dispatch so a crash mid-dispatch
+        # doesn't leave the claim un-set (replay would re-fire).
+        fake_dispatcher = _FakeDispatcher()
+        store = _FakeRescopeTriggerStore(claims_succeed=True)
+        trigger = _BackgroundRescopeTrigger(
+            MagicMock(spec=ActivityReporter),
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            dispatcher=fake_dispatcher,
+            store=store,
+        )
+        trigger.trigger_rescope(self._make_intent(comment_id=99))
+        assert store.claimed_ids == [99]
+        assert len(fake_dispatcher.reorder_tasks_background_calls) == 1
 
 
 class TestReplyToCommentElseBranch:
@@ -6408,6 +7298,52 @@ class TestMakeReorderKwargsActiveContext:
         assert pr.url == "https://github.com/owner/repo/pull/99"
 
 
+class TestMakeReorderKwargsAfterApply:
+    """Codex P1 tenth round on PR #1938: ``_make_reorder_kwargs``
+    chains a caller-supplied ``after_apply`` callback after the
+    built-in sync/rewrite on_done sequence.  The rescope-intent
+    outbox uses this to advance ``state='applied'`` ONLY after the
+    durable apply completes."""
+
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def test_after_apply_fires_when_on_done_invoked(self, tmp_path: Path) -> None:
+        calls: list[str] = []
+        gh = MagicMock()
+
+        def rewrite_fn(*_a: object, **_kw: object) -> None:
+            calls.append("rewrite")
+
+        def sync_fn(_w: Path, _g: object) -> None:
+            calls.append("sync")
+
+        def after_apply() -> None:
+            calls.append("after_apply")
+
+        kwargs = Dispatcher(
+            self._cfg(tmp_path), self._cfg(tmp_path).repos["owner/repo"], gh
+        )._make_reorder_kwargs(
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            rewrite_fn,
+            sync_fn,
+            after_apply=after_apply,
+        )
+        kwargs["_on_done"]()
+        # after_apply runs LAST — after sync and rewrite, so the
+        # applied-marker only advances on successful durable apply.
+        assert calls == ["sync", "rewrite", "after_apply"]
+
+
 # ---------------------------------------------------------------------------
 # _GitHubInsightFiler
 # ---------------------------------------------------------------------------
@@ -7032,6 +7968,124 @@ class TestGitHubInsightFiler:
         assert captured["recent_count"] == _INSIGHT_RECENT_LIMIT
 
 
+class TestFileStuckOnCriticBug:
+    """HOL-21 / #1915: shared bug-file helper for ALL critic
+    exhaustion routes (HOL-15..HOL-19).  Pulled out of
+    ``_route_critic_exhausted_blocked`` so per-leaf retry budgets
+    for HOL-16/HOL-17/HOL-19 can call it without duplicating the
+    idempotency-marker + body templating logic."""
+
+    def _ctx(
+        self,
+        *,
+        emission_point: str = "task-completion",
+        target_kind: str = "task",
+        target_id: str = "t-9",
+        attempts_preview: tuple[str, ...] = (),
+    ) -> object:
+        from fido.events import StuckOnCriticContext
+
+        return StuckOnCriticContext(
+            emission_point=emission_point,
+            source_repo="owner/repo",
+            source_pr=42,
+            target_kind=target_kind,
+            target_id=target_id,
+            source_link="https://github.com/owner/repo/pull/42",
+            gaps=("g1", "g2", "g3"),
+            attempts_preview=attempts_preview,
+        )
+
+    def test_files_new_bug_with_idempotency_marker(self) -> None:
+        from fido.events import file_stuck_on_critic_bug
+
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/1000"
+
+        url = file_stuck_on_critic_bug(self._ctx(), gh=gh)
+        assert url == "https://github.com/FidoCanCode/home/issues/1000"
+        body = gh.create_issue.call_args.args[2]
+        assert "<!-- critic-exhaustion: task-completion:" in body
+        assert "owner/repo#42:task:t-9 -->" in body
+        for gap in ("g1", "g2", "g3"):
+            assert gap in body
+        title = gh.create_issue.call_args.args[1]
+        assert "task-completion critic exhausted" in title
+        # Default empty attempts_preview → sentinel line in body.
+        assert "(no per-attempt previews recorded)" in body
+
+    def test_reuses_existing_bug_on_marker_hit(self) -> None:
+        from fido.events import file_stuck_on_critic_bug
+
+        gh = MagicMock()
+        gh.search_issues.return_value = [
+            {"html_url": "https://github.com/FidoCanCode/home/issues/2000"}
+        ]
+
+        url = file_stuck_on_critic_bug(self._ctx(), gh=gh)
+        assert url == "https://github.com/FidoCanCode/home/issues/2000"
+        gh.create_issue.assert_not_called()
+
+    def test_search_failure_falls_through_to_create(self) -> None:
+        from fido.events import file_stuck_on_critic_bug
+
+        gh = MagicMock()
+        gh.search_issues.side_effect = RuntimeError("503")
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/3000"
+
+        url = file_stuck_on_critic_bug(self._ctx(), gh=gh)
+        assert url == "https://github.com/FidoCanCode/home/issues/3000"
+
+    def test_create_failure_returns_none(self) -> None:
+        from fido.events import file_stuck_on_critic_bug
+
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.side_effect = RuntimeError("500")
+
+        url = file_stuck_on_critic_bug(self._ctx(), gh=gh)
+        assert url is None
+
+    def test_emission_point_part_of_idempotency_key(self) -> None:
+        """Two different critics exhausting on the same target file
+        SEPARATE bugs because the emission_point is in the marker."""
+        from fido.events import file_stuck_on_critic_bug
+
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = "https://x/issues/1"
+
+        file_stuck_on_critic_bug(self._ctx(emission_point="task-completion"), gh=gh)
+        intent_body = gh.create_issue.call_args.args[2]
+        gh.reset_mock()
+        gh.search_issues.return_value = []
+
+        file_stuck_on_critic_bug(self._ctx(emission_point="task-creation"), gh=gh)
+        creation_body = gh.create_issue.call_args.args[2]
+
+        assert "task-completion:" in intent_body
+        assert "task-creation:" in creation_body
+        assert "task-completion:" not in creation_body
+
+    def test_attempts_preview_when_provided(self) -> None:
+        """When the caller has per-attempt previews (HOL-15/18 path
+        always does), they're rendered in the bug body."""
+        from fido.events import file_stuck_on_critic_bug
+
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = "https://x/issues/1"
+
+        file_stuck_on_critic_bug(
+            self._ctx(attempts_preview=("preview-A", "preview-B")), gh=gh
+        )
+        body = gh.create_issue.call_args.args[2]
+        assert "preview-A" in body
+        assert "preview-B" in body
+        assert "(no per-attempt previews recorded)" not in body
+
+
 class TestRouteCriticExhaustedBlocked:
     """HOL-20 / #1914: critic-exhaustion route — BLOCKED PR comment +
     auto-filed bug carrying the full retry trace."""
@@ -7390,6 +8444,42 @@ class TestDispatcher:
         count = d.backfill_missed_pr_comments(42, gh_user="fido", registry=MagicMock())
         mock_gh.get_issue_comments.assert_called_once_with(repo_cfg.name, 42)
         assert count == 0
+
+    def test_task_creation_drop_escalator_files_bug(self, tmp_path: Path) -> None:
+        # HOL-16 follow-up / #1934: when the process-local per-intent
+        # drop counter crosses the threshold, the Dispatcher-bound
+        # escalator files a bug via ``file_stuck_on_critic_bug`` with
+        # ``emission_point="task-creation"`` and the comment id as
+        # ``target_id``.
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/9998"
+        d = Dispatcher(cfg, repo_cfg, gh)
+        d._escalate_task_creation_drop_streak(intent_comment_id=12345, count=3)
+        gh.create_issue.assert_called_once()
+        args = gh.create_issue.call_args.args
+        assert args[0] == "FidoCanCode/home"
+        assert "task-creation" in args[2]
+        assert "12345" in args[2]
+
+    def test_insight_dedup_transport_escalator_files_bug(self, tmp_path: Path) -> None:
+        # HOL-19 follow-up / #1935: when the process-local
+        # transport-failure counter crosses the threshold, the
+        # Dispatcher-bound escalator files a bug via
+        # ``file_stuck_on_critic_bug``.
+        cfg = _config(tmp_path)
+        repo_cfg = _repo_cfg(tmp_path)
+        gh = MagicMock()
+        gh.search_issues.return_value = []
+        gh.create_issue.return_value = "https://github.com/FidoCanCode/home/issues/9999"
+        d = Dispatcher(cfg, repo_cfg, gh)
+        d._escalate_insight_dedup_transport_failure(3)
+        gh.create_issue.assert_called_once()
+        args = gh.create_issue.call_args.args
+        assert args[0] == "FidoCanCode/home"
+        assert "insight-dedup-transport" in args[2]
 
     def test_launch_sync_calls_background(self, tmp_path: Path) -> None:
         cfg = _config(tmp_path)

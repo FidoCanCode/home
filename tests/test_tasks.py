@@ -842,6 +842,25 @@ class TestUnblockTasks:
     def test_returns_zero_on_empty_file(self, tmp_path: Path) -> None:
         assert Tasks(tmp_path).unblock_tasks() == 0
 
+    def test_resets_critic_retry_count_on_unblock(self, tmp_path: Path) -> None:
+        # Codex P1 on PR #1938: a task that escalated to BLOCKED on
+        # the HOL-17 budget would carry the at-budget counter back
+        # into PENDING when unblocked.  Without the reset, the very
+        # next critic failure re-escalates immediately.
+        from fido.worker import _HOL17_MAX_REPARK_BUDGET
+
+        t = Tasks(tmp_path).add(title="task", task_type=TaskType.SPEC)
+        Tasks(tmp_path).update(t["id"], TaskStatus.BLOCKED)
+        # Simulate the at-budget counter the escalation left behind.
+        with Tasks(tmp_path).modify() as live:
+            for row in live:
+                if row["id"] == t["id"]:
+                    row["critic_retry_count"] = _HOL17_MAX_REPARK_BUDGET
+        Tasks(tmp_path).unblock_tasks()
+        after = next(r for r in Tasks(tmp_path).list() if r["id"] == t["id"])
+        assert after["status"] == str(TaskStatus.PENDING)
+        assert after["critic_retry_count"] == 0
+
 
 # ── _build_task_list_snapshot ─────────────────────────────────────────────────
 
@@ -6696,7 +6715,7 @@ class TestSkipMarkerEndToEnd:
         # Phase 2 (inside lock): apply against CURRENT queue, which is
         # now EMPTY (target deleted concurrently).
         current: list[dict] = []
-        result = _apply_task_creation_verdicts(items, verdicts, current)
+        result, _ = _apply_task_creation_verdicts(items, verdicts, current)
         titles = [it.get("title") for it in result]
         assert "Proposed new" in titles
 
@@ -6735,7 +6754,7 @@ class TestSkipMarkerEndToEnd:
             ),
         ]
 
-        result = _apply_task_creation_verdicts(items, verdicts, [existing])
+        result, _ = _apply_task_creation_verdicts(items, verdicts, [existing])
         titles = [it.get("title") for it in result]
         # The new proposal is KEPT — the named "duplicate of" target
         # is closing in the same batch, so dropping the proposal too
@@ -6775,7 +6794,7 @@ class TestSkipMarkerEndToEnd:
             ),
         ]
 
-        result = _apply_task_creation_verdicts(items, verdicts, [source, target])
+        result, _ = _apply_task_creation_verdicts(items, verdicts, [source, target])
         titles = [it.get("title") for it in result]
         # ``source`` is being absorbed by the merge in this batch —
         # the proposal that duplicates ``source`` must survive.
@@ -6816,7 +6835,7 @@ class TestSkipMarkerEndToEnd:
             ),
         ]
 
-        result = _apply_task_creation_verdicts(items, verdicts, [target])
+        result, _ = _apply_task_creation_verdicts(items, verdicts, [target])
         titles = [it.get("title") for it in result]
         assert "Proposed new (would dup target)" in titles
 
@@ -6847,7 +6866,7 @@ class TestSkipMarkerEndToEnd:
             ),
         ]
 
-        result = _apply_task_creation_verdicts(items, verdicts, [existing])
+        result, _ = _apply_task_creation_verdicts(items, verdicts, [existing])
         titles = [it.get("title") for it in result]
         assert "Proposed dup" not in titles
 
@@ -7349,3 +7368,193 @@ class TestTasksCompleteWithResolve:
                 task["id"], gh, syncer=lambda _w, _g: None
             )
         assert "thread resolution skipped" in caplog.text
+
+
+class TestApplyTaskCreationVerdictsDropCounter:
+    """HOL-16 follow-up / #1934 (codex P1 sixth round on PR #1938):
+    ``_apply_task_creation_verdicts`` RETURNS the contributing-intent
+    cids for each dropped proposal so the caller (``reorder_tasks``)
+    can bump the durable counter AFTER validation passes.  The earlier
+    in-apply bump advanced the counter even when a rejected batch
+    meant no drop actually shipped."""
+
+    def test_drop_returns_each_contributing_intent_cid(self) -> None:
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_verdicts
+
+        item = {
+            "id": None,
+            "title": "new",
+            "description": "",
+            "type": "spec",
+            "contributing_intents": [101, 202],
+        }
+        existing = {"id": "t-existing", "title": "existing", "status": "pending"}
+        verdict = TaskCreationVerdict(
+            relationship="duplicate_of", duplicate_of_id="t-existing"
+        )
+        _items, dropped = _apply_task_creation_verdicts([item], [verdict], [existing])
+        assert sorted(dropped) == [101, 202]
+
+    def test_drop_returns_no_cids_when_target_missing(self) -> None:
+        # When the target doesn't survive the batch, the proposal is
+        # KEPT (not dropped) — no contributing-intent cids returned.
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_verdicts
+
+        item = {
+            "id": None,
+            "title": "new",
+            "description": "",
+            "type": "spec",
+            "contributing_intents": [101],
+        }
+        verdict = TaskCreationVerdict(
+            relationship="duplicate_of", duplicate_of_id="t-gone"
+        )
+        items, dropped = _apply_task_creation_verdicts([item], [verdict], [])
+        # Kept, not dropped.
+        assert items == [item]
+        assert dropped == []
+
+
+class TestReorderTasksDropCounterDeferredBump:
+    """Codex P1 sixth round on PR #1938: the durable
+    ``TaskCreationDropCounter`` is bumped by ``reorder_tasks`` AFTER
+    ``_validate_rescope_batch`` confirms the batch is being applied.
+    A rejected batch must NOT advance the counter — otherwise drops
+    that never actually shipped would file false stuck-on-critic bugs.
+    """
+
+    def test_rejected_batch_does_not_bump_counter(self, tmp_path: Path) -> None:
+        from fido.critics import TaskCreationDropCounter
+        from fido.tasks import Tasks, reorder_tasks
+        from fido.types import TaskType
+
+        Tasks(tmp_path).add(title="seed", task_type=TaskType.SPEC)
+
+        recorded: list[int] = []
+        counter = TaskCreationDropCounter(
+            threshold=100, escalator=lambda cid, count: None
+        )
+        counter.record_drop = lambda cid: recorded.append(cid)  # type: ignore[method-assign]
+
+        # Opus returns an operations envelope referencing an unknown id —
+        # ``_validate_rescope_batch`` rejects.  Even if there had been
+        # drops in the apply, the counter must stay clean.
+        client = _client('{"operations": [{"op": "keep", "id": "no-such-task"}]}')
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=client,
+            task_creation_drop_counter=counter,
+        )
+        assert recorded == []
+
+
+class TestReorderTasksDropCounterDropBump:
+    """Codex P1 sixth round on PR #1938 happy path: a drop attributed
+    to an intent_comment_id, in a batch that PASSES validation, DOES
+    advance the durable counter (so the deferred-bump split still
+    preserves the legitimate counter advance)."""
+
+    def test_drop_in_accepted_batch_bumps_counter(self, tmp_path: Path) -> None:
+        from fido.critics import TaskCreationDropCounter
+        from fido.tasks import Tasks, reorder_tasks
+        from fido.types import TaskType
+
+        existing = Tasks(tmp_path).add(title="existing", task_type=TaskType.SPEC)
+
+        recorded: list[int] = []
+        counter = TaskCreationDropCounter(
+            threshold=100, escalator=lambda cid, count: None
+        )
+        counter.record_drop = lambda cid: recorded.append(cid)  # type: ignore[method-assign]
+
+        # Two LLM calls happen: the rescope ops envelope, then a
+        # task-creation critic verdict per ``new`` op.  Use
+        # ``side_effect`` so each call gets the right payload.
+        ops_response = json.dumps(
+            {
+                "operations": [
+                    {"op": "keep", "id": existing["id"]},
+                    {
+                        "op": "new",
+                        "title": "proposed-new",
+                        "description": "x",
+                        "type": "spec",
+                        "contributing_intents": [555],
+                    },
+                ]
+            }
+        )
+        critic_verdict = json.dumps(
+            {
+                "relationship": "duplicate_of",
+                "scope": "single",
+                "duplicate_of_id": existing["id"],
+                "rationale": "test",
+            }
+        )
+        client = _client(ops_response)
+        # First call: ops envelope; second call: critic verdict.
+        client.run_turn.side_effect = [ops_response, critic_verdict]
+        prompts = Prompts("p")
+
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=client,
+            prompts=prompts,
+            task_creation_drop_counter=counter,
+        )
+        # Drop fired, batch validated, counter advanced for 555.
+        assert recorded == [555]
+
+
+class TestReorderTasksDropCounterReset:
+    """HOL-16 follow-up / #1934: after a successful rescope batch,
+    ``reorder_tasks`` calls ``reset_inactive_intents`` on the drop
+    counter so streaks for intents with no live contributing tasks
+    don't carry over to the next batch."""
+
+    def test_reset_called_with_active_intent_ids_after_apply(
+        self, tmp_path: Path
+    ) -> None:
+        from fido.critics import TaskCreationDropCounter
+        from fido.tasks import Tasks, reorder_tasks
+        from fido.types import TaskType
+
+        # Seed a task carrying contributing_intent 101 (Tasks.add
+        # doesn't accept contributing_intents directly, so mutate via
+        # the lock).
+        t = Tasks(tmp_path).add(title="T1", task_type=TaskType.SPEC)
+        with Tasks(tmp_path).modify() as live:
+            for row in live:
+                if row["id"] == t["id"]:
+                    row["contributing_intents"] = [101]
+
+        recorded_resets: list[set[int]] = []
+        counter = TaskCreationDropCounter(threshold=10)
+        original = counter.reset_inactive_intents
+
+        def spy(active: set[int]) -> None:
+            recorded_resets.append(set(active))
+            original(active)
+
+        counter.reset_inactive_intents = spy  # type: ignore[method-assign]
+
+        # Minimal valid keep-only operation envelope from Opus.
+        # The id in the operation must match the auto-generated task
+        # id from the seeded task.
+        client = _client(json.dumps({"operations": [{"op": "keep", "id": t["id"]}]}))
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=client,
+            task_creation_drop_counter=counter,
+        )
+        # Reset was called with the active set including intent 101
+        # (drawn from the surviving task's contributing_intents).
+        assert recorded_resets, "reset_inactive_intents was never called"
+        assert 101 in recorded_resets[-1]

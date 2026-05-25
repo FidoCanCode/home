@@ -1546,3 +1546,370 @@ class TestRunInsightDedupCritic:
                 prompts=_FakeInsightDedupPrompts(),
                 critic_system_prompt="critic-sys",
             )
+
+
+class TestInsightDedupTransportCounter:
+    """HOL-19 follow-up / #1935: consecutive-transport-failure counter
+    escalates via the injected escalator after crossing the threshold;
+    parse failures don't bump or reset; verdict-shape-valid responses
+    reset."""
+
+    def test_escalates_at_threshold(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        calls: list[int] = []
+        counter = InsightDedupTransportCounter(
+            threshold=3, escalator=lambda c: calls.append(c) or True
+        )
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        assert calls == []
+        counter.record_transport_failure()
+        assert calls == [3]
+
+    def test_already_escalated_suppresses_re_fire(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        calls: list[int] = []
+        counter = InsightDedupTransportCounter(
+            threshold=2, escalator=lambda c: calls.append(c) or True
+        )
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        # Escalated once, then suppressed until reset.
+        assert calls == [2]
+
+    def test_success_resets_counter_and_escalation_latch(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        calls: list[int] = []
+        counter = InsightDedupTransportCounter(
+            threshold=2, escalator=lambda c: calls.append(c) or True
+        )
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        assert calls == [2]
+        counter.record_success()
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        # Fresh escalation after the reset.
+        assert calls == [2, 2]
+
+    def test_none_escalator_no_op(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        counter = InsightDedupTransportCounter(threshold=1, escalator=None)
+        # Must not raise.
+        counter.record_transport_failure()
+        counter.record_transport_failure()
+        counter.record_success()
+
+    def test_failed_escalator_releases_latch_and_retries(self) -> None:
+        # Codex P1 follow-up on PR #1938: when the escalator returns
+        # False (transient bug-file failure), the already-escalated
+        # latch must be released so the next transport failure
+        # retries the escalation — without this a transient GitHub
+        # error at the first threshold crossing permanently
+        # suppresses future escalations.
+        from fido.critics import InsightDedupTransportCounter
+
+        results = iter([False, True])
+        fire_count = [0]
+
+        def flaky_escalator(_count: int) -> bool:
+            fire_count[0] += 1
+            return next(results)
+
+        counter = InsightDedupTransportCounter(threshold=1, escalator=flaky_escalator)
+        # First failure fires escalator → returns False → latch released.
+        counter.record_transport_failure()
+        assert fire_count[0] == 1
+        # Second failure fires AGAIN (because latch was released) → True.
+        counter.record_transport_failure()
+        assert fire_count[0] == 2
+        # Third failure: latch now set, no re-fire.
+        counter.record_transport_failure()
+        assert fire_count[0] == 2
+
+
+class TestInsightDedupCriticTransportCounterWiring:
+    """``run_insight_dedup_critic`` calls the counter on transport
+    failure and on verdict-shape-valid success."""
+
+    def _proposed(self) -> dict[str, str]:
+        return {"title": "t", "hook": "h", "why": "w"}
+
+    def _recent(self) -> list[dict[str, str]]:
+        return [{"title": "rt", "body": "rb", "url": "https://github.com/o/r/issues/1"}]
+
+    def test_transport_failure_bumps_counter(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        calls: list[int] = []
+        counter = InsightDedupTransportCounter(
+            threshold=1, escalator=lambda c: calls.append(c) or True
+        )
+        agent = _FakeAgent(run_turn_exception=RuntimeError("network"))
+        run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=agent,
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+            transport_counter=counter,
+        )
+        assert calls == [1]
+
+    def test_verdict_valid_response_resets_counter(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        calls: list[int] = []
+        counter = InsightDedupTransportCounter(
+            threshold=2, escalator=lambda c: calls.append(c) or True
+        )
+        # Pre-bump to threshold-1 so escalation doesn't fire.
+        counter.record_transport_failure()
+        # Verdict-shape-valid response: is_duplicate=false (any well-formed envelope).
+        agent = _FakeAgent(run_turn_responses=['{"is_duplicate": false}'])
+        run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=agent,
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+            transport_counter=counter,
+        )
+        # Counter reset — a fresh round of failures starts fresh.
+        agent2 = _FakeAgent(run_turn_exception=RuntimeError("network"))
+        run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=agent2,
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+            transport_counter=counter,
+        )
+        # Only 1 transport failure after reset; below threshold.
+        assert calls == []
+
+    def test_parse_failure_does_not_reset(self) -> None:
+        from fido.critics import InsightDedupTransportCounter
+
+        calls: list[int] = []
+        counter = InsightDedupTransportCounter(
+            threshold=2, escalator=lambda c: calls.append(c) or True
+        )
+        counter.record_transport_failure()
+        # Parse failure: no JSON.
+        agent = _FakeAgent(run_turn_responses=["garbage no json here"])
+        run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=agent,
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+            transport_counter=counter,
+        )
+        # Counter still at 1.  Next transport failure should escalate at threshold=2.
+        agent2 = _FakeAgent(run_turn_exception=RuntimeError("network"))
+        run_insight_dedup_critic(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+            agent=agent2,
+            prompts=_FakeInsightDedupPrompts(),
+            critic_system_prompt="critic-sys",
+            transport_counter=counter,
+        )
+        assert calls == [2]
+
+
+class TestTaskCreationDropCounter:
+    """HOL-16 follow-up / #1934: per-intent task-creation drop counter
+    escalates after N drops attributed to the same intent_comment_id;
+    resets when the intent has no live contributing tasks."""
+
+    def test_escalates_at_threshold_for_single_intent(self) -> None:
+        from fido.critics import TaskCreationDropCounter
+
+        calls: list[tuple[int, int]] = []
+        counter = TaskCreationDropCounter(
+            threshold=3, escalator=lambda cid, count: calls.append((cid, count)) or True
+        )
+        counter.record_drop(101)
+        counter.record_drop(101)
+        assert calls == []
+        counter.record_drop(101)
+        assert calls == [(101, 3)]
+
+    def test_drops_for_different_intents_tracked_separately(self) -> None:
+        from fido.critics import TaskCreationDropCounter
+
+        calls: list[tuple[int, int]] = []
+        counter = TaskCreationDropCounter(
+            threshold=2, escalator=lambda cid, count: calls.append((cid, count)) or True
+        )
+        counter.record_drop(101)
+        counter.record_drop(202)
+        counter.record_drop(101)
+        # 101 hit threshold; 202 hasn't.
+        assert calls == [(101, 2)]
+
+    def test_already_escalated_suppresses_re_fire(self) -> None:
+        from fido.critics import TaskCreationDropCounter
+
+        calls: list[tuple[int, int]] = []
+        counter = TaskCreationDropCounter(
+            threshold=2, escalator=lambda cid, count: calls.append((cid, count)) or True
+        )
+        counter.record_drop(101)
+        counter.record_drop(101)
+        counter.record_drop(101)
+        counter.record_drop(101)
+        assert calls == [(101, 2)]
+
+    def test_reset_inactive_intents_clears_counter_and_latch(self) -> None:
+        from fido.critics import TaskCreationDropCounter
+
+        calls: list[tuple[int, int]] = []
+        counter = TaskCreationDropCounter(
+            threshold=2, escalator=lambda cid, count: calls.append((cid, count)) or True
+        )
+        counter.record_drop(101)
+        counter.record_drop(101)  # escalates
+        assert calls == [(101, 2)]
+        # Intent 101 has no live contributing tasks anymore — reset.
+        counter.reset_inactive_intents(active_intent_ids=set())
+        # Fresh drops can escalate again.
+        counter.record_drop(101)
+        counter.record_drop(101)
+        assert calls == [(101, 2), (101, 2)]
+
+    def test_reset_inactive_keeps_active_intents(self) -> None:
+        from fido.critics import TaskCreationDropCounter
+
+        calls: list[tuple[int, int]] = []
+        counter = TaskCreationDropCounter(
+            threshold=3, escalator=lambda cid, count: calls.append((cid, count)) or True
+        )
+        counter.record_drop(101)
+        counter.record_drop(202)
+        # Both 101 and 202 stay active.
+        counter.reset_inactive_intents(active_intent_ids={101, 202})
+        # Counters preserved — one more drop on 101 doesn't escalate yet
+        # (count is now 2, threshold is 3).
+        counter.record_drop(101)
+        assert calls == []
+        # But 101 now reaches threshold.
+        counter.record_drop(101)
+        assert calls == [(101, 3)]
+
+    def test_none_escalator_no_op(self) -> None:
+        from fido.critics import TaskCreationDropCounter
+
+        counter = TaskCreationDropCounter(threshold=1, escalator=None)
+        # Must not raise.
+        counter.record_drop(101)
+        counter.record_drop(101)
+        counter.reset_inactive_intents(set())
+
+    def test_durable_store_backend_survives_counter_recreation(
+        self, tmp_path: object
+    ) -> None:
+        # Codex P2 on PR #1938 (#1934 acceptance): the counter MUST
+        # persist drops across counter object recreations (simulating
+        # a Fido restart between drops).  Wire a real ``FidoStore``
+        # backend and verify the streak carries across two counter
+        # instances.
+        from fido.critics import TaskCreationDropCounter
+        from fido.store import FidoStore
+
+        store = FidoStore(tmp_path)  # type: ignore[arg-type]
+        calls: list[tuple[int, int]] = []
+        counter1 = TaskCreationDropCounter(
+            threshold=3,
+            escalator=lambda cid, count: calls.append((cid, count)) or True,
+            store=store,
+        )
+        counter1.record_drop(101)
+        counter1.record_drop(101)
+        assert calls == []
+        # Simulate a Fido restart: drop the in-memory counter object;
+        # construct a new one against the same durable store.
+        del counter1
+        counter2 = TaskCreationDropCounter(
+            threshold=3,
+            escalator=lambda cid, count: calls.append((cid, count)) or True,
+            store=store,
+        )
+        # Streak survived — the third drop escalates.
+        counter2.record_drop(101)
+        assert calls == [(101, 3)]
+
+    def test_durable_store_escalated_latch_survives_recreation(
+        self, tmp_path: object
+    ) -> None:
+        # The already-escalated latch is also durable — re-firing the
+        # escalator across a "restart" must be suppressed until reset.
+        from fido.critics import TaskCreationDropCounter
+        from fido.store import FidoStore
+
+        store = FidoStore(tmp_path)  # type: ignore[arg-type]
+        calls: list[tuple[int, int]] = []
+        counter1 = TaskCreationDropCounter(
+            threshold=2,
+            escalator=lambda cid, count: calls.append((cid, count)) or True,
+            store=store,
+        )
+        counter1.record_drop(101)
+        counter1.record_drop(101)
+        assert calls == [(101, 2)]
+        del counter1
+        counter2 = TaskCreationDropCounter(
+            threshold=2,
+            escalator=lambda cid, count: calls.append((cid, count)) or True,
+            store=store,
+        )
+        counter2.record_drop(101)
+        counter2.record_drop(101)
+        # No re-fire — latch durably preserved.
+        assert calls == [(101, 2)]
+
+    def test_failed_escalator_does_not_persist_latch(self, tmp_path: object) -> None:
+        # Codex P1 follow-up on PR #1938: if file_stuck_on_critic_bug
+        # returned None (transient GitHub failure), the durable
+        # escalated=1 latch must NOT be set — otherwise a transient
+        # failure at the first threshold crossing permanently
+        # suppresses escalation across restarts even though no bug
+        # was filed.
+        from fido.critics import TaskCreationDropCounter
+        from fido.store import FidoStore
+
+        store = FidoStore(tmp_path)  # type: ignore[arg-type]
+        results = iter([False, True])
+        calls: list[tuple[int, int]] = []
+
+        def flaky_escalator(cid: int, count: int) -> bool:
+            calls.append((cid, count))
+            return next(results)
+
+        counter1 = TaskCreationDropCounter(
+            threshold=2, escalator=flaky_escalator, store=store
+        )
+        counter1.record_drop(101)
+        counter1.record_drop(101)  # crosses threshold; escalator returns False
+        assert calls == [(101, 2)]
+        # Simulate a restart with the durable store carrying state.
+        del counter1
+        counter2 = TaskCreationDropCounter(
+            threshold=2, escalator=flaky_escalator, store=store
+        )
+        # Next drop should re-fire because the latch was NOT persisted
+        # on the failed attempt.  This time the escalator returns True
+        # → latch persists going forward.
+        counter2.record_drop(101)
+        assert calls == [(101, 2), (101, 3)]
+        # Further drops on 101 don't re-fire (latch now durably set).
+        counter2.record_drop(101)
+        assert calls == [(101, 2), (101, 3)]

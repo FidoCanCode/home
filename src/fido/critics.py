@@ -15,8 +15,10 @@ output from shipping.
 
 import logging
 import re
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from urllib.parse import urlparse
 
 from fido.prompts import Prompts
@@ -31,9 +33,11 @@ from fido.synthesis_call import extract_json_objects
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "InsightDedupTransportCounter",
     "InsightDedupVerdict",
     "ReplyProseVerdict",
     "TaskCompletionVerdict",
+    "TaskCreationDropCounter",
     "TaskCreationProposedSplit",
     "TaskCreationVerdict",
     "run_insight_dedup_critic",
@@ -642,6 +646,195 @@ def _parse_insight_dedup_verdict(
     )
 
 
+class TaskCreationDropStore(Protocol):
+    """Minimal backend interface for :class:`TaskCreationDropCounter`.
+
+    Allows the counter to use ``FidoStore`` in production for durable
+    cross-restart accounting (#1934 acceptance criterion), and an
+    in-memory ``_InMemoryTaskCreationDropStore`` in tests that don't
+    need durability.
+    """
+
+    def bump_task_creation_drop(self, intent_comment_id: int) -> tuple[int, bool]: ...
+
+    def mark_task_creation_drop_escalated(self, intent_comment_id: int) -> None: ...
+
+    def reset_inactive_task_creation_drops(
+        self, active_intent_ids: set[int]
+    ) -> int: ...
+
+
+class _InMemoryTaskCreationDropStore:
+    """In-memory backend for tests.  Same semantics as the SQLite-
+    backed ``FidoStore`` implementation but loses state on restart.
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[int, int] = {}
+        self._escalated: set[int] = set()
+        self._lock = threading.Lock()
+
+    def bump_task_creation_drop(self, intent_comment_id: int) -> tuple[int, bool]:
+        with self._lock:
+            self._counts[intent_comment_id] = self._counts.get(intent_comment_id, 0) + 1
+            return (
+                self._counts[intent_comment_id],
+                intent_comment_id in self._escalated,
+            )
+
+    def mark_task_creation_drop_escalated(self, intent_comment_id: int) -> None:
+        with self._lock:
+            self._escalated.add(intent_comment_id)
+
+    def reset_inactive_task_creation_drops(self, active_intent_ids: set[int]) -> int:
+        with self._lock:
+            cleared = 0
+            for cid in list(self._counts):
+                if cid not in active_intent_ids:
+                    self._counts.pop(cid, None)
+                    self._escalated.discard(cid)
+                    cleared += 1
+            return cleared
+
+
+class TaskCreationDropCounter:
+    """HOL-16 follow-up / #1934: per-``intent_comment_id`` drop counter
+    for the task-creation critic, backed by a durable
+    :class:`TaskCreationDropStore` (production: ``FidoStore``).
+
+    Each ``_apply_task_creation_verdicts`` call records every drop
+    attributed to an intent_comment_id (via the item's
+    ``contributing_intents``).  When the per-intent count crosses
+    ``threshold``, the injected ``escalator(intent_comment_id, count)``
+    fires once and is suppressed until the counter resets for that
+    intent.
+
+    Reset rule: when an intent's contributing tasks reach zero —
+    either the comment was successfully covered by another task that
+    DID land, or the system moved on and no live proposal carries the
+    intent anymore.  Callers invoke ``reset_inactive_intents`` after
+    each batch apply with the set of intent ids that still appear in
+    live task ``contributing_intents``.
+
+    Codex P2 on PR #1938 (#1934 acceptance criterion): persistence in
+    a durable store — without it, a Fido restart between drops loses
+    the streak and can prevent the exhaustion bug from ever filing.
+    The default backend (no ``store=`` passed) is in-memory, suitable
+    for tests; production wires ``store=FidoStore(work_dir)``.
+
+    Codex P1 follow-up: the escalator returns ``True`` on successful
+    bug file/reuse, ``False`` when ``file_stuck_on_critic_bug``
+    failed (e.g. transient GitHub error).  The durable
+    ``escalated=1`` latch is set ONLY after a successful return — a
+    transient failure at the first threshold crossing leaves the
+    latch clear so the next drop retries the escalation instead of
+    suppressing it forever across restarts.
+    """
+
+    def __init__(
+        self,
+        *,
+        threshold: int = 3,
+        escalator: Callable[[int, int], bool] | None = None,
+        store: TaskCreationDropStore | None = None,
+    ) -> None:
+        self._threshold = threshold
+        self._escalator = escalator
+        self._store: TaskCreationDropStore = (
+            store if store is not None else _InMemoryTaskCreationDropStore()
+        )
+
+    def record_drop(self, intent_comment_id: int) -> None:
+        count, already_escalated = self._store.bump_task_creation_drop(
+            intent_comment_id
+        )
+        if (
+            count >= self._threshold
+            and not already_escalated
+            and self._escalator is not None
+        ):
+            # Fire FIRST; only set the durable latch on success.
+            if self._escalator(intent_comment_id, count):
+                self._store.mark_task_creation_drop_escalated(intent_comment_id)
+
+    def reset_inactive_intents(self, active_intent_ids: set[int]) -> None:
+        """Drop counters for any intent_comment_id NOT in
+        *active_intent_ids* — those intents have no live contributing
+        tasks anymore, so the drop streak is broken.
+        """
+        self._store.reset_inactive_task_creation_drops(active_intent_ids)
+
+
+class InsightDedupTransportCounter:
+    """HOL-19 follow-up / #1935: process-local consecutive-transport-
+    failure counter for ``run_insight_dedup_critic``.
+
+    Each ``run_insight_dedup_critic`` call updates the counter:
+    transport failures (the ``except Exception`` arm — RuntimeError,
+    network blips, model unavailable) bump it; a verdict-shape-valid
+    response resets it.  Parse failures don't reset (no clean signal
+    that the critic infrastructure is healthy) and don't bump (might
+    just be one bad model turn).
+
+    When the counter crosses ``threshold`` consecutive failures, the
+    injected ``escalator`` callback is invoked with the failure count.
+    Production wiring escalates via ``file_stuck_on_critic_bug`` with
+    ``emission_point="insight-dedup-transport"``.
+
+    Thread-safe under free-threaded Python: a lock guards every read-
+    modify cycle so two simultaneous critic calls can't both observe
+    "below threshold" and both miss an escalation.
+
+    Process-local persistence per the issue body ("a flaky day would
+    still trigger the bug within a session") — survives across critic
+    calls in one Fido process, resets on restart.
+    """
+
+    def __init__(
+        self,
+        *,
+        threshold: int = 3,
+        escalator: Callable[[int], bool] | None = None,
+    ) -> None:
+        self._threshold = threshold
+        self._escalator = escalator
+        self._consecutive_failures = 0
+        self._already_escalated = False
+        self._lock = threading.Lock()
+
+    def record_transport_failure(self) -> None:
+        # Codex P1 follow-up on PR #1938: the escalator returns
+        # ``True`` on successful bug file/reuse, ``False`` on
+        # transient failure.  We tentatively claim the latch under
+        # the lock to suppress concurrent at-threshold races, then
+        # RELEASE it if the escalator reports failure — otherwise a
+        # transient GitHub error would permanently suppress future
+        # escalations.  Net behaviour: the next transport failure
+        # retries the escalation; a successful prior fire still
+        # latches durably.
+        escalator: Callable[[int], bool] | None = None
+        count = 0
+        with self._lock:
+            self._consecutive_failures += 1
+            if (
+                self._consecutive_failures >= self._threshold
+                and not self._already_escalated
+                and self._escalator is not None
+            ):
+                self._already_escalated = True
+                escalator = self._escalator
+                count = self._consecutive_failures
+        if escalator is not None:
+            if not escalator(count):
+                with self._lock:
+                    self._already_escalated = False
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._consecutive_failures = 0
+            self._already_escalated = False
+
+
 def run_insight_dedup_critic(
     proposed_insight: dict[str, str],
     recent_insights: list[dict[str, str]],
@@ -649,6 +842,7 @@ def run_insight_dedup_critic(
     agent: ProviderAgent,
     prompts: Prompts,
     critic_system_prompt: str,
+    transport_counter: InsightDedupTransportCounter | None = None,
 ) -> InsightDedupVerdict:
     """Ask Opus whether ``proposed_insight`` near-duplicates any of
     ``recent_insights``.
@@ -683,6 +877,11 @@ def run_insight_dedup_critic(
             "insight-dedup critic transport failure (%s) — failing open",
             exc,
         )
+        # HOL-19 follow-up / #1935: count transport failures so a
+        # cross-comment pattern (the critic infra itself is broken,
+        # not "this insight is duplicate") can escalate to a bug.
+        if transport_counter is not None:
+            transport_counter.record_transport_failure()
         return InsightDedupVerdict()
 
     objs = extract_json_objects(raw or "")
@@ -716,6 +915,12 @@ def run_insight_dedup_critic(
                     len(allowed_urls),
                 )
                 continue
+            # HOL-19 follow-up / #1935: a verdict-shape-valid response
+            # means the critic infra is healthy — reset the
+            # transport-failure counter.  Parse failures don't reset
+            # (no clean health signal).
+            if transport_counter is not None:
+                transport_counter.record_success()
             return verdict
         if obj.get("is_duplicate") is True:
             saw_malformed_dup = True

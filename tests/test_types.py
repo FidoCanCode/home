@@ -478,3 +478,344 @@ class TestTaskStatusSkipped:
         assert TaskStatus.SKIPPED != TaskStatus.BLOCKED
         assert TaskStatus.SKIPPED != TaskStatus.PENDING
         assert TaskStatus.SKIPPED != TaskStatus.IN_PROGRESS
+
+
+# ---------------------------------------------------------------------------
+# HOL-23 / #1917 — verdict_is_material predicate
+# ---------------------------------------------------------------------------
+
+
+class TestVerdictIsMaterial:
+    """HOL-23 / #1917: predicate gates per-thread reply-back emission.
+
+    Test matrix covers each outcome × match/divergence combination
+    per the issue's acceptance criteria.
+    """
+
+    def _intent(self, change_request: str = "Fix the bug") -> object:
+        from fido.types import RescopeIntent
+
+        return RescopeIntent(
+            change_request=change_request,
+            comment_id=42,
+            timestamp="2026-05-24T10:00:00Z",
+        )
+
+    def _verdict(self, outcome: str) -> object:
+        from fido.types import IntentVerdict
+
+        return IntentVerdict(
+            intent_comment_id=42,
+            outcome=outcome,
+            narrative="x",
+        )
+
+    def test_reshaped_is_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        assert verdict_is_material(self._intent(), self._verdict("reshaped"))
+
+    def test_superseded_is_material(self) -> None:
+        from fido.types import IntentVerdict, verdict_is_material
+
+        verdict = IntentVerdict(
+            intent_comment_id=42,
+            outcome="superseded",
+            by_intent_comment_id=99,
+            narrative="x",
+        )
+        assert verdict_is_material(self._intent(), verdict)
+
+    def test_no_op_is_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        assert verdict_is_material(self._intent(), self._verdict("no_op"))
+
+    def test_honored_without_descriptions_is_not_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        assert not verdict_is_material(self._intent(), self._verdict("honored"))
+
+    def test_honored_matching_task_description_is_not_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        assert not verdict_is_material(
+            self._intent("Fix the bug"),
+            self._verdict("honored"),
+            task_descriptions=("Fix the bug in the retry path.",),
+        )
+
+    def test_honored_diverging_task_description_is_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        # Task description doesn't contain the change_request text —
+        # "you said X, I queued Y" pattern → material.
+        assert verdict_is_material(
+            self._intent("Fix the bug"),
+            self._verdict("honored"),
+            task_descriptions=("Refactor the entire retry subsystem.",),
+        )
+
+    def test_honored_case_insensitive_match(self) -> None:
+        from fido.types import verdict_is_material
+
+        assert not verdict_is_material(
+            self._intent("FIX THE BUG"),
+            self._verdict("honored"),
+            task_descriptions=("fix the bug pls.",),
+        )
+
+    def test_honored_with_multiple_tasks_any_match_is_not_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        # If ANY task description covers the request verbatim, the
+        # intent is honoured-as-asked → not material.
+        assert not verdict_is_material(
+            self._intent("Fix the bug"),
+            self._verdict("honored"),
+            task_descriptions=(
+                "Unrelated description.",
+                "Fix the bug as part of the broader refactor.",
+            ),
+        )
+
+    def test_honored_with_empty_change_request_is_not_material(self) -> None:
+        from fido.types import verdict_is_material
+
+        # Empty change_request can't be a basis for divergence —
+        # callers shouldn't construct intents this way but the
+        # predicate must not divide-by-zero.
+        assert not verdict_is_material(
+            self._intent(""),
+            self._verdict("honored"),
+            task_descriptions=("anything",),
+        )
+
+
+class TestIntentThreadTerminal:
+    """HOL-27 / #1921: an intent is terminal when every task in its
+    contributing_intents has reached a terminal status."""
+
+    def _task(
+        self,
+        tid: str,
+        status: str,
+        contributing_intents: tuple[int, ...] = (),
+    ) -> dict[str, object]:
+        return {
+            "id": tid,
+            "status": status,
+            "contributing_intents": list(contributing_intents),
+        }
+
+    def test_all_completed_is_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        tasks = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "completed", (101,)),
+        ]
+        assert intent_thread_terminal(101, tasks)
+
+    def test_all_skipped_is_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        tasks = [self._task("t1", "skipped", (101,))]
+        assert intent_thread_terminal(101, tasks)
+
+    def test_mixed_completed_and_skipped_is_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        tasks = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "skipped", (101,)),
+        ]
+        assert intent_thread_terminal(101, tasks)
+
+    def test_any_pending_is_not_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        tasks = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "pending", (101,)),
+        ]
+        assert not intent_thread_terminal(101, tasks)
+
+    def test_any_in_progress_is_not_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        tasks = [self._task("t1", "in_progress", (101,))]
+        assert not intent_thread_terminal(101, tasks)
+
+    def test_any_blocked_is_not_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        tasks = [self._task("t1", "blocked", (101,))]
+        assert not intent_thread_terminal(101, tasks)
+
+    def test_no_contributing_tasks_is_not_terminal(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        # Vacuous case: intent 101 never landed on any task.  HOL-24's
+        # no_op path already notified; this predicate must NOT also
+        # fire (otherwise HOL-28 double-replies).
+        tasks = [self._task("t1", "completed", (202,))]
+        assert not intent_thread_terminal(101, tasks)
+
+    def test_tolerates_taskstatus_enum_instance(self) -> None:
+        from fido.types import TaskStatus, intent_thread_terminal
+
+        tasks = [
+            {
+                "id": "t1",
+                "status": TaskStatus.COMPLETED,
+                "contributing_intents": [101],
+            }
+        ]
+        assert intent_thread_terminal(101, tasks)
+
+    def test_ignores_tasks_not_contributing(self) -> None:
+        from fido.types import intent_thread_terminal
+
+        # t2 is pending but doesn't list intent 101 — must not block
+        # 101's terminal status.
+        tasks = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "pending", (202,)),
+        ]
+        assert intent_thread_terminal(101, tasks)
+
+
+class TestNewlyTerminalIntentThreads:
+    """HOL-27: identifies intent threads that transitioned from
+    non-terminal to terminal across a tasks.json before/after snapshot."""
+
+    def _task(
+        self,
+        tid: str,
+        status: str,
+        contributing_intents: tuple[int, ...] = (),
+    ) -> dict[str, object]:
+        return {
+            "id": tid,
+            "status": status,
+            "contributing_intents": list(contributing_intents),
+        }
+
+    def test_one_intent_transitioned(self) -> None:
+        from fido.types import newly_terminal_intent_threads
+
+        prev = [self._task("t1", "in_progress", (101,))]
+        new = [self._task("t1", "completed", (101,))]
+        assert newly_terminal_intent_threads(prev, new) == (101,)
+
+    def test_intent_already_terminal_excluded(self) -> None:
+        from fido.types import newly_terminal_intent_threads
+
+        # Intent 101 was already all-terminal before the transition,
+        # don't re-emit a reply for it.
+        prev = [self._task("t1", "completed", (101,))]
+        new = [self._task("t1", "completed", (101,))]
+        assert newly_terminal_intent_threads(prev, new) == ()
+
+    def test_intent_still_pending_excluded(self) -> None:
+        from fido.types import newly_terminal_intent_threads
+
+        prev = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "pending", (101,)),
+        ]
+        new = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "in_progress", (101,)),
+        ]
+        assert newly_terminal_intent_threads(prev, new) == ()
+
+    def test_multiple_intents_transitioned_in_insertion_order(self) -> None:
+        from fido.types import newly_terminal_intent_threads
+
+        prev = [
+            self._task("t1", "pending", (101,)),
+            self._task("t2", "pending", (202,)),
+        ]
+        new = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "completed", (202,)),
+        ]
+        # 101 first because t1 lists it first.
+        assert newly_terminal_intent_threads(prev, new) == (101, 202)
+
+    def test_de_duplicated(self) -> None:
+        from fido.types import newly_terminal_intent_threads
+
+        prev = [
+            self._task("t1", "pending", (101,)),
+            self._task("t2", "pending", (101,)),
+        ]
+        new = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "completed", (101,)),
+        ]
+        # 101 appears in both tasks but emitted once.
+        assert newly_terminal_intent_threads(prev, new) == (101,)
+
+    def test_partial_thread_transition_excluded(self) -> None:
+        from fido.types import newly_terminal_intent_threads
+
+        # Intent 101 contributes to t1 (now done) AND t2 (still pending)
+        # — thread is NOT yet terminal.
+        prev = [
+            self._task("t1", "pending", (101,)),
+            self._task("t2", "pending", (101,)),
+        ]
+        new = [
+            self._task("t1", "completed", (101,)),
+            self._task("t2", "pending", (101,)),
+        ]
+        assert newly_terminal_intent_threads(prev, new) == ()
+
+
+class TestHol28AnchorKey:
+    """HOL-28 / #1922 (codex P2 eighth round on PR #1938): normalize
+    a task's ``thread["comment_id"]`` to an int so string/int mismatches
+    don't make sibling tasks invisible during the transition check."""
+
+    def test_int_passes_through(self) -> None:
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key({"comment_id": 999, "comment_type": "pulls"}) == 999
+
+    def test_string_coerced_to_int(self) -> None:
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key({"comment_id": "999"}) == 999
+
+    def test_none_thread_returns_none(self) -> None:
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key(None) is None
+
+    def test_non_mapping_returns_none(self) -> None:
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key("not-a-dict") is None
+        assert hol28_anchor_key(42) is None
+
+    def test_missing_comment_id_returns_none(self) -> None:
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key({"comment_type": "pulls"}) is None
+
+    def test_bool_returns_none(self) -> None:
+        # ``bool`` is an ``int`` subclass — reject explicitly so
+        # ``True``/``False`` can't sneak in as a fake comment id.
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key({"comment_id": True}) is None
+        assert hol28_anchor_key({"comment_id": False}) is None
+
+    def test_uncoerceable_returns_none(self) -> None:
+        from fido.types import hol28_anchor_key
+
+        assert hol28_anchor_key({"comment_id": "not-a-number"}) is None
+        assert hol28_anchor_key({"comment_id": [1, 2, 3]}) is None

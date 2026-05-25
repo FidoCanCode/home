@@ -832,13 +832,33 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 _eyes_ctype = str(_eyes_comment_info.get("comment_type", "issues"))
                 _eyes_cid = _eyes_comment_info.get("comment_id")
                 if _eyes_repo and isinstance(_eyes_cid, int):
+                    # HOL-22 / #1916: pull the review submission id (if
+                    # any) so the predicate scopes "batched with this"
+                    # to comments from the SAME submission rather than
+                    # any open comment in the repo (closes #1875).
+                    _eyes_review_id_raw = _eyes_comment_info.get(
+                        "pull_request_review_id"
+                    )
+                    _eyes_review_id = (
+                        int(_eyes_review_id_raw)
+                        if isinstance(_eyes_review_id_raw, int)
+                        else None
+                    )
                     if FidoStore(repo_cfg.work_dir).has_other_open_pr_comments(
-                        repo=_eyes_repo, exclude_comment_id=_eyes_cid
+                        repo=_eyes_repo,
+                        exclude_comment_id=_eyes_cid,
+                        review_id=_eyes_review_id,
                     ):
                         log.debug(
                             "eager eyes skipped for comment %d — repo has "
-                            "other open comments; worker posts eyes on claim",
+                            "other open comments from %s; worker posts eyes "
+                            "on claim",
                             _eyes_cid,
+                            (
+                                f"review {_eyes_review_id}"
+                                if _eyes_review_id is not None
+                                else "the same repo (no review-id scoping)"
+                            ),
                         )
                     else:
                         try:
