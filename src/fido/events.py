@@ -160,20 +160,22 @@ class _BackgroundRescopeTrigger:
         def _mark_applied() -> None:
             self._store.mark_rescope_intent_applied(intent.comment_id)
 
-        try:
-            self._dispatcher.reorder_tasks_background(
-                intent.change_request,
-                self._registry,
-                agent=self._agent,
-                prompts=self._prompts,
-                intents=[intent],
-                _on_done=_mark_applied,
-            )
-        except Exception:
-            # Synchronous failure between claim and dispatch start:
-            # release the pending claim so the next trigger fires.
-            self._store.release_rescope_intent_claim(intent.comment_id)
-            raise
+        # Codex P1 (sixteenth round) on PR #1938: don't delete the
+        # pending row on dispatch failure.  The row IS the durable
+        # recovery signal — startup replay relies on it being there.
+        # Deleting it on failure loses the only path that re-fires
+        # the intent (GitHub will not redeliver a successful webhook).
+        # ``claim_rescope_intent`` already treats pending rows as
+        # retryable, so leaving the row pending lets the next trigger
+        # or startup-replay retry cleanly.
+        self._dispatcher.reorder_tasks_background(
+            intent.change_request,
+            self._registry,
+            agent=self._agent,
+            prompts=self._prompts,
+            intents=[intent],
+            _on_done=_mark_applied,
+        )
 
 
 _INSIGHT_REPO = INSIGHT_REPO
@@ -2027,6 +2029,7 @@ class Dispatcher:
     def replay_pending_rescope_intents(
         self,
         registry: ActivityReporter,
+        pr_number: int,
         *,
         agent: ProviderAgent,
         prompts: Prompts,
@@ -2048,7 +2051,17 @@ class Dispatcher:
         Returns the number of intents re-dispatched.
         """
         store = FidoStore(self._repo_cfg.work_dir)
-        pending = store.pending_rescope_intents()
+        all_pending = store.pending_rescope_intents()
+        # Codex P1 (sixteenth round) on PR #1938: filter by the
+        # currently-active PR so an orphan pending intent from a
+        # different (e.g. now-closed) PR doesn't rescope the active
+        # task queue with stale change-request text.
+        repo_name = self._repo_cfg.name
+        pending = [
+            intent
+            for intent in all_pending
+            if intent.repo == repo_name and intent.pr_number == pr_number
+        ]
         if not pending:
             return 0
         trigger = _BackgroundRescopeTrigger(

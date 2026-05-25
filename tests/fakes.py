@@ -137,6 +137,7 @@ class _FakeDispatcher:
     def replay_pending_rescope_intents(
         self,
         registry: object,
+        pr_number: int,
         *,
         agent: object,
         prompts: object,
@@ -144,6 +145,7 @@ class _FakeDispatcher:
         self.replay_pending_rescope_intents_calls.append(
             {
                 "registry": registry,
+                "pr_number": pr_number,
                 "agent": agent,
                 "prompts": prompts,
             }

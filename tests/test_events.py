@@ -1186,10 +1186,45 @@ class TestReplayPendingRescopeIntents:
             _config(tmp_path), _repo_cfg(tmp_path), gh
         ).replay_pending_rescope_intents(
             MagicMock(spec=ActivityReporter),
+            7,
             agent=MagicMock(),
             prompts=Prompts("p"),
         )
         assert replayed == 0
+
+    def test_intents_for_other_pr_are_skipped(self, tmp_path: Path) -> None:
+        # Codex P1 (sixteenth round) on PR #1938: orphan pending
+        # intents from a now-closed/different PR must not rescope
+        # the currently-active PR's task queue with stale change-
+        # request text.  Replay filters by the active pr_number.
+        store = FidoStore(tmp_path)
+        assert store.claim_rescope_intent(
+            intent_comment_id=111,
+            change_request="stale request from a different PR",
+            intent_timestamp="2024-01-15T10:00:00+00:00",
+            author="owner",
+            comment_type="issues",
+            repo="owner/repo",
+            pr_number=99,
+        )
+        gh = _make_mock_gh()
+        thread_starts: list[object] = []
+        replayed = Dispatcher(
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            thread_start_fn=thread_starts.append,
+            reorder_coalesce_state={},
+        ).replay_pending_rescope_intents(
+            MagicMock(spec=ActivityReporter),
+            7,
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+        )
+        assert replayed == 0
+        assert thread_starts == []
+        # Row still pending — not consumed, just skipped.
+        assert [i.comment_id for i in store.pending_rescope_intents()] == [111]
 
     def test_pending_intent_is_redispatched(self, tmp_path: Path) -> None:
         # Seed a pending row directly via the store: this is the
@@ -1217,6 +1252,7 @@ class TestReplayPendingRescopeIntents:
             reorder_coalesce_state=coalesce_state,
         ).replay_pending_rescope_intents(
             MagicMock(spec=ActivityReporter),
+            7,
             agent=MagicMock(),
             prompts=Prompts("p"),
         )
@@ -6220,12 +6256,15 @@ class TestBackgroundRescopeTrigger:
         on_done()
         assert store.applied_ids == [77]
 
-    def test_trigger_rescope_releases_claim_on_synchronous_failure(self) -> None:
-        # Codex P1 (tenth round) on PR #1938: a synchronous failure
-        # between claim and dispatch must release the pending claim
-        # so the next trigger fires.  Without release, the next
-        # attempt sees the durable claim, skips dispatch, and the
-        # rescope never runs.
+    def test_trigger_rescope_preserves_pending_row_on_synchronous_failure(
+        self,
+    ) -> None:
+        # Codex P1 (sixteenth round) on PR #1938: a synchronous
+        # dispatch failure MUST leave the pending row intact — it
+        # is the only durable recovery signal once a webhook has
+        # been acked.  Startup replay (or the next trigger, since
+        # ``claim_rescope_intent`` treats pending rows as
+        # retryable) re-fires from this row.
         class _BoomDispatcher:
             def reorder_tasks_background(self, *_args: object, **_kw: object) -> None:
                 raise RuntimeError("thread-start failed")
@@ -6241,7 +6280,7 @@ class TestBackgroundRescopeTrigger:
         with pytest.raises(RuntimeError, match="thread-start failed"):
             trigger.trigger_rescope(self._make_intent(comment_id=88))
         assert store.claimed_ids == [88]
-        assert store.released_ids == [88]
+        assert store.released_ids == []
         assert store.applied_ids == []
 
     def test_trigger_rescope_claims_before_dispatch(self) -> None:

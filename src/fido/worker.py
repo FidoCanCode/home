@@ -5504,6 +5504,7 @@ class Worker:
                 # closes the lost-rescope window.
                 replayed = self._dispatcher.replay_pending_rescope_intents(
                     self._registry,
+                    pr_number,
                     agent=self._provider_agent,
                     prompts=self._get_prompts(),
                 )
