@@ -5479,6 +5479,15 @@ class Worker:
             assert self._registry is not None, (
                 "Worker._registry is required for recover_reply_promises"
             )
+            # Seed the PR-body work queue BEFORE either recovery path
+            # so any rescope they spawn operates on a seeded
+            # ``tasks.json``.  ``recover_reply_promises`` re-runs
+            # synthesis on queued ACT replies — synthesis can trigger
+            # a rescope (see ``execute_effects_only``) — so seeding
+            # only before ``replay_pending_rescope_intents`` is not
+            # enough.  Codex P2 (thirteenth/fourteenth rounds) on
+            # PR #1938.
+            self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
             recovered_promises = self._dispatcher.recover_reply_promises(
                 ctx.fido_dir,
                 pr_number,
@@ -5486,7 +5495,6 @@ class Worker:
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
             )
-            self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
             if self._first_iteration:
                 # Codex P1 (twelfth round) on PR #1938: drain orphan
                 # pending rescope intents (visible ACT reply succeeded
@@ -5494,11 +5502,6 @@ class Worker:
                 # between).  GitHub will not redeliver the original
                 # webhook, so startup replay is the only path that
                 # closes the lost-rescope window.
-                #
-                # Codex P2 (thirteenth round) on PR #1938: seed the
-                # PR-body work queue BEFORE launching the recovered
-                # rescope, so the replay thread doesn't rescope against
-                # an unseeded/partially-seeded ``tasks.json``.
                 replayed = self._dispatcher.replay_pending_rescope_intents(
                     self._registry,
                     agent=self._provider_agent,

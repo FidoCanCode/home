@@ -4171,16 +4171,6 @@ class TestReorderTasksBackground:
         # Second call: intent2 and intent3 accumulated
         assert calls[1][2].get("intents") == [intent2, intent3]
 
-    def test_chain_on_done_returns_other_when_one_is_none(self) -> None:
-        from fido.events import _chain_on_done
-
-        def a() -> None:
-            pass
-
-        assert _chain_on_done(None, a) is a
-        assert _chain_on_done(a, None) is a
-        assert _chain_on_done(None, None) is None
-
     def test_on_done_chains_across_coalesced_calls(self, tmp_path: Path) -> None:
         # Codex P1 (thirteenth round) on PR #1938: when multiple
         # rescope triggers coalesce while a batch is running, every

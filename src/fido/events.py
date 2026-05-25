@@ -731,29 +731,6 @@ _reorder_coalesce: dict[str, dict[str, Any]] = {}
 _reorder_coalesce_lock = threading.Lock()
 
 
-def _chain_on_done(
-    prev: Callable[[], None] | None,
-    new: Callable[[], None] | None,
-) -> Callable[[], None] | None:
-    """Chain two ``_on_done`` callbacks so both run after the batch lands.
-
-    Used when coalescing rescope triggers into a single pending batch:
-    every originating caller's after-apply hook must fire (e.g. so the
-    rescope outbox advances every coalesced intent to ``applied``), not
-    just the latest caller's.
-    """
-    if prev is None:
-        return new
-    if new is None:
-        return prev
-
-    def chained() -> None:
-        prev()
-        new()
-
-    return chained
-
-
 class WebhookIngressOracle:
     """Per-process at-least-once delivery vs exactly-once dispatch oracle.
 
@@ -3171,6 +3148,17 @@ class Dispatcher:
             sync_fn if sync_fn is not None else _real_sync_tasks
         )
 
+        # Codex P2 (fourteenth round) on PR #1938: per-caller
+        # after-apply hooks live in a mutable shared list so
+        # coalesced callers can be appended without re-wrapping the
+        # ``_on_done`` closure.  ``on_done`` runs sync+rewrite ONCE
+        # for the batch and then fires every after-apply, so all
+        # coalesced intents are marked applied — and the expensive
+        # external writes happen exactly once.
+        after_applies: list[Callable[[], None]] = []
+        if after_apply is not None:
+            after_applies.append(after_apply)
+
         def on_done() -> None:
             _effective_sync(work_dir, gh)
             rewrite_fn(
@@ -3180,14 +3168,8 @@ class Dispatcher:
                 _state=State(work_dir / ".git" / "fido"),
                 _tasks=Tasks(work_dir),
             )
-            # Codex P1 (tenth round) on PR #1938: chain the
-            # caller-supplied after-apply hook (e.g. the rescope
-            # outbox's ``mark_rescope_intent_applied``) AFTER
-            # tasks.json has been synced + the PR description
-            # rewritten.  The applied-marker fires only on
-            # successful completion of the durable apply.
-            if after_apply is not None:
-                after_apply()
+            for hook in after_applies:
+                hook()
 
         def on_inprogress_affected(task_id: str) -> None:
             log.info(
@@ -3218,6 +3200,13 @@ class Dispatcher:
             # batches; escalates via the Dispatcher-bound escalator
             # method when an intent's drops cross threshold.
             "task_creation_drop_counter": self._task_creation_drop_counter,
+            # Mutable shared list captured by ``on_done``.  Stored
+            # alongside ``_on_done`` so the coalesce branch can
+            # extend it when a new caller piles onto an in-flight
+            # batch (codex P2 fourteenth round on PR #1938).  Not
+            # forwarded to ``reorder_tasks`` — popped at the
+            # boundary.
+            "_after_applies": after_applies,
         }
         issue_ctx, pr_ctx = _load_active_context_for_rescope(
             work_dir, repo_cfg.name, gh
@@ -3454,29 +3443,31 @@ class Dispatcher:
             if _release_untriaged_on_finish:
                 entry["untriaged_holds"] = int(entry.get("untriaged_holds", 0)) + 1
             if entry["running"]:
-                # Coalesce: latest commit_summary and kwargs win; intents accumulate
+                # Coalesce: latest commit_summary wins; intents accumulate
                 # so every originating comment is tracked even when multiple
                 # comment-triggered rescopes arrive during the same Opus call.
                 #
-                # Codex P1 (thirteenth round) on PR #1938: chain ``_on_done``
-                # callbacks across coalesced callers so every originating
-                # intent's after-apply hook fires when the batch lands.
-                # Without chaining, only the latest caller's
-                # ``mark_rescope_intent_applied`` runs and intermediate
-                # coalesced intents stay durably ``pending`` forever — a
-                # later restart re-runs them and duplicates task/reply
-                # effects.
+                # Codex P2 (fourteenth round) on PR #1938: keep the
+                # existing pending batch's ``_on_done`` (so its sync
+                # and PR-body rewrite run ONCE for the coalesced
+                # batch) and extend its mutable ``_after_applies``
+                # list with this caller's after-apply hook.  Every
+                # coalesced intent gets marked applied without
+                # duplicating the expensive external writes — and if
+                # the sync/rewrite step fails, NO intent is marked
+                # applied (the apply hooks only run after both
+                # succeed), so a restart correctly replays the
+                # whole batch.
                 existing = entry["pending"]
                 if existing is None:
                     entry["pending"] = (commit_summary, kwargs, list(intents or []))
                 else:
                     accumulated = list(existing[2]) + list(intents or [])
-                    merged_kwargs = dict(kwargs)
-                    merged_kwargs["_on_done"] = _chain_on_done(
-                        existing[1].get("_on_done"),
-                        kwargs.get("_on_done"),
-                    )
-                    entry["pending"] = (commit_summary, merged_kwargs, accumulated)
+                    existing_chain = existing[1].get("_after_applies")
+                    new_chain = kwargs.get("_after_applies")
+                    if existing_chain is not None and new_chain is not None:
+                        existing_chain.extend(new_chain)
+                    entry["pending"] = (commit_summary, existing[1], accumulated)
                 return
             entry["running"] = True
             entry["pending"] = None
@@ -3523,11 +3514,15 @@ class Dispatcher:
                         agent=kw.get("agent"),
                         prompts=kw.get("prompts"),
                     )
+                    # ``_after_applies`` is a side-channel captured
+                    # by ``_on_done``'s closure; it must not reach
+                    # ``reorder_tasks`` (not part of its signature).
+                    reorder_kw = {k: v for k, v in kw.items() if k != "_after_applies"}
                     reorder(
                         registry.tasks_for(repo_cfg.name),
                         cs,
                         intents=current_intents or None,
-                        **kw,
+                        **reorder_kw,
                     )
                     log.info("rescope BG: iteration %d complete", iteration)
                     with _reorder_coalesce_lock:
