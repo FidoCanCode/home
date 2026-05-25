@@ -114,21 +114,40 @@ class _BackgroundRescopeTrigger:
         forwarded so the rescoper can reference the originating comment and
         accumulate multiple concurrent intents correctly.
 
-        Codex P1 (ninth round) on PR #1938: the rescope trigger is
-        now durably idempotent per ``intent.comment_id``.  Without
-        this, a replay of an already-acked reply (artifact recorded,
-        but ``execute_effects_only`` re-running because of the
-        unified replay-runs-everything path) would re-fire
-        rescope/preempt every pass.  ``FidoStore.claim_rescope_trigger``
-        atomically inserts the comment_id into a durable set and
-        returns ``True`` only on the first claim; subsequent calls
-        (this Fido process or a different one after restart) get
-        ``False`` and skip the trigger.
+        Codex P1 (ninth/tenth rounds) on PR #1938: rescope trigger
+        is now durably idempotent per ``intent.comment_id`` via the
+        ``rescope_intent_outbox`` table.
+
+        - ``claim_rescope_intent`` atomically inserts the full intent
+          payload with ``state='pending'``; returns True only on the
+          first claim.  False on any existing entry (pending or
+          applied) means a prior caller is already handling it.
+        - The ``_on_done`` callback wired into
+          ``reorder_tasks_background`` calls
+          ``mark_rescope_intent_applied`` ONLY after the background
+          rescope's work has durably landed in tasks.json — so the
+          applied-state advances after success, not after the claim.
+        - A synchronous failure of ``reorder_tasks_background``
+          (thread-start error, etc.) releases the pending claim so
+          the next trigger retries.
+        - Crash-after-thread-start residual: the intent stays in
+          ``state='pending'`` and is surfaced by
+          ``pending_rescope_intents()`` for a future startup-replay
+          recovery wiring (follow-up — payload persistence is the
+          enabling step shipped here).
         """
-        if not self._store.claim_rescope_trigger(intent.comment_id):
+        if not self._store.claim_rescope_intent(
+            intent_comment_id=intent.comment_id,
+            change_request=intent.change_request,
+            intent_timestamp=intent.timestamp,
+            author=intent.author,
+            comment_type=intent.comment_type,
+            repo=intent.repo,
+            pr_number=intent.pr_number,
+        ):
             log.info(
-                "RescopeTrigger: rescope already triggered for comment %d "
-                "(durable dedup) — skipping",
+                "RescopeTrigger: rescope already claimed for comment %d "
+                "(durable outbox) — skipping",
                 intent.comment_id,
             )
             return
@@ -137,13 +156,24 @@ class _BackgroundRescopeTrigger:
             intent.comment_id,
             intent.change_request[:80],
         )
-        self._dispatcher.reorder_tasks_background(
-            intent.change_request,
-            self._registry,
-            agent=self._agent,
-            prompts=self._prompts,
-            intents=[intent],
-        )
+
+        def _mark_applied() -> None:
+            self._store.mark_rescope_intent_applied(intent.comment_id)
+
+        try:
+            self._dispatcher.reorder_tasks_background(
+                intent.change_request,
+                self._registry,
+                agent=self._agent,
+                prompts=self._prompts,
+                intents=[intent],
+                _on_done=_mark_applied,
+            )
+        except Exception:
+            # Synchronous failure between claim and dispatch start:
+            # release the pending claim so the next trigger fires.
+            self._store.release_rescope_intent_claim(intent.comment_id)
+            raise
 
 
 _INSIGHT_REPO = INSIGHT_REPO
@@ -3062,6 +3092,8 @@ class Dispatcher:
         prompts: Prompts,
         rewrite_fn: Callable[..., None],
         sync_fn: Callable[[Path, Any], None] | None = None,
+        *,
+        after_apply: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Build the kwargs dict for a :func:`~fido.tasks.reorder_tasks` call."""
         from fido.tasks import sync_tasks as _real_sync_tasks
@@ -3083,6 +3115,14 @@ class Dispatcher:
                 _state=State(work_dir / ".git" / "fido"),
                 _tasks=Tasks(work_dir),
             )
+            # Codex P1 (tenth round) on PR #1938: chain the
+            # caller-supplied after-apply hook (e.g. the rescope
+            # outbox's ``mark_rescope_intent_applied``) AFTER
+            # tasks.json has been synced + the PR description
+            # rewritten.  The applied-marker fires only on
+            # successful completion of the durable apply.
+            if after_apply is not None:
+                after_apply()
 
         def on_inprogress_affected(task_id: str) -> None:
             log.info(
@@ -3281,6 +3321,7 @@ class Dispatcher:
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
         _release_untriaged_on_finish: bool = False,
+        _on_done: Callable[[], None] | None = None,
     ) -> None:
         """Run :func:`~fido.tasks.reorder_tasks` in a daemon background thread.
 
@@ -3338,6 +3379,7 @@ class Dispatcher:
             prompts,
             rewrite_fn,
             self._sync_fn,
+            after_apply=_on_done,
         )
 
         with _reorder_coalesce_lock:

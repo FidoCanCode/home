@@ -18,7 +18,7 @@ ReplyOutboxEffectState = Literal["prepared", "claimed", "delivered", "failed"]
 
 REPLY_PROMISE_MARKER_PREFIX = "fido:reply-promise:"
 _PROMISE_MARKER_RE = re.compile(r"<!--\s*fido:reply-promise:([0-9a-fA-F-]{36})\s*-->")
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -858,34 +858,108 @@ class FidoStore:
             assert retried is not None
             return self._pr_comment_record_from_row(retried)
 
-    def claim_rescope_trigger(self, intent_comment_id: int) -> bool:
-        """HOL-26 / #1920 (codex P1 ninth round on PR #1938):
-        atomically claim "rescope-triggered for this intent_comment_id".
+    def claim_rescope_intent(
+        self,
+        *,
+        intent_comment_id: int,
+        change_request: str,
+        intent_timestamp: str,
+        author: str,
+        comment_type: str,
+        repo: str,
+        pr_number: int,
+    ) -> bool:
+        """HOL-26 / #1920 (codex P1 ninth/tenth rounds on PR #1938):
+        atomically claim the rescope intent in the durable outbox.
 
         Returns ``True`` when this call is the first to claim the
         intent (caller should fire the rescope), ``False`` when an
-        earlier claim already exists (caller should skip — the
-        rescope was already triggered, even across Fido restarts).
+        earlier claim already exists in any state.
 
-        Used by ``_BackgroundRescopeTrigger.trigger_rescope`` to make
-        rescope firing durably idempotent per intent.  Without this,
-        a replay of an already-acked reply re-fires rescope/preempt;
-        the previous P1 fix (skip-effects-on-replay) traded that
-        bug for "effects never run if crash happens between artifact
-        record and effects" (codex P1 ninth round).  Durable rescope
-        dedup lets the replay path safely re-run all effects.
+        Persists the full intent payload (change_request / author /
+        comment_type / repo / pr_number) so a future
+        ``pending_rescope_intents`` recovery pass can replay
+        un-applied intents after a Fido crash.  Without persisting
+        the payload, a process-restart between claim and the
+        background rescope thread would permanently lose the user's
+        ACT — the reply was posted but the work never landed.
         """
         now = _utcnow()
         with self._transaction() as conn:
             cursor = conn.execute(
                 """
-                INSERT OR IGNORE INTO rescope_triggered
-                    (intent_comment_id, triggered_at)
-                VALUES (?, ?)
+                INSERT OR IGNORE INTO rescope_intent_outbox
+                    (intent_comment_id, change_request, intent_timestamp,
+                     author, comment_type, repo, pr_number,
+                     state, claimed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
                 """,
-                (int(intent_comment_id), now),
+                (
+                    int(intent_comment_id),
+                    str(change_request),
+                    str(intent_timestamp),
+                    str(author),
+                    str(comment_type),
+                    str(repo),
+                    int(pr_number) if isinstance(pr_number, int) else 0,  # noqa: SIM222  # pyright: ignore[reportUnnecessaryIsInstance]
+                    now,
+                ),
             )
             return cursor.rowcount > 0
+
+    def mark_rescope_intent_applied(self, intent_comment_id: int) -> None:
+        """Mark a previously-claimed rescope intent as durably applied
+        — the background rescope thread completed (tasks.json
+        committed).  Called from the rescope's ``_on_done`` callback so
+        the durable applied-state only advances after the work
+        actually landed.
+        """
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                UPDATE rescope_intent_outbox
+                SET state = 'applied'
+                WHERE intent_comment_id = ?
+                """,
+                (int(intent_comment_id),),
+            )
+
+    def release_rescope_intent_claim(self, intent_comment_id: int) -> None:
+        """Release a stuck pending claim — used when a synchronous
+        thread-start or dispatch failure raises after the claim
+        landed.  Without release, the next trigger sees the durable
+        claim, skips dispatch, and the rescope never runs.
+        """
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                DELETE FROM rescope_intent_outbox
+                WHERE intent_comment_id = ? AND state = 'pending'
+                """,
+                (int(intent_comment_id),),
+            )
+
+    def pending_rescope_intents(self) -> list[dict[str, object]]:
+        """Return all un-applied (state='pending') outbox entries
+        for replay after a Fido restart.  Each entry carries the
+        full intent payload so a recovery pass can reconstruct a
+        ``RescopeIntent`` and re-dispatch the trigger.
+
+        Recovery wiring (replaying these intents on Dispatcher init)
+        is a follow-up — this method exposes the data so that work
+        can land independently.
+        """
+        with self._transaction() as conn:
+            rows = conn.execute(
+                """
+                SELECT intent_comment_id, change_request, intent_timestamp,
+                       author, comment_type, repo, pr_number, claimed_at
+                FROM rescope_intent_outbox
+                WHERE state = 'pending'
+                ORDER BY claimed_at
+                """,
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def bump_task_creation_drop(self, intent_comment_id: int) -> tuple[int, bool]:
         """HOL-16 follow-up / #1934 (codex P2 on PR #1938): record a
@@ -1526,9 +1600,16 @@ CREATE TABLE IF NOT EXISTS transition_audit_log (
     created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS rescope_triggered (
+CREATE TABLE IF NOT EXISTS rescope_intent_outbox (
     intent_comment_id INTEGER PRIMARY KEY,
-    triggered_at TEXT NOT NULL
+    change_request TEXT NOT NULL,
+    intent_timestamp TEXT NOT NULL,
+    author TEXT NOT NULL,
+    comment_type TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    claimed_at TEXT NOT NULL
 );
 
 -- HOL-16 follow-up / #1934 (codex P2 on PR #1938): durable per-

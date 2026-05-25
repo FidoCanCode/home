@@ -410,7 +410,7 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == 8
+    assert version == 9
     assert {
         "comment_claims",
         "reply_promises",
@@ -433,10 +433,11 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
         # task-creation drop counter requires schema version bump
         # so existing v6 installations create the new table.
         "task_creation_drops",
-        # codex P1 ninth round on PR #1938: durable rescope-
-        # triggered set (per intent_comment_id) makes the rescope
-        # trigger replay-safe.
-        "rescope_triggered",
+        # codex P1 ninth/tenth rounds on PR #1938: durable rescope-
+        # intent outbox (per intent_comment_id with full intent
+        # payload + state) makes the rescope trigger replay-safe
+        # and recoverable after crashes.
+        "rescope_intent_outbox",
     } <= tables
 
 
@@ -1621,38 +1622,88 @@ def test_reset_inactive_task_creation_drops_empty_active_clears_all(
     assert count == 1
 
 
-def test_claim_rescope_trigger_first_caller_succeeds(tmp_path: Path) -> None:
-    # HOL-26 / #1920 (codex P1 ninth round on PR #1938): the first
-    # claim per intent_comment_id returns True; subsequent claims
-    # (this process or after restart) return False.  Enforces
-    # at-most-once rescope per originating comment.
+def _claim_intent(store: "FidoStore", cid: int, **overrides: object) -> bool:
+    """Helper: claim an intent with sensible test defaults."""
+    defaults: dict[str, object] = {
+        "intent_comment_id": cid,
+        "change_request": f"request {cid}",
+        "intent_timestamp": "2026-05-25T10:00:00+00:00",
+        "author": "alice",
+        "comment_type": "pulls",
+        "repo": "owner/repo",
+        "pr_number": 42,
+    }
+    defaults.update(overrides)
+    return store.claim_rescope_intent(**defaults)  # type: ignore[arg-type]
+
+
+def test_claim_rescope_intent_first_caller_succeeds(tmp_path: Path) -> None:
+    # HOL-26 / #1920 (codex P1 ninth/tenth rounds on PR #1938): the
+    # first claim per intent_comment_id returns True; subsequent
+    # claims (this process or after restart) return False.  Enforces
+    # at-most-once rescope dispatch per originating comment.
     store = FidoStore(tmp_path)
-    assert store.claim_rescope_trigger(42) is True
-    assert store.claim_rescope_trigger(42) is False
+    assert _claim_intent(store, 42) is True
+    assert _claim_intent(store, 42) is False
     # Different intent claim succeeds independently.
-    assert store.claim_rescope_trigger(99) is True
+    assert _claim_intent(store, 99) is True
 
 
-def test_claim_rescope_trigger_persists_across_store_instances(tmp_path: Path) -> None:
+def test_claim_rescope_intent_persists_across_store_instances(tmp_path: Path) -> None:
     store1 = FidoStore(tmp_path)
-    assert store1.claim_rescope_trigger(42) is True
-    # Simulate Fido restart: drop the in-memory store; the durable
-    # row should still suppress a second claim.
+    assert _claim_intent(store1, 42) is True
     del store1
     store2 = FidoStore(tmp_path)
-    assert store2.claim_rescope_trigger(42) is False
+    assert _claim_intent(store2, 42) is False
 
 
-def test_claim_rescope_trigger_schema_bumps_from_version_7(tmp_path: Path) -> None:
-    # Codex P1 ninth round on PR #1938: schema-version migration
-    # from v7 picks up the new rescope_triggered table.
+def test_release_rescope_intent_claim_allows_retry(tmp_path: Path) -> None:
+    # Synchronous dispatch failure path: after release, the next
+    # claim re-fires.
+    store = FidoStore(tmp_path)
+    assert _claim_intent(store, 42) is True
+    store.release_rescope_intent_claim(42)
+    assert _claim_intent(store, 42) is True
+
+
+def test_mark_rescope_intent_applied_blocks_subsequent_claims(
+    tmp_path: Path,
+) -> None:
+    # An applied intent is durably terminal — no future trigger
+    # re-fires.
+    store = FidoStore(tmp_path)
+    assert _claim_intent(store, 42) is True
+    store.mark_rescope_intent_applied(42)
+    assert _claim_intent(store, 42) is False
+    # Release on an applied row is a no-op (release only targets
+    # state='pending').
+    store.release_rescope_intent_claim(42)
+    assert _claim_intent(store, 42) is False
+
+
+def test_pending_rescope_intents_lists_unapplied(tmp_path: Path) -> None:
+    # Recovery surface: ``pending_rescope_intents`` returns only
+    # rows still in state='pending' (un-applied).
+    store = FidoStore(tmp_path)
+    assert _claim_intent(store, 42) is True
+    assert _claim_intent(store, 99) is True
+    store.mark_rescope_intent_applied(42)
+    pending = store.pending_rescope_intents()
+    assert [row["intent_comment_id"] for row in pending] == [99]
+    assert pending[0]["change_request"] == "request 99"
+    assert pending[0]["repo"] == "owner/repo"
+
+
+def test_rescope_intent_outbox_schema_bumps_from_version_8(tmp_path: Path) -> None:
+    # Codex P1 tenth round on PR #1938: schema-version migration
+    # from v8 picks up the new rescope_intent_outbox table.
     import sqlite3
 
     store = FidoStore(tmp_path)
     store.ensure_schema()
     with sqlite3.connect(store.db_path) as conn:
-        conn.execute("PRAGMA user_version = 7")
-        conn.execute("DROP TABLE rescope_triggered")
+        conn.execute("PRAGMA user_version = 8")
+        conn.execute("DROP TABLE rescope_intent_outbox")
         conn.commit()
     FidoStore(tmp_path).ensure_schema()
-    assert FidoStore(tmp_path).claim_rescope_trigger(123) is True
+    assert _claim_intent(FidoStore(tmp_path), 123) is True

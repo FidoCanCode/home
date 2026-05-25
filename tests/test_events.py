@@ -5885,17 +5885,35 @@ class TestDispatchReviewCommentNoNumber:
 
 
 class _FakeRescopeTriggerStore:
-    """Codex P1 ninth round on PR #1938: hand-rolled stand-in for
-    ``FidoStore.claim_rescope_trigger`` used in
+    """Codex P1 ninth/tenth rounds on PR #1938: hand-rolled stand-in
+    for the rescope-intent outbox used in
     ``_BackgroundRescopeTrigger`` tests."""
 
     def __init__(self, *, claims_succeed: bool) -> None:
         self._claims_succeed = claims_succeed
         self.claimed_ids: list[int] = []
+        self.applied_ids: list[int] = []
+        self.released_ids: list[int] = []
 
-    def claim_rescope_trigger(self, intent_comment_id: int) -> bool:
+    def claim_rescope_intent(
+        self,
+        *,
+        intent_comment_id: int,
+        change_request: str,
+        intent_timestamp: str,
+        author: str,
+        comment_type: str,
+        repo: str,
+        pr_number: int,
+    ) -> bool:
         self.claimed_ids.append(intent_comment_id)
         return self._claims_succeed
+
+    def mark_rescope_intent_applied(self, intent_comment_id: int) -> None:
+        self.applied_ids.append(intent_comment_id)
+
+    def release_rescope_intent_claim(self, intent_comment_id: int) -> None:
+        self.released_ids.append(intent_comment_id)
 
 
 class TestBackgroundRescopeTrigger:
@@ -5987,6 +6005,56 @@ class TestBackgroundRescopeTrigger:
         assert store.claimed_ids == [42]
         # No dispatch — duplicate rescope was suppressed.
         assert fake_dispatcher.reorder_tasks_background_calls == []
+
+    def test_trigger_rescope_marks_applied_via_on_done(self) -> None:
+        # Codex P1 (tenth round) on PR #1938: the durable
+        # ``applied`` state advances only after the rescope's
+        # ``_on_done`` callback fires (i.e. tasks.json has been
+        # synced and the PR description rewritten).  The trigger
+        # wires ``_on_done`` to ``mark_rescope_intent_applied`` so
+        # the applied marker matches "work durably landed."
+        fake_dispatcher = _FakeDispatcher()
+        store = _FakeRescopeTriggerStore(claims_succeed=True)
+        trigger = _BackgroundRescopeTrigger(
+            MagicMock(spec=ActivityReporter),
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            dispatcher=fake_dispatcher,
+            store=store,
+        )
+        trigger.trigger_rescope(self._make_intent(comment_id=77))
+        # The trigger should have passed an _on_done callable.
+        assert len(fake_dispatcher.reorder_tasks_background_calls) == 1
+        _, kwargs = fake_dispatcher.reorder_tasks_background_calls[0]
+        on_done = kwargs["_on_done"]
+        # Applied marker fires only AFTER the on_done callback runs.
+        assert store.applied_ids == []
+        on_done()
+        assert store.applied_ids == [77]
+
+    def test_trigger_rescope_releases_claim_on_synchronous_failure(self) -> None:
+        # Codex P1 (tenth round) on PR #1938: a synchronous failure
+        # between claim and dispatch must release the pending claim
+        # so the next trigger fires.  Without release, the next
+        # attempt sees the durable claim, skips dispatch, and the
+        # rescope never runs.
+        class _BoomDispatcher:
+            def reorder_tasks_background(self, *_args: object, **_kw: object) -> None:
+                raise RuntimeError("thread-start failed")
+
+        store = _FakeRescopeTriggerStore(claims_succeed=True)
+        trigger = _BackgroundRescopeTrigger(
+            MagicMock(spec=ActivityReporter),
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+            dispatcher=_BoomDispatcher(),  # type: ignore[arg-type]
+            store=store,
+        )
+        with pytest.raises(RuntimeError, match="thread-start failed"):
+            trigger.trigger_rescope(self._make_intent(comment_id=88))
+        assert store.claimed_ids == [88]
+        assert store.released_ids == [88]
+        assert store.applied_ids == []
 
     def test_trigger_rescope_claims_before_dispatch(self) -> None:
         # Claim happens before the dispatch so a crash mid-dispatch
@@ -7001,6 +7069,52 @@ class TestMakeReorderKwargsActiveContext:
         assert isinstance(pr, ActivePR)
         assert pr.number == 99
         assert pr.url == "https://github.com/owner/repo/pull/99"
+
+
+class TestMakeReorderKwargsAfterApply:
+    """Codex P1 tenth round on PR #1938: ``_make_reorder_kwargs``
+    chains a caller-supplied ``after_apply`` callback after the
+    built-in sync/rewrite on_done sequence.  The rescope-intent
+    outbox uses this to advance ``state='applied'`` ONLY after the
+    durable apply completes."""
+
+    def _cfg(self, tmp_path: Path) -> Config:
+        return Config(
+            port=9000,
+            secret=b"test",
+            repos={"owner/repo": RepoConfig(name="owner/repo", work_dir=tmp_path)},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+
+    def test_after_apply_fires_when_on_done_invoked(self, tmp_path: Path) -> None:
+        calls: list[str] = []
+        gh = MagicMock()
+
+        def rewrite_fn(*_a: object, **_kw: object) -> None:
+            calls.append("rewrite")
+
+        def sync_fn(_w: Path, _g: object) -> None:
+            calls.append("sync")
+
+        def after_apply() -> None:
+            calls.append("after_apply")
+
+        kwargs = Dispatcher(
+            self._cfg(tmp_path), self._cfg(tmp_path).repos["owner/repo"], gh
+        )._make_reorder_kwargs(
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            rewrite_fn,
+            sync_fn,
+            after_apply=after_apply,
+        )
+        kwargs["_on_done"]()
+        # after_apply runs LAST — after sync and rewrite, so the
+        # applied-marker only advances on successful durable apply.
+        assert calls == ["sync", "rewrite", "after_apply"]
 
 
 # ---------------------------------------------------------------------------
