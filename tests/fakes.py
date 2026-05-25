@@ -31,6 +31,7 @@ class _FakeDispatcher:
         backfill_side_effect: (Callable[..., int] | BaseException | None) = None,
         recover_return: bool = False,
         recover_side_effect: (Callable[..., bool] | BaseException | None) = None,
+        replay_pending_rescope_intents_return: int = 0,
         reply_to_comment_return: tuple[str, list[str]] = ("ANSWER", []),
         reply_to_comment_side_effect: (
             Callable[..., tuple[str, list[str]]] | BaseException | None
@@ -45,6 +46,7 @@ class _FakeDispatcher:
         self.launch_sync_calls: int = 0
         self.reorder_tasks_background_calls: list[tuple] = []
         self.recover_reply_promises_calls: list[dict[str, object]] = []
+        self.replay_pending_rescope_intents_calls: list[dict[str, object]] = []
         self.reply_to_comment_calls: list[tuple] = []
         self.reply_to_issue_comment_calls: list[tuple] = []
         self._dispatch_return = dispatch_return
@@ -53,6 +55,9 @@ class _FakeDispatcher:
         self._backfill_side_effect = backfill_side_effect
         self._recover_return = recover_return
         self._recover_side_effect = recover_side_effect
+        self._replay_pending_rescope_intents_return = (
+            replay_pending_rescope_intents_return
+        )
         self._reply_to_comment_return = reply_to_comment_return
         self._reply_to_comment_side_effect = reply_to_comment_side_effect
         self._reply_to_issue_comment_return = reply_to_issue_comment_return
@@ -128,6 +133,22 @@ class _FakeDispatcher:
         if isinstance(self._recover_side_effect, BaseException):
             raise self._recover_side_effect
         return self._recover_return
+
+    def replay_pending_rescope_intents(
+        self,
+        registry: object,
+        *,
+        agent: object,
+        prompts: object,
+    ) -> int:
+        self.replay_pending_rescope_intents_calls.append(
+            {
+                "registry": registry,
+                "agent": agent,
+                "prompts": prompts,
+            }
+        )
+        return self._replay_pending_rescope_intents_return
 
     def reply_to_comment(
         self,

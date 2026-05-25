@@ -1172,6 +1172,69 @@ class TestRecoverReplyPromises:
         assert FidoStore(tmp_path).recoverable_promises() == []
 
 
+class TestReplayPendingRescopeIntents:
+    """Codex P1 (twelfth round) on PR #1938: startup replay drains any
+    pending rescope intents orphaned by a crash between the visible
+    ACT reply and ``_on_done``.  GitHub will not redeliver a
+    successful webhook, so this is the only path that closes the
+    lost-rescope window.
+    """
+
+    def test_no_pending_returns_zero(self, tmp_path: Path) -> None:
+        gh = _make_mock_gh()
+        replayed = Dispatcher(
+            _config(tmp_path), _repo_cfg(tmp_path), gh
+        ).replay_pending_rescope_intents(
+            MagicMock(spec=ActivityReporter),
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+        )
+        assert replayed == 0
+
+    def test_pending_intent_is_redispatched(self, tmp_path: Path) -> None:
+        # Seed a pending row directly via the store: this is the
+        # state that a crash-between-claim-and-_on_done leaves
+        # behind.
+        store = FidoStore(tmp_path)
+        assert store.claim_rescope_intent(
+            intent_comment_id=909,
+            change_request="please refactor the parser",
+            intent_timestamp="2024-01-15T10:00:00+00:00",
+            author="owner",
+            comment_type="issues",
+            repo="owner/repo",
+            pr_number=7,
+        )
+        gh = _make_mock_gh()
+        thread_starts: list[object] = []
+        coalesce_state: dict[str, object] = {}
+
+        replayed = Dispatcher(
+            _config(tmp_path),
+            _repo_cfg(tmp_path),
+            gh,
+            thread_start_fn=thread_starts.append,
+            reorder_coalesce_state=coalesce_state,
+        ).replay_pending_rescope_intents(
+            MagicMock(spec=ActivityReporter),
+            agent=MagicMock(),
+            prompts=Prompts("p"),
+        )
+
+        assert replayed == 1
+        # reorder_tasks_background was called for the pending row —
+        # the coalesce state has an entry for this work_dir and the
+        # thread-start fn was invoked (without actually starting a
+        # daemon thread).
+        assert len(thread_starts) == 1
+        assert str(tmp_path) in coalesce_state
+        # _on_done has not fired (thread never ran), so the outbox
+        # row is still pending — exactly what the next restart
+        # would replay again until the rescope completes.
+        pending = store.pending_rescope_intents()
+        assert [intent.comment_id for intent in pending] == [909]
+
+
 class TestIsAllowed:
     def _repo_cfg(
         self, tmp_path: Path, collaborators: frozenset[str] = frozenset({"owner"})

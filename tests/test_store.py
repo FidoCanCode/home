@@ -1700,7 +1700,7 @@ def test_claim_rescope_intent_pending_refreshes_payload(tmp_path: Path) -> None:
     _claim_intent(store, 42, change_request="second")
     pending = store.pending_rescope_intents()
     assert len(pending) == 1
-    assert pending[0]["change_request"] == "second"
+    assert pending[0].change_request == "second"
 
 
 def test_release_rescope_intent_claim_allows_retry(tmp_path: Path) -> None:
@@ -1731,9 +1731,9 @@ def test_pending_rescope_intents_lists_unapplied(tmp_path: Path) -> None:
     assert _claim_intent(store, 99) is True
     store.mark_rescope_intent_applied(42)
     pending = store.pending_rescope_intents()
-    assert [row["intent_comment_id"] for row in pending] == [99]
-    assert pending[0]["change_request"] == "request 99"
-    assert pending[0]["repo"] == "owner/repo"
+    assert [intent.comment_id for intent in pending] == [99]
+    assert pending[0].change_request == "request 99"
+    assert pending[0].repo == "owner/repo"
 
 
 def test_rescope_intent_outbox_schema_bumps_from_version_8(tmp_path: Path) -> None:

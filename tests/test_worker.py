@@ -7924,6 +7924,44 @@ class TestRunSeedTasksIntegration:
             "recovered 1 in-progress PR comment claim(s) for owner/repo" in caplog.text
         )
 
+    def test_first_iteration_logs_pending_rescope_replay(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Codex P1 (twelfth round) on PR #1938: when first-iteration
+        # recovery drains pending rescope intents (crash between
+        # claim and _on_done), the warn-log surfaces the count so
+        # the operator sees the lost-rescope window closing.
+        gh = self._make_gh()
+        gh.view_issue.return_value = {"title": "t", "body": "", "state": "OPEN"}
+        gh.get_pr_state.return_value = "open"
+        mock_dispatcher = _FakeDispatcher(
+            backfill_return=0,
+            replay_pending_rescope_intents_return=2,
+        )
+        worker = Worker(
+            tmp_path,
+            gh,
+            first_iteration=True,
+            dispatcher=mock_dispatcher,
+            registry=MagicMock(spec=ActivityReporter),
+        )
+        repo_ctx = self._make_mock_repo_ctx()
+        worker.create_context = MagicMock(return_value=self._make_mock_ctx(tmp_path))
+        worker.discover_repo_context = MagicMock(return_value=repo_ctx)
+        worker.setup_hooks = MagicMock(return_value=("c", "s"))
+        worker.teardown_hooks = MagicMock()
+        worker.get_current_issue = MagicMock(return_value=7)
+        worker.post_pickup_comment = MagicMock()
+        worker.find_or_create_pr = MagicMock(return_value=(42, "fix-bug", False))
+        worker.seed_tasks_from_pr_body = MagicMock()
+        worker.handle_ci = MagicMock(return_value=False)
+        worker.handle_queued_comments = MagicMock(return_value=False)
+        worker.handle_threads = MagicMock(return_value=False)
+        with caplog.at_level(logging.WARNING, logger="fido"):
+            worker.run()
+        assert "replayed 2 pending rescope intent(s) for owner/repo" in caplog.text
+        assert len(mock_dispatcher.replay_pending_rescope_intents_calls) == 1
+
     def test_backfill_skipped_for_fresh_pr(self, tmp_path: Path) -> None:
         """A freshly-created PR has no comments to backfill — skip the call to
         avoid one superfluous API round-trip."""

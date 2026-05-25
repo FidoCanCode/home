@@ -2024,6 +2024,48 @@ class Dispatcher:
             registry=registry,
         )
 
+    def replay_pending_rescope_intents(
+        self,
+        registry: ActivityReporter,
+        *,
+        agent: ProviderAgent,
+        prompts: Prompts,
+    ) -> int:
+        """Re-fire rescope intents left in ``state='pending'`` across a restart.
+
+        Codex P1 (twelfth round) on PR #1938: a crash between the
+        visible ACT reply landing and ``_on_done`` marking the outbox
+        row applied leaves an orphan pending row.  GitHub does not
+        redeliver an already-successful webhook, so without startup
+        replay the rescope is permanently lost.
+
+        Reconstructs a ``RescopeIntent`` from each pending row's
+        persisted payload and re-dispatches through the trigger.
+        ``claim_rescope_intent`` sees the pending row, refreshes
+        ``claimed_at``, and returns True; ``reorder_tasks_background``
+        runs; ``_on_done`` advances state to ``applied`` on success.
+
+        Returns the number of intents re-dispatched.
+        """
+        store = FidoStore(self._repo_cfg.work_dir)
+        pending = store.pending_rescope_intents()
+        if not pending:
+            return 0
+        trigger = _BackgroundRescopeTrigger(
+            registry,
+            agent=agent,
+            prompts=prompts,
+            dispatcher=self,
+            store=store,
+        )
+        for intent in pending:
+            log.info(
+                "replaying pending rescope intent for comment %d",
+                intent.comment_id,
+            )
+            trigger.trigger_rescope(intent)
+        return len(pending)
+
     def recover_reply_promises(
         self,
         fido_dir: Path,

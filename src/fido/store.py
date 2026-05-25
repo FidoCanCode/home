@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
+from fido.types import RescopeIntent
+
 ReplyOwner = Literal["webhook", "worker", "recovery"]
 ClaimState = Literal["in_progress", "completed", "retryable_failed"]
 PromiseState = Literal["prepared", "posted", "acked", "failed"]
@@ -986,27 +988,40 @@ class FidoStore:
                 (int(intent_comment_id),),
             )
 
-    def pending_rescope_intents(self) -> list[dict[str, object]]:
+    def pending_rescope_intents(self) -> list[RescopeIntent]:
         """Return all un-applied (state='pending') outbox entries
-        for replay after a Fido restart.  Each entry carries the
-        full intent payload so a recovery pass can reconstruct a
-        ``RescopeIntent`` and re-dispatch the trigger.
+        as reconstructed ``RescopeIntent`` records, ordered by
+        ``claimed_at`` (oldest first) so replay preserves arrival
+        order.
 
-        Recovery wiring (replaying these intents on Dispatcher init)
-        is a follow-up — this method exposes the data so that work
-        can land independently.
+        Consumed by ``Dispatcher.replay_pending_rescope_intents`` on
+        worker first-iteration recovery to close the
+        crash-between-claim-and-_on_done window — GitHub will not
+        redeliver the original webhook, so startup replay is the only
+        path that re-fires an orphaned rescope.
         """
         with self._transaction() as conn:
             rows = conn.execute(
                 """
                 SELECT intent_comment_id, change_request, intent_timestamp,
-                       author, comment_type, repo, pr_number, claimed_at
+                       author, comment_type, repo, pr_number
                 FROM rescope_intent_outbox
                 WHERE state = 'pending'
                 ORDER BY claimed_at
                 """,
             ).fetchall()
-            return [dict(row) for row in rows]
+            return [
+                RescopeIntent(
+                    change_request=row["change_request"],
+                    comment_id=row["intent_comment_id"],
+                    timestamp=row["intent_timestamp"],
+                    comment_type=row["comment_type"],
+                    author=row["author"],
+                    repo=row["repo"],
+                    pr_number=row["pr_number"],
+                )
+                for row in rows
+            ]
 
     def bump_task_creation_drop(self, intent_comment_id: int) -> tuple[int, bool]:
         """HOL-16 follow-up / #1934 (codex P2 on PR #1938): record a
