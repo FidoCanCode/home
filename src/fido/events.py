@@ -731,6 +731,29 @@ _reorder_coalesce: dict[str, dict[str, Any]] = {}
 _reorder_coalesce_lock = threading.Lock()
 
 
+def _chain_on_done(
+    prev: Callable[[], None] | None,
+    new: Callable[[], None] | None,
+) -> Callable[[], None] | None:
+    """Chain two ``_on_done`` callbacks so both run after the batch lands.
+
+    Used when coalescing rescope triggers into a single pending batch:
+    every originating caller's after-apply hook must fire (e.g. so the
+    rescope outbox advances every coalesced intent to ``applied``), not
+    just the latest caller's.
+    """
+    if prev is None:
+        return new
+    if new is None:
+        return prev
+
+    def chained() -> None:
+        prev()
+        new()
+
+    return chained
+
+
 class WebhookIngressOracle:
     """Per-process at-least-once delivery vs exactly-once dispatch oracle.
 
@@ -3434,12 +3457,26 @@ class Dispatcher:
                 # Coalesce: latest commit_summary and kwargs win; intents accumulate
                 # so every originating comment is tracked even when multiple
                 # comment-triggered rescopes arrive during the same Opus call.
+                #
+                # Codex P1 (thirteenth round) on PR #1938: chain ``_on_done``
+                # callbacks across coalesced callers so every originating
+                # intent's after-apply hook fires when the batch lands.
+                # Without chaining, only the latest caller's
+                # ``mark_rescope_intent_applied`` runs and intermediate
+                # coalesced intents stay durably ``pending`` forever — a
+                # later restart re-runs them and duplicates task/reply
+                # effects.
                 existing = entry["pending"]
                 if existing is None:
                     entry["pending"] = (commit_summary, kwargs, list(intents or []))
                 else:
                     accumulated = list(existing[2]) + list(intents or [])
-                    entry["pending"] = (commit_summary, kwargs, accumulated)
+                    merged_kwargs = dict(kwargs)
+                    merged_kwargs["_on_done"] = _chain_on_done(
+                        existing[1].get("_on_done"),
+                        kwargs.get("_on_done"),
+                    )
+                    entry["pending"] = (commit_summary, merged_kwargs, accumulated)
                 return
             entry["running"] = True
             entry["pending"] = None

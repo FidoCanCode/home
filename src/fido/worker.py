@@ -5486,6 +5486,7 @@ class Worker:
                 agent=self._provider_agent,
                 prompts=self._get_prompts(),
             )
+            self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
             if self._first_iteration:
                 # Codex P1 (twelfth round) on PR #1938: drain orphan
                 # pending rescope intents (visible ACT reply succeeded
@@ -5493,6 +5494,11 @@ class Worker:
                 # between).  GitHub will not redeliver the original
                 # webhook, so startup replay is the only path that
                 # closes the lost-rescope window.
+                #
+                # Codex P2 (thirteenth round) on PR #1938: seed the
+                # PR-body work queue BEFORE launching the recovered
+                # rescope, so the replay thread doesn't rescope against
+                # an unseeded/partially-seeded ``tasks.json``.
                 replayed = self._dispatcher.replay_pending_rescope_intents(
                     self._registry,
                     agent=self._provider_agent,
@@ -5504,7 +5510,6 @@ class Worker:
                         replayed,
                         repo_ctx.repo,
                     )
-            self.seed_tasks_from_pr_body(repo_ctx.repo, pr_number)
             if self._first_iteration and not pr_is_fresh:
                 # One-shot replay of missed issue_comment webhooks (fix #794).
                 # Runs only on the first iteration per WorkerThread lifetime

@@ -4171,6 +4171,80 @@ class TestReorderTasksBackground:
         # Second call: intent2 and intent3 accumulated
         assert calls[1][2].get("intents") == [intent2, intent3]
 
+    def test_chain_on_done_returns_other_when_one_is_none(self) -> None:
+        from fido.events import _chain_on_done
+
+        def a() -> None:
+            pass
+
+        assert _chain_on_done(None, a) is a
+        assert _chain_on_done(a, None) is a
+        assert _chain_on_done(None, None) is None
+
+    def test_on_done_chains_across_coalesced_calls(self, tmp_path: Path) -> None:
+        # Codex P1 (thirteenth round) on PR #1938: when multiple
+        # rescope triggers coalesce while a batch is running, every
+        # caller's ``_on_done`` must fire after the coalesced batch
+        # lands.  Without chaining, only the latest caller's
+        # ``mark_rescope_intent_applied`` runs and intermediate
+        # coalesced intents stay durably ``pending`` forever — a
+        # later restart re-runs them and duplicates effects.
+        state: dict[str, object] = {}
+        started: list[object] = []
+        fired: list[str] = []
+
+        # Real ``reorder_tasks`` invokes the ``_on_done`` kwarg after
+        # a successful reorder; the mock reproduces that contract so
+        # the chaining is observable end-to-end.
+        def mock_reorder(work_dir: Path, commit_summary: str, **kwargs: object) -> None:
+            on_done = kwargs.get("_on_done")
+            if callable(on_done):
+                on_done()
+
+        gh = MagicMock()
+        # Call A: starts the thread.  Its _on_done fires after the
+        # FIRST iteration.
+        self._dispatcher(
+            tmp_path,
+            gh,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "csA",
+            registry=MagicMock(spec=ActivityReporter),
+            _on_done=lambda: fired.append("A"),
+        )
+        # Calls B and C coalesce — both must fire after the coalesced
+        # batch lands.
+        self._dispatcher(
+            tmp_path,
+            MagicMock(),
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "csB",
+            registry=MagicMock(spec=ActivityReporter),
+            _on_done=lambda: fired.append("B"),
+        )
+        self._dispatcher(
+            tmp_path,
+            MagicMock(),
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "csC",
+            registry=MagicMock(spec=ActivityReporter),
+            _on_done=lambda: fired.append("C"),
+        )
+        assert len(started) == 1
+        self._run_thread(started)
+        # A fired from its own iteration; B and C both fired from the
+        # coalesced iteration via the chained _on_done.
+        assert fired == ["A", "B", "C"]
+
     def test_running_flag_cleared_after_no_pending(self, tmp_path: Path) -> None:
         """After a normal run with no pending call, running is set to False."""
         state: dict = {}
