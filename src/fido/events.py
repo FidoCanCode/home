@@ -3463,11 +3463,24 @@ class Dispatcher:
                     entry["pending"] = (commit_summary, kwargs, list(intents or []))
                 else:
                     accumulated = list(existing[2]) + list(intents or [])
-                    existing_chain = existing[1].get("_after_applies")
+                    existing_kwargs = existing[1]
+                    existing_chain = existing_kwargs.get("_after_applies")
                     new_chain = kwargs.get("_after_applies")
                     if existing_chain is not None and new_chain is not None:
                         existing_chain.extend(new_chain)
-                    entry["pending"] = (commit_summary, existing[1], accumulated)
+                    # Codex P2 (fifteenth round) on PR #1938: keep
+                    # the latest caller's fresh issue/pr context
+                    # (used by the rescope prompt and the reply
+                    # notifier), but preserve the existing batch's
+                    # ``_on_done`` — the single closure that owns
+                    # the shared ``_after_applies`` list — so
+                    # sync+rewrite still run ONCE for the coalesced
+                    # batch.  Latest kwargs win for every field
+                    # EXCEPT the on_done / shared-list pair.
+                    merged = dict(kwargs)
+                    merged["_on_done"] = existing_kwargs.get("_on_done")
+                    merged["_after_applies"] = existing_chain
+                    entry["pending"] = (commit_summary, merged, accumulated)
                 return
             entry["running"] = True
             entry["pending"] = None

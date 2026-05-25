@@ -4171,6 +4171,62 @@ class TestReorderTasksBackground:
         # Second call: intent2 and intent3 accumulated
         assert calls[1][2].get("intents") == [intent2, intent3]
 
+    def test_coalesced_batch_uses_latest_callers_kwargs(self, tmp_path: Path) -> None:
+        # Codex P2 (fifteenth round) on PR #1938: the coalesced batch
+        # runs with the LATEST caller's kwargs (fresh issue/pr context
+        # for the rescope prompt and reply notifier), even though the
+        # ``_on_done`` and shared ``_after_applies`` list come from
+        # the existing batch.  Verified through ``agent``, which is a
+        # per-call kwarg that flows straight through to the reorder
+        # call site.
+        state: dict[str, object] = {}
+        started: list[object] = []
+        calls, mock_reorder = self._capture_reorder_calls()
+
+        agent_a = MagicMock(name="agent_a")
+        agent_b = MagicMock(name="agent_b")
+        agent_c = MagicMock(name="agent_c")
+        gh = MagicMock()
+        self._dispatcher(
+            tmp_path,
+            gh,
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "csA",
+            registry=MagicMock(spec=ActivityReporter),
+            agent=agent_a,
+        )
+        self._dispatcher(
+            tmp_path,
+            MagicMock(),
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "csB",
+            registry=MagicMock(spec=ActivityReporter),
+            agent=agent_b,
+        )
+        self._dispatcher(
+            tmp_path,
+            MagicMock(),
+            thread_start_fn=lambda t: started.append(t),
+            reorder_fn=mock_reorder,
+            reorder_coalesce_state=state,
+        ).reorder_tasks_background(
+            "csC",
+            registry=MagicMock(spec=ActivityReporter),
+            agent=agent_c,
+        )
+        self._run_thread(started)
+        assert len(calls) == 2
+        # First iteration ran with A's agent.
+        assert calls[0][2].get("agent") is agent_a
+        # Coalesced iteration ran with C's agent (latest), NOT B's.
+        assert calls[1][2].get("agent") is agent_c
+
     def test_on_done_chains_across_coalesced_calls(self, tmp_path: Path) -> None:
         # Codex P1 (thirteenth round) on PR #1938: when multiple
         # rescope triggers coalesce while a batch is running, every
