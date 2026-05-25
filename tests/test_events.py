@@ -135,6 +135,11 @@ def _make_mock_gh() -> MagicMock:
     # through ``uuid.uuid5`` (events.py:403), which would TypeError on
     # an auto-mocked sub-MagicMock.
     gh.create_issue.return_value = "https://github.com/owner/repo/issues/0"
+    # ``get_repo_info`` returns the repo slug; production sites pass it
+    # as a string into ``CommentTarget.repo`` (and downstream into the
+    # ``rescope_intent_outbox`` SQLite row), which would TypeError on an
+    # auto-mocked sub-MagicMock.
+    gh.get_repo_info.return_value = "owner/repo"
     return gh
 
 

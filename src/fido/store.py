@@ -869,43 +869,90 @@ class FidoStore:
         repo: str,
         pr_number: int,
     ) -> bool:
-        """HOL-26 / #1920 (codex P1 ninth/tenth rounds on PR #1938):
-        atomically claim the rescope intent in the durable outbox.
+        """HOL-26 / #1920 (codex P1 ninth/tenth/eleventh rounds on
+        PR #1938): atomically claim the rescope intent in the durable
+        outbox.
 
-        Returns ``True`` when this call is the first to claim the
-        intent (caller should fire the rescope), ``False`` when an
-        earlier claim already exists in any state.
+        Returns ``True`` when the caller should fire the rescope:
 
-        Persists the full intent payload (change_request / author /
-        comment_type / repo / pr_number) so a future
-        ``pending_rescope_intents`` recovery pass can replay
-        un-applied intents after a Fido crash.  Without persisting
-        the payload, a process-restart between claim and the
-        background rescope thread would permanently lose the user's
-        ACT — the reply was posted but the work never landed.
+        - First claim for this intent: INSERT a ``pending`` row, return True.
+        - Pre-existing ``pending`` row: UPDATE ``claimed_at`` (refresh
+          payload) and return True.  A pending row means "claim was
+          recorded but the work never durably applied" — likely a
+          crash between claim and ``_on_done``, or a redelivery of
+          the same comment.  Retrying is correct: in-process
+          duplicate dispatches get coalesced by ``_reorder_coalesce``,
+          and cross-restart replay is exactly the recovery path the
+          outbox enables.
+        - ``applied`` row: return False.  The rescope already
+          durably completed (tasks.json synced + PR description
+          rewritten); re-firing would duplicate the work.
+
+        Persists the full intent payload so a future
+        ``pending_rescope_intents`` recovery sweep can also replay
+        un-applied intents on startup (separate follow-up — the
+        normal-trigger retry path covers the common redelivery
+        case shipped here).
         """
         now = _utcnow()
         with self._transaction() as conn:
-            cursor = conn.execute(
+            row = conn.execute(
                 """
-                INSERT OR IGNORE INTO rescope_intent_outbox
-                    (intent_comment_id, change_request, intent_timestamp,
-                     author, comment_type, repo, pr_number,
-                     state, claimed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                SELECT state
+                FROM rescope_intent_outbox
+                WHERE intent_comment_id = ?
+                """,
+                (int(intent_comment_id),),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO rescope_intent_outbox
+                        (intent_comment_id, change_request, intent_timestamp,
+                         author, comment_type, repo, pr_number,
+                         state, claimed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    """,
+                    (
+                        int(intent_comment_id),
+                        str(change_request),
+                        str(intent_timestamp),
+                        str(author),
+                        str(comment_type),
+                        repo,
+                        int(pr_number),
+                        now,
+                    ),
+                )
+                return True
+            if row["state"] == "applied":
+                return False
+            # Stale pending — refresh payload + claimed_at so a
+            # retried claim races with the latest known shape.
+            conn.execute(
+                """
+                UPDATE rescope_intent_outbox
+                SET change_request = ?,
+                    intent_timestamp = ?,
+                    author = ?,
+                    comment_type = ?,
+                    repo = ?,
+                    pr_number = ?,
+                    claimed_at = ?
+                WHERE intent_comment_id = ?
                 """,
                 (
-                    int(intent_comment_id),
                     str(change_request),
                     str(intent_timestamp),
                     str(author),
                     str(comment_type),
-                    str(repo),
-                    int(pr_number) if isinstance(pr_number, int) else 0,  # noqa: SIM222  # pyright: ignore[reportUnnecessaryIsInstance]
+                    repo,
+                    int(pr_number),
                     now,
+                    int(intent_comment_id),
                 ),
             )
-            return cursor.rowcount > 0
+            return True
 
     def mark_rescope_intent_applied(self, intent_comment_id: int) -> None:
         """Mark a previously-claimed rescope intent as durably applied

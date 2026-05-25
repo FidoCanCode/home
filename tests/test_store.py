@@ -1638,23 +1638,69 @@ def _claim_intent(store: "FidoStore", cid: int, **overrides: object) -> bool:
 
 
 def test_claim_rescope_intent_first_caller_succeeds(tmp_path: Path) -> None:
-    # HOL-26 / #1920 (codex P1 ninth/tenth rounds on PR #1938): the
-    # first claim per intent_comment_id returns True; subsequent
-    # claims (this process or after restart) return False.  Enforces
-    # at-most-once rescope dispatch per originating comment.
+    # HOL-26 / #1920: first claim per intent_comment_id returns True.
+    # Different intents claim independently.
     store = FidoStore(tmp_path)
     assert _claim_intent(store, 42) is True
-    assert _claim_intent(store, 42) is False
-    # Different intent claim succeeds independently.
     assert _claim_intent(store, 99) is True
 
 
-def test_claim_rescope_intent_persists_across_store_instances(tmp_path: Path) -> None:
+def test_claim_rescope_intent_pending_row_is_retryable(tmp_path: Path) -> None:
+    # Codex P1 eleventh round on PR #1938: a pre-existing pending
+    # row means "claim was recorded but the work never durably
+    # applied" (likely a crash between claim and ``_on_done`` OR a
+    # webhook redelivery).  Retrying must succeed — duplicate
+    # dispatches get coalesced in-process by ``_reorder_coalesce``,
+    # and cross-restart replay is exactly what the outbox enables.
+    # Without retryability, ACT replies could be visible with no
+    # rescope ever applied.
+    store = FidoStore(tmp_path)
+    assert _claim_intent(store, 42) is True
+    # Same intent, while still pending, can be re-claimed.
+    assert _claim_intent(store, 42) is True
+
+
+def test_claim_rescope_intent_applied_row_blocks(tmp_path: Path) -> None:
+    # The applied state is durably terminal — no future trigger
+    # re-fires.
+    store = FidoStore(tmp_path)
+    assert _claim_intent(store, 42) is True
+    store.mark_rescope_intent_applied(42)
+    assert _claim_intent(store, 42) is False
+
+
+def test_claim_rescope_intent_pending_persists_across_restart(tmp_path: Path) -> None:
+    # Cross-restart redelivery: a pending row in the durable store
+    # survives a Fido restart, and the normal trigger path can
+    # re-claim it and dispatch the rescope.
     store1 = FidoStore(tmp_path)
     assert _claim_intent(store1, 42) is True
     del store1
     store2 = FidoStore(tmp_path)
+    # New process, same db: pending row → retryable.
+    assert _claim_intent(store2, 42) is True
+
+
+def test_claim_rescope_intent_applied_persists_across_restart(tmp_path: Path) -> None:
+    # Applied rows still block across restarts.
+    store1 = FidoStore(tmp_path)
+    assert _claim_intent(store1, 42) is True
+    store1.mark_rescope_intent_applied(42)
+    del store1
+    store2 = FidoStore(tmp_path)
     assert _claim_intent(store2, 42) is False
+
+
+def test_claim_rescope_intent_pending_refreshes_payload(tmp_path: Path) -> None:
+    # The re-claim of a pending row updates the payload (so a
+    # later recovery sweep sees the latest version of the
+    # change_request).
+    store = FidoStore(tmp_path)
+    _claim_intent(store, 42, change_request="first")
+    _claim_intent(store, 42, change_request="second")
+    pending = store.pending_rescope_intents()
+    assert len(pending) == 1
+    assert pending[0]["change_request"] == "second"
 
 
 def test_release_rescope_intent_claim_allows_retry(tmp_path: Path) -> None:
@@ -1666,17 +1712,13 @@ def test_release_rescope_intent_claim_allows_retry(tmp_path: Path) -> None:
     assert _claim_intent(store, 42) is True
 
 
-def test_mark_rescope_intent_applied_blocks_subsequent_claims(
-    tmp_path: Path,
-) -> None:
-    # An applied intent is durably terminal — no future trigger
-    # re-fires.
+def test_release_on_applied_row_is_noop(tmp_path: Path) -> None:
+    # Release only targets state='pending', so calling it after
+    # the row has already advanced to 'applied' must not clear
+    # the terminal marker.
     store = FidoStore(tmp_path)
     assert _claim_intent(store, 42) is True
     store.mark_rescope_intent_applied(42)
-    assert _claim_intent(store, 42) is False
-    # Release on an applied row is a no-op (release only targets
-    # state='pending').
     store.release_rescope_intent_claim(42)
     assert _claim_intent(store, 42) is False
 
