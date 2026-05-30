@@ -3426,8 +3426,20 @@ class Dispatcher:
         prompts: Prompts,
         *,
         after_apply: Callable[[], None] | None = None,
-    ) -> dict[str, Any]:
-        """Build the kwargs dict for a :func:`~fido.tasks.reorder_tasks` call."""
+    ) -> tuple[dict[str, Any], list[Callable[[], None]]]:
+        """Build the kwargs dict for a :func:`~fido.tasks.reorder_tasks` call.
+
+        Returns ``(kwargs, after_applies)``.  Every value in *kwargs* is
+        a valid ``reorder_tasks`` parameter — the dict is safe to
+        ``**``-splat into the call without filtering.  *after_applies*
+        is the mutable list captured by ``_on_done``'s closure; the
+        coalesce branch in ``reorder_tasks_background`` extends it so
+        every coalesced caller's after-apply hook fires after a single
+        sync+rewrite (#1955 regression: previously the list was stored
+        in ``kwargs`` as ``_after_applies`` and leaked into
+        ``reorder_tasks`` from ``Worker.rescope_before_pick``, which
+        does not filter side-channel kwargs).
+        """
         repo_cfg = self._repo_cfg
         gh = self._gh
         work_dir = repo_cfg.work_dir
@@ -3482,13 +3494,6 @@ class Dispatcher:
             # batches; escalates via the Dispatcher-bound escalator
             # method when an intent's drops cross threshold.
             "task_creation_drop_counter": self._task_creation_drop_counter,
-            # Mutable shared list captured by ``on_done``.  Stored
-            # alongside ``_on_done`` so the coalesce branch can
-            # extend it when a new caller piles onto an in-flight
-            # batch (codex P2 fourteenth round on PR #1938).  Not
-            # forwarded to ``reorder_tasks`` — popped at the
-            # boundary.
-            "_after_applies": after_applies,
         }
         issue_ctx, pr_ctx = _load_active_context_for_rescope(
             work_dir, repo_cfg.name, gh
@@ -3511,7 +3516,7 @@ class Dispatcher:
             agent=agent,
             prompts=prompts,
         )
-        return kwargs
+        return kwargs, after_applies
 
     def _build_on_rescope_apply(
         self,
@@ -3701,7 +3706,7 @@ class Dispatcher:
             prompts = Prompts(_load_persona(config))
 
         key = str(work_dir)
-        kwargs = self._make_reorder_kwargs(
+        kwargs, after_applies = self._make_reorder_kwargs(
             registry,
             agent,
             prompts,
@@ -3719,40 +3724,43 @@ class Dispatcher:
                 # so every originating comment is tracked even when multiple
                 # comment-triggered rescopes arrive during the same Opus call.
                 #
-                # Codex P2 (fourteenth round) on PR #1938: keep the
-                # existing pending batch's ``_on_done`` (so its sync
-                # and PR-body rewrite run ONCE for the coalesced
-                # batch) and extend its mutable ``_after_applies``
-                # list with this caller's after-apply hook.  Every
-                # coalesced intent gets marked applied without
-                # duplicating the expensive external writes — and if
-                # the sync/rewrite step fails, NO intent is marked
-                # applied (the apply hooks only run after both
-                # succeed), so a restart correctly replays the
-                # whole batch.
+                # Keep the existing pending batch's ``_on_done`` (which
+                # captures the existing ``after_applies`` list) so its
+                # sync+PR-body rewrite run ONCE for the coalesced
+                # batch.  Extend that same shared list with this
+                # caller's after-apply hook so every coalesced intent
+                # is marked applied after the single sync+rewrite
+                # succeeds.  If sync/rewrite fails, NO intent is marked
+                # applied — the apply hooks only run after both
+                # succeed, so a restart correctly replays the whole
+                # batch.  Latest *kwargs* still win for fresh issue/pr
+                # context (used by the rescope prompt and reply
+                # notifier).  Per codex P2 rounds 14–15 on PR #1938.
                 existing = entry["pending"]
                 if existing is None:
-                    entry["pending"] = (commit_summary, kwargs, list(intents or []))
+                    entry["pending"] = (
+                        commit_summary,
+                        kwargs,
+                        list(intents or []),
+                        after_applies,
+                    )
                 else:
-                    accumulated = list(existing[2]) + list(intents or [])
-                    existing_kwargs = existing[1]
-                    existing_chain = existing_kwargs.get("_after_applies")
-                    new_chain = kwargs.get("_after_applies")
-                    if existing_chain is not None and new_chain is not None:
-                        existing_chain.extend(new_chain)
-                    # Codex P2 (fifteenth round) on PR #1938: keep
-                    # the latest caller's fresh issue/pr context
-                    # (used by the rescope prompt and the reply
-                    # notifier), but preserve the existing batch's
-                    # ``_on_done`` — the single closure that owns
-                    # the shared ``_after_applies`` list — so
-                    # sync+rewrite still run ONCE for the coalesced
-                    # batch.  Latest kwargs win for every field
-                    # EXCEPT the on_done / shared-list pair.
+                    (
+                        _,
+                        existing_kwargs,
+                        existing_intents,
+                        existing_after_applies,
+                    ) = existing
+                    accumulated = existing_intents + list(intents or [])
+                    existing_after_applies.extend(after_applies)
                     merged = dict(kwargs)
-                    merged["_on_done"] = existing_kwargs.get("_on_done")
-                    merged["_after_applies"] = existing_chain
-                    entry["pending"] = (commit_summary, merged, accumulated)
+                    merged["_on_done"] = existing_kwargs["_on_done"]
+                    entry["pending"] = (
+                        commit_summary,
+                        merged,
+                        accumulated,
+                        existing_after_applies,
+                    )
                 return
             entry["running"] = True
             entry["pending"] = None
@@ -3799,15 +3807,11 @@ class Dispatcher:
                         agent=kw.get("agent"),
                         prompts=kw.get("prompts"),
                     )
-                    # ``_after_applies`` is a side-channel captured
-                    # by ``_on_done``'s closure; it must not reach
-                    # ``reorder_tasks`` (not part of its signature).
-                    reorder_kw = {k: v for k, v in kw.items() if k != "_after_applies"}
                     self._task_reorderer(
                         registry.tasks_for(repo_cfg.name),
                         cs,
                         intents=current_intents or None,
-                        **reorder_kw,
+                        **kw,
                     )
                     log.info("rescope BG: iteration %d complete", iteration)
                     with _reorder_coalesce_lock:
@@ -3815,7 +3819,11 @@ class Dispatcher:
                         if pending is None:
                             break
                         state[key]["pending"] = None
-                        cs, kw, current_intents = pending
+                        # 4-tuple: (cs, kwargs, intents, after_applies).
+                        # The after_applies list is captured by kw's
+                        # on_done closure, so we don't need to bind it
+                        # here — the existing on_done already reads it.
+                        cs, kw, current_intents, _ = pending
             finally:
                 log.info("rescope BG: entering finally (iterations=%d)", iteration)
                 with _reorder_coalesce_lock:
