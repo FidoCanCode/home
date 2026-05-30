@@ -11,6 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from fido.config import Config, RepoConfig
+from fido.critics import (
+    INSIGHT_REPO,
+    InsightDedupTransportCounter,
+    InsightDedupVerdict,
+    TaskCreationDropCounter,
+    run_insight_dedup_critic,
+)
 from fido.github import GitHub
 from fido.prompts import NO_TOOLS_CLAUSE, Prompts
 from fido.provider import (
@@ -35,8 +42,9 @@ from fido.store import (
     ReplyPromiseRecord,
     append_reply_promise_markers,
 )
-from fido.synthesis import Insight
+from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_call import (
+    SynthesisCriticExhaustedError,
     SynthesisExhaustedError,
     call_failure_explanation,
     call_synthesis,
@@ -46,7 +54,15 @@ from fido.tasks import (
     Tasks,
     thread_comment_author_for_auto_resolve_oracle,
 )
-from fido.types import ActiveIssue, ActivePR, IntentVerdict, RescopeIntent, TaskType
+from fido.types import (
+    ActiveIssue,
+    ActivePR,
+    IntentVerdict,
+    RescopeIntent,
+    TaskStatus,
+    TaskType,
+    verdict_is_material,
+)
 from fido.worker import ActivityReporter
 
 log = logging.getLogger(__name__)
@@ -77,11 +93,17 @@ class _BackgroundRescopeTrigger:
         agent: ProviderAgent,
         prompts: Prompts,
         dispatcher: "Dispatcher",
+        store: "FidoStore",
     ) -> None:
         self._registry = registry
         self._agent = agent
         self._prompts = prompts
         self._dispatcher = dispatcher
+        # Codex P1 (ninth round) on PR #1938: durable dedup store
+        # injected at construction so the trigger has its own
+        # collaborator instead of reaching into the dispatcher's
+        # private ``_repo_cfg`` (single-root composition rule).
+        self._store = store
 
     def trigger_rescope(self, intent: RescopeIntent) -> None:
         """Trigger :meth:`Dispatcher.reorder_tasks_background` with the given rescope intent.
@@ -91,45 +113,148 @@ class _BackgroundRescopeTrigger:
         changed.  The full intent (including *comment_id* and *timestamp*) is
         forwarded so the rescoper can reference the originating comment and
         accumulate multiple concurrent intents correctly.
+
+        Codex P1 (ninth/tenth rounds) on PR #1938: rescope trigger
+        is now durably idempotent per ``intent.comment_id`` via the
+        ``rescope_intent_outbox`` table.
+
+        - ``claim_rescope_intent`` atomically inserts the full intent
+          payload with ``state='pending'``; returns True only on the
+          first claim.  False on any existing entry (pending or
+          applied) means a prior caller is already handling it.
+        - The ``_on_done`` callback wired into
+          ``reorder_tasks_background`` calls
+          ``mark_rescope_intent_applied`` ONLY after the background
+          rescope's work has durably landed in tasks.json — so the
+          applied-state advances after success, not after the claim.
+        - A synchronous failure of ``reorder_tasks_background``
+          (thread-start error, etc.) releases the pending claim so
+          the next trigger retries.
+        - Crash-after-thread-start residual: the intent stays in
+          ``state='pending'`` and is surfaced by
+          ``pending_rescope_intents()`` for a future startup-replay
+          recovery wiring (follow-up — payload persistence is the
+          enabling step shipped here).
         """
+        if not self._store.claim_rescope_intent(
+            intent_comment_id=intent.comment_id,
+            change_request=intent.change_request,
+            intent_timestamp=intent.timestamp,
+            author=intent.author,
+            comment_type=intent.comment_type,
+            repo=intent.repo,
+            pr_number=intent.pr_number,
+        ):
+            log.info(
+                "RescopeTrigger: rescope already claimed for comment %d "
+                "(durable outbox) — skipping",
+                intent.comment_id,
+            )
+            return
         log.info(
             "RescopeTrigger: triggering background rescope for comment %d: %s",
             intent.comment_id,
             intent.change_request[:80],
         )
+
+        def _mark_applied() -> None:
+            self._store.mark_rescope_intent_applied(intent.comment_id)
+
+        # Codex P1 (sixteenth round) on PR #1938: don't delete the
+        # pending row on dispatch failure.  The row IS the durable
+        # recovery signal — startup replay relies on it being there.
+        # Deleting it on failure loses the only path that re-fires
+        # the intent (GitHub will not redeliver a successful webhook).
+        # ``claim_rescope_intent`` already treats pending rows as
+        # retryable, so leaving the row pending lets the next trigger
+        # or startup-replay retry cleanly.
         self._dispatcher.reorder_tasks_background(
             intent.change_request,
             self._registry,
             agent=self._agent,
             prompts=self._prompts,
             intents=[intent],
+            _on_done=_mark_applied,
         )
 
 
-_INSIGHT_REPO = "FidoCanCode/home"
+_INSIGHT_REPO = INSIGHT_REPO
 _INSIGHT_LABEL = "Insight"
+
+
+_INSIGHT_RECENT_LIMIT = 30
 
 
 class _GitHubInsightFiler:
     """InsightFiler implementation that creates GitHub issues on :data:`_INSIGHT_REPO`.
 
-    Idempotent: before filing, searches for an existing issue carrying the
-    ``<!-- insight-source: {comment_id} -->`` marker in its body.  If one is
-    found the filing is skipped so replaying the same comment never creates
-    duplicate insights.
+    Two-layer dedup:
+
+    1. **Per-comment idempotency marker** — the cheap path.  Every
+       insight body carries ``<!-- insight-source: {comment_id} -->``;
+       a GitHub search for that marker catches same-comment replays
+       (e.g. the same webhook re-delivered, or a comment re-processed
+       after a worker restart).
+    2. **Cross-comment near-duplicate critic (HOL-19 / #1913)** — the
+       slow path.  Runs Opus over the proposed insight plus the
+       recent ``Insight``-labelled issues; skips filing when the
+       critic verdicts ``is_duplicate=true``.  Fail-open: a critic
+       transport/parse failure proceeds to file (the marker check
+       still prevents the dumbest duplicates).
+
+    The critic dependencies are optional so legacy call sites without
+    an agent (and the bulk of the existing tests) still file
+    unchanged.  Production wiring in ``Dispatcher`` passes the live
+    agent + prompts so the critic actually runs.
     """
 
-    def __init__(self, gh: GitHub) -> None:
+    def __init__(
+        self,
+        gh: GitHub,
+        *,
+        agent: ProviderAgent | None = None,
+        prompts: Prompts | None = None,
+        critic_system_prompt: str | None = None,
+        transport_counter: InsightDedupTransportCounter | None = None,
+    ) -> None:
+        # All three of agent / prompts / critic_system_prompt are
+        # required for the HOL-19 critic to fire.  If any is None the
+        # critic is disabled and we fall back to marker-only dedup —
+        # matches the legacy no-critic behaviour for any caller that
+        # hasn't migrated.
         self._gh = gh
+        self._agent = agent
+        self._prompts = prompts
+        self._critic_system_prompt = critic_system_prompt
+        # HOL-19 follow-up / #1935: when an
+        # ``InsightDedupTransportCounter`` is injected, transport-failure
+        # patterns escalate to a bug via the counter's escalator.  None
+        # in tests; production wiring in ``Dispatcher`` constructs one
+        # bound to ``file_stuck_on_critic_bug``.
+        self._transport_counter = transport_counter
 
     def file_insight(self, insight: Insight, target: CommentTarget) -> None:
         """File *insight* as a GitHub issue against :data:`_INSIGHT_REPO`.
 
-        Skips creation if an issue with the idempotency marker for
-        *target.comment_id* already exists.
+        Skips creation when EITHER:
+        - The same-comment idempotency marker is already on record (a
+          replay of this exact comment) — looked up in BOTH issue
+          bodies and comments so dedup-skip markers (see below) count.
+        - The HOL-19 critic verdicts the insight as a near-duplicate
+          of a recent filed insight (catches cross-comment duplicates
+          the marker can't see).
+
+        When the dedup critic skips, a durable marker is recorded as a
+        comment on the duplicate-of issue (codex on PR #1932: without
+        this, a later replay + fail-open critic could file the
+        duplicate after all — the marker lookup needs a record of
+        every comment_id we considered, not just the ones we actually
+        filed).
         """
         marker = f"<!-- insight-source: {target.comment_id} -->"
-        existing = self._gh.search_issues(_INSIGHT_REPO, f'"{marker}" in:body is:issue')
+        existing = self._gh.search_issues(
+            _INSIGHT_REPO, f'"{marker}" in:body,comments is:issue'
+        )
         if existing:
             log.info(
                 "insight already filed for comment %d — skipping: %s",
@@ -137,11 +262,207 @@ class _GitHubInsightFiler:
                 existing[0].get("html_url", ""),
             )
             return
+        verdict = self._dedup_critic_verdict(insight)
+        if verdict.is_duplicate:
+            self._record_dedup_skip_marker(verdict, marker, target)
+            log.info(
+                "insight-dedup critic verdicted near-duplicate of %s — "
+                "skipping filing for comment %d: %s",
+                verdict.duplicate_url,
+                target.comment_id,
+                verdict.rationale or "(no rationale)",
+            )
+            return
         source_link = _insight_source_link(target)
         title = f"Insight: {insight.title}"
         body = f"{insight.hook}\n\n{insight.why}\n\nSource: {source_link}\n\n{marker}"
         url = self._gh.create_issue(_INSIGHT_REPO, title, body, labels=[_INSIGHT_LABEL])
         log.info("filed insight issue for comment %d: %s", target.comment_id, url)
+
+    def _record_dedup_skip_marker(
+        self,
+        verdict: InsightDedupVerdict,
+        marker: str,
+        target: CommentTarget,
+    ) -> None:
+        """Post a comment carrying ``marker`` on the duplicate-of issue
+        named by ``verdict.duplicate_url``.
+
+        Without this record, a future webhook replay of the SAME
+        comment + a fail-open critic outcome would find no marker and
+        file the duplicate insight that the critic just rejected.  The
+        comment-body marker plus the ``in:body,comments`` search above
+        closes that race.
+
+        The comment is human-readable too: the GitHub UI shows "Also
+        covered: <source-link>" so a human reviewing the duplicate-of
+        issue can trace back to every source comment that surfaced
+        this insight.
+
+        URL parsing failures are logged and swallowed — we'd rather
+        skip the durable record than crash the synthesis dispatch on
+        a malformed critic URL (the cheap marker check still prevents
+        the next dispatch from filing it; only an actual fail-open
+        replay loses durability).
+        """
+        # Codex on PR #1932 (follow-up): the critic parser in
+        # ``fido.critics`` now requires the duplicate_url to target
+        # ``INSIGHT_REPO`` specifically, so any verdict that reaches
+        # here has a URL the marker regex below will accept.  Use a
+        # hard assertion rather than a fail-open branch — if the two
+        # layers ever drift, surfacing the bug loudly is better than
+        # silently swallowing the durability record.
+        number = _parse_insight_issue_number(verdict.duplicate_url)
+        assert number is not None, (
+            f"InsightDedupVerdict.duplicate_url {verdict.duplicate_url!r} "
+            f"passed the critic parser but failed the marker URL regex — "
+            f"the two validators have drifted"
+        )
+        source_link = _insight_source_link(target)
+        body = f"Also covered: {source_link}\n\n{marker}"
+        # Codex on PR #1932: this marker write is best-effort
+        # bookkeeping at an external-system boundary — a transient
+        # GitHub failure (rate limit, network blip, the target issue
+        # was closed/transferred between the critic's lookup and now,
+        # etc.) must not abort the whole comment-processing flow.
+        # The critic's primary decision (skip filing the duplicate)
+        # is already honoured by the early return above; only the
+        # replay-durability marker is at risk.  Log and continue.
+        try:
+            self._gh.comment_issue(_INSIGHT_REPO, number, body)
+        except Exception as exc:
+            log.warning(
+                "insight-dedup skip-marker write failed (%s) — falling "
+                "open: comment_id=%d, target issue=%s#%d.  Replay could "
+                "still file a duplicate if the critic later fails open.",
+                exc,
+                target.comment_id,
+                _INSIGHT_REPO,
+                number,
+            )
+
+    def _dedup_critic_verdict(self, insight: Insight) -> InsightDedupVerdict:
+        """Run the HOL-19 critic when the agent/prompts collaborators
+        were injected; otherwise return the default pass-through
+        verdict so the legacy no-critic path is preserved exactly.
+        """
+        if (
+            self._agent is None
+            or self._prompts is None
+            or self._critic_system_prompt is None
+        ):
+            return InsightDedupVerdict()
+        recent = self._recent_insights_for_critic()
+        return run_insight_dedup_critic(
+            proposed_insight={
+                "title": insight.title,
+                "hook": insight.hook,
+                "why": insight.why,
+            },
+            recent_insights=recent,
+            agent=self._agent,
+            prompts=self._prompts,
+            critic_system_prompt=self._critic_system_prompt,
+            transport_counter=self._transport_counter,
+        )
+
+    def _recent_insights_for_critic(self) -> list[dict[str, str]]:
+        """Fetch the most-recent open ``Insight``-labelled issues from
+        :data:`_INSIGHT_REPO`, capped at :data:`_INSIGHT_RECENT_LIMIT`.
+
+        Returns ``[{title, body, url}, ...]`` shaped for the critic
+        prompt formatter.  An empty list is returned when the search
+        yields nothing — the critic prompt treats that as a pass.
+
+        Codex on PR #1932: the search itself is wrapped in fail-open.
+        Without it, a transient ``gh.search_issues`` failure
+        (rate limit, network blip) raised out of ``file_insight`` and
+        aborted the entire dispatch — a flaky GitHub couldn't be
+        allowed to BLOCK legitimate insight filing.  On error, return
+        an empty list so the critic sees "no peers" (and the prompt's
+        "passes by default when recent list is empty" rule lets the
+        insight file normally).
+        """
+        try:
+            # Codex on PR #1932: GitHub issue-search defaults to
+            # best-match ranking, so slicing the first
+            # :data:`_INSIGHT_RECENT_LIMIT` results could omit the
+            # newest insights entirely (and feed stale comparison
+            # examples to the dedup critic, raising false-"distinct"
+            # rates).  Explicit ``sort:created-desc`` makes the
+            # "most recent" claim in the docstring above actually
+            # true.
+            results = self._gh.search_issues(
+                _INSIGHT_REPO,
+                f"label:{_INSIGHT_LABEL} is:issue is:open sort:created-desc",
+            )
+        except Exception as exc:
+            log.warning(
+                "insight-dedup recent-corpus search failed (%s) — "
+                "falling open with empty corpus so the critic doesn't "
+                "block the insight on a flaky GitHub",
+                exc,
+            )
+            return []
+        out: list[dict[str, str]] = []
+        for item in results[:_INSIGHT_RECENT_LIMIT]:
+            out.append(
+                {
+                    "title": str(item.get("title", "")),
+                    "body": str(item.get("body", "") or ""),
+                    "url": str(item.get("html_url", "")),
+                }
+            )
+        return out
+
+
+_INSIGHT_URL_RE = re.compile(
+    r"^https://github\.com/(?P<owner_repo>[^/]+/[^/]+)/issues/"
+    r"(?P<number>\d+)(?:[#/?].*)?$",
+    # Codex on PR #1932: GitHub URLs are case-insensitive on
+    # scheme/host AND owner/repo names, so the marker-write boundary
+    # must use the same case-insensitive match as the critic parser
+    # above.  Otherwise a verdict with ``HTTPS://GITHUB.COM/...``
+    # passes parser validation, the filer skips filing, and this
+    # regex rejects the marker target — silently losing the
+    # durability record.
+    re.IGNORECASE,
+)
+
+
+def _parse_insight_issue_number(url: str) -> int | None:
+    """Extract the issue number from a duplicate insight URL that
+    targets :data:`_INSIGHT_REPO`.
+
+    Returns ``None`` when the URL doesn't end in ``/issues/{NN}`` on
+    that repo specifically (codex on PR #1932: a previous version
+    accepted any ``/issues/{NN}`` URL, so a critic that returned a
+    valid issue URL from a different repo would land the replay
+    marker on the wrong issue in ``FidoCanCode/home``).
+
+    Rejects:
+
+    - non-GitHub URLs (hallucinated by a flaky critic)
+    - PR URLs (``/pull/N``) — we don't comment on PRs from this path
+    - issue URLs targeting any other ``owner/repo``
+    - plain garbage
+
+    Caller treats ``None`` as "skip the durable record" rather than
+    crashing dispatch — the critic's primary decision (skip the
+    filing) is still honoured.
+    """
+    match = _INSIGHT_URL_RE.match(url.strip())
+    if match is None:
+        return None
+    # GitHub owner/repo names are case-insensitive — codex on PR
+    # #1932 flagged that a critic URL like
+    # ``https://github.com/fidocancode/home/issues/123`` was treated
+    # as cross-repo under strict equality, which dropped the durable
+    # skip-marker write and let a later fail-open replay file the
+    # duplicate insight after all.  Normalize both sides.
+    if match.group("owner_repo").lower() != _INSIGHT_REPO.lower():
+        return None
+    return int(match.group("number"))
 
 
 def _insight_source_link(target: CommentTarget) -> str:
@@ -159,6 +480,251 @@ def _insight_source_link(target: CommentTarget) -> str:
         f"https://github.com/{target.repo}/issues/{target.pr}"
         f"#issuecomment-{target.comment_id}"
     )
+
+
+_BUG_REPO = "FidoCanCode/home"
+_BUG_LABEL = "Bug"
+
+
+@dataclass(frozen=True)
+class StuckOnCriticContext:
+    """HOL-21 / #1915: context bundle for ``file_stuck_on_critic_bug``.
+
+    Every critic that detects exhaustion (HOL-15..HOL-19) builds one
+    of these and hands it to the shared filing helper.  The shape is
+    deliberately critic-agnostic so the bug body, idempotency
+    marker, and title template are all uniform across emission
+    points — the auto-filed bug is recognizably the same shape
+    whether it came from intent-coverage exhaustion on a triage
+    reply or task-completion exhaustion on a worker commit.
+
+    Fields:
+
+    - ``emission_point``: short label identifying which critic
+      exhausted (``"intent-coverage"``, ``"task-completion"``, etc.).
+      Part of the idempotency key so two different critics
+      exhausting on the same target still file separate bugs.
+    - ``source_repo`` / ``source_pr``: where the exhaustion happened.
+    - ``target_kind`` / ``target_id``: what the critic was working on
+      when it exhausted (``"comment"``/``"task"``).  Part of the
+      idempotency key.
+    - ``source_link``: clickable URL to the target.
+    - ``gaps``: every failed verdict's gap text, in order.
+    - ``attempts_preview``: per-attempt response preview when
+      available (HOL-15/18 carry these; HOL-17 task-completion may
+      use the per-attempt commit summary instead; HOL-16/19 leave
+      empty when their exhaustion paths land).
+    """
+
+    emission_point: str
+    source_repo: str
+    source_pr: int
+    target_kind: str
+    target_id: str
+    source_link: str
+    gaps: tuple[str, ...]
+    attempts_preview: tuple[str, ...] = ()
+
+
+def file_stuck_on_critic_bug(ctx: StuckOnCriticContext, *, gh: GitHub) -> str | None:
+    """HOL-21 / #1915: file (idempotently) a bug on :data:`_BUG_REPO`
+    for a critic exhaustion.
+
+    Returns the bug URL on success (whether newly filed or reused
+    from an idempotency-marker hit), or ``None`` when both the
+    marker search AND the create call fail — caller decides whether
+    to soften the BLOCKED-comment wording (no URL to cite) or carry
+    on silently.
+
+    Idempotency marker keyed on
+    ``(emission_point, source_repo, source_pr, target_kind, target_id)``
+    so retry attempts of the same exhaustion route reuse the
+    existing bug instead of spamming ``_BUG_REPO`` with duplicates.
+    Two different critics exhausting on the same target file
+    SEPARATE bugs because the emission point is part of the key —
+    different root causes warrant separate tickets.
+    """
+    bug_marker = (
+        f"<!-- critic-exhaustion: {ctx.emission_point}:"
+        f"{ctx.source_repo}#{ctx.source_pr}:"
+        f"{ctx.target_kind}:{ctx.target_id} -->"
+    )
+    bug_title = (
+        f"Bug: {ctx.emission_point} critic exhausted "
+        f"on {ctx.source_repo}#{ctx.source_pr} {ctx.target_kind} {ctx.target_id}"
+    )
+    gap_lines = (
+        "\n".join(f"  {i + 1}. {gap}" for i, gap in enumerate(ctx.gaps))
+        or "  (no gaps recorded)"
+    )
+    if ctx.attempts_preview:
+        attempts_block = "\n".join(
+            f"  {i + 1}. {preview!r}" for i, preview in enumerate(ctx.attempts_preview)
+        )
+    else:
+        attempts_block = "  (no per-attempt previews recorded)"
+    bug_body = (
+        f"## Critic exhaustion\n\n"
+        f"- Critic: `{ctx.emission_point}`\n"
+        f"- Source: {ctx.source_link}\n"
+        f"- Source repo / PR: `{ctx.source_repo}#{ctx.source_pr}`\n"
+        f"- Target: `{ctx.target_kind} {ctx.target_id}`\n"
+        f"- Attempts: {len(ctx.gaps)}\n\n"
+        f"## Critic gaps (one per attempt)\n\n{gap_lines}\n\n"
+        f"## Per-attempt previews\n\n{attempts_block}\n\n"
+        f"{bug_marker}\n"
+    )
+    try:
+        existing_bugs = gh.search_issues(_BUG_REPO, f'"{bug_marker}" in:body is:issue')
+    except Exception as search_exc:
+        log.warning(
+            "stuck-on-critic[%s]: bug-marker search failed (%s) — "
+            "proceeding to file (may create a duplicate)",
+            ctx.emission_point,
+            search_exc,
+        )
+        existing_bugs = []
+    if existing_bugs:
+        url = existing_bugs[0].get("html_url")
+        log.info(
+            "stuck-on-critic[%s]: existing bug found for %s#%d %s %s — reusing %s",
+            ctx.emission_point,
+            ctx.source_repo,
+            ctx.source_pr,
+            ctx.target_kind,
+            ctx.target_id,
+            url,
+        )
+        return str(url) if url else None
+    try:
+        return str(gh.create_issue(_BUG_REPO, bug_title, bug_body, labels=[_BUG_LABEL]))
+    except Exception as file_exc:
+        log.warning(
+            "stuck-on-critic[%s]: failed to auto-file bug for %s#%d %s %s (%s)",
+            ctx.emission_point,
+            ctx.source_repo,
+            ctx.source_pr,
+            ctx.target_kind,
+            ctx.target_id,
+            file_exc,
+        )
+        return None
+
+
+def _route_critic_exhausted_blocked(
+    exc: "SynthesisCriticExhaustedError",
+    target: CommentTarget,
+    *,
+    gh: GitHub,
+    executor: "SynthesisExecutor",
+    promise_ids: Iterable[str],
+) -> bool:
+    """HOL-20 / #1914: route a critic-exhaustion through the BLOCKED
+    PR mechanism instead of the legacy "please rephrase" fallback.
+
+    Returns ``True`` iff the BLOCKED comment actually landed on
+    GitHub.  Caller acks the covered promises only on ``True`` —
+    codex on PR #1932: swallowing a failed post and then acking
+    would mark the comment "handled" with no visible signal,
+    silently losing the user-facing notice.  Returning ``False``
+    keeps the promises recoverable so the next webhook delivery
+    (or recovery scan) re-fires the route.
+
+    ``promise_ids`` is every covered promise — recovery / queued
+    paths pass in the full set from ``context["reply_promise_id"]``
+    + ``context["reply_promise_ids"]``, direct webhook paths pass
+    just ``direct_promise.promise_id``.  All of them are embedded
+    into the BLOCKED comment body so ``recover_from_bodies`` can
+    dedup against any of them on the next pass.
+
+    Order of operations (codex on PR #1932):
+
+    1. File the bug against :data:`_BUG_REPO` FIRST so the BLOCKED
+       comment's claim of "auto-filed" is grounded in the actual
+       result (URL embedded when filing succeeded; wording softened
+       when it didn't).  Bug filing is best-effort: a transient
+       GitHub error here mustn't block the user-visible BLOCKED
+       comment.
+    2. Build the BLOCKED comment body, embed the reply-promise
+       recovery markers, and post.  This step is the durability
+       boundary — if the post raises, return ``False`` so the
+       promises stay claimed and recovery's ``recover_from_bodies``
+       scan can re-detect the situation.  If the post LANDED but
+       a crash interrupts before ack, the embedded markers let
+       ``recover_from_bodies`` recognise the work as already done
+       and ack the promises (no duplicate BLOCKED comment).
+    3. Remove the eyes reaction — pure UX cleanup, best-effort.
+    """
+    source_link = _insight_source_link(target)
+
+    # HOL-21 / #1915: bug-filing is shared infrastructure now —
+    # ``file_stuck_on_critic_bug`` handles the body, idempotency
+    # marker, and URL return for ALL critic exhaustion routes
+    # (synthesis critics here + per-leaf retry budgets for HOL-16/
+    # HOL-17/HOL-19 in their own modules).
+    bug_url = file_stuck_on_critic_bug(
+        StuckOnCriticContext(
+            emission_point=exc.label,
+            source_repo=target.repo,
+            source_pr=target.pr,
+            target_kind="comment",
+            target_id=str(target.comment_id),
+            source_link=source_link,
+            gaps=tuple(exc.critic_gaps),
+            attempts_preview=tuple(exc.synthesis_attempts),
+        ),
+        gh=gh,
+    )
+
+    if bug_url:
+        filing_line = f"Auto-filed against `{_BUG_REPO}` for follow-up: {bug_url}"
+    else:
+        filing_line = (
+            f"Auto-filing against `{_BUG_REPO}` FAILED — see Fido logs for "
+            f"the full gap chain."
+        )
+    blocked_body = (
+        f"**BLOCKED**: synthesis {exc.label} critic exhausted "
+        f"{len(exc.critic_gaps)} attempts on this comment.\n\n"
+        f"The Layer 2 critic ({exc.label}) repeatedly rejected the "
+        f"triage response.  Final gap from the critic:\n\n"
+        f"> {exc.critic_gaps[-1] if exc.critic_gaps else '(no gap recorded)'}\n\n"
+        f"{filing_line}\n\n"
+        f"See the originating comment: {source_link}"
+    )
+    # Codex on PR #1932: embed every covered reply-promise marker so
+    # a crash between the successful post and the ack doesn't leave
+    # recovery blind.  ``recover_from_bodies`` finds the markers in
+    # the posted comment, recognises the work as done, and acks the
+    # promises — no duplicate BLOCKED comment on the next dispatch.
+    # Plural is essential: queued/recovery paths can carry multiple
+    # promise ids in ``context["reply_promise_ids"]`` for grouped
+    # comments, and ALL of them need to map back to the same posted
+    # comment for dedup to fire on any redelivery.
+    blocked_body = append_reply_promise_markers(blocked_body, promise_ids)
+
+    try:
+        gh.comment_issue(target.repo, target.pr, blocked_body)
+    except Exception as comment_exc:
+        log.warning(
+            "critic-exhausted route: failed to post BLOCKED comment on "
+            "%s#%d (%s) — leaving promise unacked so recovery retries",
+            target.repo,
+            target.pr,
+            comment_exc,
+        )
+        return False
+
+    try:
+        executor.remove_eyes_reaction(target)
+    except Exception as cleanup_exc:
+        log.warning(
+            "critic-exhausted route: failed to remove eyes reaction "
+            "(%s) — BLOCKED comment already landed",
+            cleanup_exc,
+        )
+
+    return True
 
 
 # Per-work_dir coalescing state for Dispatcher.reorder_tasks_background.
@@ -365,6 +931,14 @@ def build_review_comment_action(
             "comment_type": "pulls",
             "lineage_key": lineage_key,
             "lineage_comment_ids": list(lineage_comment_ids),
+            # HOL-22 / #1916: identifies the GitHub review submission
+            # this comment belongs to.  The eager-eyes predicate uses
+            # it to detect "same-submission batch" vs "solo comment
+            # arriving during an unrelated batch" (closes #1875).
+            # None for review comments that aren't part of a
+            # submission (e.g. single-line comments without a
+            # review wrapper); the predicate's fallback handles that.
+            "pull_request_review_id": comment.get("pull_request_review_id"),
         },
         comment_body=body,
         is_bot=is_bot,
@@ -812,8 +1386,18 @@ def _queued_pr_comment_action(
     author: str,
     is_bot: bool,
     context: dict[str, Any],
+    pull_request_review_id: int | None = None,
 ) -> Action:
-    """Wake the worker for a durably queued PR comment without using provider."""
+    """Wake the worker for a durably queued PR comment without using provider.
+
+    HOL-22 / #1916: ``pull_request_review_id`` plumbs through so the
+    eager-eyes predicate in ``server.py`` (which reads it off
+    ``action.thread`` on the queued/recovery path) can scope its
+    "same-batch" check to the review submission this comment belongs
+    to.  Without the propagation, the predicate falls back to the
+    legacy unscoped check and the #1875 scenario keeps reproducing on
+    the live webhook → queue → dispatch path (codex on PR #1937).
+    """
     return Action(
         prompt=prompt,
         preempts_worker=True,
@@ -826,6 +1410,7 @@ def _queued_pr_comment_action(
             "url": html_url,
             "author": author,
             "comment_type": comment_type,
+            "pull_request_review_id": pull_request_review_id,
         },
     )
 
@@ -863,6 +1448,46 @@ def _is_allowed(user: str, repo_cfg: RepoConfig, config: Config) -> bool:
     (``server.populate_memberships``) and excludes the bot itself.
     """
     return user in repo_cfg.membership.collaborators or user in config.allowed_bots
+
+
+def _gather_claim_grounding_state(work_dir: Path) -> dict[str, Any]:
+    """HOL-18 / #1912: gather ground-truth state for the reply-prose
+    claim-grounding critic.
+
+    Populates ``recent_commit_shas`` from the last 20 commits on the
+    current branch.  Both the full 40-char form (``%H``) AND the
+    7-char abbreviated form (``%h``) are included because replies
+    routinely cite short SHAs (``commit abc1234``) — the critic needs
+    to find a match for either form (Rob review on PR #1932).
+
+    Returns an empty dict when git is unavailable for any reason —
+    ``OSError`` (and every subclass: FileNotFoundError when git isn't
+    installed, NotADirectoryError when work_dir is a file,
+    PermissionError on locked paths, etc.) is swallowed alongside
+    CalledProcessError (Rob review on PR #1932: the original narrow
+    catch crashed dispatch on the other subclasses instead of
+    degrading).
+
+    Future leaves can extend the returned dict with
+    ``open_issue_numbers`` / ``filed_insights`` / ``referenced_files``
+    as those sources of ground truth become cheap to gather here.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "--pretty=format:%H %h", "-n", "20"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError, OSError:
+        return {}
+    shas: list[str] = []
+    for line in result.stdout.splitlines():
+        for token in line.split():
+            if token:
+                shas.append(token)
+    return {"recent_commit_shas": shas}
 
 
 class Dispatcher:
@@ -912,6 +1537,99 @@ class Dispatcher:
         self._sync_fn = sync_fn
         self._reorder_coalesce_state = reorder_coalesce_state
         self._get_commit_summary_fn = get_commit_summary_fn
+        # HOL-19 follow-up / #1935: one process-local
+        # transport-failure counter shared across all insight-dedup
+        # critic calls for this Dispatcher (= this repo).  Escalates
+        # via ``file_stuck_on_critic_bug`` when consecutive transport
+        # failures cross the threshold, then suppresses re-fires until
+        # a successful critic call resets it.
+        self._insight_dedup_transport_counter = InsightDedupTransportCounter(
+            escalator=self._escalate_insight_dedup_transport_failure,
+        )
+        # HOL-16 follow-up / #1934 (codex P2 on PR #1938): per-intent
+        # task-creation-drop counter backed by ``FidoStore`` so the
+        # streak survives Fido restarts.  Escalates via the
+        # Dispatcher-bound method when an intent's drops cross
+        # threshold.
+        self._task_creation_drop_counter = TaskCreationDropCounter(
+            escalator=self._escalate_task_creation_drop_streak,
+            store=FidoStore(self._repo_cfg.work_dir),
+        )
+
+    def _escalate_task_creation_drop_streak(
+        self, intent_comment_id: int, count: int
+    ) -> bool:
+        """HOL-16 follow-up / #1934: escalator bound to the
+        Dispatcher's per-intent
+        :class:`TaskCreationDropCounter`.  Files a bug against
+        ``FidoCanCode/home`` when a single intent_comment_id has had
+        N proposals dropped in a row — either Opus keeps re-proposing
+        legitimately-distinct work the critic mis-classifies, or the
+        comment's intent isn't being honoured.
+
+        Returns ``True`` on successful bug file/reuse (the helper
+        returns a URL).  Returns ``False`` on transient failure
+        (``file_stuck_on_critic_bug`` returns ``None``) so the counter
+        leaves its escalated latch clear and retries on the next drop
+        — without this, a transient GitHub error at the first
+        threshold crossing would permanently suppress escalation
+        across restarts (codex P1 on PR #1938).
+        """
+        return (
+            file_stuck_on_critic_bug(
+                StuckOnCriticContext(
+                    emission_point="task-creation",
+                    source_repo=self._repo_cfg.name,
+                    source_pr=0,
+                    target_kind="comment",
+                    target_id=str(intent_comment_id),
+                    source_link=(
+                        f"(durable — comment {intent_comment_id} had "
+                        f"{count} proposals dropped by the task-creation critic "
+                        f"in {self._repo_cfg.name})"
+                    ),
+                    gaps=(
+                        f"{count} consecutive task-creation drops attributed to "
+                        f"comment #{intent_comment_id}",
+                    ),
+                ),
+                gh=self._gh,
+            )
+            is not None
+        )
+
+    def _escalate_insight_dedup_transport_failure(self, count: int) -> bool:
+        """HOL-19 follow-up / #1935: escalator bound to the
+        Dispatcher's process-local
+        :class:`InsightDedupTransportCounter`.  Files a bug against
+        ``FidoCanCode/home`` so the critic infra failure is visible
+        for follow-up, idempotent via the shared
+        ``file_stuck_on_critic_bug`` marker.
+
+        Returns ``True`` on success / ``False`` on transient failure
+        (same contract as the task-creation escalator — see codex P1
+        on PR #1938).  The counter releases its already-escalated
+        latch on ``False`` so the next transport failure retries the
+        bug filing.
+        """
+        return (
+            file_stuck_on_critic_bug(
+                StuckOnCriticContext(
+                    emission_point="insight-dedup-transport",
+                    source_repo=self._repo_cfg.name,
+                    source_pr=0,
+                    target_kind="critic",
+                    target_id="insight-dedup",
+                    source_link=(
+                        f"(process-local — {count} consecutive transport failures "
+                        f"in {self._repo_cfg.name})"
+                    ),
+                    gaps=(f"{count} consecutive transport failures",),
+                ),
+                gh=self._gh,
+            )
+            is not None
+        )
 
     def dispatch(
         self,
@@ -1046,6 +1764,9 @@ class Dispatcher:
                 html_url=comment.get("html_url", ""),
                 author=user,
                 is_bot=is_bot,
+                # HOL-22 / #1916: scope eager-eyes to same review
+                # submission (codex on PR #1937).
+                pull_request_review_id=comment.get("pull_request_review_id"),
                 context={
                     "comment_body": comment_body,
                     "delivery_id": delivery_id,
@@ -1304,6 +2025,59 @@ class Dispatcher:
             thread=thread,
             registry=registry,
         )
+
+    def replay_pending_rescope_intents(
+        self,
+        registry: ActivityReporter,
+        pr_number: int,
+        *,
+        agent: ProviderAgent,
+        prompts: Prompts,
+    ) -> int:
+        """Re-fire rescope intents left in ``state='pending'`` across a restart.
+
+        Codex P1 (twelfth round) on PR #1938: a crash between the
+        visible ACT reply landing and ``_on_done`` marking the outbox
+        row applied leaves an orphan pending row.  GitHub does not
+        redeliver an already-successful webhook, so without startup
+        replay the rescope is permanently lost.
+
+        Reconstructs a ``RescopeIntent`` from each pending row's
+        persisted payload and re-dispatches through the trigger.
+        ``claim_rescope_intent`` sees the pending row, refreshes
+        ``claimed_at``, and returns True; ``reorder_tasks_background``
+        runs; ``_on_done`` advances state to ``applied`` on success.
+
+        Returns the number of intents re-dispatched.
+        """
+        store = FidoStore(self._repo_cfg.work_dir)
+        all_pending = store.pending_rescope_intents()
+        # Codex P1 (sixteenth round) on PR #1938: filter by the
+        # currently-active PR so an orphan pending intent from a
+        # different (e.g. now-closed) PR doesn't rescope the active
+        # task queue with stale change-request text.
+        repo_name = self._repo_cfg.name
+        pending = [
+            intent
+            for intent in all_pending
+            if intent.repo == repo_name and intent.pr_number == pr_number
+        ]
+        if not pending:
+            return 0
+        trigger = _BackgroundRescopeTrigger(
+            registry,
+            agent=agent,
+            prompts=prompts,
+            dispatcher=self,
+            store=store,
+        )
+        for intent in pending:
+            log.info(
+                "replaying pending rescope intent for comment %d",
+                intent.comment_id,
+            )
+            trigger.trigger_rescope(intent)
+        return len(pending)
 
     def recover_reply_promises(
         self,
@@ -1599,6 +2373,7 @@ class Dispatcher:
             agent=agent,
             prompts=prompts,
             dispatcher=self,
+            store=FidoStore(repo_cfg.work_dir),
         )
         executor = (
             _executor
@@ -1606,7 +2381,15 @@ class Dispatcher:
             else SynthesisExecutor(
                 gh,
                 rescope=rescope_trigger,
-                insight_filer=_GitHubInsightFiler(gh),
+                insight_filer=_GitHubInsightFiler(
+                    gh,
+                    agent=agent,
+                    prompts=prompts,
+                    critic_system_prompt=prompts.critic_system_prompt(
+                        issue=issue_ctx, pr=pr_ctx
+                    ),
+                    transport_counter=self._insight_dedup_transport_counter,
+                ),
                 fido_logins=FIDO_LOGINS,
             )
         )
@@ -1634,7 +2417,63 @@ class Dispatcher:
                 pr=pr_ctx,
                 agent=agent,
                 prompts=prompts,
+                # HOL-18 / #1912: ground-truth state for the
+                # reply-prose claim-grounding critic so it can catch
+                # PR #1858's "in commit ABC" lies against actual git.
+                claim_grounding_state=_gather_claim_grounding_state(repo_cfg.work_dir),
             )
+        except SynthesisCriticExhaustedError as critic_exc:
+            # HOL-20 / #1914: critic-exhaustion → BLOCKED PR + auto-file
+            # bug.  Skip the "please rephrase" fallback because the
+            # critic gap is more informative than a generic apology
+            # and we don't want to spam the thread with an LLM-
+            # generated message that the same critic would just
+            # reject again.
+            log.warning(
+                "synthesis %s critic exhausted for comment %s — routing to "
+                "BLOCKED PR + auto-file path",
+                critic_exc.label,
+                info.get("comment_id"),
+            )
+            # Codex on PR #1932: gather promise ids from BOTH the
+            # direct webhook claim AND ``context["reply_promise_id"]``
+            # / ``["reply_promise_ids"]``.  Queued / recovery paths
+            # leave ``direct_promise`` None but carry the actual
+            # promises in context; missing those ids meant the
+            # posted BLOCKED comment carried no marker and recovery
+            # could duplicate the post.
+            covered_promise_ids: list[str] = list(_reply_promise_ids(context))
+            if direct_promise is not None:
+                covered_promise_ids.append(direct_promise.promise_id)
+            posted = False
+            if target is not None:
+                posted = _route_critic_exhausted_blocked(
+                    critic_exc,
+                    target,
+                    gh=gh,
+                    executor=executor,
+                    promise_ids=covered_promise_ids,
+                )
+            if not posted:
+                # Codex on PR #1932: a failed post must propagate so
+                # queued callers (``queue_reply_tasks`` at l.1860 and
+                # the server's direct-webhook caller) hit their
+                # error branch and mark the promises FAILED rather
+                # than acking them silently.  Without the raise, a
+                # queued reply with ``context["reply_promise_id"]``
+                # would get acked unconditionally even though no
+                # BLOCKED comment landed — silently swallowing the
+                # user signal.
+                raise critic_exc
+            # Direct webhook path: ack ``direct_promise`` here since
+            # it's our managed claim (queued/recovery paths have no
+            # direct_promise; their caller handles the ack).
+            if direct_promise is not None:
+                FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
+            # ``BLOCKED`` category signals the caller no action was
+            # taken (no reply, no rescope) — server.py + worker
+            # callers discard the value, so this is informational.
+            return ("BLOCKED", [])
         except SynthesisExhaustedError:
             log.warning(
                 "synthesis exhausted retries for comment %s — falling back to "
@@ -1707,6 +2546,13 @@ class Dispatcher:
         root_comment_id = (
             thread_comments[0]["id"] if thread_comments else info["comment_id"]
         )
+        # Codex P2 seventh round on PR #1938: track whether the pre-
+        # reply insight file succeeded.  False both when we didn't
+        # try (existing artifact / no target) AND when the try raised
+        # — either way the post-reply effects must run their own
+        # ``_file_insights`` pass so a transient pre-reply failure
+        # doesn't permanently lose the insight.
+        pre_reply_insights_filed = False
         existing_artifact_id = _existing_reply_artifact(repo_cfg, promise_ids)
         if existing_artifact_id is None:
             _claim_reply_outbox_effects(
@@ -1716,6 +2562,16 @@ class Dispatcher:
                 ),
                 promise_ids=promise_ids,
             )
+            # HOL-26 / #1920: file insights BEFORE the reply post so any
+            # claim in the reply body about a filed insight is true at
+            # the moment of posting.
+            if target is not None:
+                pre_reply_insights_filed = _safe_file_insights_pre_reply(
+                    executor,
+                    synthesis_response,
+                    target,
+                    where=(f"PR #{info.get('pr')} comment {info.get('comment_id')}"),
+                )
             log.info("posting reply to PR #%s: %s", info["pr"], body[:80])
             posted = gh.reply_to_review_comment(
                 info["repo"], info["pr"], body, info["comment_id"]
@@ -1743,13 +2599,24 @@ class Dispatcher:
         if direct_promise is not None:
             FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
-        # Execute post-reply effects: remove eyes, add final emoji, trigger
-        # rescope.  Only runs if we have a real comment_id to react on (the
-        # ``target`` was constructed up-front for the same reason).  Reuses the
-        # ``executor`` instance built before the synthesis call so the failure
-        # path could share its eyes-removal helper.
+        # Codex P1 (ninth round) on PR #1938: always run the full
+        # post-reply effects sequence — even on the replay branch
+        # (existing_artifact_id is not None).  The previous eighth-
+        # round fix skipped effects on replay to avoid re-firing
+        # rescope; that traded the duplicate-rescope bug for a
+        # "crashed mid-effects → effects never run on replay" bug.
+        # Now ``_BackgroundRescopeTrigger.trigger_rescope`` is
+        # durably idempotent (via
+        # ``FidoStore.claim_rescope_trigger``), so replay can safely
+        # re-run eyes/emoji/rescope/insight-file: the rescope dedup
+        # is enforced inside the trigger, and the other effects are
+        # idempotent or already-marker-deduped.
         if target is not None:
-            executor.execute_effects_only(synthesis_response, target)
+            executor.execute_effects_only(
+                synthesis_response,
+                target,
+                insights_already_filed=pre_reply_insights_filed,
+            )
 
         return (category, titles)
 
@@ -1841,6 +2708,7 @@ class Dispatcher:
             agent=agent,
             prompts=prompts,
             dispatcher=self,
+            store=FidoStore(repo_cfg.work_dir),
         )
         executor = (
             _executor
@@ -1848,7 +2716,15 @@ class Dispatcher:
             else SynthesisExecutor(
                 gh,
                 rescope=rescope_trigger,
-                insight_filer=_GitHubInsightFiler(gh),
+                insight_filer=_GitHubInsightFiler(
+                    gh,
+                    agent=agent,
+                    prompts=prompts,
+                    critic_system_prompt=prompts.critic_system_prompt(
+                        issue=issue_ctx, pr=pr_ctx
+                    ),
+                    transport_counter=self._insight_dedup_transport_counter,
+                ),
                 fido_logins=FIDO_LOGINS,
             )
         )
@@ -1879,7 +2755,39 @@ class Dispatcher:
                 pr=pr_ctx,
                 agent=agent,
                 prompts=prompts,
+                # HOL-18 / #1912: ground-truth state for the
+                # reply-prose claim-grounding critic so it can catch
+                # PR #1858's "in commit ABC" lies against actual git.
+                claim_grounding_state=_gather_claim_grounding_state(repo_cfg.work_dir),
             )
+        except SynthesisCriticExhaustedError as critic_exc:
+            # HOL-20 / #1914: same routing as the review-comment path.
+            log.warning(
+                "synthesis %s critic exhausted for issue comment %s on PR "
+                "#%s — routing to BLOCKED PR + auto-file path",
+                critic_exc.label,
+                _cid,
+                number,
+            )
+            covered_promise_ids = list(_reply_promise_ids(context))
+            if direct_promise is not None:
+                covered_promise_ids.append(direct_promise.promise_id)
+            posted = False
+            if issue_target is not None:
+                posted = _route_critic_exhausted_blocked(
+                    critic_exc,
+                    issue_target,
+                    gh=gh,
+                    executor=executor,
+                    promise_ids=covered_promise_ids,
+                )
+            if not posted:
+                # See the matching raise in the review-comment path
+                # above (Codex on PR #1932).
+                raise critic_exc
+            if direct_promise is not None:
+                FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
+            return ("BLOCKED", [])
         except SynthesisExhaustedError:
             log.warning(
                 "synthesis exhausted retries for issue comment %s on PR #%s — "
@@ -1915,6 +2823,8 @@ class Dispatcher:
 
         promise_ids = _reply_promise_ids(context)
         body = append_reply_promise_markers(body, promise_ids)
+        # Codex P2 seventh round on PR #1938 — see review-comment path.
+        pre_reply_insights_filed = False
         existing_artifact_id = _existing_reply_artifact(repo_cfg, promise_ids)
         if existing_artifact_id is None:
             _claim_reply_outbox_effects(
@@ -1924,6 +2834,15 @@ class Dispatcher:
                 ),
                 promise_ids=promise_ids,
             )
+            # HOL-26 / #1920: file insights BEFORE the reply post.  See
+            # the matching comment on the review-comment path.
+            if issue_target is not None:
+                pre_reply_insights_filed = _safe_file_insights_pre_reply(
+                    executor,
+                    synthesis_response,
+                    issue_target,
+                    where=f"{repo_full} #{number} comment {comment_id}",
+                )
             log.info("posting issue comment reply on PR #%s: %s", number, body[:80])
             posted = gh.comment_issue(repo_full, number, body)
             log.info("reply posted on PR #%s", number)
@@ -1946,12 +2865,16 @@ class Dispatcher:
         if direct_promise is not None:
             FidoStore(repo_cfg.work_dir).ack_promise(direct_promise.promise_id)
 
-        # Execute post-reply effects: remove eyes, add final emoji, trigger
-        # rescope.  Reuses the ``executor`` and ``issue_target`` constructed
-        # before the synthesis call so the failure path could share its
-        # eyes-removal helper.
+        # Codex P1 (ninth round) on PR #1938: always run full
+        # effects — see the matching comment on ``reply_to_comment``.
+        # ``trigger_rescope`` is durably idempotent, so replay can
+        # re-run safely.
         if issue_target is not None:
-            executor.execute_effects_only(synthesis_response, issue_target)
+            executor.execute_effects_only(
+                synthesis_response,
+                issue_target,
+                insights_already_filed=pre_reply_insights_filed,
+            )
 
         log.info(
             "reply_to_issue_comment: complete for PR #%s (category=%s)",
@@ -1971,6 +2894,7 @@ class Dispatcher:
         result: list[dict[str, Any]],
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
+        verdict: IntentVerdict | None = None,
     ) -> None:
         """Post a per-intent reply per the INV-F reply-back rule.
 
@@ -2033,7 +2957,15 @@ class Dispatcher:
                 seen_cids.add(other_cid)
                 co_contributing.append(other)
 
-        if isinstance(kind, oracle.NotifyDropped):
+        # HOL-25 / #1919: when the call carries a verdict (HOL-24 path),
+        # use outcome+narrative framing so the prose grounds in what the
+        # rescope actually decided rather than the cross-author oracle's
+        # default "a later commenter caused..." story (which may not be
+        # true — a no_op verdict can stand alone with no other commenter
+        # involved).
+        if verdict is not None:
+            framing = _hol25_verdict_framing(verdict)
+        elif isinstance(kind, oracle.NotifyDropped):
             framing = (
                 "A change request from a PR comment was DROPPED by the rescope "
                 "because a later commenter's intent caused the task this "
@@ -2091,6 +3023,123 @@ class Dispatcher:
         except Exception:
             log.exception("failed to notify intent comment %s", intent.comment_id)
 
+    def notify_terminal_task_thread(
+        self,
+        new_tasks: list[dict[str, Any]],
+        anchor_intent: RescopeIntent,
+        *,
+        pr: int,
+        agent: ProviderAgent,
+        prompts: Prompts,
+    ) -> None:
+        """HOL-28 / #1922: post the per-thread terminal aggregate reply
+        for *task* at *anchor_intent*'s comment.
+
+        Codex P1 (fifth round) on PR #1938: the prior shape iterated
+        ``contributing_intents`` and emitted per-intent.  That had two
+        problems:
+
+        1. Per-intent emission required per-intent ``comment_type``
+           metadata the tasks.json schema doesn't carry — so a
+           hardcoded fallback could route an issue-comment id through
+           the review-comment endpoint.
+        2. When the worker passed only the task-anchor intent (to
+           avoid the wrong-endpoint hole), terminal threads for
+           non-anchor contributing intents were silently dropped.
+
+        The reconciled contract: HOL-28's job is the closing summary
+        at the task's PRIMARY thread.  Cross-author divergence
+        notifications at rescope time are HOL-24's job.  Tasks whose
+        secondary contributing-intent threads also deserve a closing
+        summary are a future leaf that needs per-intent ``comment_type``
+        in the schema; the predicate ``newly_terminal_intent_threads``
+        (HOL-27) remains a building block for that future work.
+
+        The caller is responsible for:
+
+        - Verifying the thread just transitioned from non-all-terminal
+          to all-terminal (so this method fires exactly once per
+          thread closing).
+        - Constructing *anchor_intent* from the task's primary thread
+          (``task["thread"]``) with the correct ``comment_type``.
+
+        Codex P1+P2 (seventh round) on PR #1938: this method now
+        receives ``new_tasks`` (the live post-completion snapshot)
+        and builds completed/skipped lists from EVERY task anchored
+        at ``anchor_intent.comment_id``.  The previous shape took a
+        single task argument and gated on its ``status`` — which was
+        broken on both axes:
+
+        1. The worker passed a pre-completion snapshot of the task,
+           so the dispatcher saw stale ``status="in_progress"`` and
+           returned early.
+        2. Even with a fresh row, building the closing summary from
+           only ONE task lost the sibling tasks that shared the
+           thread; the user got "T2 done" with no mention of T1.
+
+        Best-effort post: transport failures log but do not propagate.
+        """
+        # Codex P2 (eighth round) on PR #1938: anchor comparison
+        # goes through ``int(...)`` normalization so a string-typed
+        # ``thread.comment_id`` in any sibling row doesn't make that
+        # sibling invisible during the "still pending?" filter.
+        from fido.types import hol28_anchor_key
+
+        terminal = {TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value}
+        anchored = [
+            t
+            for t in new_tasks
+            if hol28_anchor_key(t.get("thread")) == anchor_intent.comment_id
+        ]
+        completed = [
+            t for t in anchored if str(t.get("status")) == TaskStatus.COMPLETED.value
+        ]
+        skipped = [
+            t for t in anchored if str(t.get("status")) == TaskStatus.SKIPPED.value
+        ]
+        non_terminal = [t for t in anchored if str(t.get("status")) not in terminal]
+        if non_terminal:
+            log.info(
+                "notify_terminal_task_thread: anchor %s still has "
+                "non-terminal tasks (%r) — skipping",
+                anchor_intent.comment_id,
+                [t.get("id") for t in non_terminal],
+            )
+            return
+        if not anchored:
+            log.info(
+                "notify_terminal_task_thread: no tasks anchored at "
+                "comment %s — skipping",
+                anchor_intent.comment_id,
+            )
+            return
+        framing = _hol28_terminal_thread_framing(anchor_intent, completed, skipped)
+        body = safe_voice_turn(
+            agent,
+            prompts.persona_wrap(framing),
+            model=agent.voice_model,
+            allowed_tools=READ_ONLY_ALLOWED_TOOLS,
+            system_prompt=prompts.reply_system_prompt(),
+            log_prefix="notify_terminal_task_thread",
+        )
+        try:
+            self._gh.reply_to_review_comment(
+                self._repo_cfg.name, pr, body, anchor_intent.comment_id
+            )
+            log.info(
+                "notified terminal task thread at comment %s "
+                "(%d completed, %d skipped across %d sibling tasks)",
+                anchor_intent.comment_id,
+                len(completed),
+                len(skipped),
+                len(anchored),
+            )
+        except Exception:
+            log.exception(
+                "failed to notify terminal task thread at comment %s",
+                anchor_intent.comment_id,
+            )
+
     def _make_reorder_kwargs(
         self,
         registry: ActivityReporter,
@@ -2098,6 +3147,8 @@ class Dispatcher:
         prompts: Prompts,
         rewrite_fn: Callable[..., None],
         sync_fn: Callable[[Path, Any], None] | None = None,
+        *,
+        after_apply: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Build the kwargs dict for a :func:`~fido.tasks.reorder_tasks` call."""
         from fido.tasks import sync_tasks as _real_sync_tasks
@@ -2110,6 +3161,17 @@ class Dispatcher:
             sync_fn if sync_fn is not None else _real_sync_tasks
         )
 
+        # Codex P2 (fourteenth round) on PR #1938: per-caller
+        # after-apply hooks live in a mutable shared list so
+        # coalesced callers can be appended without re-wrapping the
+        # ``_on_done`` closure.  ``on_done`` runs sync+rewrite ONCE
+        # for the batch and then fires every after-apply, so all
+        # coalesced intents are marked applied — and the expensive
+        # external writes happen exactly once.
+        after_applies: list[Callable[[], None]] = []
+        if after_apply is not None:
+            after_applies.append(after_apply)
+
         def on_done() -> None:
             _effective_sync(work_dir, gh)
             rewrite_fn(
@@ -2119,6 +3181,8 @@ class Dispatcher:
                 _state=State(work_dir / ".git" / "fido"),
                 _tasks=Tasks(work_dir),
             )
+            for hook in after_applies:
+                hook()
 
         def on_inprogress_affected(task_id: str) -> None:
             log.info(
@@ -2144,6 +3208,18 @@ class Dispatcher:
             "_on_inprogress_affected": on_inprogress_affected,
             "agent": agent,
             "prompts": prompts,
+            # HOL-16 follow-up / #1934: process-local per-intent
+            # drop counter shared across this Dispatcher's rescope
+            # batches; escalates via the Dispatcher-bound escalator
+            # method when an intent's drops cross threshold.
+            "task_creation_drop_counter": self._task_creation_drop_counter,
+            # Mutable shared list captured by ``on_done``.  Stored
+            # alongside ``_on_done`` so the coalesce branch can
+            # extend it when a new caller piles onto an in-flight
+            # batch (codex P2 fourteenth round on PR #1938).  Not
+            # forwarded to ``reorder_tasks`` — popped at the
+            # boundary.
+            "_after_applies": after_applies,
         }
         issue_ctx, pr_ctx = _load_active_context_for_rescope(
             work_dir, repo_cfg.name, gh
@@ -2208,7 +3284,6 @@ class Dispatcher:
             task_id_to_positive: dict[str, int],
             verdicts: list["IntentVerdict"],
         ) -> None:
-            del verdicts  # reserved; not consumed by the current rule
             if pr_ctx is None:
                 return
             intent_rows = _rocq_intent_rows(intents)
@@ -2217,6 +3292,7 @@ class Dispatcher:
                 intent_rows, task_records, op_inputs
             )
             positive_to_task_id = {pos: tid for tid, pos in task_id_to_positive.items()}
+            notified_cids: set[int] = set()
             for cid, kind in entries:
                 intent = intents_by_cid[cid]
                 affected_positives = oracle.intent_contributing_tasks(cid, task_records)
@@ -2235,6 +3311,71 @@ class Dispatcher:
                     agent=agent,
                     prompts=prompts,
                 )
+                notified_cids.add(cid)
+
+            # HOL-24 / #1918: verdict-based per-thread reply gating.
+            # The oracle above covers the cross-author destructive-op
+            # cases that pre-date the verdict envelope.  This pass uses
+            # the HOL-23 ``verdict_is_material`` predicate to catch
+            # verdicts the oracle misses — primarily ``no_op`` drops
+            # (the request silently disappeared, closes the #1890
+            # class of failure) and honored-but-divergent (Opus queued
+            # something different from what the user asked).  Dedupes
+            # against the oracle path by intent_comment_id so we never
+            # double-notify.
+            tasks_by_id = {t["id"]: t for t in result}
+            for verdict in verdicts:
+                cid = verdict.intent_comment_id
+                if cid in notified_cids:
+                    continue
+                intent = intents_by_cid[cid]
+                affected_task_ids = [
+                    tid for tid in verdict.affected_task_ids if tid in tasks_by_id
+                ]
+                # Codex P2 on PR #1938: honored verdicts can omit
+                # ``affected_task_ids`` even when they shaped real
+                # tasks (the field is optional on the dataclass).
+                # Without this fallback, the divergence check below
+                # sees no descriptions and ``verdict_is_material``
+                # returns False for honored — silently skipping the
+                # reply for what's actually a divergent landing.
+                # Fall back to every task whose
+                # ``contributing_intents`` lists this comment id.
+                if not affected_task_ids:
+                    affected_task_ids = [
+                        tid
+                        for tid, t in tasks_by_id.items()
+                        if cid in (t.get("contributing_intents") or ())
+                    ]
+                descs = tuple(
+                    (tasks_by_id[tid].get("description") or "")
+                    for tid in affected_task_ids
+                )
+                if not verdict_is_material(intent, verdict, task_descriptions=descs):
+                    continue
+                # Map outcome → existing NotifyKind.  no_op shares the
+                # "your ask was dropped" emotional shape with NotifyDropped;
+                # reshaped/honored-divergent/superseded all share "your ask
+                # landed but in a form different from what you wrote" with
+                # NotifyChanged.  HOL-25 will refine prose framing per
+                # outcome inside ``_notify_intent_outcome``.
+                kind: oracle.NotifyKind = (
+                    oracle.NotifyDropped()
+                    if verdict.outcome == "no_op"
+                    else oracle.NotifyChanged()
+                )
+                self._notify_intent_outcome(
+                    intent,
+                    kind,
+                    pr=pr_ctx.number,
+                    batch_intents=intents,
+                    affected_task_ids=affected_task_ids,
+                    result=result,
+                    agent=agent,
+                    prompts=prompts,
+                    verdict=verdict,  # HOL-25: drives outcome-aware framing
+                )
+                notified_cids.add(cid)
 
         return on_rescope_apply
 
@@ -2247,6 +3388,7 @@ class Dispatcher:
         agent: ProviderAgent | None = None,
         prompts: Prompts | None = None,
         _release_untriaged_on_finish: bool = False,
+        _on_done: Callable[[], None] | None = None,
     ) -> None:
         """Run :func:`~fido.tasks.reorder_tasks` in a daemon background thread.
 
@@ -2304,6 +3446,7 @@ class Dispatcher:
             prompts,
             rewrite_fn,
             self._sync_fn,
+            after_apply=_on_done,
         )
 
         with _reorder_coalesce_lock:
@@ -2313,15 +3456,44 @@ class Dispatcher:
             if _release_untriaged_on_finish:
                 entry["untriaged_holds"] = int(entry.get("untriaged_holds", 0)) + 1
             if entry["running"]:
-                # Coalesce: latest commit_summary and kwargs win; intents accumulate
+                # Coalesce: latest commit_summary wins; intents accumulate
                 # so every originating comment is tracked even when multiple
                 # comment-triggered rescopes arrive during the same Opus call.
+                #
+                # Codex P2 (fourteenth round) on PR #1938: keep the
+                # existing pending batch's ``_on_done`` (so its sync
+                # and PR-body rewrite run ONCE for the coalesced
+                # batch) and extend its mutable ``_after_applies``
+                # list with this caller's after-apply hook.  Every
+                # coalesced intent gets marked applied without
+                # duplicating the expensive external writes — and if
+                # the sync/rewrite step fails, NO intent is marked
+                # applied (the apply hooks only run after both
+                # succeed), so a restart correctly replays the
+                # whole batch.
                 existing = entry["pending"]
                 if existing is None:
                     entry["pending"] = (commit_summary, kwargs, list(intents or []))
                 else:
                     accumulated = list(existing[2]) + list(intents or [])
-                    entry["pending"] = (commit_summary, kwargs, accumulated)
+                    existing_kwargs = existing[1]
+                    existing_chain = existing_kwargs.get("_after_applies")
+                    new_chain = kwargs.get("_after_applies")
+                    if existing_chain is not None and new_chain is not None:
+                        existing_chain.extend(new_chain)
+                    # Codex P2 (fifteenth round) on PR #1938: keep
+                    # the latest caller's fresh issue/pr context
+                    # (used by the rescope prompt and the reply
+                    # notifier), but preserve the existing batch's
+                    # ``_on_done`` — the single closure that owns
+                    # the shared ``_after_applies`` list — so
+                    # sync+rewrite still run ONCE for the coalesced
+                    # batch.  Latest kwargs win for every field
+                    # EXCEPT the on_done / shared-list pair.
+                    merged = dict(kwargs)
+                    merged["_on_done"] = existing_kwargs.get("_on_done")
+                    merged["_after_applies"] = existing_chain
+                    entry["pending"] = (commit_summary, merged, accumulated)
                 return
             entry["running"] = True
             entry["pending"] = None
@@ -2368,11 +3540,15 @@ class Dispatcher:
                         agent=kw.get("agent"),
                         prompts=kw.get("prompts"),
                     )
+                    # ``_after_applies`` is a side-channel captured
+                    # by ``_on_done``'s closure; it must not reach
+                    # ``reorder_tasks`` (not part of its signature).
+                    reorder_kw = {k: v for k, v in kw.items() if k != "_after_applies"}
                     reorder(
                         registry.tasks_for(repo_cfg.name),
                         cs,
                         intents=current_intents or None,
-                        **kw,
+                        **reorder_kw,
                     )
                     log.info("rescope BG: iteration %d complete", iteration)
                     with _reorder_coalesce_lock:
@@ -2881,6 +4057,169 @@ def _intent_arrival_indices(intents: list[RescopeIntent]) -> dict[int, int]:
     """
     ordered = sorted(intents, key=lambda i: i.timestamp)
     return {intent.comment_id: idx for idx, intent in enumerate(ordered)}
+
+
+def _safe_file_insights_pre_reply(
+    executor: "SynthesisExecutor",
+    response: "CommentResponse",
+    target: "CommentTarget",
+    *,
+    where: str,
+) -> bool:
+    """HOL-26 / #1920 (codex P1 sixth round on PR #1938): wrap
+    :meth:`SynthesisExecutor.file_insights_pre_reply` in a best-
+    effort guard so a transient GitHub failure inside the insight-
+    filer (marker search or issue create) does NOT drop the
+    user-visible reply.
+
+    Returns ``True`` when filing completed cleanly (so the matching
+    ``execute_effects_only`` call can pass
+    ``insights_already_filed=True`` and skip the post-reply re-file).
+    Returns ``False`` on failure (codex P2 seventh round on PR
+    #1938) so the caller leaves ``insights_already_filed=False`` and
+    the post-reply effects pass re-attempts the file — without
+    that, a transient pre-reply failure permanently lost the
+    insight instead of retrying.
+
+    The reply is the primary user-facing artifact; insight filing is
+    bookkeeping.  HOL-18's claim-grounding critic remains the
+    verification-layer backstop for prose that references a
+    not-yet-filed insight.
+
+    *where* is a free-form locator (PR/comment string) for the log
+    line so a transient failure is greppable to its source path.
+    """
+    try:
+        executor.file_insights_pre_reply(response, target)
+    except Exception:
+        log.exception(
+            "HOL-26: file_insights_pre_reply failed for %s — "
+            "proceeding with reply post; post-reply effects will "
+            "retry the file",
+            where,
+        )
+        return False
+    return True
+
+
+def _hol25_verdict_framing(verdict: IntentVerdict) -> str:
+    """HOL-25 / #1919: per-thread material-divergence framing built from
+    the rescope verdict's outcome + narrative.
+
+    Falls under the voice-text-not-templated rule: this builds the
+    INSTRUCTION sent to Opus (a deterministic fact-carrier), not the
+    user-visible reply text — Opus generates that per call from these
+    facts.  Each outcome carries a different story shape:
+
+    - ``no_op``: the request didn't land in the queue at all.  The
+      narrative explains why; the reply must NOT pretend work is in
+      flight.
+    - ``honored`` (divergent): a task DID land, but its scope reads
+      differently from the literal change_request.  Reply explains
+      the reshape so the requester doesn't think their exact ask was
+      queued verbatim.
+    - ``reshaped``: same shape as honored-divergent at the user-facing
+      level; the verdict's narrative carries the rescope's reasoning.
+    - ``superseded``: another later intent in the same batch took
+      precedence.  ``by_intent_comment_id`` (when set) names the
+      superseding intent so the prompt can render the link.
+    """
+    # IntentVerdict.__post_init__ enforces non-empty narrative on every
+    # outcome (HOL-3 / #1897) and ``by_intent_comment_id`` on superseded
+    # (INV-E / #1803), so we can trust both here without fallback branches.
+    narrative = (verdict.narrative or "").strip()
+    match verdict.outcome:
+        case "no_op":
+            return (
+                "A change request from a PR comment was NOT queued by the "
+                "rescope.  Tell this commenter their ask did not land, and "
+                "explain WHY using the rescope's narrative below.  Do NOT "
+                "imply work is in flight — nothing was queued.\n\n"
+                f"Rescope narrative: {narrative}"
+            )
+        case "honored":
+            return (
+                "A change request from a PR comment WAS queued, but the "
+                "task that landed reads differently from the literal ask.  "
+                "Tell this commenter their ask landed and explain the "
+                "reshape using the rescope's narrative below.  Do NOT "
+                "claim the task description matches verbatim — it diverges.\n\n"
+                f"Rescope narrative: {narrative}"
+            )
+        case "reshaped":
+            return (
+                "A change request from a PR comment was RESHAPED by the "
+                "rescope into a different-scope task.  Tell this commenter "
+                "the STORY of how their ask was reshaped using the "
+                "rescope's narrative below.  Do NOT claim work is done — "
+                "the rescope only restructured the plan.\n\n"
+                f"Rescope narrative: {narrative}"
+            )
+        case "superseded":
+            return (
+                f"A change request from a PR comment was SUPERSEDED by intent "
+                f"comment #{verdict.by_intent_comment_id} "
+                "in the same rescope batch.  Tell this commenter their ask "
+                "was overridden using the rescope's narrative below.  Do "
+                "NOT say their work is done — it was dropped in favour of "
+                "the superseding intent.\n\n"
+                f"Rescope narrative: {narrative}"
+            )
+
+
+def _hol28_terminal_thread_framing(
+    intent: RescopeIntent,
+    completed_tasks: list[dict[str, Any]],
+    skipped_tasks: list[dict[str, Any]],
+) -> str:
+    """HOL-28 / #1922: per-thread terminal aggregate framing.
+
+    Built when an intent thread transitions to fully-terminal — every
+    task carrying *intent*'s comment_id in ``contributing_intents`` is
+    now COMPLETED or SKIPPED.  The framing lists what landed (commit
+    titles) and what was skipped (with the skip narrative if present),
+    so Opus can generate a single per-thread reply summarising
+    everything the requester's comment shaped.
+
+    Voice-text-not-templated: this is the INSTRUCTION sent to Opus
+    (deterministic fact-carrier); Opus generates the user-visible
+    prose per call.
+    """
+    parts: list[str] = [
+        "Every task this PR comment shaped has reached terminal state — "
+        "either landed as a commit or skipped with reason.  Tell this "
+        "commenter the AGGREGATE story across all the tasks their ask "
+        "touched.  Do NOT post per-task; this is the single closing "
+        "summary for the whole thread.",
+        "",
+        f"Their comment id: {intent.comment_id} ({intent.timestamp})",
+    ]
+    # Codex P2 (seventh round) on PR #1938: only include the
+    # change_request line when it's a real, non-empty value.  The
+    # HOL-28 worker wire constructs a synthetic anchor intent with
+    # ``change_request=""``; interpolating a placeholder string here
+    # would leak fabricated request text into the user-visible reply.
+    if intent.change_request.strip():
+        parts.insert(
+            len(parts) - 1,
+            f"This commenter's change request: {intent.change_request}",
+        )
+    if completed_tasks:
+        parts.append("")
+        parts.append("Tasks that LANDED (use commit titles in the story):")
+        for task in completed_tasks:
+            title = (task.get("title") or "").strip() or "(untitled)"
+            parts.append(f"- {task['id']}: {title}")
+    if skipped_tasks:
+        parts.append("")
+        parts.append("Tasks that were SKIPPED (carry the skip reason verbatim):")
+        for task in skipped_tasks:
+            title = (task.get("title") or "").strip() or "(untitled)"
+            reason = (task.get("description") or "").strip() or "(no reason recorded)"
+            parts.append(f"- {task['id']}: {title} — {reason}")
+    parts.append("")
+    parts.append("Write a brief aggregate reply.")
+    return "\n".join(parts)
 
 
 def _rocq_intent_rows(

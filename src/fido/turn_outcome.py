@@ -27,6 +27,7 @@ from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
     SkipTaskWithReason,
+    SplitTask,
     StuckOnTask,
     TurnOutcome,
     parse_sentinel,
@@ -256,6 +257,19 @@ def parse_turn_outcome(
                 kind,
                 "reason",
                 lambda s: StuckOnTask(reason=s),
+                _oracle=oracle,
+            )
+        case "split-task":
+            # HOL-13 / #1907: emitted by the worker on pickup when the
+            # task's invariant doesn't fit a single commit boundary.
+            # The reason explains why; the harness routes this to a
+            # re-decomposition pathway (BLOCKED with a "needs split"
+            # label so the next rescope can fan it out).
+            outcome = _parse_outcome_field(
+                obj,
+                kind,
+                "reason",
+                lambda s: SplitTask(reason=s),
                 _oracle=oracle,
             )
         case None:

@@ -8,11 +8,15 @@ import pytest
 from fido.synthesis import Insight
 from fido.synthesis_call import (
     MAX_RETRIES,
+    CriticExhaustedError,
+    CriticVerdict,
+    SynthesisCriticExhaustedError,
     SynthesisExhaustedError,
-    _extract_json_objects,
     _parse_comment_response,
     call_failure_explanation,
     call_synthesis,
+    critic_loop,
+    extract_json_objects,
 )
 from fido.types import ActiveIssue, ActivePR
 
@@ -120,12 +124,16 @@ class _FakePrompts:
         system: str = "sys",
         user: str = "user",
         followup_system: str = "followup-sys",
+        critic_system: str = "critic-sys",
     ) -> None:
         self.synthesis_system_prompt = _FakeCallRecorder(return_value=system)
         self.synthesis_followup_system_prompt = _FakeCallRecorder(
             return_value=followup_system
         )
+        self.critic_system_prompt = _FakeCallRecorder(return_value=critic_system)
         self.synthesis_prompt = _FakeCallRecorder(return_value=user)
+        self.intent_coverage_critic_prompt = _FakeCallRecorder(return_value="")
+        self.reply_prose_claim_grounding_prompt = _FakeCallRecorder(return_value="")
 
 
 class _FakeFailurePrompts:
@@ -170,56 +178,73 @@ def _make_agent(return_value: object) -> _FakeAgent:
     return _FakeAgent(return_value)
 
 
+# HOL-15 / #1909: stubs for the intent-coverage critic turn.  Threaded
+# into ``side_effect`` sequences between synthesis and verify turns so
+# the call ordering remains synthesis → critic → verify[ → derive].
+_CRITIC_PASS = '{"passed": true}'
+
+
+def _critic_fail(gap: str = "missing X") -> str:
+    """Stub for a failing critic verdict — drives a synthesis retry."""
+    return json.dumps({"passed": False, "gap": gap})
+
+
 def _make_prompts(
     system: str = "sys",
     user: str = "user",
     followup_system: str = "followup-sys",
+    critic_system: str = "critic-sys",
 ) -> _FakePrompts:
-    return _FakePrompts(system=system, user=user, followup_system=followup_system)
+    return _FakePrompts(
+        system=system,
+        user=user,
+        followup_system=followup_system,
+        critic_system=critic_system,
+    )
 
 
 # ---------------------------------------------------------------------------
-# _extract_json_objects
+# extract_json_objects
 # ---------------------------------------------------------------------------
 
 
 class TestExtractJsonObjects:
     def test_returns_parsed_dict_for_clean_json(self) -> None:
-        result = _extract_json_objects('{"a": 1}')
+        result = extract_json_objects('{"a": 1}')
         assert result == [{"a": 1}]
 
     def test_returns_empty_for_no_braces(self) -> None:
-        result = _extract_json_objects("not json at all")
+        result = extract_json_objects("not json at all")
         assert result == []
 
     def test_finds_object_when_preamble_present(self) -> None:
-        result = _extract_json_objects('Here is the JSON: {"a": 1} done.')
+        result = extract_json_objects('Here is the JSON: {"a": 1} done.')
         assert result == [{"a": 1}]
 
     def test_skips_invalid_brace_and_continues(self) -> None:
-        result = _extract_json_objects('{ not json, then {"a": 1}')
+        result = extract_json_objects('{ not json, then {"a": 1}')
         assert result == [{"a": 1}]
 
     def test_returns_all_objects_in_order(self) -> None:
-        result = _extract_json_objects('{"a": 1} then {"b": 2}')
+        result = extract_json_objects('{"a": 1} then {"b": 2}')
         assert result == [{"a": 1}, {"b": 2}]
 
     def test_handles_nested_objects(self) -> None:
-        result = _extract_json_objects('{"outer": {"inner": 42}}')
+        result = extract_json_objects('{"outer": {"inner": 42}}')
         assert result == [{"outer": {"inner": 42}}]
 
     def test_skips_non_dict_json_values(self) -> None:
         # A JSON array starting with [ has no {, and a bare number has no {.
         # A JSON string has no {. Confirm arrays are skipped.
-        result = _extract_json_objects("[1, 2, 3]")
+        result = extract_json_objects("[1, 2, 3]")
         assert result == []
 
     def test_handles_leading_and_trailing_whitespace(self) -> None:
-        result = _extract_json_objects('  {"a": 1}  ')
+        result = extract_json_objects('  {"a": 1}  ')
         assert result == [{"a": 1}]
 
     def test_returns_empty_for_empty_string(self) -> None:
-        result = _extract_json_objects("")
+        result = extract_json_objects("")
         assert result == []
 
 
@@ -402,8 +427,11 @@ class TestCallSynthesis:
         )
 
         assert result.reply_text == "Great feedback!"
-        # 1 synthesis call + 1 verify call (change_request is None so verify fires)
-        assert agent.run_turn.call_count == 2
+        # 1 synthesis call + 1 critic call (HOL-15: always fires after a
+        # parse; here it gets back the same raw JSON which has no "passed"
+        # key so it fails open) + 1 verify call (change_request is None
+        # so the legacy #1218 verify still fires)
+        assert agent.run_turn.call_count == 3
 
     def test_passes_system_prompt_to_agent(self) -> None:
         agent = _make_agent(_make_raw())
@@ -428,14 +456,14 @@ class TestCallSynthesis:
     def test_retry_on_parse_failure_then_success(self) -> None:
         raw_bad = "not json"
         raw_good = _make_raw(reply_text="Fixed!")
-        # 1 bad synthesis + 1 good synthesis + 1 verify (returns "Yes" → no promotion)
-        agent = _make_agent([raw_bad, raw_good, "Yes"])
+        # 1 bad synthesis + 1 good synthesis + 1 critic (passes) + 1 verify
+        agent = _make_agent([raw_bad, raw_good, _CRITIC_PASS, "Yes"])
         prompts = _make_prompts()
 
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.reply_text == "Fixed!"
-        assert agent.run_turn.call_count == 3
+        assert agent.run_turn.call_count == 4
 
     def test_retry_appends_suffix_to_prompt(self) -> None:
         raw_bad = "not json"
@@ -676,32 +704,36 @@ class TestCallSynthesisVerificationTurn:
     def test_verify_yes_no_promotion(self) -> None:
         """When verify says Yes, change_request stays None."""
         raw = _make_raw(reply_text="Looks fine as-is.", change_request=None)
-        agent = _make_agent([raw, "Yes"])
+        # Codex on PR #1932: ``_check_and_promote`` now runs BEFORE the
+        # critic so any derived ``change_request`` is part of the
+        # response the critic sees.  Call order is therefore
+        # synthesis → verify[ → derive] → critic.
+        agent = _make_agent([raw, "Yes", _CRITIC_PASS])
         prompts = _make_prompts()
 
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.change_request is None
-        # synthesis + verify
-        assert agent.run_turn.call_count == 2
+        # synthesis + verify + critic
+        assert agent.run_turn.call_count == 3
 
     def test_verify_no_derives_change_request(self) -> None:
         """When verify says No, the derive turn populates change_request."""
         raw = _make_raw(reply_text="This looks fine.", change_request=None)
-        agent = _make_agent([raw, "No", "Update the test coverage"])
+        agent = _make_agent([raw, "No", "Update the test coverage", _CRITIC_PASS])
         prompts = _make_prompts()
 
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.change_request == "Update the test coverage"
         assert result.reply_text == "This looks fine."
-        # synthesis + verify + derive
-        assert agent.run_turn.call_count == 3
+        # synthesis + verify + derive + critic
+        assert agent.run_turn.call_count == 4
 
     def test_verify_no_preserves_reply_text(self) -> None:
         """Promotion via verify must not alter reply_text."""
         raw = _make_raw(reply_text="Understood.", change_request=None)
-        agent = _make_agent([raw, "No", "Add missing tests"])
+        agent = _make_agent([raw, "No", "Add missing tests", _CRITIC_PASS])
         prompts = _make_prompts()
 
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
@@ -709,7 +741,9 @@ class TestCallSynthesisVerificationTurn:
         assert result.reply_text == "Understood."
 
     def test_verify_skipped_when_change_request_set(self) -> None:
-        """When change_request is already populated, verify turn is never called."""
+        """When change_request is already populated, verify turn is never
+        called.  HOL-15 critic still fires (it gates EVERY response, not
+        just change_request=None ones)."""
         raw = _make_raw(reply_text="Got it.", change_request="Fix the tests")
         agent = _make_agent(raw)
         prompts = _make_prompts()
@@ -717,13 +751,13 @@ class TestCallSynthesisVerificationTurn:
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.change_request == "Fix the tests"
-        # synthesis only — no verify turn
-        assert agent.run_turn.call_count == 1
+        # synthesis + critic — no verify (change_request already set)
+        assert agent.run_turn.call_count == 2
 
     def test_verify_no_case_insensitive(self) -> None:
         """'NO', 'No.', 'no' etc. all trigger promotion."""
         raw = _make_raw(reply_text="Sure.", change_request=None)
-        agent = _make_agent([raw, "NO.", "Handle the edge case"])
+        agent = _make_agent([raw, "NO.", "Handle the edge case", _CRITIC_PASS])
         prompts = _make_prompts()
 
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
@@ -733,7 +767,9 @@ class TestCallSynthesisVerificationTurn:
     def test_verify_no_with_trailing_text_triggers_promotion(self) -> None:
         """'No, I missed X' (starts with No) also triggers promotion."""
         raw = _make_raw(reply_text="Sure.", change_request=None)
-        agent = _make_agent([raw, "No, I did not record it.", "Fix the linting"])
+        agent = _make_agent(
+            [raw, "No, I did not record it.", "Fix the linting", _CRITIC_PASS]
+        )
         prompts = _make_prompts()
 
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
@@ -743,19 +779,19 @@ class TestCallSynthesisVerificationTurn:
     def test_verify_no_skips_promotion_when_derive_empty(self) -> None:
         """When the derive turn returns empty, no promotion — original returned."""
         raw = _make_raw(reply_text="This looks fine.", change_request=None)
-        agent = _make_agent([raw, "No", ""])
+        agent = _make_agent([raw, "No", "", _CRITIC_PASS])
         prompts = _make_prompts()
 
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.change_request is None
-        # synthesis + verify + derive (even though derive is empty)
-        assert agent.run_turn.call_count == 3
+        # synthesis + verify + derive (even empty) + critic
+        assert agent.run_turn.call_count == 4
 
     def test_verify_no_preserves_emoji_on_promotion(self) -> None:
         """Promotion via verify preserves the original emoji."""
         raw = _make_raw(reply_text="Got it.", emoji="rocket", change_request=None)
-        agent = _make_agent([raw, "No", "Add the missing test"])
+        agent = _make_agent([raw, "No", "Add the missing test", _CRITIC_PASS])
         prompts = _make_prompts()
 
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
@@ -769,7 +805,7 @@ class TestCallSynthesisVerificationTurn:
         raw = _make_raw(
             reply_text="Got it.", change_request=None, insights=insight_data
         )
-        agent = _make_agent([raw, "No", "Add the missing test"])
+        agent = _make_agent([raw, "No", "Add the missing test", _CRITIC_PASS])
         prompts = _make_prompts()
 
         result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
@@ -869,29 +905,42 @@ class TestCallSynthesisVerificationTurn:
         goes off running unrelated tools (observed on PR #1842, 84-second
         turn before the reply landed).  The follow-up variant strips the
         JSON-only directive so ``startswith("no")`` actually works
-        (codex P1)."""
+        (codex P1).
+
+        Call order is synth → verify → critic after the codex PR #1932
+        reorder; verify sits at index 1."""
         raw = _make_raw(reply_text="Looks fine.", change_request=None)
-        agent = _make_agent([raw, "Yes"])
+        agent = _make_agent([raw, "Yes", _CRITIC_PASS])
         prompts = _make_prompts(
-            system="SYNTHESIS_JSON_ONLY", followup_system="SYNTHESIS_FOLLOWUP"
+            system="SYNTHESIS_JSON_ONLY",
+            followup_system="SYNTHESIS_FOLLOWUP",
+            critic_system="SYNTHESIS_CRITIC",
         )
 
         call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
-        # First turn: main synthesis with the JSON-only system prompt.
+        # Idx 0: main synthesis with the JSON-only system prompt.
         _, synth_kwargs = agent.run_turn.call_args_list[0]
         assert synth_kwargs.get("system_prompt") == "SYNTHESIS_JSON_ONLY"
-        # Second turn: verify with the follow-up system prompt.
+        # Idx 1: legacy verify with the plain-text follow-up prompt.
         _, verify_kwargs = agent.run_turn.call_args_list[1]
         assert verify_kwargs.get("system_prompt") == "SYNTHESIS_FOLLOWUP"
+        # Idx 2: HOL-15 critic with its own JSON-capable prompt.
+        _, critic_kwargs = agent.run_turn.call_args_list[2]
+        assert critic_kwargs.get("system_prompt") == "SYNTHESIS_CRITIC"
 
     def test_derive_turn_carries_followup_system_prompt(self) -> None:
         """#1850: the derive turn (after a No verify) must also carry the
-        follow-up synthesis system prompt — same plain-text framing."""
+        follow-up synthesis system prompt — same plain-text framing.
+
+        Call order is synth → verify (No) → derive → critic after the
+        codex PR #1932 reorder; derive sits at index 2."""
         raw = _make_raw(reply_text="Looks fine.", change_request=None)
-        agent = _make_agent([raw, "No", "Add missing tests"])
+        agent = _make_agent([raw, "No", "Add missing tests", _CRITIC_PASS])
         prompts = _make_prompts(
-            system="SYNTHESIS_JSON_ONLY", followup_system="SYNTHESIS_FOLLOWUP"
+            system="SYNTHESIS_JSON_ONLY",
+            followup_system="SYNTHESIS_FOLLOWUP",
+            critic_system="SYNTHESIS_CRITIC",
         )
 
         call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
@@ -906,6 +955,7 @@ class TestCallSynthesisVerificationTurn:
         agent.run_turn.side_effect = [
             raw,
             RuntimeError("transport error"),
+            _CRITIC_PASS,
         ]
         prompts = _make_prompts()
 
@@ -913,7 +963,8 @@ class TestCallSynthesisVerificationTurn:
 
         assert result.reply_text == "Original reply."
         assert result.change_request is None
-        assert agent.run_turn.call_count == 2
+        # synthesis + verify (raises, swallowed) + critic
+        assert agent.run_turn.call_count == 3
 
     def test_derive_turn_exception_returns_original_response(self) -> None:
         """A transport error in the derive turn must not discard the synthesis result."""
@@ -923,6 +974,7 @@ class TestCallSynthesisVerificationTurn:
             raw,
             "No",
             RuntimeError("derive transport error"),
+            _CRITIC_PASS,
         ]
         prompts = _make_prompts()
 
@@ -930,7 +982,8 @@ class TestCallSynthesisVerificationTurn:
 
         assert result.reply_text == "Original reply."
         assert result.change_request is None
-        assert agent.run_turn.call_count == 3
+        # synthesis + verify + derive (raises, swallowed) + critic
+        assert agent.run_turn.call_count == 4
 
     def test_context_overflow_error_propagates_from_verify_turn(self) -> None:
         """ContextOverflowError in verify must propagate — not be swallowed."""
@@ -956,6 +1009,26 @@ class TestCallSynthesisVerificationTurn:
         with pytest.raises(SessionLeakError):
             call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
+    def test_context_overflow_error_propagates_from_intent_critic(self) -> None:
+        """After the PR #1932 reorder, the intent-coverage critic runs
+        AFTER verify — so a ContextOverflowError raised by the critic
+        sits at a later position in the side_effect list than verify's.
+        This test pins the critic's own propagation arm so a future
+        change can't accidentally swallow it.
+
+        ``change_request`` is pre-set on the response so verify is
+        skipped (``_check_and_promote`` short-circuits when cr is
+        already populated), placing the critic call right after synth."""
+        from fido.provider import ContextOverflowError
+
+        raw = _make_raw(reply_text="Reply.", change_request="Fix it")
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [raw, ContextOverflowError("overflow")]
+        prompts = _make_prompts()
+
+        with pytest.raises(ContextOverflowError):
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
     def test_context_overflow_error_propagates_from_derive_turn(self) -> None:
         """ContextOverflowError in derive must propagate — not be swallowed."""
         from fido.provider import ContextOverflowError
@@ -979,3 +1052,652 @@ class TestCallSynthesisVerificationTurn:
 
         with pytest.raises(SessionLeakError):
             call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# HOL-15 / #1909 — intent-coverage critic at triage
+# ---------------------------------------------------------------------------
+
+
+class TestIntentCoverageCritic:
+    """End-to-end behaviour of the HOL-15 intent-coverage gate wired
+    into ``call_synthesis``.  The gate fires for every parsed response
+    and can demand a synthesis retry with a specific gap."""
+
+    def test_passing_critic_does_not_change_count(self) -> None:
+        """A clean ``{"passed": true}`` verdict short-circuits the
+        critic — no retry, same synthesis result returned."""
+        raw = _make_raw(reply_text="Done.", change_request="Fix the test")
+        agent = _make_agent([raw, _CRITIC_PASS])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Done."
+        # synthesis + critic — no verify (change_request set), no retry
+        assert agent.run_turn.call_count == 2
+
+    def test_failing_critic_drives_retry_with_gap_in_nudge(self) -> None:
+        """When the critic fails, the next synthesis attempt's user
+        prompt MUST include the gap text so Opus addresses the specific
+        complaint — generic JSON-strict nudges don't help when the
+        problem is coverage, not parse shape.  This is the #1862 fix
+        path: the first response promised X but didn't queue it; the
+        critic catches the mismatch and the retry has the specific
+        gap to address.
+
+        After codex on PR #1932 reordered ``_check_and_promote`` BEFORE
+        the critics, v1 (cr=None) gets a "Yes" verify turn first; v2
+        (cr already set) skips verify.  Sequence per attempt now
+        includes the verify response when change_request is None."""
+        raw_v1 = _make_raw(reply_text="I'll add tests.", change_request=None)
+        raw_v2 = _make_raw(
+            reply_text="Tests added.", change_request="Add the missing tests"
+        )
+        agent = _make_agent(
+            [
+                raw_v1,
+                "Yes",  # verify on v1 (cr=None) — no derive
+                _critic_fail("prose promises tests but no change_request queued"),
+                raw_v2,
+                # v2 has cr set → no verify
+                _CRITIC_PASS,
+            ]
+        )
+        prompts = _make_prompts(user="USER-PROMPT")
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.change_request == "Add the missing tests"
+        # synth-v1 + verify-v1 + critic-fail + synth-v2 + critic-pass = 5
+        assert agent.run_turn.call_count == 5
+        # The second synthesis turn's user prompt must carry the gap
+        # text.  After the reorder synth-v2 is at index 3 (v1 + verify
+        # + critic-fail + v2 + critic-pass).
+        retry_args, _ = agent.run_turn.call_args_list[3]
+        assert "prose promises tests but no change_request queued" in retry_args[0]
+        assert "critic" in retry_args[0].lower()
+
+    def test_critic_exhaustion_raises_synthesis_exhausted_error(self) -> None:
+        """When MAX_RETRIES critic-fail/synthesis cycles all fail, the
+        outer call raises ``SynthesisCriticExhaustedError`` (HOL-20
+        subclass of ``SynthesisExhaustedError``) so the executor can
+        route to the BLOCKED PR + auto-file path (Constraint B:
+        never silently default to empty).
+
+        After the PR #1932 reorder, each attempt is synth → verify (cr
+        was None) → critic-fail.  3 attempts × 3 turns = 9 calls."""
+        raw = _make_raw(reply_text="Promise.", change_request=None)
+        side_effects = []
+        for _ in range(MAX_RETRIES):
+            side_effects.extend([raw, "Yes", _critic_fail("still wrong")])
+        agent = _make_agent(side_effects)
+        prompts = _make_prompts()
+
+        # The subclass still satisfies the parent type assertion so
+        # legacy catches stay compatible; HOL-20 catches can narrow.
+        with pytest.raises(
+            SynthesisCriticExhaustedError, match="intent-coverage critic"
+        ) as caught:
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        assert agent.run_turn.call_count == 3 * MAX_RETRIES
+        # HOL-20 retry history is attached to the exception.
+        assert caught.value.label == "intent-coverage"
+        assert len(caught.value.critic_gaps) == MAX_RETRIES
+        assert all("still wrong" in gap for gap in caught.value.critic_gaps)
+        assert len(caught.value.synthesis_attempts) == MAX_RETRIES
+        assert all("Promise." in preview for preview in caught.value.synthesis_attempts)
+
+    def test_parse_after_critic_resets_chain_to_generic_exhausted(self) -> None:
+        """Codex on PR #1932: a mixed sequence (critic-fail then
+        parse-fail attempts) used to leave stale critic state intact
+        — exhaustion would route to the BLOCKED PR / auto-file path
+        even though the LAST attempt was a parse failure (the model
+        couldn't emit valid JSON, NOT a critic that wouldn't accept
+        what it emitted).  Parse failures must RESET the critic
+        chain so the final exhaustion reflects the actual final
+        failure mode."""
+        good_raw = _make_raw(reply_text="Promise.", change_request=None)
+        # Attempt 1: parse → critic-fail.
+        # Attempt 2: parse fail.
+        # Attempt 3: parse fail.
+        # Last failure is parse → generic SynthesisExhaustedError.
+        agent = _make_agent(
+            [
+                good_raw,
+                "Yes",
+                _critic_fail("missing X"),
+                "not json",
+                "still not json",
+            ]
+        )
+        prompts = _make_prompts()
+
+        with pytest.raises(SynthesisExhaustedError) as caught:
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        # The exception is the BASE class, not the critic subclass —
+        # the parse failures reset the trailing-critic chain.
+        assert not isinstance(caught.value, SynthesisCriticExhaustedError)
+
+    def test_label_change_resets_critic_chain(self) -> None:
+        """Codex on PR #1932: when the failing critic LABEL changes
+        mid-retry, the gap chain must reset so the final
+        ``SynthesisCriticExhaustedError`` carries ONLY the trailing
+        run of same-label gaps.  Previously a sequence like
+        intent-coverage fail → reply-prose fail attached the
+        unrelated intent gap to the reply-prose exhaustion's
+        ``critic_gaps`` list, misfiling the BLOCKED bug context."""
+        raw_v1 = _make_raw(reply_text="Fixed in commit deadbeef.", change_request="x")
+        raw_v2 = _make_raw(reply_text="Fixed in commit abc1234.", change_request="x")
+        raw_v3 = _make_raw(reply_text="Fixed in commit abc1234.", change_request="x")
+        prose_fail = json.dumps(
+            {
+                "passed": False,
+                "gap": "prose gap A",
+                "rationale": "x",
+            }
+        )
+        prose_fail_2 = json.dumps(
+            {
+                "passed": False,
+                "gap": "prose gap B",
+                "rationale": "x",
+            }
+        )
+        # Attempt 1: intent-coverage fails (chain = [intent-gap])
+        # Attempt 2: intent-coverage passes, reply-prose fails
+        #            → chain must RESET to [prose gap A]
+        # Attempt 3: intent passes, reply-prose fails again
+        #            → chain APPENDS [prose gap A, prose gap B]
+        agent = _make_agent(
+            [
+                raw_v1,
+                _critic_fail("intent gap (should be reset)"),
+                raw_v2,
+                _CRITIC_PASS,
+                prose_fail,
+                raw_v3,
+                _CRITIC_PASS,
+                prose_fail_2,
+            ]
+        )
+        prompts = _make_prompts()
+        prompts.reply_prose_claim_grounding_prompt.return_value = "prose-p"
+
+        with pytest.raises(SynthesisCriticExhaustedError) as caught:
+            call_synthesis(
+                "comment",
+                is_bot=False,
+                agent=agent,
+                prompts=prompts,
+                claim_grounding_state={"recent_commit_shas": ["abc1234"]},
+            )
+
+        # The final exception's label is reply-prose AND its
+        # critic_gaps contains ONLY the trailing reply-prose gaps,
+        # not the earlier intent-coverage gap.
+        assert caught.value.label == "reply-prose"
+        assert caught.value.critic_gaps == ["prose gap A", "prose gap B"]
+        assert "intent gap" not in " ".join(caught.value.critic_gaps)
+
+    def test_critic_after_parse_routes_to_blocked(self) -> None:
+        """Mirror case: parse-fail early, then trailing critic-fail
+        attempts.  The LAST failure IS a critic gap, so exhaustion
+        routes to the BLOCKED / auto-file path with the trailing
+        critic chain attached.  The earlier parse-failure attempt
+        is correctly excluded from the chain."""
+        good_raw = _make_raw(reply_text="Promise.", change_request=None)
+        agent = _make_agent(
+            [
+                "not json",
+                good_raw,
+                "Yes",
+                _critic_fail("missing tests on attempt 2"),
+                good_raw,
+                "Yes",
+                _critic_fail("missing tests on attempt 3"),
+            ]
+        )
+        prompts = _make_prompts()
+
+        with pytest.raises(SynthesisCriticExhaustedError) as caught:
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        # Only the trailing critic-fail attempts are in the chain —
+        # the early parse-failure is correctly excluded.
+        assert caught.value.label == "intent-coverage"
+        assert len(caught.value.critic_gaps) == 2
+        assert caught.value.critic_gaps == [
+            "missing tests on attempt 2",
+            "missing tests on attempt 3",
+        ]
+
+    def test_parse_only_exhaustion_raises_generic_synthesis_exhausted(self) -> None:
+        """Parse-only failures (model can't emit valid JSON) raise the
+        generic ``SynthesisExhaustedError``, NOT the HOL-20 critic
+        subclass — that path falls back to the "please rephrase"
+        explanation, not the BLOCKED PR routing.  The two paths must
+        stay distinct so a flaky-model day doesn't auto-file a
+        critic-exhaustion bug."""
+        # Every attempt returns garbage that _parse_comment_response
+        # rejects.  No critic ever fires because there's no parsed
+        # response to critique.
+        agent = _make_agent(["not json"] * MAX_RETRIES)
+        prompts = _make_prompts()
+
+        with pytest.raises(SynthesisExhaustedError) as caught:
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        # The exception is the BASE class, not the critic subclass.
+        assert not isinstance(caught.value, SynthesisCriticExhaustedError)
+
+    def test_critic_transport_failure_fails_open(self) -> None:
+        """A transport error in the critic turn must not block a valid
+        synthesis response — the critic is an additional gate, not the
+        only one.  Critic exception → fail open → response shipped."""
+        raw = _make_raw(reply_text="Done.", change_request="Fix it")
+        agent = _make_agent([raw])
+        agent.run_turn.side_effect = [
+            raw,
+            RuntimeError("critic transport error"),
+        ]
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Done."
+        assert agent.run_turn.call_count == 2
+
+    def test_critic_malformed_response_fails_open(self) -> None:
+        """A critic response that doesn't parse as a verdict envelope
+        (no ``passed`` field, or non-bool ``passed``) must fail open
+        rather than blocking a valid synthesis response."""
+        raw = _make_raw(reply_text="Done.", change_request="Fix it")
+        agent = _make_agent(
+            [
+                raw,
+                '{"verdict": "yes"}',  # not the right schema
+            ]
+        )
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Done."
+
+    def test_critic_failure_without_gap_fails_open(self) -> None:
+        """A ``{"passed": false}`` verdict with no ``gap`` field can't
+        drive a meaningful retry — there's no specific complaint to
+        nudge with.  Treat as fail-open to avoid useless retries."""
+        raw = _make_raw(reply_text="Done.", change_request="Fix it")
+        agent = _make_agent([raw, '{"passed": false}'])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Done."
+
+    def test_critic_scans_past_leading_unrelated_json(self) -> None:
+        """codex r3293359040 on PR #1932: a response that leads with an
+        unrelated JSON object before the real verdict envelope must
+        still pick up the verdict.  Before the fix, only the first
+        decoded object was checked — a leading ``{}`` would mask a
+        following ``{"passed": false, "gap": "..."}`` and the
+        intent-coverage failure would silently ship.
+
+        Sequence under the PR #1932 reorder: v1 (cr=None) → verify
+        ("Yes") → critic-fail → v2 (cr set, no verify) → critic-pass."""
+        raw_v1 = _make_raw(reply_text="Promise.", change_request=None)
+        raw_v2 = _make_raw(reply_text="Tests added.", change_request="Add tests")
+        critic_with_leading_noise = '{} {"passed": false, "gap": "missing tests"}'
+        agent = _make_agent(
+            [raw_v1, "Yes", critic_with_leading_noise, raw_v2, _CRITIC_PASS]
+        )
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        # Critic verdict was picked up — synthesis retried.
+        assert result.change_request == "Add tests"
+        # synth-v1 + verify + critic-fail + synth-v2 + critic-pass = 5
+        assert agent.run_turn.call_count == 5
+
+    def test_retry_suffix_uses_critic_label_that_failed(self) -> None:
+        """Codex on PR #1932: the critic-retry user prompt previously
+        hard-coded "intent-coverage critic" even when the failure was
+        a reply-prose critic, nudging the model toward the wrong
+        failure mode.  The label must reflect the critic that
+        actually failed so the model's next attempt addresses the
+        right axis."""
+        raw_v1 = _make_raw(reply_text="Fixed in commit deadbeef.", change_request="x")
+        raw_v2 = _make_raw(reply_text="Fixed in commit abc1234.", change_request="x")
+        prose_fail = json.dumps(
+            {
+                "passed": False,
+                "gap": "commit deadbeef not in recent_commit_shas",
+                "rationale": "checked git log",
+            }
+        )
+        prose_pass = json.dumps({"passed": True, "rationale": "grounded"})
+        agent = _make_agent(
+            [raw_v1, _CRITIC_PASS, prose_fail, raw_v2, _CRITIC_PASS, prose_pass]
+        )
+        prompts = _make_prompts()
+        prompts.reply_prose_claim_grounding_prompt.return_value = "reply-prose-prompt"
+
+        call_synthesis(
+            "comment",
+            is_bot=False,
+            agent=agent,
+            prompts=prompts,
+            claim_grounding_state={"recent_commit_shas": ["abc1234"]},
+        )
+
+        # Synth attempt 1 = idx 0 (no retry suffix).  Synth attempt 2 =
+        # idx 3 (after intent-pass + reply-prose-fail).  The retry
+        # user prompt at idx 3 must name "reply-prose critic", NOT
+        # "intent-coverage critic".
+        retry_args, _ = agent.run_turn.call_args_list[3]
+        assert "reply-prose critic" in retry_args[0]
+        assert "intent-coverage critic" not in retry_args[0]
+        assert "commit deadbeef not in recent_commit_shas" in retry_args[0]
+
+    def test_reply_prose_critic_fires_when_grounding_state_provided(
+        self,
+    ) -> None:
+        """HOL-18 / #1912: when the caller passes
+        ``claim_grounding_state``, the reply-prose critic runs after
+        intent-coverage and gates the response on grounded claims.
+        Order in the loop: synthesis → intent-coverage critic →
+        reply-prose critic → verify."""
+        raw_v1 = _make_raw(
+            reply_text="Fixed in commit deadbeef.",
+            change_request="Fix it",
+        )
+        raw_v2 = _make_raw(
+            reply_text="Fixed in commit abc1234.",
+            change_request="Fix it",
+        )
+        prose_fail = json.dumps(
+            {
+                "passed": False,
+                "gap": "commit deadbeef not in recent_commit_shas",
+                "rationale": "checked git log",
+            }
+        )
+        prose_pass = json.dumps({"passed": True, "rationale": "grounded"})
+        # synth-v1 + intent-pass + prose-fail + synth-v2 + intent-pass +
+        # prose-pass = 6 turns (no verify since change_request is set).
+        agent = _make_agent(
+            [raw_v1, _CRITIC_PASS, prose_fail, raw_v2, _CRITIC_PASS, prose_pass]
+        )
+        prompts = _make_prompts()
+        # Stub the reply-prose prompt method so the critic's prompt-build doesn't blow up.
+        prompts.reply_prose_claim_grounding_prompt.return_value = "reply-prose-prompt"
+
+        result = call_synthesis(
+            "comment",
+            is_bot=False,
+            agent=agent,
+            prompts=prompts,
+            claim_grounding_state={"recent_commit_shas": ["abc1234"]},
+        )
+
+        # Real grounded reply shipped.
+        assert "abc1234" in result.reply_text
+        assert agent.run_turn.call_count == 6
+
+    def test_reply_prose_critic_skipped_when_grounding_state_empty(
+        self,
+    ) -> None:
+        """When no ground-truth state is available, the prose critic
+        must not fire — the legacy single-critic flow ships unchanged.
+        Verifies the default-None / empty-dict back-compat."""
+        raw = _make_raw(reply_text="Done.", change_request="Fix it")
+        agent = _make_agent([raw, _CRITIC_PASS])
+        prompts = _make_prompts()
+
+        call_synthesis(
+            "comment",
+            is_bot=False,
+            agent=agent,
+            prompts=prompts,
+            claim_grounding_state=None,
+        )
+
+        # Only synth + intent-coverage critic ran (no prose critic, no
+        # verify since change_request is set).
+        assert agent.run_turn.call_count == 2
+
+    def test_critic_recovers_real_fail_after_malformed_early_envelope(
+        self,
+    ) -> None:
+        """codex r3293424368 on PR #1932: if the critic emits
+        ``{"passed": false}`` with no gap followed by a real
+        ``{"passed": false, "gap": "..."}``, we must use the real
+        verdict instead of failing open on the first malformed one.
+        Otherwise an early malformed envelope masks a legitimate
+        intent-coverage failure and lets it ship.
+
+        Same sequence shape as ``test_critic_scans_past_leading_...``
+        — v1 has cr=None so the verify turn slips in before the
+        critic; v2 has cr set so verify skips."""
+        raw_v1 = _make_raw(reply_text="Promise.", change_request=None)
+        raw_v2 = _make_raw(reply_text="Tests added.", change_request="Add tests")
+        critic_response = '{"passed": false} {"passed": false, "gap": "missing tests"}'
+        agent = _make_agent([raw_v1, "Yes", critic_response, raw_v2, _CRITIC_PASS])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        # Real verdict was picked up — synthesis retried.
+        assert result.change_request == "Add tests"
+        # synth-v1 + verify + critic-fail + synth-v2 + critic-pass = 5
+        assert agent.run_turn.call_count == 5
+
+    def test_critic_scans_past_leading_unrelated_json_pass_case(self) -> None:
+        """Symmetric to the fail-case test: a leading unrelated object
+        followed by ``{"passed": true}`` must still resolve as a pass
+        (not fail-open through ignorance)."""
+        raw = _make_raw(reply_text="Done.", change_request="Fix it")
+        agent = _make_agent([raw, '{} {"passed": true}'])
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        assert result.reply_text == "Done."
+        # synthesis + critic only — no retry, no verify (change_request set).
+        assert agent.run_turn.call_count == 2
+
+    def test_critic_uses_critic_system_prompt(self) -> None:
+        """Critic turn must run with the JSON-capable critic system
+        prompt, NOT the follow-up plain-text prompt — the latter tells
+        the model "no JSON", which silently disables the gate (codex
+        r3293399801 on PR #1932)."""
+        raw = _make_raw(reply_text="Done.", change_request="Fix it")
+        agent = _make_agent([raw, _CRITIC_PASS])
+        prompts = _make_prompts(
+            system="MAIN-SYS",
+            followup_system="FOLLOWUP-SYS",
+            critic_system="CRITIC-SYS",
+        )
+
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        # First call: main synthesis with the main system prompt.
+        _, synth_kw = agent.run_turn.call_args_list[0]
+        assert synth_kw["system_prompt"] == "MAIN-SYS"
+        # Second call: critic with the JSON-capable critic prompt.
+        _, critic_kw = agent.run_turn.call_args_list[1]
+        assert critic_kw["system_prompt"] == "CRITIC-SYS"
+
+    def test_derived_change_request_is_critic_checked(self) -> None:
+        """Codex on PR #1932: ``_check_and_promote`` can derive a new
+        ``change_request`` (the response originally had cr=None but the
+        verify turn answered "No" and the derive turn produced text).
+        Before the reorder, the critic ran on the pre-derive response
+        and never saw the derived value — a hallucinated or over-broad
+        derivation bypassed every gate.  After the reorder, the
+        critic sees the post-derive response and CAN reject it.  This
+        test pins that wiring: derived cr is bad → critic fires →
+        retry → the next attempt's clean response ships."""
+        raw_v1 = _make_raw(reply_text="I'll think about it.", change_request=None)
+        raw_v2 = _make_raw(
+            reply_text="Adding tests.",
+            change_request="Add the missing tests",
+        )
+        agent = _make_agent(
+            [
+                # Attempt 1: cr=None → verify "No" → derive a bogus cr →
+                # critic catches the bogus derive and demands retry.
+                raw_v1,
+                "No",
+                "Rewrite half the codebase",  # hallucinated, over-broad
+                _critic_fail("derived change_request is unrelated to comment"),
+                # Attempt 2: clean response with a tight cr → critic
+                # passes; verify skipped (cr already set).
+                raw_v2,
+                _CRITIC_PASS,
+            ]
+        )
+        prompts = _make_prompts()
+
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+
+        # The hallucinated derive was rejected — v2's clean response
+        # ships instead, NOT the bogus "Rewrite half the codebase".
+        assert result.change_request == "Add the missing tests"
+        # synth-v1 + verify + derive + critic-fail + synth-v2 + critic-pass = 6
+        assert agent.run_turn.call_count == 6
+
+
+# ---------------------------------------------------------------------------
+# HOL-14 / #1908 — critic_loop helper
+# ---------------------------------------------------------------------------
+
+
+class TestCriticVerdict:
+    """Constructor invariant: a failing verdict must carry a non-empty
+    gap.  The gap is the nudge the next generate() attempt needs to
+    address — losing it defeats the loop."""
+
+    def test_pass_requires_no_gap(self) -> None:
+        v = CriticVerdict(passed=True)
+        assert v.passed
+        assert v.gap == ""
+
+    def test_pass_with_gap_allowed(self) -> None:
+        v = CriticVerdict(passed=True, gap="optional context")
+        assert v.passed
+        assert v.gap == "optional context"
+
+    def test_fail_requires_non_empty_gap(self) -> None:
+        with pytest.raises(ValueError, match="gap is required"):
+            CriticVerdict(passed=False)
+
+    def test_fail_rejects_empty_gap(self) -> None:
+        with pytest.raises(ValueError, match="gap is required"):
+            CriticVerdict(passed=False, gap="")
+
+    def test_fail_rejects_whitespace_gap(self) -> None:
+        with pytest.raises(ValueError, match="gap is required"):
+            CriticVerdict(passed=False, gap="   \n\t  ")
+
+
+class TestCriticLoop:
+    """Behavioural contract of :func:`critic_loop` — the shape HOL-15..HOL-19
+    depend on.  Tests use hand-rolled lambdas / fakes per project rule."""
+
+    def test_returns_first_passing_candidate(self) -> None:
+        attempts: list[tuple[int, str]] = []
+
+        def generate(attempt: int, gap: str) -> str:
+            attempts.append((attempt, gap))
+            return "candidate"
+
+        def verify(_c: str) -> CriticVerdict:
+            return CriticVerdict(passed=True)
+
+        result = critic_loop(generate, verify, label="t")
+        assert result == "candidate"
+        assert attempts == [(0, "")]
+
+    def test_loops_with_gap_until_passing(self) -> None:
+        gap_seen: list[str] = []
+
+        def generate(attempt: int, gap: str) -> str:
+            gap_seen.append(gap)
+            return f"v{attempt}"
+
+        def verify(candidate: str) -> CriticVerdict:
+            if candidate == "v0":
+                return CriticVerdict(passed=False, gap="missing X")
+            if candidate == "v1":
+                return CriticVerdict(passed=False, gap="missing Y")
+            return CriticVerdict(passed=True)
+
+        result = critic_loop(generate, verify, label="t", max_attempts=5)
+        assert result == "v2"
+        assert gap_seen == ["", "missing X", "missing Y"]
+
+    def test_raises_critic_exhausted_after_max_attempts(self) -> None:
+        def generate(attempt: int, gap: str) -> str:
+            return f"v{attempt}"
+
+        def verify(c: str) -> CriticVerdict:
+            return CriticVerdict(passed=False, gap=f"never-passes ({c})")
+
+        with pytest.raises(CriticExhaustedError) as excinfo:
+            critic_loop(generate, verify, label="my-emission", max_attempts=3)
+        err = excinfo.value
+        assert err.label == "my-emission"
+        # Every gap is preserved so HOL-20/21 can attach full retry
+        # history to the auto-filed bug.
+        assert err.gaps == [
+            "never-passes (v0)",
+            "never-passes (v1)",
+            "never-passes (v2)",
+        ]
+
+    def test_generate_exception_propagates(self) -> None:
+        """The loop is for verification gaps, not generation errors.
+        Generation exceptions (transport, parsing, context overflow)
+        should bubble out untouched so the caller decides whether to
+        retry or surface."""
+
+        class _Boom(RuntimeError):
+            pass
+
+        def generate(attempt: int, gap: str) -> str:
+            raise _Boom("transport")
+
+        def verify(_c: str) -> CriticVerdict:
+            return CriticVerdict(passed=True)
+
+        with pytest.raises(_Boom, match="transport"):
+            critic_loop(generate, verify, label="t")
+
+    def test_default_max_attempts_uses_synthesis_constant(self) -> None:
+        attempts: list[int] = []
+
+        def generate(attempt: int, gap: str) -> str:
+            attempts.append(attempt)
+            return "x"
+
+        def verify(_c: str) -> CriticVerdict:
+            return CriticVerdict(passed=False, gap="nope")
+
+        with pytest.raises(CriticExhaustedError):
+            critic_loop(generate, verify, label="t")
+        assert len(attempts) == MAX_RETRIES
+
+    def test_label_in_exhausted_message(self) -> None:
+        """HOL-20/21 routes by label, so the label has to make it onto
+        the error path verbatim."""
+
+        def generate(attempt: int, gap: str) -> str:
+            return "x"
+
+        def verify(_c: str) -> CriticVerdict:
+            return CriticVerdict(passed=False, gap="g")
+
+        with pytest.raises(CriticExhaustedError, match="my-special-label"):
+            critic_loop(generate, verify, label="my-special-label", max_attempts=1)

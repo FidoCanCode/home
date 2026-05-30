@@ -410,7 +410,7 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
             ).fetchall()
         }
 
-    assert version == 6
+    assert version == 9
     assert {
         "comment_claims",
         "reply_promises",
@@ -429,7 +429,42 @@ def test_schema_includes_durable_store_skeleton(tmp_path: Path) -> None:
         "issue_cache_snapshots",
         "restart_metadata",
         "transition_audit_log",
+        # codex P1 (fourth round) on PR #1938: durable
+        # task-creation drop counter requires schema version bump
+        # so existing v6 installations create the new table.
+        "task_creation_drops",
+        # codex P1 ninth/tenth rounds on PR #1938: durable rescope-
+        # intent outbox (per intent_comment_id with full intent
+        # payload + state) makes the rescope trigger replay-safe
+        # and recoverable after crashes.
+        "rescope_intent_outbox",
     } <= tables
+
+
+def test_schema_bumps_from_version_6_creates_new_tables(tmp_path: Path) -> None:
+    # Codex P1 (fourth round) on PR #1938: an installation already at
+    # schema version 6 (e.g. existing production Fido databases) must
+    # pick up the v7 task_creation_drops table when ensure_schema
+    # runs.  Without the version bump, ``if version < _SCHEMA_VERSION``
+    # would skip the CREATE TABLE statements and the first
+    # bump_task_creation_drop() query would fail with "no such table".
+    import sqlite3
+
+    store = FidoStore(tmp_path)
+    # Simulate an existing v6 installation: ensure_schema once, then
+    # roll the version backwards to 6 so the next ensure_schema must
+    # actually run the v7 statements (and re-running v6 statements
+    # is idempotent thanks to CREATE TABLE IF NOT EXISTS).
+    store.ensure_schema()
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("PRAGMA user_version = 6")
+        conn.execute("DROP TABLE task_creation_drops")
+        conn.commit()
+    # Re-run ensure_schema on the simulated old database.
+    FidoStore(tmp_path).ensure_schema()
+    # The bump query now works against the recreated table.
+    count, escalated = FidoStore(tmp_path).bump_task_creation_drop(42)
+    assert (count, escalated) == (1, False)
 
 
 def test_record_deferred_issue_is_idempotent(tmp_path: Path) -> None:
@@ -926,6 +961,104 @@ def test_has_other_open_pr_comments_scopes_by_repo(tmp_path: Path) -> None:
             repo="owner/repo", exclude_comment_id=just_arrived.comment_id
         )
         is False
+    )
+
+
+def test_has_other_open_pr_comments_review_id_scopes_to_same_submission(
+    tmp_path: Path,
+) -> None:
+    """HOL-22 / #1916: when ``review_id`` is provided, only OTHER
+    queue entries from the SAME review submission count as
+    "batched with this comment".  A solo human comment queued
+    behind an unrelated batch from a DIFFERENT review submission
+    still gets sub-1s eager-eyes (closes #1875)."""
+    store = FidoStore(tmp_path)
+    # Batch from review submission 12345.
+    store.enqueue_pr_comment(
+        delivery_id="delivery-batch-a",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=1001,
+        author="bot",
+        is_bot=True,
+        body="batch a",
+        github_created_at="2026-04-30T10:00:00Z",
+        payload_json='{"payload":{"comment":{"pull_request_review_id":12345}}}',
+    )
+    # Solo human comment from a DIFFERENT submission 67890.
+    solo = store.enqueue_pr_comment(
+        delivery_id="delivery-solo",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=1002,
+        author="rob",
+        is_bot=False,
+        body="solo human",
+        github_created_at="2026-04-30T10:00:01Z",
+        payload_json='{"payload":{"comment":{"pull_request_review_id":67890}}}',
+    )
+    # With review-id scoping: no other open comment from the solo's
+    # submission → eager-eyes fires.
+    assert (
+        store.has_other_open_pr_comments(
+            repo="owner/repo",
+            exclude_comment_id=solo.comment_id,
+            review_id=67890,
+        )
+        is False
+    )
+    # Legacy unscoped call (review_id=None) still sees the batch
+    # comment → eager-eyes skipped.
+    assert (
+        store.has_other_open_pr_comments(
+            repo="owner/repo",
+            exclude_comment_id=solo.comment_id,
+        )
+        is True
+    )
+
+
+def test_has_other_open_pr_comments_review_id_detects_same_submission_batch(
+    tmp_path: Path,
+) -> None:
+    """HOL-22 sibling: when another open comment IS from the same
+    review submission, the scoped predicate returns True so eyes
+    is correctly skipped (the worker posts eyes on claim instead)."""
+    store = FidoStore(tmp_path)
+    # Two comments from the same review submission 99999.
+    store.enqueue_pr_comment(
+        delivery_id="delivery-batch-first",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=2001,
+        author="rob",
+        is_bot=False,
+        body="batch first",
+        github_created_at="2026-04-30T10:00:00Z",
+        payload_json='{"payload":{"comment":{"pull_request_review_id":99999}}}',
+    )
+    sibling = store.enqueue_pr_comment(
+        delivery_id="delivery-batch-sibling",
+        repo="owner/repo",
+        pr_number=7,
+        comment_type="pulls",
+        comment_id=2002,
+        author="rob",
+        is_bot=False,
+        body="batch sibling",
+        github_created_at="2026-04-30T10:00:01Z",
+        payload_json='{"payload":{"comment":{"pull_request_review_id":99999}}}',
+    )
+    assert (
+        store.has_other_open_pr_comments(
+            repo="owner/repo",
+            exclude_comment_id=sibling.comment_id,
+            review_id=99999,
+        )
+        is True
     )
 
 
@@ -1437,3 +1570,182 @@ def test_extracted_oracle_matches_recovery_lifecycle() -> None:
     )
     assert same_claims == claims
     assert same_promises == promises
+
+
+def test_task_creation_drops_persist_across_store_instances(tmp_path: Path) -> None:
+    # HOL-16 follow-up / #1934 (codex P2 on PR #1938): the durable
+    # drop counter table survives FidoStore object recreations so a
+    # Fido restart doesn't lose the streak.
+    store1 = FidoStore(tmp_path)
+    count, escalated = store1.bump_task_creation_drop(123)
+    assert (count, escalated) == (1, False)
+    count, escalated = store1.bump_task_creation_drop(123)
+    assert (count, escalated) == (2, False)
+    store2 = FidoStore(tmp_path)
+    count, escalated = store2.bump_task_creation_drop(123)
+    assert (count, escalated) == (3, False)
+
+
+def test_task_creation_drops_mark_escalated_persists(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    store.bump_task_creation_drop(123)
+    store.mark_task_creation_drop_escalated(123)
+    _, escalated = store.bump_task_creation_drop(123)
+    assert escalated is True
+
+
+def test_reset_inactive_task_creation_drops_keeps_active(tmp_path: Path) -> None:
+    store = FidoStore(tmp_path)
+    store.bump_task_creation_drop(101)
+    store.bump_task_creation_drop(202)
+    store.bump_task_creation_drop(303)
+    # Only 202 remains active.
+    cleared = store.reset_inactive_task_creation_drops({202})
+    assert cleared == 2
+    # 202's counter preserved at 1.
+    count, _ = store.bump_task_creation_drop(202)
+    assert count == 2
+    # 101 starts fresh.
+    count, _ = store.bump_task_creation_drop(101)
+    assert count == 1
+
+
+def test_reset_inactive_task_creation_drops_empty_active_clears_all(
+    tmp_path: Path,
+) -> None:
+    store = FidoStore(tmp_path)
+    store.bump_task_creation_drop(101)
+    store.bump_task_creation_drop(202)
+    cleared = store.reset_inactive_task_creation_drops(set())
+    assert cleared == 2
+    count, _ = store.bump_task_creation_drop(101)
+    assert count == 1
+
+
+def _claim_intent(store: "FidoStore", cid: int, **overrides: object) -> bool:
+    """Helper: claim an intent with sensible test defaults."""
+    defaults: dict[str, object] = {
+        "intent_comment_id": cid,
+        "change_request": f"request {cid}",
+        "intent_timestamp": "2026-05-25T10:00:00+00:00",
+        "author": "alice",
+        "comment_type": "pulls",
+        "repo": "owner/repo",
+        "pr_number": 42,
+    }
+    defaults.update(overrides)
+    return store.claim_rescope_intent(**defaults)  # type: ignore[arg-type]
+
+
+def test_claim_rescope_intent_first_caller_succeeds(tmp_path: Path) -> None:
+    # HOL-26 / #1920: first claim per intent_comment_id returns True.
+    # Different intents claim independently.
+    store = FidoStore(tmp_path)
+    assert _claim_intent(store, 42) is True
+    assert _claim_intent(store, 99) is True
+
+
+def test_claim_rescope_intent_pending_row_is_retryable(tmp_path: Path) -> None:
+    # Codex P1 eleventh round on PR #1938: a pre-existing pending
+    # row means "claim was recorded but the work never durably
+    # applied" (likely a crash between claim and ``_on_done`` OR a
+    # webhook redelivery).  Retrying must succeed — duplicate
+    # dispatches get coalesced in-process by ``_reorder_coalesce``,
+    # and cross-restart replay is exactly what the outbox enables.
+    # Without retryability, ACT replies could be visible with no
+    # rescope ever applied.
+    store = FidoStore(tmp_path)
+    assert _claim_intent(store, 42) is True
+    # Same intent, while still pending, can be re-claimed.
+    assert _claim_intent(store, 42) is True
+
+
+def test_claim_rescope_intent_applied_row_blocks(tmp_path: Path) -> None:
+    # The applied state is durably terminal — no future trigger
+    # re-fires.
+    store = FidoStore(tmp_path)
+    assert _claim_intent(store, 42) is True
+    store.mark_rescope_intent_applied(42)
+    assert _claim_intent(store, 42) is False
+
+
+def test_claim_rescope_intent_pending_persists_across_restart(tmp_path: Path) -> None:
+    # Cross-restart redelivery: a pending row in the durable store
+    # survives a Fido restart, and the normal trigger path can
+    # re-claim it and dispatch the rescope.
+    store1 = FidoStore(tmp_path)
+    assert _claim_intent(store1, 42) is True
+    del store1
+    store2 = FidoStore(tmp_path)
+    # New process, same db: pending row → retryable.
+    assert _claim_intent(store2, 42) is True
+
+
+def test_claim_rescope_intent_applied_persists_across_restart(tmp_path: Path) -> None:
+    # Applied rows still block across restarts.
+    store1 = FidoStore(tmp_path)
+    assert _claim_intent(store1, 42) is True
+    store1.mark_rescope_intent_applied(42)
+    del store1
+    store2 = FidoStore(tmp_path)
+    assert _claim_intent(store2, 42) is False
+
+
+def test_claim_rescope_intent_pending_refreshes_payload(tmp_path: Path) -> None:
+    # The re-claim of a pending row updates the payload (so a
+    # later recovery sweep sees the latest version of the
+    # change_request).
+    store = FidoStore(tmp_path)
+    _claim_intent(store, 42, change_request="first")
+    _claim_intent(store, 42, change_request="second")
+    pending = store.pending_rescope_intents()
+    assert len(pending) == 1
+    assert pending[0].change_request == "second"
+
+
+def test_release_rescope_intent_claim_allows_retry(tmp_path: Path) -> None:
+    # Synchronous dispatch failure path: after release, the next
+    # claim re-fires.
+    store = FidoStore(tmp_path)
+    assert _claim_intent(store, 42) is True
+    store.release_rescope_intent_claim(42)
+    assert _claim_intent(store, 42) is True
+
+
+def test_release_on_applied_row_is_noop(tmp_path: Path) -> None:
+    # Release only targets state='pending', so calling it after
+    # the row has already advanced to 'applied' must not clear
+    # the terminal marker.
+    store = FidoStore(tmp_path)
+    assert _claim_intent(store, 42) is True
+    store.mark_rescope_intent_applied(42)
+    store.release_rescope_intent_claim(42)
+    assert _claim_intent(store, 42) is False
+
+
+def test_pending_rescope_intents_lists_unapplied(tmp_path: Path) -> None:
+    # Recovery surface: ``pending_rescope_intents`` returns only
+    # rows still in state='pending' (un-applied).
+    store = FidoStore(tmp_path)
+    assert _claim_intent(store, 42) is True
+    assert _claim_intent(store, 99) is True
+    store.mark_rescope_intent_applied(42)
+    pending = store.pending_rescope_intents()
+    assert [intent.comment_id for intent in pending] == [99]
+    assert pending[0].change_request == "request 99"
+    assert pending[0].repo == "owner/repo"
+
+
+def test_rescope_intent_outbox_schema_bumps_from_version_8(tmp_path: Path) -> None:
+    # Codex P1 tenth round on PR #1938: schema-version migration
+    # from v8 picks up the new rescope_intent_outbox table.
+    import sqlite3
+
+    store = FidoStore(tmp_path)
+    store.ensure_schema()
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("PRAGMA user_version = 8")
+        conn.execute("DROP TABLE rescope_intent_outbox")
+        conn.commit()
+    FidoStore(tmp_path).ensure_schema()
+    assert _claim_intent(FidoStore(tmp_path), 123) is True

@@ -33,6 +33,7 @@ from fido.rocq.turn_outcome import (
     CommitTaskComplete,
     CommitTaskInProgress,
     SkipTaskWithReason,
+    SplitTask,
     StuckOnTask,
     TurnOutcome,
 )
@@ -219,6 +220,18 @@ class HarnessCommitter:
                 # the BLOCKED transition before commit() is ever called.  Present
                 # here for oracle completeness so direct-call tests can exercise
                 # the assertion paths.
+                self._assert_commit_dispatch_oracle(outcome, dispatched_to_commit=False)
+                result = CommitSkipped(reason=reason)
+                self._assert_decision_oracle(outcome, result)
+                return result
+            case SplitTask(reason=reason):
+                # HOL-13 / #1907: unreachable from production for the
+                # same reason as StuckOnTask — the worker routes
+                # ``split-task`` to the "needs re-decomposition" BLOCKED
+                # state before commit() is called.  Present here for
+                # oracle completeness so the Rocq decision model (which
+                # treats SplitTask as non-commit, same as StuckOnTask)
+                # has a Python branch the oracle assertions can match.
                 self._assert_commit_dispatch_oracle(outcome, dispatched_to_commit=False)
                 result = CommitSkipped(reason=reason)
                 self._assert_decision_oracle(outcome, result)

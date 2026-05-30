@@ -425,6 +425,33 @@ class TestRescopePrompt:
         result = Prompts("").rescope_prompt(tasks, "feat: add parser method")
         assert "feat: add parser method" in result
 
+    def test_narrative_chain_rendered_when_present(self) -> None:
+        # HOL-8 / #1902: per-task narrative_chain lands in the rescope
+        # prompt so Opus sees the history of verdicts that touched the
+        # task across prior rescopes.
+        task = self._task("Carry-over", task_id="T1")
+        task["narrative_chain"] = [
+            {
+                "outcome": "reshaped",
+                "narrative": "Split into prereq + feature.",
+                "intent_comment_id": 42,
+                "ts": "2026-05-23T10:00:00Z",
+            }
+        ]
+        result = Prompts("").rescope_prompt([task], "")
+        # The chain JSON is part of the pending-task block.
+        assert '"narrative_chain"' in result
+        assert "Split into prereq + feature." in result
+        assert '"intent_comment_id": 42' in result
+
+    def test_narrative_chain_omitted_when_empty(self) -> None:
+        # No chain → no field in the rendered JSON.  Keeps the prompt
+        # compact for fresh tasks that haven't gone through a rescope.
+        tasks = [self._task("Fresh", task_id="T1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        # Pending JSON block must NOT contain the field name.
+        assert '"narrative_chain"' not in result
+
     def test_empty_commit_summary_shows_none(self) -> None:
         tasks = [self._task("Add tests", task_id="1")]
         result = Prompts("").rescope_prompt(tasks, "")
@@ -675,6 +702,38 @@ class TestRescopePrompt:
         # in the new schema.
         assert '{"op": "new"' in result
 
+    def test_new_op_schema_advertises_invariant_field(self) -> None:
+        """HOL-12 / #1906: the ``new`` op schema must show
+        ``"invariant": "..."`` so Opus emits one per task."""
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        # Look at the new-op JSON sample only (not the constraint
+        # paragraph, which mentions "invariant" as well).
+        new_op_block = result.split('{"op": "new"')[1].split("\n")[0]
+        assert '"invariant"' in new_op_block
+
+    def test_split_children_schema_advertises_invariant_field(self) -> None:
+        """HOL-12 / #1906: every ``split`` child is a fresh task too,
+        so the schema example must include an ``invariant`` field on
+        each child."""
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        split_block = result.split('{"op": "split"')[1].split("\n")[0]
+        assert '"invariant"' in split_block
+
+    def test_one_invariant_per_task_rule_stated(self) -> None:
+        """HOL-12 / #1906: the rule itself — ``new``/``split`` children
+        carry exactly one invariant — must appear in plain English so
+        Opus reasons about it, not just the schema field."""
+        tasks = [self._task("Do thing", task_id="1")]
+        result = Prompts("").rescope_prompt(tasks, "")
+        assert "One invariant per task" in result
+        assert "HOL-12" in result
+        # The split-when-too-big guidance has to be explicit — otherwise
+        # Opus will emit one giant ``new`` op with a hand-wavy
+        # invariant rather than fan it into multiple ops.
+        assert "split it into multiple" in result
+
 
 # ── Prompts.rescope_prompt_verdicts (#1810 / INV-D wiring leaf) ──────────────
 
@@ -712,6 +771,34 @@ class TestRescopePromptVerdicts:
         # Envelope keyword + explicit JSON shape directive.
         assert '"verdicts"' in result
         assert '{"verdicts": [...]}' in result
+
+    def test_narrative_chain_rendered_when_present(self) -> None:
+        # HOL-8 / #1902: per-task narrative_chain renders in the
+        # verdict-envelope prompt too — the verdict-shape prompt is
+        # the modern path, so the chain has to land here.
+        task = self._task("Carry-over", task_id="T1")
+        task["narrative_chain"] = [
+            {
+                "outcome": "no_op",
+                "narrative": "Already covered by an in-flight task.",
+                "intent_comment_id": 99,
+                "ts": "2026-05-23T11:00:00Z",
+            }
+        ]
+        result = Prompts("").rescope_prompt_verdicts(
+            [task], "", intents=[self._intent(1)]
+        )
+        assert '"narrative_chain"' in result
+        assert "Already covered by an in-flight task." in result
+        assert '"intent_comment_id": 99' in result
+
+    def test_narrative_chain_omitted_when_empty(self) -> None:
+        # No chain → no field — keeps the prompt compact for fresh
+        # tasks that haven't seen a rescope yet.
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        assert '"narrative_chain"' not in result
 
     def test_includes_each_intent_with_author(self) -> None:
         intents = [
@@ -768,10 +855,13 @@ class TestRescopePromptVerdicts:
         result = Prompts("").rescope_prompt_verdicts(
             [self._task()], "", intents=[self._intent(1)]
         )
-        # honored / no_op explicitly do NOT warrant reply-back
+        # honored explicitly does NOT warrant reply-back
         assert "no follow-up" in result
-        # reshaped / superseded are material → narrative required
-        assert "Narrative MUST be non-empty" in result
+        # HOL-3 / #1897: narrative is REQUIRED on every outcome —
+        # honored / reshaped / superseded / no_op all carry one.
+        assert "Narrative REQUIRED" in result
+        # The no_op narrative IS the reply-back reason (PR #1890 fix).
+        assert "PR #1890" in result
 
     def test_supersedence_constraints_stated(self) -> None:
         result = Prompts("").rescope_prompt_verdicts(
@@ -816,6 +906,33 @@ class TestRescopePromptVerdicts:
             "new",
         ):
             assert f'"op": "{op_name}"' in result
+
+    def test_new_op_schema_advertises_invariant_field(self) -> None:
+        """HOL-12 / #1906: ``new`` op schema in the verdict envelope
+        must advertise ``invariant`` so Opus emits one per task."""
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        new_op_block = result.split('{"op": "new"')[1].split("\n")[0]
+        assert '"invariant"' in new_op_block
+
+    def test_split_children_schema_advertises_invariant_field(self) -> None:
+        """HOL-12 / #1906: every ``split`` child carries one invariant."""
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        split_block = result.split('{"op": "split"')[1].split("\n")[0]
+        assert '"invariant"' in split_block
+
+    def test_one_invariant_per_task_rule_stated(self) -> None:
+        """HOL-12 / #1906: the prose rule must be explicit (so Opus
+        reasons about scope, not just fills in a slot)."""
+        result = Prompts("").rescope_prompt_verdicts(
+            [self._task()], "", intents=[self._intent(1)]
+        )
+        assert "One invariant per task" in result
+        assert "HOL-12" in result
+        assert "split it into multiple" in result
 
     def test_current_task_list_included(self) -> None:
         tasks = [
@@ -1846,3 +1963,500 @@ class TestSynthesisPrompt:
         result = Prompts("").synthesis_prompt("comment", is_bot=False)
         assert "change_request" in result
         assert "future" in result.lower() or "I'll" in result or "I will" in result
+
+
+# ─── HOL-15 / #1909 — intent-coverage critic prompt ────────────────────────
+
+
+class TestIntentCoverageCriticPrompt:
+    """Layer 2 critic prompt that gates the synthesis turn.  Wraps the
+    comment + reply + change_request into a question Opus answers as
+    ``{"passed": true}`` or ``{"passed": false, "gap": "..."}``."""
+
+    def test_includes_comment_and_reply(self) -> None:
+        result = Prompts("").intent_coverage_critic_prompt(
+            comment_body="Please fix the test.",
+            reply_text="I'll add the missing test case.",
+            change_request="Add the missing test case",
+        )
+        assert "Please fix the test." in result
+        assert "I'll add the missing test case." in result
+        assert "Add the missing test case" in result
+
+    def test_renders_none_change_request_as_label(self) -> None:
+        """When no work is queued, the prompt must render a clear
+        sentinel rather than the bare string ``None`` so Opus can
+        reason about the no-queue case."""
+        result = Prompts("").intent_coverage_critic_prompt(
+            comment_body="just thinking out loud",
+            reply_text="Got it.",
+            change_request=None,
+        )
+        assert "(none — no work queued)" in result
+        assert "None" not in result.split("REGISTERED CHANGE REQUEST")[1].split(
+            "QUESTION"
+        )[0].replace("(none — no work queued)", "")
+
+    def test_empty_change_request_treated_as_none(self) -> None:
+        """Empty string and whitespace-only change_request render the
+        same as None — they carry no actionable scope."""
+        result = Prompts("").intent_coverage_critic_prompt(
+            comment_body="x",
+            reply_text="y",
+            change_request="   \t",
+        )
+        assert "(none — no work queued)" in result
+
+    def test_question_distinguishes_three_failure_axes(self) -> None:
+        """The pass rule must enumerate ``missing``/``invented``/
+        ``mismatched`` so Opus knows which axes to check.  The bare
+        Yes/No (#1218) only caught missing — HOL-15 is the broader
+        gate."""
+        result = Prompts("").intent_coverage_critic_prompt(
+            comment_body="x", reply_text="y", change_request=None
+        )
+        assert "missing" in result
+        assert "invented" in result
+        assert "mismatched" in result
+
+    def test_response_schema_is_passed_gap_envelope(self) -> None:
+        """Output schema must be the fixed ``{"passed": bool}`` /
+        ``{"passed": false, "gap": "..."}`` envelope so the Python
+        parser has one shape to handle."""
+        result = Prompts("").intent_coverage_critic_prompt(
+            comment_body="x", reply_text="y", change_request=None
+        )
+        assert '"passed": true' in result
+        assert '"passed": false' in result
+        assert '"gap"' in result
+        # JSON-only directive — no preamble/postamble lets parser pick
+        # the verdict cleanly from the response.
+        assert "No other text" in result
+
+
+# ─── HOL-16 / #1910 — task-creation critic prompt ──────────────────────────
+
+
+class TestTaskCreationCriticPrompt:
+    """Layer 2 critic that gates each proposed ``new`` op against the
+    queue along two axes: relationship (distinct/duplicate_of/supersedes)
+    and scope (single/multi)."""
+
+    def _proposed(self) -> dict[str, Any]:
+        return {
+            "title": "Add retry logic",
+            "description": "Retry on transient failures.",
+            "invariant": "transient failures retry up to 3 times",
+        }
+
+    def _queue(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "t-1",
+                "title": "Add CI for the new module",
+                "description": "Wire workflow.",
+                "invariant": "ci runs on every PR",
+            },
+            {
+                "id": "t-2",
+                "title": "Document the retry policy",
+                "description": "",
+                "invariant": "",
+            },
+        ]
+
+    def test_includes_proposed_task_fields(self) -> None:
+        result = Prompts("").task_creation_critic_prompt(
+            self._proposed(), self._queue()
+        )
+        assert "Add retry logic" in result
+        assert "Retry on transient failures." in result
+        assert "transient failures retry up to 3 times" in result
+
+    def test_includes_each_queue_entry_with_id(self) -> None:
+        result = Prompts("").task_creation_critic_prompt(
+            self._proposed(), self._queue()
+        )
+        assert "id=t-1" in result
+        assert "Add CI for the new module" in result
+        assert "id=t-2" in result
+        assert "Document the retry policy" in result
+
+    def test_renders_queue_invariants_when_present(self) -> None:
+        """When a queue entry has an invariant, render it — Opus
+        needs the invariant to compare scope for duplicate/supersede
+        verdicts."""
+        result = Prompts("").task_creation_critic_prompt(
+            self._proposed(), self._queue()
+        )
+        assert "ci runs on every PR" in result
+
+    def test_empty_queue_renders_explicit_sentinel(self) -> None:
+        """The empty-queue case is distinct from "many tasks" — render
+        a clear marker so Opus doesn't mistake silence for context."""
+        result = Prompts("").task_creation_critic_prompt(self._proposed(), [])
+        assert "queue is empty" in result
+
+    def test_relationship_axis_documented(self) -> None:
+        """Opus must see all three relationship values explained, not
+        just listed in the schema."""
+        result = Prompts("").task_creation_critic_prompt(
+            self._proposed(), self._queue()
+        )
+        assert '"distinct"' in result
+        assert '"duplicate_of"' in result
+        assert '"supersedes"' in result
+        # The follow-up actions on duplicate/supersedes (drop/replace)
+        # need to be discoverable from the prompt.
+        assert "duplicate_of_id" in result
+        assert "supersedes_id" in result
+
+    def test_scope_axis_documented_with_hol12_link(self) -> None:
+        """The ``scope`` axis is the HOL-12 invariant carrier — call
+        out the link so Opus reasons about single-invariant scoping."""
+        result = Prompts("").task_creation_critic_prompt(
+            self._proposed(), self._queue()
+        )
+        assert '"single"' in result
+        assert '"multi"' in result
+        assert "HOL-12" in result
+        assert "proposed_splits" in result
+
+    def test_response_schema_is_verdict_envelope(self) -> None:
+        """Output schema must include every field downstream parsing
+        reads — relationship/scope/duplicate_of_id/supersedes_id/
+        proposed_splits/rationale."""
+        result = Prompts("").task_creation_critic_prompt(
+            self._proposed(), self._queue()
+        )
+        assert '"relationship":' in result
+        assert '"scope":' in result
+        assert '"duplicate_of_id":' in result
+        assert '"supersedes_id":' in result
+        assert '"proposed_splits":' in result
+        assert '"rationale":' in result
+        assert "No other text" in result
+
+
+# ─── HOL-17 / #1911 — task-completion critic prompt ────────────────────────
+
+
+class TestTaskCompletionCriticPrompt:
+    """Layer 2 critic that gates ``commit-task-complete`` against the
+    just-landed diff and the task's named invariant."""
+
+    def test_includes_invariant_description_diff(self) -> None:
+        result = Prompts("").task_completion_critic_prompt(
+            task_invariant="transient failures retry up to 3 times",
+            task_description="Wire retry on the network layer.",
+            diff="diff --git a/x b/x\n+changed\n",
+        )
+        assert "transient failures retry up to 3 times" in result
+        assert "Wire retry on the network layer." in result
+        assert "+changed" in result
+
+    def test_empty_invariant_renders_sentinel(self) -> None:
+        """Tasks predating HOL-11 don't have an invariant; render a
+        clear marker so Opus knows to reason about scope-creep without
+        an anchor (but the establishes-axis can still catch empty
+        diffs)."""
+        result = Prompts("").task_completion_critic_prompt(
+            task_invariant="",
+            task_description="Legacy task body.",
+            diff="diff --git a/x b/x\n+ok\n",
+        )
+        assert "no invariant declared" in result
+
+    def test_empty_diff_renders_sentinel(self) -> None:
+        """PR #1858's empty-commit pattern: the prompt must render
+        ``(empty diff)`` distinct from "missing field" so Opus reads it
+        as a clear flag for the establishes axis."""
+        result = Prompts("").task_completion_critic_prompt(
+            task_invariant="x",
+            task_description="",
+            diff="",
+        )
+        assert "(empty diff)" in result
+
+    def test_both_axes_documented(self) -> None:
+        """The pass rule must enumerate ``establishes`` and ``only``
+        so Opus reasons about both."""
+        result = Prompts("").task_completion_critic_prompt(
+            task_invariant="x",
+            task_description="",
+            diff="d",
+        )
+        assert "establishes" in result
+        assert "only" in result
+        # Pattern reference: PR #1858 is the empty-commit prior art
+        # this critic exists to catch.
+        assert "PR #1858" in result
+
+    def test_response_schema_is_verdict_envelope(self) -> None:
+        result = Prompts("").task_completion_critic_prompt(
+            task_invariant="x",
+            task_description="",
+            diff="d",
+        )
+        assert '"passed": true' in result
+        assert '"passed": false' in result
+        assert '"gap":' in result
+        assert '"rationale":' in result
+        assert "No other text" in result
+
+
+# ─── Critic system prompt (codex r3293399801 / r3293399806 on PR #1932) ────
+
+
+class TestCriticSystemPrompt:
+    """The JSON-capable system prompt that all Layer 2 critics use.
+    Distinct from ``synthesis_followup_system_prompt`` which explicitly
+    forbids JSON — wiring critics through the followup prompt silently
+    disables them (codex r3293399801 / r3293399806 on PR #1932)."""
+
+    def test_anchors_in_synthesis_base(self) -> None:
+        """Shares the persona/active-work framing with the main
+        synthesis prompt so the agent stays anchored."""
+        result = Prompts("PERSONA_TEXT").critic_system_prompt()
+        assert "PERSONA_TEXT" in result
+
+    def test_anti_instructs_against_no_json_rule(self) -> None:
+        """The critic must emit JSON; the followup prompt's "no JSON"
+        rule directly contradicts that.  This prompt's contract is
+        ONE JSON object on one line."""
+        result = Prompts("").critic_system_prompt()
+        assert "JSON" in result
+        assert "one line" in result.lower()
+
+    def test_active_context_included_when_provided(self) -> None:
+        """Same active-work framing as synthesis system prompt — issue
+        + PR context flows through so the critic reasons against the
+        same shared backdrop the original turn saw."""
+        from fido.types import ActiveIssue, ActivePR
+
+        issue = ActiveIssue(number=42, title="Fix the thing", body="long body")
+        pr = ActivePR(number=99, title="PR title", url="u", body="pr body")
+        result = Prompts("").critic_system_prompt(issue=issue, pr=pr)
+        assert "Fix the thing" in result
+        assert "PR title" in result
+
+
+# ─── HOL-18 / #1912 — reply-prose claim-grounding critic prompt ────────────
+
+
+class TestReplyProseClaimGroundingPrompt:
+    """Layer 2 critic that verifies specific claims in reply prose
+    against caller-gathered ground truth.  Catches PR #1858's
+    nonexistent-commit lies and closes #1855 at the prose layer."""
+
+    def _state(self) -> dict[str, Any]:
+        return {
+            "recent_commit_shas": ["abc1234567"],
+            "open_issue_numbers": [101, 102],
+            "filed_insights": [{"title": "T", "number": 999, "url": "https://x/999"}],
+            "referenced_files": ["src/fido/tasks.py"],
+        }
+
+    def test_includes_reply_prose(self) -> None:
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="Fixed it in commit abc1234567.",
+            structured_state=self._state(),
+        )
+        assert "Fixed it in commit abc1234567." in result
+
+    def test_renders_ground_truth_sections(self) -> None:
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state=self._state(),
+        )
+        assert "recent_commit_shas" in result
+        assert "abc1234567" in result
+        assert "open_issue_numbers" in result
+        assert "101" in result
+        assert "filed_insights" in result
+        assert "referenced_files" in result
+        assert "src/fido/tasks.py" in result
+
+    def test_empty_state_renders_none_per_section(self) -> None:
+        """A state where every key is empty/missing must render ``(none)``
+        for each section — distinct sentinel from "field missing"."""
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state={},
+        )
+        # All four sections present, all rendered as (none).
+        for section in (
+            "recent_commit_shas",
+            "open_issue_numbers",
+            "filed_insights",
+            "referenced_files",
+        ):
+            assert section in result
+        assert result.count("(none)") == 4
+
+    def test_three_axes_documented(self) -> None:
+        """The pass rule must enumerate commit/issue-PR/file axes so
+        Opus reasons about each."""
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state=self._state(),
+        )
+        assert "commit claims" in result
+        assert "issue/PR claims" in result
+        assert "file claims" in result
+        # Reference the closing-bug context.
+        assert "PR #1858" in result
+        assert "#1855" in result
+
+    def test_generic_claims_explicitly_pass(self) -> None:
+        """A response with only qualitative prose (no SHAs, no #NN, no
+        file paths) must pass — the critic catches falsifiable
+        specifics, not opinionated prose."""
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state=self._state(),
+        )
+        assert "Generic claims" in result
+        assert "pass" in result.lower()
+
+    def test_response_schema_is_verdict_envelope(self) -> None:
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state=self._state(),
+        )
+        assert '"passed": true' in result
+        assert '"passed": false' in result
+        assert '"gap":' in result
+        assert "No other text" in result
+
+    def test_axes_pass_by_default_when_ground_truth_silent(self) -> None:
+        """Rob review on PR #1932: when the caller hasn't gathered
+        ground truth for a given axis (commit / issue-PR / file), that
+        axis must pass by default — otherwise normal replies that
+        mention a real ``#NN`` get rejected just because the caller
+        didn't populate ``open_issue_numbers``."""
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state={},
+        )
+        # commit and issue/PR axes both need explicit "passes by
+        # default when silent" so Opus reads it as a pass condition,
+        # not a fail condition.
+        commit_block = result.split("commit claims:", 1)[1].split(
+            "issue/PR claims:", 1
+        )[0]
+        assert "passes by default" in commit_block
+        issue_block = result.split("issue/PR claims:", 1)[1].split("file claims:", 1)[0]
+        assert "passes by default" in issue_block
+
+    def test_commit_claims_accept_prefix_match(self) -> None:
+        """Rob review on PR #1932: git abbreviates SHAs to different
+        lengths depending on repo size, and our ground-truth list
+        carries the full 40-char ``%H`` form (plus the repo's ``%h``).
+        A strict "must appear in the list" rule would reject any prose
+        that uses an abbreviation git chose at composition time but
+        whose length doesn't match the rendered form.  The prompt must
+        instruct PREFIX matching: any 4-to-40 hex prefix that uniquely
+        identifies a listed full SHA passes."""
+        result = Prompts("").reply_prose_claim_grounding_prompt(
+            reply_text="x",
+            structured_state=self._state(),
+        )
+        commit_block = result.split("commit claims:", 1)[1].split(
+            "issue/PR claims:", 1
+        )[0]
+        # The new rule explicitly names PREFIX matching and the legal
+        # length window, so a regenerated reply with a short SHA still
+        # passes the critic.
+        assert "PREFIX" in commit_block
+        assert "4-to-40" in commit_block
+        assert "hex prefix" in commit_block
+
+
+class TestInsightDedupCriticPrompt:
+    """HOL-19 / #1913: insight-filing critic prompt — catches cross-comment
+    near-duplicates the per-comment idempotency marker can't see."""
+
+    def _proposed(self) -> dict[str, str]:
+        return {
+            "title": "Mocking the network masks contract drift",
+            "hook": "Tests passed in CI but the migration failed in prod.",
+            "why": "Mock/prod divergence is a recurring class of bug.",
+        }
+
+    def _recent(self) -> list[dict[str, str]]:
+        return [
+            {
+                "title": "Old: drift between mocks and prod",
+                "body": "Long body about mocks leaking real assumptions.",
+                "url": "https://github.com/FidoCanCode/home/issues/42",
+            },
+            {
+                "title": "Unrelated insight",
+                "body": "Different lesson entirely.",
+                "url": "https://github.com/FidoCanCode/home/issues/77",
+            },
+        ]
+
+    def test_includes_proposed_insight_fields(self) -> None:
+        result = Prompts("").insight_dedup_critic_prompt(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+        )
+        assert "Mocking the network masks contract drift" in result
+        assert "Tests passed in CI but the migration failed in prod." in result
+        assert "Mock/prod divergence is a recurring class of bug." in result
+
+    def test_includes_recent_insights_block(self) -> None:
+        result = Prompts("").insight_dedup_critic_prompt(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+        )
+        for entry in self._recent():
+            assert entry["title"] in result
+            assert entry["url"] in result
+
+    def test_empty_recent_list_renders_sentinel(self) -> None:
+        result = Prompts("").insight_dedup_critic_prompt(
+            proposed_insight=self._proposed(),
+            recent_insights=[],
+        )
+        assert "(none — no recent insights to compare against)" in result
+
+    def test_long_body_is_truncated(self) -> None:
+        """A single oversized insight body must not crowd out the rest of
+        the comparison set — the formatter caps it at 400 chars."""
+        long_body = "x" * 600
+        result = Prompts("").insight_dedup_critic_prompt(
+            proposed_insight=self._proposed(),
+            recent_insights=[
+                {
+                    "title": "Big one",
+                    "body": long_body,
+                    "url": "https://x/issues/1",
+                }
+            ],
+        )
+        assert "x" * 400 + "…" in result
+        assert "x" * 600 not in result
+
+    def test_response_schema_is_verdict_envelope(self) -> None:
+        result = Prompts("").insight_dedup_critic_prompt(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+        )
+        assert '"is_duplicate": false' in result
+        assert '"is_duplicate": true' in result
+        assert '"duplicate_url":' in result
+        assert "No other text" in result
+
+    def test_question_names_near_duplicate_criteria(self) -> None:
+        """The prompt must define 'near-duplicate' so Opus doesn't reject
+        only on exact wording match (the per-comment marker already
+        catches exact replays)."""
+        result = Prompts("").insight_dedup_critic_prompt(
+            proposed_insight=self._proposed(),
+            recent_insights=self._recent(),
+        )
+        assert "near-duplicate" in result
+        assert "same core claim" in result.lower() or "SAME core claim" in result

@@ -697,6 +697,28 @@ class TestExecutorInsightFiling:
 
         filer.file_insight.assert_called_once_with(insight, target)
 
+    def test_execute_files_insights_before_posting_reply(self) -> None:
+        """HOL-26: insights are durable as GitHub issues before the
+        user-visible reply can claim they exist."""
+        gh = _make_gh()
+        filer = _make_insight_filer()
+        order: list[str] = []
+        filer.file_insight.side_effect = lambda *_a, **_kw: order.append("file")
+        gh.reply_to_review_comment.side_effect = lambda *_a, **_kw: order.append("post")
+        gh.comment_issue.side_effect = lambda *_a, **_kw: order.append("post")
+        executor = SynthesisExecutor(gh, insight_filer=filer)
+
+        executor.execute(
+            _make_response(insights=[_make_insight()]),
+            _make_target(comment_type="pulls"),
+        )
+
+        assert order == ["file", "post"], (
+            f"expected filing before reply post, got {order}"
+        )
+        # And not double-filed by execute_effects_only:
+        assert filer.file_insight.call_count == 1
+
     def test_execute_effects_only_no_insights_no_filer_call(self) -> None:
         gh = _make_gh()
         gh.list_reactions.return_value = []

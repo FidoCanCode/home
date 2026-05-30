@@ -3368,3 +3368,175 @@ class TestFetchActivitiesRateLimit:
         assert info is not None
         assert info.rest.used == 7
         assert info.graphql.used == 22
+
+
+# ---------------------------------------------------------------------------
+# HOL-29 / #1923 — BLOCKED-task display
+# ---------------------------------------------------------------------------
+
+
+class TestBlockedCriticTasks:
+    """HOL-29: ``./fido status`` surfaces tasks the HOL-21 escalation
+    helper has marked BLOCKED."""
+
+    def test_blocked_critic_tasks_extracts_marker(self) -> None:
+        from fido.status import _blocked_critic_tasks
+
+        task_list = [
+            {
+                "id": "t-1",
+                "title": "Add retry logic",
+                "status": "blocked",
+                "description": (
+                    "Original notes here.\n\n"
+                    "CRITIC EXHAUSTED (3 attempts): diff includes "
+                    "unrelated formatting"
+                ),
+            },
+            # Non-blocked task — skipped.
+            {"id": "t-2", "title": "x", "status": "pending", "description": ""},
+            # Blocked but no CRITIC marker (e.g. blocked for another
+            # reason like #1247 unblock semantics) — skipped.
+            {"id": "t-3", "title": "y", "status": "blocked", "description": "stuck"},
+        ]
+
+        out = _blocked_critic_tasks(task_list)
+        assert len(out) == 1
+        assert out[0].task_id == "t-1"
+        assert out[0].title == "Add retry logic"
+        assert out[0].attempt_count == 3
+        assert "diff includes unrelated formatting" in out[0].final_gap
+
+    def test_blocked_critic_tasks_prefers_structured_chain(self) -> None:
+        # Codex P2 on PR #1938: when ``critic_gap_chain`` is present
+        # on the task, the status display reads it instead of regex-
+        # parsing the description.  Pins the precedence so a stale
+        # CRITIC EXHAUSTED marker in the description text (carried
+        # across an unblock) can't outweigh the current structured
+        # state.
+        from fido.status import _blocked_critic_tasks
+
+        task_list = [
+            {
+                "id": "t-1",
+                "title": "Add retry logic",
+                "status": "blocked",
+                "critic_gap_chain": ["gap A", "gap B", "FINAL gap"],
+                # Stale description marker would say "5 attempts" if
+                # we fell back to the regex — assert we ignore it.
+                "description": "CRITIC EXHAUSTED (5 attempts): stale-marker",
+            }
+        ]
+        out = _blocked_critic_tasks(task_list)
+        assert len(out) == 1
+        assert out[0].attempt_count == 3
+        assert out[0].final_gap == "FINAL gap"
+
+    def test_blocked_critic_tasks_falls_back_to_last_marker_when_no_chain(
+        self,
+    ) -> None:
+        # When the structured field is absent and the description has
+        # multiple CRITIC EXHAUSTED markers (re-escalation after
+        # unblock left both), take the LAST — the current state.
+        from fido.status import _blocked_critic_tasks
+
+        task_list = [
+            {
+                "id": "t-1",
+                "title": "y",
+                "status": "blocked",
+                "description": (
+                    "CRITIC EXHAUSTED (3 attempts): old marker from before unblock\n\n"
+                    "CRITIC EXHAUSTED (2 attempts): current marker"
+                ),
+            }
+        ]
+        out = _blocked_critic_tasks(task_list)
+        assert len(out) == 1
+        assert out[0].attempt_count == 2
+        assert "current marker" in out[0].final_gap
+
+    def test_format_status_renders_blocked_critic_line(self) -> None:
+        from fido.color import Color
+        from fido.status import BlockedTaskInfo, RepoStatus, _format_repo_body
+
+        repo = RepoStatus(
+            name="owner/repo",
+            fido_running=True,
+            issue=42,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+            blocked_critic_tasks=[
+                BlockedTaskInfo(
+                    task_id="t-1",
+                    title="Add retry logic",
+                    final_gap="diff includes unrelated formatting",
+                    attempt_count=3,
+                ),
+            ],
+        )
+        lines = _format_repo_body(repo, c=Color(env={"NO_COLOR": "1"}))
+        blocked_line = next((line for line in lines if "BLOCKED:" in line), None)
+        assert blocked_line is not None
+        assert "Add retry logic" in blocked_line
+        assert "diff includes unrelated formatting" in blocked_line
+        assert "3 attempts" in blocked_line
+
+    def test_format_blocked_critic_line_truncates_long_gap(self) -> None:
+        from fido.color import Color
+        from fido.status import BlockedTaskInfo, RepoStatus, _format_repo_body
+
+        repo = RepoStatus(
+            name="owner/repo",
+            fido_running=True,
+            issue=42,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+            blocked_critic_tasks=[
+                BlockedTaskInfo(
+                    task_id="t-1",
+                    title="Big task",
+                    final_gap="x" * 200,  # exceeds the 80-char cap
+                    attempt_count=3,
+                ),
+            ],
+        )
+        lines = _format_repo_body(repo, c=Color(env={"NO_COLOR": "1"}))
+        blocked_line = next(line for line in lines if "BLOCKED:" in line)
+        assert "..." in blocked_line
+        assert "x" * 200 not in blocked_line
+
+    def test_format_repo_body_omits_blocked_section_when_empty(self) -> None:
+        from fido.color import Color
+        from fido.status import RepoStatus, _format_repo_body
+
+        repo = RepoStatus(
+            name="owner/repo",
+            fido_running=True,
+            issue=42,
+            pending=0,
+            completed=0,
+            current_task=None,
+            claude_pid=None,
+            claude_uptime=None,
+            worker_what=None,
+            crash_count=0,
+            last_crash_error=None,
+            worker_stuck=False,
+        )
+        lines = _format_repo_body(repo, c=Color(env={"NO_COLOR": "1"}))
+        assert not any("BLOCKED:" in line for line in lines)

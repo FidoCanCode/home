@@ -124,6 +124,10 @@ class _FakeCallRecorder:
     def call_args_list(self) -> list[_FakeCallArgs]:
         return [_FakeCallArgs(args, kwargs) for args, kwargs in self._calls]
 
+    @property
+    def called(self) -> bool:
+        return bool(self._calls)
+
     def assert_not_called(self) -> None:
         assert not self._calls, f"expected no calls, got {len(self._calls)}"
 
@@ -148,6 +152,22 @@ class _FakePrompts:
         self.rescope_duplicate_nudge: _FakeCallRecorder = _FakeCallRecorder()
         self.rescope_prompt_verdicts: _FakeCallRecorder = _FakeCallRecorder()
         self.rescope_verdicts_parse_nudge: _FakeCallRecorder = _FakeCallRecorder()
+        self.rescope_parse_nudge: _FakeCallRecorder = _FakeCallRecorder()
+        self.critic_system_prompt: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=""
+        )
+        self.task_creation_critic_prompt: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=""
+        )
+        self.task_completion_critic_prompt: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=""
+        )
+        self.reply_prose_claim_grounding_prompt: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=""
+        )
+        self.insight_dedup_critic_prompt: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=""
+        )
 
 
 class _FakeGitHub:
@@ -245,6 +265,22 @@ class TestTaskStoreOracleAdapter:
         )
         assert isinstance(_task_status_for_oracle({}), oracle.StatusPending)
 
+    def test_task_status_skipped_maps_to_completed_at_oracle(self) -> None:
+        # HOL-5 / #1899: SKIPPED projects to StatusCompleted at the
+        # oracle boundary — terminal for picker purposes.  The
+        # SKIPPED-vs-COMPLETED distinction is retained at the Python
+        # layer for UI (HOL-7) and reply-back narrative; the oracle
+        # only needs to know terminal vs not.  Both string and enum
+        # forms map.
+        assert isinstance(
+            _task_status_for_oracle({"status": TaskStatus.SKIPPED}),
+            oracle.StatusCompleted,
+        )
+        assert isinstance(
+            _task_status_for_oracle({"status": "skipped"}),
+            oracle.StatusCompleted,
+        )
+
     def test_task_source_comment_maps_thread_metadata(self) -> None:
         assert _task_source_comment_for_oracle({"thread": {"comment_id": "42"}}) == 42
         assert _task_source_comment_for_oracle({"thread": {}}) is None
@@ -288,6 +324,86 @@ class TestTaskStoreOracleAdapter:
         assert lines[1] == "- [ ] Spec <!-- type:spec -->"
         assert "Blocked" not in queue
         assert "- [x] Done <!-- type:thread -->" in queue
+
+    def test_format_work_queue_renders_skipped_separately(self) -> None:
+        # HOL-7 / #1901: SKIPPED marker tasks land in their own
+        # collapsed ``<details>`` block below completed.  The oracle
+        # projects SKIPPED → StatusCompleted (HOL-5) so the formatter
+        # has to read the underlying status to distinguish.
+        task_list = [
+            {"title": "Active work", "status": "pending", "type": "spec"},
+            {"title": "Skipped: drop A", "status": "skipped", "type": "spec"},
+            {"title": "Done thing", "status": "completed", "type": "spec"},
+            {"title": "Skipped: drop B", "status": "skipped", "type": "spec"},
+        ]
+
+        queue = _format_work_queue(task_list)
+
+        # Pending at top.
+        assert "- [ ] Active work" in queue
+        # Completed in its own block.
+        assert "<details><summary>Completed (1)</summary>" in queue
+        assert "- [x] Done thing" in queue
+        # Skipped in a SEPARATE block — both markers present, glyph is ⊘.
+        assert "<details><summary>Skipped (2)</summary>" in queue
+        assert "- ⊘ Skipped: drop A <!-- type:spec -->" in queue
+        assert "- ⊘ Skipped: drop B <!-- type:spec -->" in queue
+
+    def test_format_work_queue_encodes_skipped_description(self) -> None:
+        """Rob review on PR #1932: the SKIPPED block previously rendered
+        only the title — the per-skip narrative carried in
+        ``description`` was lost.  When ``seed_tasks_from_pr_body``
+        rehydrates tasks from the PR body after a restart, that
+        narrative needs to be roundtripped.  The formatter encodes it
+        as base64 inside an HTML comment (``<!-- desc:BASE64 -->``) so
+        the inner ``-->`` of any markdown payload can't terminate the
+        comment early.  Decoder lives in ``seed_tasks_from_pr_body``."""
+        import base64
+
+        task_list = [
+            {
+                "title": "Skipped: drop A",
+                "status": "skipped",
+                "type": "spec",
+                "description": "Rescope verdict: duplicate of #1234.",
+            },
+            {
+                "title": "Skipped: drop B",
+                "status": "skipped",
+                "type": "spec",
+                # Empty description must NOT emit the comment — keeps
+                # the rendered line identical to the pre-roundtrip
+                # shape when there's nothing to carry.
+                "description": "",
+            },
+        ]
+
+        queue = _format_work_queue(task_list)
+
+        # Non-empty description encoded into the desc HTML comment.
+        encoded_a = base64.b64encode(b"Rescope verdict: duplicate of #1234.").decode(
+            "ascii"
+        )
+        assert f"<!-- desc:{encoded_a} -->" in queue
+        # Empty description path emits the bare line — no desc comment.
+        assert "- ⊘ Skipped: drop B <!-- type:spec -->" in queue
+        # And the bare line for B has no trailing desc comment.
+        b_line = next(line for line in queue.splitlines() if "Skipped: drop B" in line)
+        assert "desc:" not in b_line
+
+    def test_format_work_queue_no_skipped_block_when_none(self) -> None:
+        # The "Skipped" block only appears when at least one skipped
+        # task exists.  Otherwise the rendering matches the pre-HOL-7
+        # shape exactly.
+        task_list = [
+            {"title": "Active", "status": "pending", "type": "spec"},
+            {"title": "Done", "status": "completed", "type": "spec"},
+        ]
+
+        queue = _format_work_queue(task_list)
+
+        assert "Skipped" not in queue
+        assert "⊘" not in queue
 
 
 class TestRescopeOracleAdapter:
@@ -339,6 +455,16 @@ class TestRescopeOracleAdapter:
             == "StatusBlocked"
         )
         assert type(_rescope_task_status_for_oracle({})).__name__ == "StatusPending"
+        # HOL-5 / #1899: SKIPPED projects to StatusCompleted in the
+        # rescope oracle too — the snapshot-order computation treats it
+        # as already-terminal, so the rescope won't try to re-mutate a
+        # skipped marker.
+        assert (
+            type(
+                _rescope_task_status_for_oracle({"status": TaskStatus.SKIPPED})
+            ).__name__
+            == "StatusCompleted"
+        )
         assert (
             _rescope_task_source_comment_for_oracle({"thread": {"comment_id": "42"}})
             == 42
@@ -636,6 +762,31 @@ class TestAddTask:
         with pytest.raises(TypeError, match="task_type must be TaskType"):
             Tasks(tmp_path).add(title="t", task_type="spec")  # type: ignore[arg-type]
 
+    def test_invariant_field_stored_when_provided(self, tmp_path: Path) -> None:
+        """HOL-11 / #1905: ``Tasks.add`` accepts an ``invariant`` kwarg
+        and the task carries it forward.  HOL-12 will tighten the
+        rescope prompt so every new task names one; today the field
+        is the carrier."""
+        task = Tasks(tmp_path).add(
+            title="extract _RescopeOp dataclass",
+            task_type=TaskType.SPEC,
+            invariant="rescope ops are typed values, not raw dicts",
+        )
+        assert task["invariant"] == "rescope ops are typed values, not raw dicts"
+        assert (
+            Tasks(tmp_path).list()[0]["invariant"]
+            == "rescope ops are typed values, not raw dicts"
+        )
+
+    def test_invariant_omitted_when_empty(self, tmp_path: Path) -> None:
+        """Legacy callers (CLI ``./fido task add``, seed-from-PR-body)
+        don't supply an invariant.  We don't want a noisy ``invariant: ""``
+        field cluttering every legacy task — store the field only when
+        the caller actually named one."""
+        task = Tasks(tmp_path).add(title="legacy task", task_type=TaskType.SPEC)
+        assert "invariant" not in task
+        assert "invariant" not in Tasks(tmp_path).list()[0]
+
 
 class TestUpdateTask:
     def test_updates_status(self, tmp_path: Path) -> None:
@@ -827,6 +978,25 @@ class TestUnblockTasks:
     def test_returns_zero_on_empty_file(self, tmp_path: Path) -> None:
         assert Tasks(tmp_path).unblock_tasks() == 0
 
+    def test_resets_critic_retry_count_on_unblock(self, tmp_path: Path) -> None:
+        # Codex P1 on PR #1938: a task that escalated to BLOCKED on
+        # the HOL-17 budget would carry the at-budget counter back
+        # into PENDING when unblocked.  Without the reset, the very
+        # next critic failure re-escalates immediately.
+        from fido.worker import _HOL17_MAX_REPARK_BUDGET
+
+        t = Tasks(tmp_path).add(title="task", task_type=TaskType.SPEC)
+        Tasks(tmp_path).update(t["id"], TaskStatus.BLOCKED)
+        # Simulate the at-budget counter the escalation left behind.
+        with Tasks(tmp_path).modify() as live:
+            for row in live:
+                if row["id"] == t["id"]:
+                    row["critic_retry_count"] = _HOL17_MAX_REPARK_BUDGET
+        Tasks(tmp_path).unblock_tasks()
+        after = next(r for r in Tasks(tmp_path).list() if r["id"] == t["id"])
+        assert after["status"] == str(TaskStatus.PENDING)
+        assert after["critic_retry_count"] == 0
+
 
 # ── _build_task_list_snapshot ─────────────────────────────────────────────────
 
@@ -997,6 +1167,104 @@ class TestParseRescopeOperations:
                 "contributing_intents": [],
             }
         ]
+
+    def test_parses_new_with_invariant(self) -> None:
+        """HOL-12 / #1906 + codex r3293319645 on PR #1932: the
+        ``invariant`` field on a ``new`` op must survive the typed
+        pipeline.  Before the codex fix, ``_RescopeOpNew`` dropped
+        the field and ``_operations_to_items`` emitted no
+        ``invariant`` key, silently breaking the HOL-11/12 carrier."""
+        raw = (
+            '{"operations": [{"op": "new", "title": "T", '
+            '"description": "d", "type": "spec", '
+            '"invariant": "rescope ops are typed values"}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert _operations_to_items(ops) == [
+            {
+                "id": None,
+                "title": "T",
+                "description": "d",
+                "type": "spec",
+                "invariant": "rescope ops are typed values",
+                "contributing_intents": [],
+            }
+        ]
+
+    def test_parses_split_with_per_child_invariants(self) -> None:
+        """HOL-12 / #1906 + codex r3293319645 on PR #1932: each
+        ``split`` child can carry its own ``invariant``; the field
+        must survive into ``_operations_to_items``'s
+        ``split_targets``."""
+        raw = (
+            '{"operations": [{"op": "split", "id": "src", "children": ['
+            '{"title": "A", "description": "first", '
+            '"invariant": "invariant-A"}, '
+            '{"title": "B", "description": "second", '
+            '"invariant": "invariant-B"}]}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        assert _operations_to_items(ops) == [
+            {
+                "id": "src",
+                "split_targets": [
+                    {
+                        "title": "A",
+                        "description": "first",
+                        "invariant": "invariant-A",
+                    },
+                    {
+                        "title": "B",
+                        "description": "second",
+                        "invariant": "invariant-B",
+                    },
+                ],
+                "contributing_intents": [],
+            }
+        ]
+
+    def test_parses_new_without_invariant_omits_field(self) -> None:
+        """Legacy ``new`` ops that predate HOL-12 don't supply an
+        invariant.  The materialised item must NOT carry an empty
+        ``invariant`` key — downstream consumers distinguish
+        "Opus gave one" from "field absent"."""
+        raw = (
+            '{"operations": [{"op": "new", "title": "T", '
+            '"description": "d", "type": "spec"}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        item = _operations_to_items(ops)[0]
+        assert "invariant" not in item
+
+    def test_parses_split_child_without_invariant_omits_field(self) -> None:
+        """Same omission rule on the split path — children without an
+        invariant don't get an empty placeholder."""
+        raw = (
+            '{"operations": [{"op": "split", "id": "src", "children": ['
+            '{"title": "A", "description": "first"}]}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        child = _operations_to_items(ops)[0]["split_targets"][0]
+        assert "invariant" not in child
+
+    def test_parses_new_with_non_string_invariant_treats_as_empty(self) -> None:
+        """A non-string ``invariant`` (e.g. ``null``, ``42``) is
+        ignored rather than rejected so a slightly malformed Opus
+        response still parses — the title/description/type gate is
+        the load-bearing one."""
+        raw = (
+            '{"operations": [{"op": "new", "title": "T", '
+            '"description": "d", "type": "spec", '
+            '"invariant": 42}]}'
+        )
+        ops, errors = _parse_rescope_operations(raw)
+        assert errors == []
+        item = _operations_to_items(ops)[0]
+        assert "invariant" not in item
 
     def test_parses_json_with_preamble(self) -> None:
         raw = 'Reordered:\n{"operations": [{"op": "keep", "id": "1"}]}'
@@ -1237,7 +1505,10 @@ def _intent(
 
 class TestParseRescopeVerdicts:
     def test_minimal_honored_verdict(self) -> None:
-        raw = '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored"}]}'
+        raw = (
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored", '
+            '"narrative": "as asked"}]}'
+        )
         verdicts, errors = _parse_rescope_verdicts(raw, [_intent(1)])
         assert errors == []
         assert len(verdicts) == 1
@@ -1267,7 +1538,8 @@ class TestParseRescopeVerdicts:
             '{"intent_comment_id": 1, "outcome": "superseded", '
             '"by_intent_comment_id": 2, '
             '"narrative": "color overridden"},'
-            '{"intent_comment_id": 2, "outcome": "honored"}'
+            '{"intent_comment_id": 2, "outcome": "honored", '
+            '"narrative": "winning color request honored"}'
             "]}"
         )
         verdicts, errors = _parse_rescope_verdicts(raw, [_intent(1), _intent(2)])
@@ -1309,8 +1581,8 @@ class TestParseRescopeVerdicts:
     def test_duplicate_intent_comment_id_in_verdicts(self) -> None:
         raw = (
             '{"verdicts": ['
-            '{"intent_comment_id": 1, "outcome": "honored"},'
-            '{"intent_comment_id": 1, "outcome": "no_op"}'
+            '{"intent_comment_id": 1, "outcome": "honored", "narrative": "x"},'
+            '{"intent_comment_id": 1, "outcome": "no_op", "narrative": "y"}'
             "]}"
         )
         _, errors = _parse_rescope_verdicts(raw, [_intent(1)])
@@ -1388,7 +1660,7 @@ class TestParseRescopeVerdicts:
             ' "by_intent_comment_id": 2, "narrative": "x"},'
             '{"intent_comment_id": 2, "outcome": "superseded", '
             ' "by_intent_comment_id": 3, "narrative": "y"},'
-            '{"intent_comment_id": 3, "outcome": "honored"}'
+            '{"intent_comment_id": 3, "outcome": "honored", "narrative": "z"}'
             "]}"
         )
         verdicts, errors = _parse_rescope_verdicts(
@@ -1442,7 +1714,10 @@ class TestParseRescopeVerdicts:
     def test_absent_ops_defaults_to_empty(self) -> None:
         # Absent ``ops`` field is the documented "no ops" case —
         # default ``()`` is the right value, not an error.
-        raw = '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored"}]}'
+        raw = (
+            '{"verdicts": [{"intent_comment_id": 1, "outcome": "honored", '
+            '"narrative": "x"}]}'
+        )
         verdicts, errors = _parse_rescope_verdicts(raw, [_intent(1)])
         assert errors == []
         assert verdicts[0].ops == ()
@@ -2792,6 +3067,61 @@ class TestMakeNewTasksFromOpus:
         # positional alignment for later new tasks.
         assert result == [None], "covered intent must drop the duplicate (#1337)"
 
+    def test_skipped_marker_exempt_from_post_snapshot_dedup(self) -> None:
+        """Rob review on PR #1932: HOL-6 SKIPPED markers are the
+        DURABLE record of an intent's no_op disposition.  If a
+        concurrent thread task happens to cover the same intent's
+        lineage, the dedup must NOT drop the marker — that's exactly
+        the silent-drop pattern HOL-6 exists to close."""
+        snapshot_ids = frozenset({"orig-1"})
+        current = [
+            {"id": "orig-1", "title": "Original", "status": "pending"},
+            # post-snapshot thread task whose lineage covers intent 99
+            {
+                "id": "post-snapshot-2",
+                "title": "Concurrent thread task",
+                "status": "in_progress",
+                "type": "thread",
+                "thread": {
+                    "comment_id": 99,
+                    "lineage_comment_ids": [99],
+                },
+            },
+        ]
+        intents = [
+            RescopeIntent(
+                comment_id=99,
+                change_request="something",
+                timestamp="2026-05-23T15:00:00+00:00",
+            ),
+        ]
+        # SKIPPED marker for intent 99, AND another normal null-id item.
+        items = [
+            {"id": "orig-1", "title": "Original"},
+            {
+                "title": "Skipped: covered by another task",
+                "description": "marker",
+                "status": "skipped",
+                "contributing_intents": [99],
+            },
+            {
+                "title": "Other genuine new task",
+                "description": "regular new work",
+            },
+        ]
+        result = _make_new_tasks_from_opus(
+            items, snapshot_ids, current=current, intents=intents
+        )
+        # 2 null-id items, both keep their slots in result.
+        assert len(result) == 2
+        # SKIPPED marker survives even though intent 99 is covered.
+        skipped = result[0]
+        assert skipped is not None
+        assert skipped["status"] == "skipped"
+        # The OTHER null-id item gets dropped (one dedup quota used by
+        # the covered intent, applied to the first NON-skipped item).
+        assert result[1] is None
+
     def test_does_not_dedup_when_lineage_does_not_match_intent(self) -> None:
         """When no post-snapshot thread task covers the intent, Opus's null-id
         item is genuinely new and must be kept."""
@@ -2915,6 +3245,30 @@ class TestMakeNewTasksFromOpus:
         assert result[0] is None
         assert result[1] is not None
         assert result[1]["title"] == "Genuine new"
+
+    def test_carries_invariant_from_opus_item(self) -> None:
+        """HOL-11 / #1905: when Opus names an invariant on a new task,
+        the materialised task carries it forward.  HOL-12 will require
+        the field; today's contract is "if present, preserve it"."""
+        items = [
+            {
+                "title": "Extract _RescopeOp dataclass",
+                "description": "Replace raw dicts in the rescope reducer.",
+                "invariant": "rescope ops are typed values, not raw dicts",
+            },
+        ]
+        result = _make_new_tasks_from_opus(items, frozenset())
+        assert result[0] is not None
+        assert result[0]["invariant"] == "rescope ops are typed values, not raw dicts"
+
+    def test_omits_invariant_when_opus_did_not_supply(self) -> None:
+        """Pre-HOL-12 callers (legacy Opus prompt, hand-built items) won't
+        carry an ``invariant`` key.  We don't fabricate one, and we
+        don't write an empty placeholder."""
+        items = [{"title": "Untyped new task", "description": "no invariant"}]
+        result = _make_new_tasks_from_opus(items, frozenset())
+        assert result[0] is not None
+        assert "invariant" not in result[0]
 
 
 # ── _find_duplicate_titles ────────────────────────────────────────────────────
@@ -3236,6 +3590,132 @@ class TestValidateRescopeBatch:
             "merging into a completed task is contradictory" in e and "already on" in e
             for e in errors
         )
+
+    def test_merge_into_skipped_marker_target_is_rejected(self) -> None:
+        """Rob review on PR #1932: SKIPPED tasks are terminal lineage
+        records (HOL-6 no_op markers).  Codex follow-up: the rejection
+        is now a single generic guard at the top of the per-item loop —
+        ANY op targeting a SKIPPED row is rejected, not just merge /
+        split.  This test pins the merge variant of that broader rule."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        items = [
+            {"id": "target", "title": "T", "merge_sources": ["source"]},
+            {"id": "source", "title": "S", "status": "completed"},
+        ]
+        current = [target, self._t("source")]
+        errors = _validate_rescope_batch(current, items)
+        assert any(
+            "SKIPPED marker" in e and "terminal" in e and "any op on it" in e
+            for e in errors
+        )
+
+    def test_split_skipped_marker_target_is_rejected(self) -> None:
+        """Split variant of the generic SKIPPED-guard rule (see the merge
+        test above)."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        items = [
+            {
+                "id": "target",
+                "title": "T",
+                "split_targets": [
+                    {"title": "A", "description": ""},
+                    {"title": "B", "description": ""},
+                ],
+            },
+        ]
+        errors = _validate_rescope_batch([target], items)
+        assert any(
+            "SKIPPED marker" in e and "terminal" in e and "any op on it" in e
+            for e in errors
+        )
+
+    def test_rewrite_skipped_marker_target_is_rejected(self) -> None:
+        """Codex on PR #1932: the earlier merge/split-only guard missed
+        the rewrite shape — an item targeting a SKIPPED id with no
+        merge/split arms (just a new title/description) would silently
+        mutate the marker's title while preserving skipped status,
+        corrupting the no_op lineage record."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        target["title"] = "Original SKIPPED marker"
+        items = [
+            {
+                "id": "target",
+                "title": "Rewritten — would overwrite the marker",
+                "description": "and the description too",
+            },
+        ]
+        errors = _validate_rescope_batch([target], items)
+        assert any("SKIPPED marker" in e and "any op on it" in e for e in errors)
+
+    def test_keep_skipped_marker_with_empty_op_sentinels_is_allowed(
+        self,
+    ) -> None:
+        """Empty ``merge_sources`` / ``split_targets`` /
+        ``contributing_intents`` are the documented sentinels (no
+        merge, no split, no new intents) — a caller that always emits
+        these keys with empty lists isn't actually mutating the row,
+        so the SKIPPED guard must NOT flag them."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        items = [
+            {
+                "id": "target",
+                "contributing_intents": [],
+                "merge_sources": [],
+                "split_targets": [],
+            },
+        ]
+        errors = _validate_rescope_batch([target], items)
+        assert not any("SKIPPED marker" in e for e in errors)
+
+    def test_keep_skipped_marker_target_is_allowed(self) -> None:
+        """The cheap ``keep`` no-op shape (bare ``{id}``) must NOT be
+        rejected — that's exactly the right semantic for a terminal
+        lineage record on every rescope pass, and it keeps the
+        SKIPPED row in the projected output where the materialise
+        pass can re-stamp ``"skipped"`` instead of ``"completed"``.
+        Pins the boundary of the generic SKIPPED-guard above."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        items = [
+            {"id": "target"},
+        ]
+        errors = _validate_rescope_batch([target], items)
+        assert not any("SKIPPED marker" in e for e in errors)
+
+    def test_keep_skipped_marker_with_non_empty_intents_is_rejected(
+        self,
+    ) -> None:
+        """Codex on PR #1932: ``_rescope_releases_for_oracle`` unions
+        the op's ``contributing_intents`` into the persisted task at
+        ``src/fido/tasks.py:650``, so a "keep" item carrying NEW
+        intents would silently expand the SKIPPED marker's lineage
+        metadata — contradicting the terminal-record invariant.  The
+        generic SKIPPED-guard must treat non-empty
+        ``contributing_intents`` as a mutation."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        items = [
+            {"id": "target", "contributing_intents": [42]},
+        ]
+        errors = _validate_rescope_batch([target], items)
+        assert any("SKIPPED marker" in e and "any op on it" in e for e in errors)
+
+    def test_remove_skipped_marker_target_is_rejected(self) -> None:
+        """Codex on PR #1932: status='completed' on a SKIPPED row would
+        demote the marker out of SKIPPED — the no_op record disappears
+        into the regular completed tasks block.  Same generic guard
+        catches it."""
+        target = self._t("target")
+        target["status"] = "skipped"
+        items = [
+            {"id": "target", "title": "T", "status": "completed"},
+        ]
+        errors = _validate_rescope_batch([target], items)
+        assert any("SKIPPED marker" in e and "any op on it" in e for e in errors)
 
     def test_empty_merge_sources_on_completed_target_is_harmless(self) -> None:
         # codex on #1738 (low): an empty merge_sources is the
@@ -4246,6 +4726,19 @@ class TestReorderTasks:
         ]
         assert _inprogress_was_demoted(ip, result) is False
 
+    def test_inprogress_demoted_helper_skips_skipped_at_front(self) -> None:
+        # HOL-5 / #1899: SKIPPED is also terminal — a skipped marker
+        # task at the front of result must not count as demotion (the
+        # picker walks past it).  Same rule as completed.
+        from fido.tasks import _inprogress_was_demoted
+
+        ip = {"id": "ip", "status": "in_progress", "type": "spec"}
+        result = [
+            {"id": "skipped1", "status": "skipped", "type": "spec"},
+            ip,
+        ]
+        assert _inprogress_was_demoted(ip, result) is False
+
     def test_inprogress_demoted_helper_skips_ask_and_defer_prefixed(
         self,
     ) -> None:
@@ -4864,7 +5357,15 @@ class TestReorderTasksVerdictWiring:
         ]
         bad_raw = '{"operations": []}'  # ops envelope, not verdicts
         valid_raw = json.dumps(
-            {"verdicts": [{"intent_comment_id": 101, "outcome": "no_op"}]}
+            {
+                "verdicts": [
+                    {
+                        "intent_comment_id": 101,
+                        "outcome": "no_op",
+                        "narrative": "nothing to do",
+                    }
+                ]
+            }
         )
         agent = _client()
         agent.run_turn.side_effect = [bad_raw, valid_raw]
@@ -4977,6 +5478,7 @@ class TestReorderTasksVerdictWiring:
                         "intent_comment_id": 20,
                         "outcome": "honored",
                         "affected_task_ids": [t1["id"]],
+                        "narrative": "joint-honored sibling",
                     },
                 ]
             }
@@ -5127,6 +5629,7 @@ class TestFlattenVerdictsToOps:
                 outcome="honored",
                 ops=({"op": "keep", "id": "A"},),
                 affected_task_ids=("A",),
+                narrative="x",
             ),
             IntentVerdict(
                 intent_comment_id=2,
@@ -5136,6 +5639,7 @@ class TestFlattenVerdictsToOps:
                     {"op": "remove", "id": "C"},
                 ),
                 affected_task_ids=("B", "C"),
+                narrative="x",
             ),
         ]
         flat = _flatten_verdicts_to_ops(verdicts)
@@ -5164,6 +5668,7 @@ class TestFlattenVerdictsToOps:
                 },
             ),
             affected_task_ids=("T1",),
+            narrative="x",
         )
         flat = _flatten_verdicts_to_ops([v])
         # Malformed value passed through; verdict id NOT injected.
@@ -5180,6 +5685,7 @@ class TestFlattenVerdictsToOps:
             outcome="honored",
             ops=({"op": "keep", "id": "T1", "contributing_intents": ""},),
             affected_task_ids=("T1",),
+            narrative="x",
         )
         flat = _flatten_verdicts_to_ops([v])
         assert flat[0]["contributing_intents"] == ""
@@ -5201,6 +5707,7 @@ class TestFlattenVerdictsToOps:
                 },
             ),
             affected_task_ids=("T1",),
+            narrative="x",
         )
         flat = _flatten_verdicts_to_ops([v])
         assert flat[0]["contributing_intents"] == {"10": "x"}
@@ -5223,6 +5730,7 @@ class TestFlattenVerdictsToOps:
                 },
             ),
             affected_task_ids=("T1",),
+            narrative="x",
         )
         flat = _flatten_verdicts_to_ops([v])
         # After IntentVerdict's deep_freeze, the list became a tuple.
@@ -5246,6 +5754,7 @@ class TestFlattenVerdictsToOps:
                 },
             ),
             affected_task_ids=("T1",),
+            narrative="x",
         )
         flat = _flatten_verdicts_to_ops([v])
         # After deep_freeze, list → tuple; bool-containing → passed through.
@@ -5262,9 +5771,1261 @@ class TestFlattenVerdictsToOps:
             outcome="honored",
             ops=({"op": "keep", "id": "T1", "contributing_intents": 0},),
             affected_task_ids=("T1",),
+            narrative="x",
         )
         flat = _flatten_verdicts_to_ops([v])
         assert flat[0]["contributing_intents"] == 0
+
+
+# ── _skip_ops_for_no_op_verdicts (HOL-6 / #1900) ─────────────────────────────
+
+
+class TestSkipOpsForNoOpVerdicts:
+    """HOL-6: every no_op verdict synthesises a SKIPPED marker op."""
+
+    def test_empty_verdicts_yields_no_skip_ops(self) -> None:
+        from fido.tasks import _skip_ops_for_no_op_verdicts
+
+        assert _skip_ops_for_no_op_verdicts([]) == []
+
+    def test_only_honored_verdicts_yields_no_skip_ops(self) -> None:
+        # No no_op verdicts in the batch → no marker tasks needed.
+        from fido.tasks import _skip_ops_for_no_op_verdicts
+        from fido.types import IntentVerdict
+
+        verdicts = [
+            IntentVerdict(intent_comment_id=1, outcome="honored", narrative="x"),
+            IntentVerdict(intent_comment_id=2, outcome="honored", narrative="y"),
+        ]
+        assert _skip_ops_for_no_op_verdicts(verdicts) == []
+
+    def test_no_op_verdict_produces_one_skip_op_per_intent(self) -> None:
+        from fido.tasks import _RescopeOpSkip, _skip_ops_for_no_op_verdicts
+        from fido.types import IntentVerdict
+
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=42,
+                outcome="no_op",
+                narrative="Already covered by an in-flight task.",
+            )
+        ]
+        result = _skip_ops_for_no_op_verdicts(verdicts)
+        assert len(result) == 1
+        op = result[0]
+        assert isinstance(op, _RescopeOpSkip)
+        assert op.contributing_intents == [42]
+        assert op.description == "Already covered by an in-flight task."
+        assert op.title.startswith("Skipped: ")
+
+    def test_mixed_batch_only_no_op_synthesises(self) -> None:
+        from fido.tasks import _skip_ops_for_no_op_verdicts
+        from fido.types import IntentVerdict
+
+        verdicts = [
+            IntentVerdict(intent_comment_id=1, outcome="honored", narrative="ok"),
+            IntentVerdict(intent_comment_id=2, outcome="no_op", narrative="drop A"),
+            IntentVerdict(
+                intent_comment_id=3,
+                outcome="reshaped",
+                ops=({"op": "rewrite", "id": "T1", "title": "z"},),
+                affected_task_ids=("T1",),
+                narrative="reshape",
+            ),
+            IntentVerdict(intent_comment_id=4, outcome="no_op", narrative="drop B"),
+        ]
+        result = _skip_ops_for_no_op_verdicts(verdicts)
+        assert [op.contributing_intents for op in result] == [[2], [4]]
+        assert [op.description for op in result] == ["drop A", "drop B"]
+
+    def test_title_truncated_with_ellipsis_when_long(self) -> None:
+        from fido.tasks import _skip_ops_for_no_op_verdicts
+        from fido.types import IntentVerdict
+
+        long_narrative = "x" * 200
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=1, outcome="no_op", narrative=long_narrative
+            )
+        ]
+        result = _skip_ops_for_no_op_verdicts(verdicts)
+        # Body capped at 60 chars + ellipsis ⇒ "Skipped: " + 60 + "…"
+        assert result[0].title == "Skipped: " + ("x" * 60) + "…"
+        # Full narrative still lives on the description for the reply-back.
+        assert result[0].description == long_narrative
+
+    def test_title_uses_first_non_blank_line(self) -> None:
+        # Multi-line narratives — title takes the first meaningful line.
+        from fido.tasks import _skip_ops_for_no_op_verdicts
+        from fido.types import IntentVerdict
+
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=1,
+                outcome="no_op",
+                narrative="\n  \nFirst real line.\nSecond line.\n",
+            )
+        ]
+        result = _skip_ops_for_no_op_verdicts(verdicts)
+        assert result[0].title == "Skipped: First real line."
+
+    def test_skip_title_helper_falls_back_for_blank_narrative(self) -> None:
+        # Defensive fallback in ``_skip_title_from_narrative``: when the
+        # narrative is empty or all-whitespace, the title is bare
+        # "Skipped" rather than an empty title (which the materializer
+        # would drop entirely).  Unreachable from
+        # ``_skip_ops_for_no_op_verdicts`` because ``IntentVerdict``
+        # enforces non-empty narrative at the ctor (HOL-3 / #1897), but
+        # exercised here for coverage and to pin the contract for any
+        # future direct caller.
+        from fido.tasks import _skip_title_from_narrative
+
+        assert _skip_title_from_narrative("") == "Skipped"
+        assert _skip_title_from_narrative("   \n\t\n") == "Skipped"
+
+
+# ── _append_narrative_chain_entries (HOL-8 / #1902) ──────────────────────────
+
+
+class TestAppendNarrativeChainEntries:
+    """HOL-8: verdicts touching tasks append narrative entries to the chain."""
+
+    def test_empty_verdicts_no_change(self) -> None:
+        from fido.tasks import _append_narrative_chain_entries
+
+        tasks = [{"id": "T1", "title": "x"}]
+        _append_narrative_chain_entries(tasks, [])
+        assert "narrative_chain" not in tasks[0]
+
+    def test_explicit_affected_task_id_appends_entry(self) -> None:
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        tasks = [{"id": "T1", "title": "x"}]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=42,
+                outcome="reshaped",
+                ops=({"op": "rewrite", "id": "T1", "title": "new"},),
+                affected_task_ids=("T1",),
+                narrative="reshaped per ask",
+            )
+        ]
+        _append_narrative_chain_entries(tasks, verdicts)
+        assert tasks[0]["narrative_chain"] == [
+            {
+                "outcome": "reshaped",
+                "narrative": "reshaped per ask",
+                "intent_comment_id": 42,
+                "ts": tasks[0]["narrative_chain"][0]["ts"],
+            }
+        ]
+        # ts is a non-empty ISO-8601 string.
+        assert tasks[0]["narrative_chain"][0]["ts"]
+
+    def test_contributing_intents_match_for_fresh_task(self) -> None:
+        # Freshly-created tasks (Opus new ops, HOL-6 SKIPPED markers)
+        # have no pre-existing id for Opus to name in affected_task_ids
+        # — attribution flows through contributing_intents instead.
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        tasks = [
+            {
+                "id": "T-fresh",
+                "title": "Skipped: drop",
+                "contributing_intents": [99],
+            }
+        ]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=99,
+                outcome="no_op",
+                narrative="already covered",
+            )
+        ]
+        _append_narrative_chain_entries(tasks, verdicts)
+        chain = tasks[0]["narrative_chain"]
+        assert len(chain) == 1
+        assert chain[0]["outcome"] == "no_op"
+        assert chain[0]["intent_comment_id"] == 99
+
+    def test_unrelated_verdict_does_not_append(self) -> None:
+        # A verdict that touches neither this task's id nor its
+        # contributing intents must NOT pollute the chain.
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        tasks = [{"id": "T1", "title": "untouched", "contributing_intents": [10]}]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=999,
+                outcome="honored",
+                ops=({"op": "rewrite", "id": "OTHER", "title": "x"},),
+                affected_task_ids=("OTHER",),
+                narrative="not for us",
+            )
+        ]
+        _append_narrative_chain_entries(tasks, verdicts)
+        assert "narrative_chain" not in tasks[0]
+
+    def test_multiple_verdicts_jointly_honored_task_gets_multiple_entries(
+        self,
+    ) -> None:
+        # Canonical 3+1 pattern from #1798 — three review comments
+        # consolidated into one task.  Each verdict appends its own
+        # chain entry; chain length matches verdict count.
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        tasks = [{"id": "T-fix-all", "title": "consolidated"}]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=cid,
+                outcome="honored",
+                affected_task_ids=("T-fix-all",),
+                narrative=f"ask #{cid}",
+            )
+            for cid in (1, 2, 3)
+        ]
+        _append_narrative_chain_entries(tasks, verdicts)
+        chain = tasks[0]["narrative_chain"]
+        assert [e["intent_comment_id"] for e in chain] == [1, 2, 3]
+        assert [e["narrative"] for e in chain] == ["ask #1", "ask #2", "ask #3"]
+
+    def test_existing_chain_appended_not_replaced(self) -> None:
+        # Chains are append-only across rescopes — pre-existing
+        # entries survive; new entry is added at the end.
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        prior_entry = {
+            "outcome": "honored",
+            "narrative": "first rescope",
+            "intent_comment_id": 1,
+            "ts": "2024-01-01T00:00:00Z",
+        }
+        tasks = [
+            {
+                "id": "T1",
+                "title": "x",
+                "narrative_chain": [prior_entry],
+            }
+        ]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=2,
+                outcome="reshaped",
+                ops=({"op": "rewrite", "id": "T1", "title": "y"},),
+                affected_task_ids=("T1",),
+                narrative="second rescope",
+            )
+        ]
+        _append_narrative_chain_entries(tasks, verdicts)
+        chain = tasks[0]["narrative_chain"]
+        assert len(chain) == 2
+        assert chain[0] == prior_entry
+        assert chain[1]["narrative"] == "second rescope"
+
+    def test_snapshot_filter_restricts_contributing_intents_fallback(
+        self,
+    ) -> None:
+        """codex r3293359039 on PR #1932: the contributing_intents
+        fallback should only fire for freshly-created tasks (id NOT
+        in the snapshot), not pre-existing siblings that merely share
+        an old intent id.  Without the snapshot filter, a verdict
+        attributing to one task would also pollute every other task
+        in the queue that historically carried the same intent."""
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        # Two tasks both carry intent 42 historically.  The verdict's
+        # affected_task_ids names only T-affected.  T-sibling must NOT
+        # get a chain entry — even though its contributing_intents
+        # contains 42.
+        tasks = [
+            {
+                "id": "T-affected",
+                "title": "affected",
+                "contributing_intents": [42],
+            },
+            {
+                "id": "T-sibling",
+                "title": "sibling — same historical intent",
+                "contributing_intents": [42],
+            },
+        ]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=42,
+                outcome="reshaped",
+                ops=({"op": "rewrite", "id": "T-affected", "title": "x"},),
+                affected_task_ids=("T-affected",),
+                narrative="acted on T-affected only",
+            )
+        ]
+        # Snapshot = both task ids (both pre-existing).  Fallback
+        # must NOT fire for either; only the explicit attribution
+        # matters.
+        snapshot = frozenset({"T-affected", "T-sibling"})
+        _append_narrative_chain_entries(tasks, verdicts, snapshot)
+        assert tasks[0]["narrative_chain"][0]["narrative"] == (
+            "acted on T-affected only"
+        )
+        assert "narrative_chain" not in tasks[1]
+
+    def test_snapshot_filter_still_attributes_fresh_tasks(
+        self,
+    ) -> None:
+        """Pre-existing-only restriction must not break the
+        fresh-task path: a task whose id is NOT in the snapshot
+        (freshly-created this rescope) still receives attribution
+        via contributing_intents."""
+        from fido.tasks import _append_narrative_chain_entries
+        from fido.types import IntentVerdict
+
+        tasks = [
+            {"id": "T-old", "title": "untouched", "contributing_intents": [99]},
+            {"id": "T-fresh", "title": "new task", "contributing_intents": [99]},
+        ]
+        verdicts = [
+            IntentVerdict(
+                intent_comment_id=99,
+                outcome="no_op",
+                narrative="fresh marker",
+            )
+        ]
+        # Only T-old was in the snapshot — T-fresh is new this rescope.
+        snapshot = frozenset({"T-old"})
+        _append_narrative_chain_entries(tasks, verdicts, snapshot)
+        # T-old (pre-existing) gets no fallback attribution.
+        assert "narrative_chain" not in tasks[0]
+        # T-fresh (freshly-created) gets the fallback attribution.
+        assert tasks[1]["narrative_chain"][0]["narrative"] == "fresh marker"
+
+
+class TestMergeLineageNarrativeChain:
+    """HOL-9 / #1903: merge folds source narrative_chains into target."""
+
+    def _add_with_chain(
+        self, tmp_path: Path, title: str, chain: list[dict[str, Any]] | None = None
+    ) -> dict:
+        t = Tasks(tmp_path).add(title=title, task_type=TaskType.SPEC)
+        if chain is None:
+            return t
+        with Tasks(tmp_path).modify() as live:
+            for live_task in live:
+                if live_task["id"] == t["id"]:
+                    live_task["narrative_chain"] = chain
+        found = next(
+            (lt for lt in Tasks(tmp_path).list() if lt["id"] == t["id"]),
+            None,
+        )
+        assert found is not None
+        return found
+
+    def _response(self, items: list[dict[str, Any]]) -> str:
+        return json.dumps({"operations": items})
+
+    def test_merge_folds_source_chains_into_target(self, tmp_path: Path) -> None:
+        # Two source tasks with prior chains + a target with its own
+        # chain.  After merge, the target chain holds the union of
+        # all three (target entries first, then sources in order).
+        prior_target_entry = {
+            "outcome": "honored",
+            "narrative": "target-prior",
+            "intent_comment_id": 1,
+            "ts": "2024-01-01T00:00:00Z",
+        }
+        prior_src_a = {
+            "outcome": "reshaped",
+            "narrative": "src-a-prior",
+            "intent_comment_id": 2,
+            "ts": "2024-01-02T00:00:00Z",
+        }
+        prior_src_b = {
+            "outcome": "no_op",
+            "narrative": "src-b-prior",
+            "intent_comment_id": 3,
+            "ts": "2024-01-03T00:00:00Z",
+        }
+        target = self._add_with_chain(tmp_path, "Target", [prior_target_entry])
+        src_a = self._add_with_chain(tmp_path, "Source A", [prior_src_a])
+        src_b = self._add_with_chain(tmp_path, "Source B", [prior_src_b])
+        raw = self._response(
+            [
+                {
+                    "op": "merge",
+                    "target_id": target["id"],
+                    "sources": [src_a["id"], src_b["id"]],
+                    "title": "Merged",
+                    "description": "all the work",
+                },
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        merged = next(t for t in Tasks(tmp_path).list() if t["id"] == target["id"])
+        chain = merged.get("narrative_chain") or []
+        narratives = [e["narrative"] for e in chain]
+        assert "target-prior" in narratives
+        assert "src-a-prior" in narratives
+        assert "src-b-prior" in narratives
+        # Target's own entry comes first (pre-fold position preserved).
+        assert chain[0]["narrative"] == "target-prior"
+
+    def test_merge_dedupes_by_intent_id_and_ts(self, tmp_path: Path) -> None:
+        # Source and target share an entry (same intent_comment_id +
+        # same ts).  After merge, the target chain has the entry
+        # exactly once — not duplicated.
+        shared_entry = {
+            "outcome": "honored",
+            "narrative": "shared",
+            "intent_comment_id": 42,
+            "ts": "2024-01-01T00:00:00Z",
+        }
+        unique_entry = {
+            "outcome": "no_op",
+            "narrative": "src-only",
+            "intent_comment_id": 99,
+            "ts": "2024-01-02T00:00:00Z",
+        }
+        target = self._add_with_chain(tmp_path, "Target", [shared_entry])
+        src = self._add_with_chain(tmp_path, "Source", [shared_entry, unique_entry])
+        raw = self._response(
+            [
+                {
+                    "op": "merge",
+                    "target_id": target["id"],
+                    "sources": [src["id"]],
+                    "title": "Merged",
+                    "description": "",
+                },
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        merged = next(t for t in Tasks(tmp_path).list() if t["id"] == target["id"])
+        chain = merged.get("narrative_chain") or []
+        # Shared entry appears once; source-unique entry is added.
+        assert len(chain) == 2
+        narratives = [e["narrative"] for e in chain]
+        assert narratives.count("shared") == 1
+        assert "src-only" in narratives
+
+    def test_split_children_inherit_parent_chain_snapshot(self, tmp_path: Path) -> None:
+        # HOL-10 / #1904: split children inherit a SNAPSHOT of the
+        # parent's narrative_chain at split time.  Each child gets the
+        # full pre-split chain so the rationale for why the parent
+        # task existed is preserved on every child.
+        prior_entry = {
+            "outcome": "honored",
+            "narrative": "parent-history",
+            "intent_comment_id": 99,
+            "ts": "2024-03-01T00:00:00Z",
+        }
+        parent = self._add_with_chain(tmp_path, "Parent task", [prior_entry])
+        raw = self._response(
+            [
+                {
+                    "op": "split",
+                    "id": parent["id"],
+                    "children": [
+                        {"title": "Child A", "description": "first half"},
+                        {"title": "Child B", "description": "second half"},
+                    ],
+                },
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        result = Tasks(tmp_path).list()
+        children = [t for t in result if t.get("title") in ("Child A", "Child B")]
+        assert len(children) == 2
+        for child in children:
+            chain = child.get("narrative_chain") or []
+            assert chain == [prior_entry]
+
+    def test_split_children_chains_are_independent_copies(self, tmp_path: Path) -> None:
+        # Each child gets its OWN copy of the parent's chain — mutating
+        # one child's chain dict must NOT bleed into siblings.  Pins
+        # the "shallow snapshot per child, not shared" contract.
+        prior_entry = {
+            "outcome": "reshaped",
+            "narrative": "shared-history",
+            "intent_comment_id": 7,
+            "ts": "2024-03-02T00:00:00Z",
+        }
+        parent = self._add_with_chain(tmp_path, "Parent", [prior_entry])
+        raw = self._response(
+            [
+                {
+                    "op": "split",
+                    "id": parent["id"],
+                    "children": [
+                        {"title": "Child A", "description": ""},
+                        {"title": "Child B", "description": ""},
+                    ],
+                },
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        children = [
+            t
+            for t in Tasks(tmp_path).list()
+            if t.get("title") in ("Child A", "Child B")
+        ]
+        chain_a = next(c for c in children if c["title"] == "Child A")[
+            "narrative_chain"
+        ]
+        chain_b = next(c for c in children if c["title"] == "Child B")[
+            "narrative_chain"
+        ]
+        # Same content, different list objects, different entry dicts.
+        assert chain_a == chain_b == [prior_entry]
+        assert chain_a is not chain_b
+        assert chain_a[0] is not chain_b[0]
+
+    def test_split_with_no_parent_chain_children_have_no_chain(
+        self, tmp_path: Path
+    ) -> None:
+        # Parent without a chain ⇒ children have no chain (no empty
+        # list pollution).  Matches the "omit when empty" contract of
+        # the prompt renderer (HOL-8).
+        parent = self._add_with_chain(tmp_path, "Parent", None)
+        raw = self._response(
+            [
+                {
+                    "op": "split",
+                    "id": parent["id"],
+                    "children": [
+                        {"title": "Child", "description": ""},
+                    ],
+                },
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        child = next(t for t in Tasks(tmp_path).list() if t.get("title") == "Child")
+        assert "narrative_chain" not in child
+
+    def test_merge_target_without_prior_chain_inherits_source_chain(
+        self, tmp_path: Path
+    ) -> None:
+        # Fresh target (no prior chain) + source with a chain ⇒ target
+        # ends up with the source's chain only.
+        src_entry = {
+            "outcome": "honored",
+            "narrative": "src-history",
+            "intent_comment_id": 7,
+            "ts": "2024-02-01T00:00:00Z",
+        }
+        target = self._add_with_chain(tmp_path, "Target", None)
+        src = self._add_with_chain(tmp_path, "Source", [src_entry])
+        raw = self._response(
+            [
+                {
+                    "op": "merge",
+                    "target_id": target["id"],
+                    "sources": [src["id"]],
+                    "title": "Merged",
+                    "description": "",
+                },
+            ]
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw))
+        merged = next(t for t in Tasks(tmp_path).list() if t["id"] == target["id"])
+        chain = merged.get("narrative_chain") or []
+        assert chain == [src_entry]
+
+
+class TestSkipMarkerEndToEnd:
+    """HOL-6: integration through ``_apply_reorder``.
+
+    Verifies that a no_op verdict produces a SKIPPED marker task in
+    the resulting queue with the verdict narrative as description and
+    the intent comment id in contributing_intents — the data-layer
+    fix for PR #1890's silent-drop pattern.
+    """
+
+    def _add(self, tmp_path: Path, title: str) -> dict:
+        return Tasks(tmp_path).add(title=title, task_type=TaskType.SPEC)
+
+    def _response_verdicts(self, verdict_dicts: list[dict]) -> str:
+        # Build a verdict-envelope JSON response, the shape Opus emits.
+        import json as _json
+
+        return _json.dumps({"verdicts": verdict_dicts})
+
+    def test_no_op_verdict_lands_skipped_marker_task(self, tmp_path: Path) -> None:
+        # Reproduces PR #1890: comment-driven intent, no_op verdict.
+        # Before HOL-6 this silently produced NO task.  After HOL-6 the
+        # marker task lands with status=SKIPPED and the narrative
+        # carried into the description.
+        self._add(tmp_path, "Pre-existing")
+        intent = RescopeIntent(
+            change_request="Apply constructor-DI to fake classes",
+            comment_id=4490644973,
+            timestamp="2026-05-23T14:00:00+00:00",
+        )
+        raw = self._response_verdicts(
+            [
+                {
+                    "intent_comment_id": 4490644973,
+                    "outcome": "no_op",
+                    "narrative": (
+                        "Already covered by an in-flight task on the same area."
+                    ),
+                }
+            ]
+        )
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw),
+            intents=[intent],
+        )
+        result = Tasks(tmp_path).list()
+        skipped = [t for t in result if t.get("status") == "skipped"]
+        assert len(skipped) == 1
+        assert skipped[0]["title"].startswith("Skipped: ")
+        assert (
+            skipped[0]["description"]
+            == "Already covered by an in-flight task on the same area."
+        )
+        assert skipped[0]["contributing_intents"] == [4490644973]
+        # Pre-existing task untouched.
+        assert any(t["title"] == "Pre-existing" for t in result)
+
+    def test_skipped_survives_subsequent_rescope_pass(self, tmp_path: Path) -> None:
+        """codex r3293249256 on PR #1932: SKIPPED projects to
+        StatusCompleted at the oracle boundary (both terminal), so the
+        round-trip through ``_materialize_rescope_oracle_result`` must
+        re-stamp SKIPPED rather than collapsing to plain ``"completed"``.
+        Without the lift-back guard, the next rescope pass after a
+        ``no_op`` verdict silently erases the HOL-6 dedicated rendering
+        and lineage semantics."""
+        # First pass: no_op verdict lands a SKIPPED marker.
+        self._add(tmp_path, "Pre-existing")
+        intent = RescopeIntent(
+            change_request="A change-request to acknowledge but not act on",
+            comment_id=4490644974,
+            timestamp="2026-05-23T15:00:00+00:00",
+        )
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(
+                self._response_verdicts(
+                    [
+                        {
+                            "intent_comment_id": 4490644974,
+                            "outcome": "no_op",
+                            "narrative": "covered already, no-op",
+                        }
+                    ]
+                )
+            ),
+            intents=[intent],
+        )
+        before = Tasks(tmp_path).list()
+        skipped_before = [t for t in before if t.get("status") == "skipped"]
+        assert len(skipped_before) == 1
+        skipped_id = skipped_before[0]["id"]
+
+        # Second pass: rescope with no intents (the no-intent path uses
+        # the operations envelope, not verdicts).  Opus emits ``keep`` on
+        # every snapshot id including the SKIPPED marker; the materialise
+        # path must re-stamp ``"skipped"`` on the way back, not
+        # ``"completed"``.
+        pending_ids = [t["id"] for t in before if t.get("status") != "completed"]
+        keep_ops = [{"op": "keep", "id": tid} for tid in pending_ids]
+        raw_ops = '{"operations": ' + str(keep_ops).replace("'", '"') + "}"
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=_client(raw_ops),
+        )
+        after = Tasks(tmp_path).list()
+        skipped_after = next(t for t in after if t["id"] == skipped_id)
+        assert skipped_after["status"] == "skipped"
+
+    def test_new_op_invariant_lands_on_materialised_task(self, tmp_path: Path) -> None:
+        """codex r3293319645 on PR #1932: the ``invariant`` Opus emits
+        on a ``new`` op must survive the typed rescope pipeline and
+        appear on the persisted task.  Before the fix, ``_RescopeOpNew``
+        dropped the field at parse time, ``_operations_to_items`` had
+        nothing to emit, and ``_make_new_tasks_from_opus`` always saw
+        ``invariant=None`` — silently breaking the HOL-11/12 carrier
+        contract for every Opus-driven new task."""
+        # Seed one existing task so the empty-queue short-circuit in
+        # ``reorder_tasks`` doesn't skip the rescope call entirely.
+        # The ``new`` op is what we're actually testing.
+        existing = self._add(tmp_path, "Pre-existing")
+        raw_ops = (
+            '{"operations": ['
+            f'{{"op": "keep", "id": "{existing["id"]}"}}, '
+            '{"op": "new", '
+            '"title": "extract _RescopeOp dataclass", '
+            '"description": "Replace raw dicts in the rescope reducer.", '
+            '"type": "spec", '
+            '"invariant": "rescope ops are typed values, not raw dicts"}'
+            "]}"
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw_ops))
+        result = Tasks(tmp_path).list()
+        new_tasks = [
+            t for t in result if t.get("title") == "extract _RescopeOp dataclass"
+        ]
+        assert len(new_tasks) == 1
+        assert (
+            new_tasks[0]["invariant"] == "rescope ops are typed values, not raw dicts"
+        )
+
+    def test_task_creation_critic_drops_duplicate_proposal(
+        self, tmp_path: Path
+    ) -> None:
+        """HOL-16 / #1910: when the critic returns ``duplicate_of`` for a
+        proposed new task, the materialised queue must not contain it.
+        Closes #1861's shape (duplicate task spawn from follow-up
+        comments)."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_reorder
+
+        existing = self._add(tmp_path, "Existing work")
+        proposed_new = {
+            "id": None,
+            "title": "Same scope, different words",
+            "description": "",
+            "type": "spec",
+            "contributing_intents": [],
+        }
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            proposed_new,
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id=existing["id"],
+                rationale="covered by existing",
+            )
+
+        result = _apply_reorder([existing], items, task_creation_critic_fn=critic)
+        titles = [t["title"] for t in result if t.get("status") == "pending"]
+        assert "Existing work" in titles
+        assert "Same scope, different words" not in titles
+
+    def test_task_creation_critic_drops_supersedes_proposal(
+        self, tmp_path: Path
+    ) -> None:
+        """Supersedes is treated as a drop today (a follow-up leaf will
+        fold it into a rewrite op so the existing task is updated in
+        place).  This test pins today's behaviour."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_reorder
+
+        existing = self._add(tmp_path, "Old approach")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "Replacement approach",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict(
+                relationship="supersedes",
+                supersedes_id=existing["id"],
+                rationale="supersedes",
+            )
+
+        result = _apply_reorder([existing], items, task_creation_critic_fn=critic)
+        titles = [t["title"] for t in result if t.get("status") == "pending"]
+        assert "Replacement approach" not in titles
+
+    def test_task_creation_critic_fans_out_multi_proposal(self, tmp_path: Path) -> None:
+        """HOL-16 / #1910: a ``multi`` verdict replaces the single
+        proposed task with one materialised task per proposed split,
+        each carrying its own invariant (HOL-12 contract)."""
+        from fido.critics import TaskCreationProposedSplit, TaskCreationVerdict
+        from fido.tasks import _apply_reorder
+
+        existing = self._add(tmp_path, "Pre-existing")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "Too broad",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [42],
+            },
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict(
+                scope="multi",
+                proposed_splits=(
+                    TaskCreationProposedSplit(
+                        title="Phase 1",
+                        description="first half",
+                        invariant="invariant-1",
+                    ),
+                    TaskCreationProposedSplit(
+                        title="Phase 2",
+                        description="second half",
+                        invariant="invariant-2",
+                    ),
+                ),
+                rationale="spans two invariants",
+            )
+
+        result = _apply_reorder([existing], items, task_creation_critic_fn=critic)
+        new_tasks = [
+            t
+            for t in result
+            if t.get("status") == "pending" and t["id"] != existing["id"]
+        ]
+        assert len(new_tasks) == 2
+        titles = {t["title"] for t in new_tasks}
+        assert titles == {"Phase 1", "Phase 2"}
+        invariants = {t["invariant"] for t in new_tasks}
+        assert invariants == {"invariant-1", "invariant-2"}
+        for t in new_tasks:
+            assert t["contributing_intents"] == [42]
+
+    def test_task_creation_critic_pass_through_on_distinct_single(
+        self, tmp_path: Path
+    ) -> None:
+        """The default verdict (distinct + single) leaves the proposed
+        new task unchanged — wiring must not silently mutate the
+        happy-path queue."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_reorder
+
+        existing = self._add(tmp_path, "Pre-existing")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "Genuinely new",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict()  # default: distinct + single
+
+        result = _apply_reorder([existing], items, task_creation_critic_fn=critic)
+        titles = [t["title"] for t in result if t.get("status") == "pending"]
+        assert "Genuinely new" in titles
+
+    def test_task_creation_critic_skips_blank_title_items(self, tmp_path: Path) -> None:
+        """Blank-title items get dropped by ``_make_new_tasks_from_opus``
+        regardless; the critic must not be asked about them (no LLM
+        round-trip on guaranteed-drop items)."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_reorder
+
+        existing = self._add(tmp_path, "Pre-existing")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "  ",
+                "description": "blank",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        critic_calls: list[dict] = []
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            critic_calls.append(proposed)
+            return TaskCreationVerdict()
+
+        _apply_reorder([existing], items, task_creation_critic_fn=critic)
+        assert critic_calls == []
+
+    def test_task_creation_critic_skips_terminal_from_queue(
+        self, tmp_path: Path
+    ) -> None:
+        """The critic's queue context should only include pending work
+        — completed and skipped tasks are terminal and can't be the
+        ``duplicate_of`` target for a live new task."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_reorder
+
+        active = self._add(tmp_path, "Active task")
+        completed = self._add(tmp_path, "Already done")
+        Tasks(tmp_path).complete_by_id(completed["id"])
+        current = Tasks(tmp_path).list()
+        items = [
+            {"id": active["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "New task",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        seen_queues: list[list[dict]] = []
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            seen_queues.append(queue)
+            return TaskCreationVerdict()
+
+        _apply_reorder(current, items, task_creation_critic_fn=critic)
+        assert len(seen_queues) == 1
+        seen_ids = {t["id"] for t in seen_queues[0]}
+        assert active["id"] in seen_ids
+        assert completed["id"] not in seen_ids
+
+    def test_task_creation_critic_none_is_pass_through(self, tmp_path: Path) -> None:
+        """When ``critic_fn`` is ``None`` the wiring must be a no-op —
+        every legacy ``_apply_reorder`` call site relies on this."""
+        from fido.tasks import _apply_reorder
+
+        existing = self._add(tmp_path, "Pre-existing")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "New",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        result = _apply_reorder([existing], items)
+        titles = [t["title"] for t in result if t.get("status") == "pending"]
+        assert "New" in titles
+
+    def test_task_creation_critic_exempts_skipped_marker_items(
+        self, tmp_path: Path
+    ) -> None:
+        """codex r3293399804 on PR #1932: HOL-6 synthetic SKIPPED marker
+        items (from ``no_op`` verdicts) are deterministic lineage
+        records, NOT Opus-proposed new work.  Sending them through the
+        critic risks ``duplicate_of`` or ``multi`` verdicts that drop
+        the marker — reintroducing the silent-drop pattern HOL-6
+        exists to close."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_critics
+        from fido.types import TaskStatus
+
+        critic_calls: list[dict] = []
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            critic_calls.append(proposed)
+            # Even if the critic WERE invoked, return a duplicate
+            # verdict — verifies that the exemption short-circuits
+            # before the critic gets called.
+            return TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id="any-id",
+            )
+
+        skipped_marker = {
+            "id": None,
+            "title": "Skipped: covered already",
+            "description": "no_op verdict marker",
+            "type": "spec",
+            "status": str(TaskStatus.SKIPPED),
+            "contributing_intents": [42],
+        }
+        items = [skipped_marker]
+        out = _apply_task_creation_critics(items, [], critic_fn=critic)
+        assert out == items
+        assert critic_calls == []
+
+    def test_task_creation_critic_ignores_hallucinated_duplicate_id(
+        self, tmp_path: Path
+    ) -> None:
+        """codex r3293399805 on PR #1932: ``duplicate_of_id`` comes from
+        model output and can be hallucinated.  Don't delete the new
+        task when the critic names a target id that isn't in the
+        pending queue — fail open and keep the new work."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_critics
+
+        existing = self._add(tmp_path, "Pre-existing")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "Legitimate new work",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id="not-in-queue-hallucination",
+            )
+
+        out = _apply_task_creation_critics(items, [existing], critic_fn=critic)
+        # Existing kept, new task NOT dropped despite the critic's
+        # duplicate verdict — hallucinated target id failed safe.
+        titles = [it.get("title") for it in out]
+        assert "Legitimate new work" in titles
+
+    def test_task_creation_critic_ignores_hallucinated_supersedes_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Same protection on the supersedes axis."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_critics
+
+        existing = self._add(tmp_path, "Pre-existing")
+        items = [
+            {"id": existing["id"], "contributing_intents": []},
+            {
+                "id": None,
+                "title": "Legitimate new work",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict(
+                relationship="supersedes",
+                supersedes_id="not-in-queue-hallucination",
+            )
+
+        out = _apply_task_creation_critics(items, [existing], critic_fn=critic)
+        titles = [it.get("title") for it in out]
+        assert "Legitimate new work" in titles
+
+    def test_task_creation_critic_drop_revalidated_against_current_queue(
+        self, tmp_path: Path
+    ) -> None:
+        """Rob review on PR #1932: the critic verdict is gathered
+        OUTSIDE the tasks.json flock, but the actual drop decision
+        must re-validate the target against the CURRENT queue inside
+        the lock.  If the named duplicate_of target was deleted
+        between gather and lock, the proposed task must be KEPT —
+        not silently dropped against a stale target reference."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import (
+            _apply_task_creation_verdicts,
+            _gather_task_creation_verdicts,
+        )
+
+        existing = self._add(tmp_path, "Snapshot-time target")
+        items = [
+            {
+                "id": None,
+                "title": "Proposed new",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+
+        def critic(proposed: dict, queue: list[dict]) -> TaskCreationVerdict:
+            return TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id=existing["id"],
+            )
+
+        # Phase 1 (outside lock): gather verdicts against snapshot.
+        verdicts = _gather_task_creation_verdicts(items, [existing], critic_fn=critic)
+        assert verdicts[0] is not None
+        assert verdicts[0].duplicate_of_id == existing["id"]
+
+        # Phase 2 (inside lock): apply against CURRENT queue, which is
+        # now EMPTY (target deleted concurrently).
+        current: list[dict] = []
+        result, _ = _apply_task_creation_verdicts(items, verdicts, current)
+        titles = [it.get("title") for it in result]
+        assert "Proposed new" in titles
+
+    def test_apply_keeps_proposal_when_target_closed_by_same_batch(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex on PR #1932: a drop verdict whose target is being
+        CLOSED in the same batch (status="completed", merged away,
+        or split) must NOT honor the drop — otherwise the proposal
+        is dropped against a target that won't survive the batch and
+        no live task carries the scope, silently losing work.
+
+        Concretely: rescope batch closes ``existing`` AND the critic
+        says the new proposal duplicates ``existing``.  The proposal
+        must be KEPT so its scope survives somewhere."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_verdicts
+
+        existing = self._add(tmp_path, "Doomed target")
+        items = [
+            # The same batch closes ``existing`` via status="completed".
+            {"id": existing["id"], "title": existing["title"], "status": "completed"},
+            {
+                "id": None,
+                "title": "Proposed new (would dup existing)",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        verdicts = [
+            None,  # the closing item gets no verdict (has an id)
+            TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id=existing["id"],
+            ),
+        ]
+
+        result, _ = _apply_task_creation_verdicts(items, verdicts, [existing])
+        titles = [it.get("title") for it in result]
+        # The new proposal is KEPT — the named "duplicate of" target
+        # is closing in the same batch, so dropping the proposal too
+        # would leave the scope unrepresented.
+        assert "Proposed new (would dup existing)" in titles
+
+    def test_apply_keeps_proposal_when_target_merged_in_same_batch(
+        self, tmp_path: Path
+    ) -> None:
+        """Sibling case: the target is closed by appearing as a
+        ``merge_sources`` of another item in the same batch."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_verdicts
+
+        source = self._add(tmp_path, "Will be merged")
+        target = self._add(tmp_path, "Merge sink")
+        items = [
+            # The same batch folds ``source`` into ``target``.
+            {
+                "id": target["id"],
+                "title": target["title"],
+                "merge_sources": [source["id"]],
+            },
+            {
+                "id": None,
+                "title": "Proposed new (would dup source)",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        verdicts = [
+            None,
+            TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id=source["id"],
+            ),
+        ]
+
+        result, _ = _apply_task_creation_verdicts(items, verdicts, [source, target])
+        titles = [it.get("title") for it in result]
+        # ``source`` is being absorbed by the merge in this batch —
+        # the proposal that duplicates ``source`` must survive.
+        assert "Proposed new (would dup source)" in titles
+
+    def test_apply_keeps_proposal_when_target_split_in_same_batch(
+        self, tmp_path: Path
+    ) -> None:
+        """Third closing-shape: the target carries non-empty
+        ``split_targets`` so it'll be closed and replaced by children."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_verdicts
+
+        target = self._add(tmp_path, "Will be split")
+        items = [
+            # The same batch splits ``target`` into two children.
+            {
+                "id": target["id"],
+                "title": target["title"],
+                "split_targets": [
+                    {"title": "child A", "description": "", "invariant": "a"},
+                    {"title": "child B", "description": "", "invariant": "b"},
+                ],
+            },
+            {
+                "id": None,
+                "title": "Proposed new (would dup target)",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        verdicts = [
+            None,
+            TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id=target["id"],
+            ),
+        ]
+
+        result, _ = _apply_task_creation_verdicts(items, verdicts, [target])
+        titles = [it.get("title") for it in result]
+        assert "Proposed new (would dup target)" in titles
+
+    def test_apply_drops_proposal_when_target_survives_batch(
+        self, tmp_path: Path
+    ) -> None:
+        """Boundary: when the target is NOT being closed by the
+        batch, the drop verdict IS honored — that's the whole point
+        of HOL-16 dedup.  Pins the negative case so the new
+        survives-batch guard doesn't accidentally over-keep."""
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_verdicts
+
+        existing = self._add(tmp_path, "Stays put")
+        items = [
+            {
+                "id": None,
+                "title": "Proposed dup",
+                "description": "",
+                "type": "spec",
+                "contributing_intents": [],
+            },
+        ]
+        verdicts = [
+            TaskCreationVerdict(
+                relationship="duplicate_of",
+                duplicate_of_id=existing["id"],
+            ),
+        ]
+
+        result, _ = _apply_task_creation_verdicts(items, verdicts, [existing])
+        titles = [it.get("title") for it in result]
+        assert "Proposed dup" not in titles
+
+    def test_split_child_invariants_land_on_materialised_children(
+        self, tmp_path: Path
+    ) -> None:
+        """Same regression for the split-child path: each child's
+        invariant must survive to the persisted task."""
+        # Seed one parent task that the split op will fan out.
+        parent = self._add(tmp_path, "Refactor the whole rescope reducer")
+        raw_ops = (
+            '{"operations": [{"op": "split", '
+            f'"id": "{parent["id"]}", "children": ['
+            '{"title": "Typed ops", "description": "_RescopeOp dataclass", '
+            '"invariant": "rescope ops are typed values"}, '
+            '{"title": "SKIPPED lift", "description": "round-trip guard", '
+            '"invariant": "SKIPPED survives the rescope round-trip"}]}]}'
+        )
+        reorder_tasks(Tasks(tmp_path), "", agent=_client(raw_ops))
+        result = Tasks(tmp_path).list()
+        pending = [t for t in result if t.get("status") == "pending"]
+        assert len(pending) == 2
+        invariants = {t["invariant"] for t in pending}
+        assert invariants == {
+            "rescope ops are typed values",
+            "SKIPPED survives the rescope round-trip",
+        }
 
 
 # ── _build_op_inputs (INV-F adapter glue) ─────────────────────────────────────
@@ -5739,3 +7500,193 @@ class TestTasksCompleteWithResolve:
                 task["id"], gh, syncer=lambda _w, _g: None
             )
         assert "thread resolution skipped" in caplog.text
+
+
+class TestApplyTaskCreationVerdictsDropCounter:
+    """HOL-16 follow-up / #1934 (codex P1 sixth round on PR #1938):
+    ``_apply_task_creation_verdicts`` RETURNS the contributing-intent
+    cids for each dropped proposal so the caller (``reorder_tasks``)
+    can bump the durable counter AFTER validation passes.  The earlier
+    in-apply bump advanced the counter even when a rejected batch
+    meant no drop actually shipped."""
+
+    def test_drop_returns_each_contributing_intent_cid(self) -> None:
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_verdicts
+
+        item = {
+            "id": None,
+            "title": "new",
+            "description": "",
+            "type": "spec",
+            "contributing_intents": [101, 202],
+        }
+        existing = {"id": "t-existing", "title": "existing", "status": "pending"}
+        verdict = TaskCreationVerdict(
+            relationship="duplicate_of", duplicate_of_id="t-existing"
+        )
+        _items, dropped = _apply_task_creation_verdicts([item], [verdict], [existing])
+        assert sorted(dropped) == [101, 202]
+
+    def test_drop_returns_no_cids_when_target_missing(self) -> None:
+        # When the target doesn't survive the batch, the proposal is
+        # KEPT (not dropped) — no contributing-intent cids returned.
+        from fido.critics import TaskCreationVerdict
+        from fido.tasks import _apply_task_creation_verdicts
+
+        item = {
+            "id": None,
+            "title": "new",
+            "description": "",
+            "type": "spec",
+            "contributing_intents": [101],
+        }
+        verdict = TaskCreationVerdict(
+            relationship="duplicate_of", duplicate_of_id="t-gone"
+        )
+        items, dropped = _apply_task_creation_verdicts([item], [verdict], [])
+        # Kept, not dropped.
+        assert items == [item]
+        assert dropped == []
+
+
+class TestReorderTasksDropCounterDeferredBump:
+    """Codex P1 sixth round on PR #1938: the durable
+    ``TaskCreationDropCounter`` is bumped by ``reorder_tasks`` AFTER
+    ``_validate_rescope_batch`` confirms the batch is being applied.
+    A rejected batch must NOT advance the counter — otherwise drops
+    that never actually shipped would file false stuck-on-critic bugs.
+    """
+
+    def test_rejected_batch_does_not_bump_counter(self, tmp_path: Path) -> None:
+        from fido.critics import TaskCreationDropCounter
+        from fido.tasks import Tasks, reorder_tasks
+        from fido.types import TaskType
+
+        Tasks(tmp_path).add(title="seed", task_type=TaskType.SPEC)
+
+        recorded: list[int] = []
+        counter = TaskCreationDropCounter(
+            threshold=100, escalator=lambda cid, count: None
+        )
+        counter.record_drop = lambda cid: recorded.append(cid)  # type: ignore[method-assign]
+
+        # Opus returns an operations envelope referencing an unknown id —
+        # ``_validate_rescope_batch`` rejects.  Even if there had been
+        # drops in the apply, the counter must stay clean.
+        client = _client('{"operations": [{"op": "keep", "id": "no-such-task"}]}')
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=client,
+            task_creation_drop_counter=counter,
+        )
+        assert recorded == []
+
+
+class TestReorderTasksDropCounterDropBump:
+    """Codex P1 sixth round on PR #1938 happy path: a drop attributed
+    to an intent_comment_id, in a batch that PASSES validation, DOES
+    advance the durable counter (so the deferred-bump split still
+    preserves the legitimate counter advance)."""
+
+    def test_drop_in_accepted_batch_bumps_counter(self, tmp_path: Path) -> None:
+        from fido.critics import TaskCreationDropCounter
+        from fido.tasks import Tasks, reorder_tasks
+        from fido.types import TaskType
+
+        existing = Tasks(tmp_path).add(title="existing", task_type=TaskType.SPEC)
+
+        recorded: list[int] = []
+        counter = TaskCreationDropCounter(
+            threshold=100, escalator=lambda cid, count: None
+        )
+        counter.record_drop = lambda cid: recorded.append(cid)  # type: ignore[method-assign]
+
+        # Two LLM calls happen: the rescope ops envelope, then a
+        # task-creation critic verdict per ``new`` op.  Use
+        # ``side_effect`` so each call gets the right payload.
+        ops_response = json.dumps(
+            {
+                "operations": [
+                    {"op": "keep", "id": existing["id"]},
+                    {
+                        "op": "new",
+                        "title": "proposed-new",
+                        "description": "x",
+                        "type": "spec",
+                        "contributing_intents": [555],
+                    },
+                ]
+            }
+        )
+        critic_verdict = json.dumps(
+            {
+                "relationship": "duplicate_of",
+                "scope": "single",
+                "duplicate_of_id": existing["id"],
+                "rationale": "test",
+            }
+        )
+        client = _client(ops_response)
+        # First call: ops envelope; second call: critic verdict.
+        client.run_turn.side_effect = [ops_response, critic_verdict]
+        prompts = _FakePrompts()
+
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=client,
+            prompts=prompts,
+            task_creation_drop_counter=counter,
+        )
+        # Drop fired, batch validated, counter advanced for 555.
+        assert recorded == [555]
+
+
+class TestReorderTasksDropCounterReset:
+    """HOL-16 follow-up / #1934: after a successful rescope batch,
+    ``reorder_tasks`` calls ``reset_inactive_intents`` on the drop
+    counter so streaks for intents with no live contributing tasks
+    don't carry over to the next batch."""
+
+    def test_reset_called_with_active_intent_ids_after_apply(
+        self, tmp_path: Path
+    ) -> None:
+        from fido.critics import TaskCreationDropCounter
+        from fido.tasks import Tasks, reorder_tasks
+        from fido.types import TaskType
+
+        # Seed a task carrying contributing_intent 101 (Tasks.add
+        # doesn't accept contributing_intents directly, so mutate via
+        # the lock).
+        t = Tasks(tmp_path).add(title="T1", task_type=TaskType.SPEC)
+        with Tasks(tmp_path).modify() as live:
+            for row in live:
+                if row["id"] == t["id"]:
+                    row["contributing_intents"] = [101]
+
+        recorded_resets: list[set[int]] = []
+        counter = TaskCreationDropCounter(threshold=10)
+        original = counter.reset_inactive_intents
+
+        def spy(active: set[int]) -> None:
+            recorded_resets.append(set(active))
+            original(active)
+
+        counter.reset_inactive_intents = spy  # type: ignore[method-assign]
+
+        # Minimal valid keep-only operation envelope from Opus.
+        # The id in the operation must match the auto-generated task
+        # id from the seeded task.
+        client = _client(json.dumps({"operations": [{"op": "keep", "id": t["id"]}]}))
+        reorder_tasks(
+            Tasks(tmp_path),
+            "",
+            agent=client,
+            task_creation_drop_counter=counter,
+        )
+        # Reset was called with the active set including intent 101
+        # (drawn from the surviving task's contributing_intents).
+        assert recorded_resets, "reset_inactive_intents was never called"
+        assert 101 in recorded_resets[-1]

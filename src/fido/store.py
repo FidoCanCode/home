@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
+from fido.types import RescopeIntent
+
 ReplyOwner = Literal["webhook", "worker", "recovery"]
 ClaimState = Literal["in_progress", "completed", "retryable_failed"]
 PromiseState = Literal["prepared", "posted", "acked", "failed"]
@@ -18,7 +20,7 @@ ReplyOutboxEffectState = Literal["prepared", "claimed", "delivered", "failed"]
 
 REPLY_PROMISE_MARKER_PREFIX = "fido:reply-promise:"
 _PROMISE_MARKER_RE = re.compile(r"<!--\s*fido:reply-promise:([0-9a-fA-F-]{36})\s*-->")
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -665,7 +667,13 @@ class FidoStore:
             ).fetchall()
         return [int(row[0]) for row in rows]
 
-    def has_other_open_pr_comments(self, *, repo: str, exclude_comment_id: int) -> bool:
+    def has_other_open_pr_comments(
+        self,
+        *,
+        repo: str,
+        exclude_comment_id: int,
+        review_id: int | None = None,
+    ) -> bool:
         """Return whether *repo* has any other open queue entries.
 
         "Open" means ``state IN ('pending', 'in_progress', 'retryable_failed')``
@@ -674,20 +682,65 @@ class FidoStore:
         comment for the same repo, this comment is part of a batch and the
         worker will post eyes when it claims the comment in pickup order
         (#1662).
+
+        HOL-22 / #1916: when ``review_id`` is provided (the incoming
+        comment is part of a specific GitHub review submission), only
+        OTHER queue entries from the SAME review submission count as
+        "batched with this comment".  A solo human comment queued
+        behind an unrelated batch from a different review submission
+        is no longer falsely classified as batched — it still gets
+        the sub-1s eyes ack (closes #1875).  When ``review_id`` is
+        None (top-level PR comments, issue comments, anything not
+        from a review), fall back to the legacy "any other open"
+        check.
         """
         self.ensure_schema()
         with closing(self._connect()) as conn:
-            row = conn.execute(
-                """
-                SELECT 1
-                FROM pr_comment_queue
-                WHERE repo = ?
-                  AND comment_id != ?
-                  AND state IN ('pending', 'in_progress', 'retryable_failed')
-                LIMIT 1
-                """,
-                (repo, int(exclude_comment_id)),
-            ).fetchone()
+            if review_id is None:
+                row = conn.execute(
+                    """
+                    SELECT 1
+                    FROM pr_comment_queue
+                    WHERE repo = ?
+                      AND comment_id != ?
+                      AND state IN ('pending', 'in_progress', 'retryable_failed')
+                    LIMIT 1
+                    """,
+                    (repo, int(exclude_comment_id)),
+                ).fetchone()
+            else:
+                # Filter on the JSON-encoded payload's
+                # ``pull_request_review_id`` so only comments from the
+                # SAME review submission count.  Rows without that
+                # field (e.g. queued before HOL-22 landed, or
+                # non-review comment types) compare as NULL and are
+                # correctly excluded — they're "not part of this
+                # review", which is exactly what we want.
+                #
+                # Codex on PR #1937: ``payload_json`` is the envelope
+                # ``_enqueue_pr_comment_webhook`` writes —
+                # ``{"event": ..., "delivery_id": ..., "payload":
+                # <github-webhook-body>}`` — so GitHub's per-comment
+                # ``pull_request_review_id`` lives at
+                # ``$.payload.comment.pull_request_review_id``.  An
+                # earlier version of this query used the top-level
+                # path which always resolved NULL against real rows,
+                # leaving the scoping silently broken in production.
+                row = conn.execute(
+                    """
+                    SELECT 1
+                    FROM pr_comment_queue
+                    WHERE repo = ?
+                      AND comment_id != ?
+                      AND state IN ('pending', 'in_progress', 'retryable_failed')
+                      AND json_extract(
+                            payload_json,
+                            '$.payload.comment.pull_request_review_id'
+                          ) = ?
+                    LIMIT 1
+                    """,
+                    (repo, int(exclude_comment_id), int(review_id)),
+                ).fetchone()
         return row is not None
 
     def claim_next_pr_comment(
@@ -806,6 +859,246 @@ class FidoStore:
             retried = self._pr_comment_by_queue_id(conn, queue_id)
             assert retried is not None
             return self._pr_comment_record_from_row(retried)
+
+    def claim_rescope_intent(
+        self,
+        *,
+        intent_comment_id: int,
+        change_request: str,
+        intent_timestamp: str,
+        author: str,
+        comment_type: str,
+        repo: str,
+        pr_number: int,
+    ) -> bool:
+        """HOL-26 / #1920 (codex P1 ninth/tenth/eleventh rounds on
+        PR #1938): atomically claim the rescope intent in the durable
+        outbox.
+
+        Returns ``True`` when the caller should fire the rescope:
+
+        - First claim for this intent: INSERT a ``pending`` row, return True.
+        - Pre-existing ``pending`` row: UPDATE ``claimed_at`` (refresh
+          payload) and return True.  A pending row means "claim was
+          recorded but the work never durably applied" — likely a
+          crash between claim and ``_on_done``, or a redelivery of
+          the same comment.  Retrying is correct: in-process
+          duplicate dispatches get coalesced by ``_reorder_coalesce``,
+          and cross-restart replay is exactly the recovery path the
+          outbox enables.
+        - ``applied`` row: return False.  The rescope already
+          durably completed (tasks.json synced + PR description
+          rewritten); re-firing would duplicate the work.
+
+        Persists the full intent payload so a future
+        ``pending_rescope_intents`` recovery sweep can also replay
+        un-applied intents on startup (separate follow-up — the
+        normal-trigger retry path covers the common redelivery
+        case shipped here).
+        """
+        now = _utcnow()
+        with self._transaction() as conn:
+            row = conn.execute(
+                """
+                SELECT state
+                FROM rescope_intent_outbox
+                WHERE intent_comment_id = ?
+                """,
+                (int(intent_comment_id),),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO rescope_intent_outbox
+                        (intent_comment_id, change_request, intent_timestamp,
+                         author, comment_type, repo, pr_number,
+                         state, claimed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    """,
+                    (
+                        int(intent_comment_id),
+                        str(change_request),
+                        str(intent_timestamp),
+                        str(author),
+                        str(comment_type),
+                        repo,
+                        int(pr_number),
+                        now,
+                    ),
+                )
+                return True
+            if row["state"] == "applied":
+                return False
+            # Stale pending — refresh payload + claimed_at so a
+            # retried claim races with the latest known shape.
+            conn.execute(
+                """
+                UPDATE rescope_intent_outbox
+                SET change_request = ?,
+                    intent_timestamp = ?,
+                    author = ?,
+                    comment_type = ?,
+                    repo = ?,
+                    pr_number = ?,
+                    claimed_at = ?
+                WHERE intent_comment_id = ?
+                """,
+                (
+                    str(change_request),
+                    str(intent_timestamp),
+                    str(author),
+                    str(comment_type),
+                    repo,
+                    int(pr_number),
+                    now,
+                    int(intent_comment_id),
+                ),
+            )
+            return True
+
+    def mark_rescope_intent_applied(self, intent_comment_id: int) -> None:
+        """Mark a previously-claimed rescope intent as durably applied
+        — the background rescope thread completed (tasks.json
+        committed).  Called from the rescope's ``_on_done`` callback so
+        the durable applied-state only advances after the work
+        actually landed.
+        """
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                UPDATE rescope_intent_outbox
+                SET state = 'applied'
+                WHERE intent_comment_id = ?
+                """,
+                (int(intent_comment_id),),
+            )
+
+    def release_rescope_intent_claim(self, intent_comment_id: int) -> None:
+        """Release a stuck pending claim — used when a synchronous
+        thread-start or dispatch failure raises after the claim
+        landed.  Without release, the next trigger sees the durable
+        claim, skips dispatch, and the rescope never runs.
+        """
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                DELETE FROM rescope_intent_outbox
+                WHERE intent_comment_id = ? AND state = 'pending'
+                """,
+                (int(intent_comment_id),),
+            )
+
+    def pending_rescope_intents(self) -> list[RescopeIntent]:
+        """Return all un-applied (state='pending') outbox entries
+        as reconstructed ``RescopeIntent`` records, ordered by
+        ``claimed_at`` (oldest first) so replay preserves arrival
+        order.
+
+        Consumed by ``Dispatcher.replay_pending_rescope_intents`` on
+        worker first-iteration recovery to close the
+        crash-between-claim-and-_on_done window — GitHub will not
+        redeliver the original webhook, so startup replay is the only
+        path that re-fires an orphaned rescope.
+        """
+        with self._transaction() as conn:
+            rows = conn.execute(
+                """
+                SELECT intent_comment_id, change_request, intent_timestamp,
+                       author, comment_type, repo, pr_number
+                FROM rescope_intent_outbox
+                WHERE state = 'pending'
+                ORDER BY claimed_at
+                """,
+            ).fetchall()
+            return [
+                RescopeIntent(
+                    change_request=row["change_request"],
+                    comment_id=row["intent_comment_id"],
+                    timestamp=row["intent_timestamp"],
+                    comment_type=row["comment_type"],
+                    author=row["author"],
+                    repo=row["repo"],
+                    pr_number=row["pr_number"],
+                )
+                for row in rows
+            ]
+
+    def bump_task_creation_drop(self, intent_comment_id: int) -> tuple[int, bool]:
+        """HOL-16 follow-up / #1934 (codex P2 on PR #1938): record a
+        task-creation critic drop attributed to *intent_comment_id*.
+
+        Returns ``(new_count, already_escalated)``.  Atomically
+        increments the count and reports whether the escalator has
+        already fired for this intent — callers use the
+        already-escalated flag to suppress duplicate bug filings.
+        """
+        now = _utcnow()
+        with self._transaction() as conn:
+            row = conn.execute(
+                """
+                SELECT drop_count, escalated
+                FROM task_creation_drops
+                WHERE intent_comment_id = ?
+                """,
+                (int(intent_comment_id),),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO task_creation_drops
+                        (intent_comment_id, drop_count, escalated, updated_at)
+                    VALUES (?, 1, 0, ?)
+                    """,
+                    (int(intent_comment_id), now),
+                )
+                return (1, False)
+            new_count = int(row["drop_count"]) + 1
+            already_escalated = bool(int(row["escalated"]))
+            conn.execute(
+                """
+                UPDATE task_creation_drops
+                SET drop_count = ?, updated_at = ?
+                WHERE intent_comment_id = ?
+                """,
+                (new_count, now, int(intent_comment_id)),
+            )
+            return (new_count, already_escalated)
+
+    def mark_task_creation_drop_escalated(self, intent_comment_id: int) -> None:
+        """Set the escalated flag for *intent_comment_id* so subsequent
+        ``bump_task_creation_drop`` calls report ``already_escalated=True``
+        and the counter suppresses duplicate escalator fires until the
+        intent's drops are reset.
+        """
+        now = _utcnow()
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                UPDATE task_creation_drops
+                SET escalated = 1, updated_at = ?
+                WHERE intent_comment_id = ?
+                """,
+                (now, int(intent_comment_id)),
+            )
+
+    def reset_inactive_task_creation_drops(self, active_intent_ids: set[int]) -> int:
+        """Drop counter rows for any intent_comment_id NOT in
+        *active_intent_ids* — those intents have no live contributing
+        tasks anymore, so the drop streak is broken.  Returns the row
+        count cleared (for logging / tests)."""
+        with self._transaction() as conn:
+            if not active_intent_ids:
+                cursor = conn.execute("DELETE FROM task_creation_drops")
+                return cursor.rowcount
+            placeholders = ",".join("?" for _ in active_intent_ids)
+            cursor = conn.execute(
+                f"""
+                DELETE FROM task_creation_drops
+                WHERE intent_comment_id NOT IN ({placeholders})
+                """,
+                tuple(int(cid) for cid in active_intent_ids),
+            )
+            return cursor.rowcount
 
     def clear_pr_comment_queue(self, *, repo: str, pr_number: int) -> int:
         """Delete queued comment state for a PR after merge/close cleanup."""
@@ -1367,6 +1660,31 @@ CREATE TABLE IF NOT EXISTS transition_audit_log (
     subject TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rescope_intent_outbox (
+    intent_comment_id INTEGER PRIMARY KEY,
+    change_request TEXT NOT NULL,
+    intent_timestamp TEXT NOT NULL,
+    author TEXT NOT NULL,
+    comment_type TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    claimed_at TEXT NOT NULL
+);
+
+-- HOL-16 follow-up / #1934 (codex P2 on PR #1938): durable per-
+-- ``intent_comment_id`` drop counter for the task-creation critic.
+-- The process-local counter was lost on Fido restart, which could
+-- prevent the exhaustion bug from ever filing.  Survives restarts;
+-- ``reset_inactive_task_creation_drops`` clears rows for intents
+-- with no live contributing tasks after each rescope batch.
+CREATE TABLE IF NOT EXISTS task_creation_drops (
+    intent_comment_id INTEGER PRIMARY KEY,
+    drop_count INTEGER NOT NULL,
+    escalated INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
 );
 """
 

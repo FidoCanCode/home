@@ -141,6 +141,29 @@ class SynthesisExecutor:
         self._insight_filer = insight_filer
         self._fido_logins = fido_logins
 
+    def file_insights_pre_reply(
+        self,
+        response: CommentResponse,
+        target: CommentTarget,
+    ) -> None:
+        """HOL-26 / #1920: file insights BEFORE the reply is posted, so
+        the durable GitHub issues exist before any user-visible reply
+        can claim they do.
+
+        Public hook used by production reply paths (``Dispatcher``'s
+        ``reply_to_review_comment`` / ``reply_to_issue_comment``) which
+        own their own post step and must call this before posting.  The
+        matching ``execute_effects_only`` call must then pass
+        ``insights_already_filed=True`` so the post-reply effects pass
+        does not double-file.
+
+        The convenience entry :meth:`execute` chains this + post +
+        post-reply effects internally; production callers that thread
+        the outbox protocol through their own post can't use that
+        chain and split it explicitly via this hook.
+        """
+        self._file_insights(response, target)
+
     def execute(
         self,
         response: CommentResponse,
@@ -148,21 +171,34 @@ class SynthesisExecutor:
     ) -> ReviewReplyOutcome:
         """Post the reply and run all post-reply effects in one call.
 
-        Thin convenience wrapper: posts the reply via :meth:`_post_reply`,
-        then delegates to :meth:`execute_effects_only` for the eyes /
-        emoji / rescope / insights / outcome chain.  Production callers
-        in ``events.py`` use :meth:`execute_effects_only` directly because
-        they own the reply-posting step (so the outbox protocol can thread
-        through it).  This entry point is retained for callers that don't
-        need that control.
+        HOL-26 / #1920: files insights FIRST so the reply post sequences
+        AFTER their durability is established.  The full sequencing-layer
+        fix (synthesis prompt sees ``insights_with_urls[]`` so the LLM
+        can weave URLs into prose by construction) requires splitting
+        synthesis into two LLM calls; that's a substantial restructure
+        out of scope here.  The minimal viable fix in this method
+        addresses the ordering contract — insights exist as durable
+        GitHub issues before any user-visible reply claims they do.
+        HOL-18's reply-prose claim-grounding critic remains the
+        verification-layer backstop for URL-in-prose.
+
+        Production callers in ``Dispatcher`` use
+        :meth:`file_insights_pre_reply` + their own outbox-routed post
+        + :meth:`execute_effects_only` (with
+        ``insights_already_filed=True``) instead of this entry point,
+        because they need to thread the outbox protocol through the
+        post step.
         """
+        self.file_insights_pre_reply(response, target)
         self._post_reply(response.reply_text, target)
-        return self.execute_effects_only(response, target)
+        return self.execute_effects_only(response, target, insights_already_filed=True)
 
     def execute_effects_only(
         self,
         response: CommentResponse,
         target: CommentTarget,
+        *,
+        insights_already_filed: bool = False,
     ) -> ReviewReplyOutcome:
         """Execute post-reply effects for *response* against *target*.
 
@@ -206,8 +242,10 @@ class SynthesisExecutor:
         # 3. Trigger rescope if change_request present
         self._maybe_trigger_rescope(response, target)
 
-        # 4. File insights if any
-        self._file_insights(response, target)
+        # 4. File insights if any (HOL-26: may have already been filed
+        #    pre-reply by execute() to sequence durability before prose).
+        if not insights_already_filed:
+            self._file_insights(response, target)
 
         # 5. Return outcome for Rocq oracle
         return outcome_for_response(response)

@@ -10,7 +10,7 @@
     The LLM declares intent; Python acts on it.  Git operations are
     never the LLM's responsibility.
 
-    Four constructors:
+    Five constructors:
 
     [CommitTaskComplete]   — stage + commit, then mark the task completed.
                              [summary] becomes the git commit message.
@@ -28,7 +28,16 @@
                              progress without human guidance.  The harness
                              posts a BLOCKED comment on the PR and parks the
                              task — no further work until the human provides
-                             direction (skip, iterate to fix, etc). *)
+                             direction (skip, iterate to fix, etc).
+    [SplitTask]            — HOL-13 / #1907: the LLM picked up the task and
+                             determined its scope exceeds one statable
+                             invariant (one commit boundary).  Emitted in
+                             lieu of attempting the work, [reason] explains
+                             why the task is too broad.  The harness marks
+                             the task as needing re-decomposition (BLOCKED
+                             with a labelled comment) so the next rescope
+                             pass can fan it out into invariant-sized
+                             children. *)
 
 From FidoModels Require Import preamble.
 
@@ -39,7 +48,8 @@ Inductive TurnOutcome : Type :=
 | CommitTaskComplete   (summary : string) : TurnOutcome
 | CommitTaskInProgress (summary : string) : TurnOutcome
 | SkipTaskWithReason   (reason  : string) : TurnOutcome
-| StuckOnTask          (reason  : string) : TurnOutcome.
+| StuckOnTask          (reason  : string) : TurnOutcome
+| SplitTask            (reason  : string) : TurnOutcome.
 
 (** [outcome_summary] extracts the summary string from commit outcomes.
     Returns the empty string for [SkipTaskWithReason] since skip outcomes
@@ -50,6 +60,7 @@ Definition outcome_summary (o : TurnOutcome) : string :=
   | CommitTaskInProgress s => s
   | SkipTaskWithReason   _ => ""%string
   | StuckOnTask          _ => ""%string
+  | SplitTask            _ => ""%string
   end.
 
 (** [outcome_is_commit] returns [true] when the outcome calls for a
@@ -60,17 +71,23 @@ Definition outcome_is_commit (o : TurnOutcome) : bool :=
   | CommitTaskInProgress _ => true
   | SkipTaskWithReason   _ => false
   | StuckOnTask          _ => false
+  | SplitTask            _ => false
   end.
 
 (** [outcome_is_terminal] returns [true] when the outcome marks the task
     as finished — either successfully committed and complete, or skipped
-    with a reason that grounds completion. *)
+    with a reason that grounds completion.
+
+    [SplitTask] is NOT terminal: the original task is parked for
+    re-decomposition, not finished.  The next rescope materialises new
+    invariant-sized children that supersede the parked task. *)
 Definition outcome_is_terminal (o : TurnOutcome) : bool :=
   match o with
   | CommitTaskComplete   _ => true
   | CommitTaskInProgress _ => false
   | SkipTaskWithReason   _ => true
   | StuckOnTask          _ => true
+  | SplitTask            _ => false
   end.
 
 (** [parse_sentinel] models the dispatch logic of the Python
@@ -92,6 +109,8 @@ Definition parse_sentinel (kind : string) (payload : string) : option TurnOutcom
     Some (SkipTaskWithReason payload)
   else if String.eqb kind "stuck-on-task" then
     Some (StuckOnTask payload)
+  else if String.eqb kind "split-task" then
+    Some (SplitTask payload)
   else None.
 
 (** [parse_sentinel] is total: every recognised kind with a non-empty
@@ -102,7 +121,8 @@ Lemma parse_sentinel_known_kinds :
     parse_sentinel "commit-task-complete" payload = Some (CommitTaskComplete payload) /\
     parse_sentinel "commit-task-in-progress" payload = Some (CommitTaskInProgress payload) /\
     parse_sentinel "skip-task-with-reason" payload = Some (SkipTaskWithReason payload) /\
-    parse_sentinel "stuck-on-task" payload = Some (StuckOnTask payload).
+    parse_sentinel "stuck-on-task" payload = Some (StuckOnTask payload) /\
+    parse_sentinel "split-task" payload = Some (SplitTask payload).
 Proof.
   intros payload Hne.
   unfold parse_sentinel.
@@ -142,7 +162,11 @@ Proof.
         -- injection Hparse as <-. simpl. split.
            ++ intros Habs; discriminate.
            ++ intros [H1 | H2]; discriminate.
-        -- discriminate.
+        -- destruct (String.eqb kind "split-task") eqn:Hsplit.
+           ++ injection Hparse as <-. simpl. split.
+              ** intros Habs; discriminate.
+              ** intros [H1 | H2]; discriminate.
+           ++ discriminate.
 Qed.
 
 Python File Extraction turn_outcome

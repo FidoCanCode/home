@@ -141,6 +141,12 @@ class _FakeProcWithQueue:
     def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
         return 0
 
+    def terminate(self) -> None:
+        """No-op: fake proc has no real OS process to signal."""
+
+    def kill(self) -> None:
+        """No-op: fake proc has no real OS process to kill."""
+
 
 def _make_proc_with_queue(line_queue: "queue.Queue[str]") -> _FakeProcWithQueue:
     """Build a fake Popen whose ``readline`` blocks on *line_queue*."""
