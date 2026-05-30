@@ -6,12 +6,10 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
 from fido.config import RepoMembership, default_sub_dir
-from fido.github import GitHub
 from fido.issue_cache import IssueCache
 from fido.provider_factory import DefaultProviderFactory
 from fido.state import State
@@ -19,8 +17,49 @@ from fido.worker import WorkerThread
 from tests.fakes import _FakeDispatcher
 
 
+class _FakeCallRecorder:
+    """Typed callable that records every invocation."""
+
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value: object = return_value
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append((args, kwargs))
+        return self.return_value
+
+    def assert_called_once(self) -> None:
+        assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
+
+
+class _FakeSession:
+    """Minimal provider session stub with a call-recording reset() method."""
+
+    def __init__(self, *, session_id: str = "") -> None:
+        self.session_id: str = session_id
+        self.reset: _FakeCallRecorder = _FakeCallRecorder()
+
+
+class _FakeAgent:
+    """Minimal provider agent stub."""
+
+    def __init__(self, session: _FakeSession | None = None) -> None:
+        self.session: _FakeSession | None = session
+
+
+class _FakeProvider:
+    """Minimal provider stub whose .agent.session chain the persistence tests read."""
+
+    def __init__(self, session: _FakeSession | None = None) -> None:
+        self.agent: _FakeAgent = _FakeAgent(session)
+
+
+class _FakeGH:
+    """Minimal GitHub stub — no methods are called in these persistence tests."""
+
+
 def _make_thread(tmp_path: Path, **kwargs: object) -> WorkerThread:
-    gh = MagicMock(spec=GitHub)
+    gh = _FakeGH()
     kwargs.setdefault("membership", RepoMembership())
     kwargs.setdefault(
         "provider_factory",
@@ -31,8 +70,8 @@ def _make_thread(tmp_path: Path, **kwargs: object) -> WorkerThread:
     return WorkerThread(
         tmp_path,
         "owner/repo",
-        gh=gh,
-        **kwargs,
+        gh=gh,  # type: ignore[arg-type]
+        **kwargs,  # type: ignore[arg-type]
     )
 
 
@@ -80,12 +119,8 @@ def test_load_persisted_session_id_handles_state_load_oserror(tmp_path: Path) ->
 
 def test_persist_session_id_writes_new_value(tmp_path: Path) -> None:
     fido_dir = _init_git_repo(tmp_path)
-    session = MagicMock()
-    session.session_id = "new-sid-456"
-    agent = MagicMock()
-    agent.session = session
-    provider = MagicMock()
-    provider.agent = agent
+    session = _FakeSession(session_id="new-sid-456")
+    provider = _FakeProvider(session)
     thread = _make_thread(tmp_path, provider=provider)
     thread._persist_session_id()
     persisted = json.loads((fido_dir / "state.json").read_text())
@@ -100,12 +135,8 @@ def test_persist_session_id_skips_when_unchanged(tmp_path: Path) -> None:
         json.dumps({"session_id": "same-sid", "issue": 1})
     )
     mtime_before = (fido_dir / "state.json").stat().st_mtime_ns
-    session = MagicMock()
-    session.session_id = "same-sid"
-    agent = MagicMock()
-    agent.session = session
-    provider = MagicMock()
-    provider.agent = agent
+    session = _FakeSession(session_id="same-sid")
+    provider = _FakeProvider(session)
     thread = _make_thread(tmp_path, provider=provider)
     thread._persist_session_id()
     # mtime should not be bumped beyond what State.modify does on read-only
@@ -124,28 +155,23 @@ def test_persist_session_id_noop_when_no_provider(tmp_path: Path) -> None:
 
 def test_persist_session_id_noop_when_no_session(tmp_path: Path) -> None:
     _init_git_repo(tmp_path)
-    provider = MagicMock()
-    provider.agent.session = None
+    provider = _FakeProvider(session=None)
     thread = _make_thread(tmp_path, provider=provider)
     thread._persist_session_id()  # must not raise
 
 
 def test_persist_session_id_noop_when_session_has_empty_id(tmp_path: Path) -> None:
     _init_git_repo(tmp_path)
-    session = MagicMock()
-    session.session_id = ""
-    provider = MagicMock()
-    provider.agent.session = session
+    session = _FakeSession(session_id="")
+    provider = _FakeProvider(session)
     thread = _make_thread(tmp_path, provider=provider)
     thread._persist_session_id()  # must not raise and must not write
 
 
 def test_persist_session_id_noop_when_fido_dir_unresolvable(tmp_path: Path) -> None:
     """Not a git repo → no fido_dir → persistence silently skipped."""
-    session = MagicMock()
-    session.session_id = "some-sid"
-    provider = MagicMock()
-    provider.agent.session = session
+    session = _FakeSession(session_id="some-sid")
+    provider = _FakeProvider(session)
     thread = _make_thread(tmp_path, provider=provider)
     # No git init — resolving fails
     thread._persist_session_id()  # must not raise
@@ -157,10 +183,8 @@ def test_persist_session_id_swallows_state_modify_oserror(
     import logging
 
     fido_dir = _init_git_repo(tmp_path)
-    session = MagicMock()
-    session.session_id = "sid"
-    provider = MagicMock()
-    provider.agent.session = session
+    session = _FakeSession(session_id="sid")
+    provider = _FakeProvider(session)
 
     class ErrorModifyState(State):
         @contextmanager
@@ -203,11 +227,8 @@ def test_retire_poisoned_session_preserves_other_state_keys(tmp_path: Path) -> N
 
 def test_retire_poisoned_session_calls_session_reset(tmp_path: Path) -> None:
     _init_git_repo(tmp_path)
-    session = MagicMock()
-    agent = MagicMock()
-    agent.session = session
-    provider = MagicMock()
-    provider.agent = agent
+    session = _FakeSession()
+    provider = _FakeProvider(session)
     thread = _make_thread(tmp_path, provider=provider)
     thread._retire_poisoned_session()  # pyright: ignore[reportPrivateUsage]
     session.reset.assert_called_once()
@@ -248,8 +269,7 @@ def test_retire_poisoned_session_noop_when_no_provider(tmp_path: Path) -> None:
 
 def test_retire_poisoned_session_noop_when_no_session(tmp_path: Path) -> None:
     _init_git_repo(tmp_path)
-    provider = MagicMock()
-    provider.agent.session = None
+    provider = _FakeProvider(session=None)
     thread = _make_thread(tmp_path, provider=provider)
     thread._retire_poisoned_session()  # pyright: ignore[reportPrivateUsage]  # must not raise
 

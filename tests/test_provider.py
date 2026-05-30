@@ -1,6 +1,5 @@
 import dataclasses
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -277,14 +276,31 @@ class TestProviderPalette:
         assert not failures, "\n".join(failures)
 
 
+class _FakeVoiceAgent:
+    """Minimal typed fake for :class:`~fido.provider.ProviderAgent` — only the
+    ``run_turn`` surface needed by :func:`~fido.provider.safe_voice_turn`.
+
+    Records each ``run_turn`` call as ``(args, kwargs)`` in
+    :attr:`run_turn_calls` so tests can assert on the keyword arguments
+    that ``safe_voice_turn`` passes through.
+    """
+
+    voice_model: ProviderModel = ProviderModel("claude-opus-4-6")
+
+    def __init__(self, return_value: str = "ok") -> None:
+        self._return_value = return_value
+        self.run_turn_calls: list[tuple[tuple, dict]] = []
+
+    def run_turn(self, *args: object, **kwargs: object) -> str:
+        self.run_turn_calls.append((args, kwargs))
+        return self._return_value
+
+
 class TestSafeVoiceTurn:
     """safe_voice_turn: retry_on_preempt + raise-on-empty contract."""
 
-    def _agent(self, return_value: str = "ok") -> MagicMock:
-        agent = MagicMock()
-        agent.run_turn.return_value = return_value
-        agent.voice_model = "claude-opus-4-6"
-        return agent
+    def _agent(self, return_value: str = "ok") -> _FakeVoiceAgent:
+        return _FakeVoiceAgent(return_value)
 
     def test_returns_result_on_non_empty_output(self) -> None:
         agent = self._agent("Hello!")
@@ -294,7 +310,7 @@ class TestSafeVoiceTurn:
     def test_always_passes_retry_on_preempt(self) -> None:
         agent = self._agent("reply")
         safe_voice_turn(agent, "prompt", model=agent.voice_model)
-        _, kwargs = agent.run_turn.call_args
+        _, kwargs = agent.run_turn_calls[-1]
         assert kwargs.get("retry_on_preempt") is True
 
     def test_raises_on_empty_string(self) -> None:
@@ -313,7 +329,7 @@ class TestSafeVoiceTurn:
         agent = self._agent("ok")
         model = ProviderModel("claude-haiku-4-5")
         safe_voice_turn(agent, "prompt", model=model, system_prompt="be brief")
-        _, kwargs = agent.run_turn.call_args
+        _, kwargs = agent.run_turn_calls[-1]
         assert kwargs["model"] == model
         assert kwargs["system_prompt"] == "be brief"
 

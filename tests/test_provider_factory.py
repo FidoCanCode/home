@@ -1,11 +1,29 @@
 from pathlib import Path
-from unittest.mock import MagicMock
 
-from fido.atomic import AtomicUpdater
+from frozendict import frozendict
+
+from fido.appstate import (
+    _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    _ZERO_GITHUB_LIMITS,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    FidoState,
+)
+from fido.atomic import AtomicUpdater, create_atomic
 from fido.config import RepoConfig
 from fido.copilotcli import CopilotCLIAPI, CopilotCLIClient
 from fido.provider import ProviderID
 from fido.provider_factory import DefaultProviderFactory
+
+
+def _make_updater() -> AtomicUpdater[FidoState]:
+    """Return a fresh real :class:`~fido.atomic.AtomicUpdater` for DI seam tests."""
+    _, updater = create_atomic(
+        FidoState(
+            repos=frozendict(),
+            github_limits=_ZERO_GITHUB_LIMITS,
+            process_started_at=_EPOCH,
+        )
+    )
+    return updater
 
 
 class TestDefaultProviderFactory:
@@ -232,7 +250,7 @@ class TestProviderStateUpdaterWiring:
             ProviderID.CODEX,
             ProviderID.COPILOT_CLI,
         ):
-            fake: AtomicUpdater = MagicMock(spec=AtomicUpdater)
+            fake = _make_updater()
             prov = factory.create_provider(
                 RepoConfig(name="owner/repo", work_dir=tmp_path, provider=provider_id),
                 work_dir=tmp_path,

@@ -1,6 +1,5 @@
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,6 +12,190 @@ from fido.github import (
     _pr_state_str,  # noqa: PLC2701
     _TimeoutSession,  # noqa: PLC2701
 )
+
+
+class _CallRecord:
+    """One recorded call: positional args and keyword args."""
+
+    def __init__(self, args: tuple, kwargs: dict) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _FakeCallable:
+    """Typed callable fake with call recording and assertion helpers.
+
+    Replaces MagicMock for session HTTP methods, runner callbacks, and
+    sleepers.  ``return_value`` is returned on each call unless
+    ``side_effect`` is set.  A list side_effect is consumed one element
+    per call; a BaseException side_effect is raised every call; a
+    callable side_effect is delegated.
+    """
+
+    def __init__(
+        self,
+        *,
+        return_value: object = None,
+        side_effect: object = None,
+    ) -> None:
+        self._return_value: object = return_value
+        self._side_effect: object = side_effect
+        self._side_effect_idx: int = 0
+        self._calls: list[_CallRecord] = []
+
+    @property
+    def side_effect(self) -> object:
+        return self._side_effect
+
+    @side_effect.setter
+    def side_effect(self, value: object) -> None:
+        self._side_effect = value
+        self._side_effect_idx = 0
+
+    @property
+    def return_value(self) -> "_ReturnValueProxy":
+        return _ReturnValueProxy(self)
+
+    @return_value.setter
+    def return_value(self, value: object) -> None:
+        self._return_value = value
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append(_CallRecord(args, kwargs))
+        se = self._side_effect
+        if isinstance(se, list):
+            result = se[self._side_effect_idx]
+            self._side_effect_idx += 1
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        if isinstance(se, BaseException):
+            raise se
+        if callable(se) and not isinstance(se, type):
+            return se(*args, **kwargs)
+        return self._return_value
+
+    @property
+    def call_count(self) -> int:
+        return len(self._calls)
+
+    @property
+    def called(self) -> bool:
+        return len(self._calls) > 0
+
+    @property
+    def call_args(self) -> _CallRecord | None:
+        return self._calls[-1] if self._calls else None
+
+    @property
+    def call_args_list(self) -> list[_CallRecord]:
+        return self._calls
+
+    def assert_not_called(self) -> None:
+        assert len(self._calls) == 0, (
+            f"Expected not called, got {len(self._calls)} call(s)"
+        )
+
+    def assert_called(self) -> None:
+        assert len(self._calls) > 0, "Expected at least one call"
+
+    def assert_called_once(self) -> None:
+        assert len(self._calls) == 1, f"Expected 1 call, got {len(self._calls)}"
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) == 1, f"Expected 1 call, got {len(self._calls)}"
+        call = self._calls[0]
+        assert call.args == args, f"args: {call.args!r} != {args!r}"
+        assert call.kwargs == kwargs, f"kwargs: {call.kwargs!r} != {kwargs!r}"
+
+    def assert_called_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) > 0, "Expected at least one call"
+        call = self._calls[-1]
+        assert call.args == args, f"args: {call.args!r} != {args!r}"
+        assert call.kwargs == kwargs, f"kwargs: {call.kwargs!r} != {kwargs!r}"
+
+
+class _FakeResponse:
+    """Minimal HTTP response stub for GitHub session tests.
+
+    ``raise_for_status`` is a ``_FakeCallable`` that raises
+    ``raise_side_effect`` when called (if set) so tests can assert on it.
+    """
+
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        json_data: object = None,
+        headers: dict | None = None,
+        content: bytes = b"",
+        text: str = "",
+        url: str = "",
+        request: object = None,
+        reason: str = "",
+        raise_side_effect: BaseException | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self._json_data = json_data
+        self.headers = headers if headers is not None else {}
+        self.content = content
+        self.text = text
+        self.url = url
+        self.request = request
+        self.reason = reason
+        self.raise_for_status = _FakeCallable(side_effect=raise_side_effect)
+
+    def json(self) -> object:
+        return self._json_data
+
+
+class _PropProxy:
+    """Proxy for .json on a _FakeCallable: intercepts .return_value and .side_effect.
+
+    Allows the chain ``mock_s.post.return_value.json.return_value = X`` to
+    translate transparently to ``mock_s.post._return_value = _FakeResponse(json_data=X)``.
+    """
+
+    def __init__(self, owner: "_FakeCallable") -> None:
+        object.__setattr__(self, "_owner", owner)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        owner: _FakeCallable = object.__getattribute__(self, "_owner")
+        if name == "return_value":
+            owner._return_value = _FakeResponse(json_data=value)
+        elif name == "side_effect":
+            if isinstance(value, list):
+                owner.side_effect = [_FakeResponse(json_data=v) for v in value]
+            else:
+                owner.side_effect = value
+        else:
+            object.__setattr__(self, name, value)
+
+
+class _ReturnValueProxy:
+    """Proxy returned by _FakeCallable.return_value: supports .json chain.
+
+    Allows ``mock_s.post.return_value.json.return_value = X`` to translate
+    to setting the callable's ``_return_value`` to a ``_FakeResponse``.
+    Direct assignment ``mock_s.post.return_value = X`` calls the setter on
+    ``_FakeCallable`` directly and bypasses this proxy.
+    """
+
+    def __init__(self, owner: "_FakeCallable") -> None:
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "json", _PropProxy(owner))
+
+
+class _FakeSession:
+    """Minimal HTTP session stub for GitHub class tests."""
+
+    def __init__(self) -> None:
+        self.headers: dict[str, str] = {}
+        self.get = _FakeCallable()
+        self.post = _FakeCallable()
+        self.patch = _FakeCallable()
+        self.put = _FakeCallable()
+        self.delete = _FakeCallable()
 
 
 class _RawCall:
@@ -84,20 +267,20 @@ class TestGhToken:
         assert _gh_token(environ={"GITHUB_TOKEN": "mytoken"}) == "mytoken"
 
     def test_falls_back_to_gh_cli(self) -> None:
-        mock_run = MagicMock(return_value=_completed("ghp_abc\n"))
+        mock_run = _FakeCallable(return_value=_completed("ghp_abc\n"))
         assert _gh_token(runner=mock_run, environ={}) == "ghp_abc"
 
     def test_gh_cli_strips_whitespace(self) -> None:
-        mock_run = MagicMock(return_value=_completed("  tok  \n"))
+        mock_run = _FakeCallable(return_value=_completed("  tok  \n"))
         assert _gh_token(runner=mock_run, environ={}) == "tok"
 
     def test_raises_on_nonzero_exit(self) -> None:
-        mock_run = MagicMock(return_value=_completed("", returncode=1))
+        mock_run = _FakeCallable(return_value=_completed("", returncode=1))
         with pytest.raises(RuntimeError, match="gh auth token failed"):
             _gh_token(runner=mock_run, environ={})
 
     def test_error_message_includes_exit_code(self) -> None:
-        mock_run = MagicMock(return_value=_completed("", returncode=4))
+        mock_run = _FakeCallable(return_value=_completed("", returncode=4))
         with pytest.raises(RuntimeError, match=r"exit 4"):
             _gh_token(runner=mock_run, environ={})
 
@@ -206,18 +389,14 @@ class TestPrStateStr:
 
 class TestTimeoutSession:
     def test_injects_default_timeout(self) -> None:
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.headers = {}
+        resp = _FakeResponse(status_code=200, headers={})
         s = _FakeTimeoutSession(resp)
         s.request("GET", "https://example.com")
         assert s.call_args is not None
         assert s.call_args.kwargs.get("timeout") == _HTTP_TIMEOUT
 
     def test_does_not_override_caller_timeout(self) -> None:
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.headers = {}
+        resp = _FakeResponse(status_code=200, headers={})
         s = _FakeTimeoutSession(resp)
         s.request("GET", "https://example.com", timeout=5)
         assert s.call_args is not None
@@ -230,17 +409,16 @@ class TestTimeoutSession:
     def test_get_caches_response_then_replays_on_304(self) -> None:
         """GET response with ETag is cached; second GET that gets a 304
         returns a synthesized 200 carrying the original body."""
-        first = MagicMock()
-        first.status_code = 200
-        first.headers = {"ETag": 'W/"abc"', "Content-Type": "application/json"}
-        first.content = b'{"hello": "world"}'
-
-        second = MagicMock()
-        second.status_code = 304
-        second.headers = {}
-        second.url = "https://api.github.com/repos/o/r/issues/1/comments"
-        second.request = None
-
+        first = _FakeResponse(
+            status_code=200,
+            headers={"ETag": 'W/"abc"', "Content-Type": "application/json"},
+            content=b'{"hello": "world"}',
+        )
+        second = _FakeResponse(
+            status_code=304,
+            url="https://api.github.com/repos/o/r/issues/1/comments",
+            request=None,
+        )
         s = _FakeTimeoutSession([first, second])
         r1 = s.request("GET", "https://api.github.com/repos/o/r/issues/1/comments")
         assert r1.status_code == 200
@@ -253,15 +431,16 @@ class TestTimeoutSession:
     def test_get_caches_last_modified_when_no_etag(self) -> None:
         """Responses with only Last-Modified still get cached and the
         next GET sends If-Modified-Since."""
-        first = MagicMock()
-        first.status_code = 200
-        first.headers = {"Last-Modified": "Wed, 21 Oct 2026 07:28:00 GMT"}
-        first.content = b"body"
-        second = MagicMock()
-        second.status_code = 304
-        second.headers = {}
-        second.url = "https://api.github.com/repos/o/r/issues/2"
-        second.request = None
+        first = _FakeResponse(
+            status_code=200,
+            headers={"Last-Modified": "Wed, 21 Oct 2026 07:28:00 GMT"},
+            content=b"body",
+        )
+        second = _FakeResponse(
+            status_code=304,
+            url="https://api.github.com/repos/o/r/issues/2",
+            request=None,
+        )
         s = _FakeTimeoutSession([first, second])
         s.request("GET", "https://api.github.com/repos/o/r/issues/2")
         s.request("GET", "https://api.github.com/repos/o/r/issues/2")
@@ -271,14 +450,12 @@ class TestTimeoutSession:
         )
 
     def test_get_without_etag_or_last_modified_is_not_cached(self) -> None:
-        first = MagicMock()
-        first.status_code = 200
-        first.headers = {"Content-Type": "text/plain"}
-        first.content = b"hi"
-        second = MagicMock()
-        second.status_code = 200
-        second.headers = {}
-        second.content = b"hi2"
+        first = _FakeResponse(
+            status_code=200,
+            headers={"Content-Type": "text/plain"},
+            content=b"hi",
+        )
+        second = _FakeResponse(status_code=200, content=b"hi2")
         s = _FakeTimeoutSession([first, second])
         s.request("GET", "https://api.github.com/repos/o/r/x")
         r2 = s.request("GET", "https://api.github.com/repos/o/r/x")
@@ -288,9 +465,7 @@ class TestTimeoutSession:
         assert "If-None-Match" not in second_headers
 
     def test_non_get_methods_bypass_cache(self) -> None:
-        resp = MagicMock()
-        resp.status_code = 201
-        resp.headers = {}
+        resp = _FakeResponse(status_code=201)
         s = _FakeTimeoutSession(resp)
         s.request("POST", "https://api.github.com/repos/o/r/issues")
         s.request("POST", "https://api.github.com/repos/o/r/issues")
@@ -300,26 +475,20 @@ class TestTimeoutSession:
             assert "If-None-Match" not in (call.kwargs.get("headers") or {})
 
     def test_bytes_method_and_url_are_accepted(self) -> None:
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.headers = {}
+        resp = _FakeResponse(status_code=200)
         s = _FakeTimeoutSession(resp)
         s.request(b"GET", b"https://api.github.com/repos/o/r/x")
         assert s.call_count == 1
 
     def test_clear_repo_cache_drops_only_that_repos_entries(self) -> None:
-        def mk(etag: str, body: bytes) -> MagicMock:
-            r = MagicMock()
-            r.status_code = 200
-            r.headers = {"ETag": etag}
-            r.content = body
-            return r
+        def mk(etag: str, body: bytes) -> _FakeResponse:
+            return _FakeResponse(status_code=200, headers={"ETag": etag}, content=body)
 
-        not_modified = MagicMock()
-        not_modified.status_code = 304
-        not_modified.headers = {}
-        not_modified.url = "https://api.github.com/repos/owner/bar/issues/1"
-        not_modified.request = None
+        not_modified = _FakeResponse(
+            status_code=304,
+            url="https://api.github.com/repos/owner/bar/issues/1",
+            request=None,
+        )
 
         s = _FakeTimeoutSession([mk('W/"a"', b"A"), mk('W/"b"', b"B"), not_modified])
         s.request("GET", "https://api.github.com/repos/owner/foo/issues/1")
@@ -338,7 +507,7 @@ class TestTimeoutSession:
     def test_github_clear_repo_cache_returns_zero_for_non_caching_session(
         self,
     ) -> None:
-        gh = GitHub("tok", session=MagicMock())
+        gh = GitHub("tok", session=_FakeSession())
         assert gh.clear_repo_cache("owner/repo") == 0
 
     def test_non_repo_urls_are_not_cached(self) -> None:
@@ -346,10 +515,11 @@ class TestTimeoutSession:
         outside any per-repo lifecycle hook — caching them would grow
         unbounded.  These URLs must bypass the cache entirely; even
         on a fresh ``200`` with ``ETag``, the entry is not stored."""
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.headers = {"ETag": 'W/"u"'}
-        resp.content = b'{"login": "fido"}'
+        resp = _FakeResponse(
+            status_code=200,
+            headers={"ETag": 'W/"u"'},
+            content=b'{"login": "fido"}',
+        )
         s = _FakeTimeoutSession(resp)
         for url in (
             "https://api.github.com/user",
@@ -365,9 +535,7 @@ class TestTimeoutSession:
         """Even if a non-repo URL were sneakily cached, the request
         path must never inject ``If-None-Match`` for non-cacheable
         URLs — guards against bypassing the bypass."""
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.headers = {}
+        resp = _FakeResponse(status_code=200)
         s = _FakeTimeoutSession(resp)
         s.request("GET", "https://api.github.com/user")
         headers = s.call_args.kwargs.get("headers") or {}  # type: ignore[union-attr]
@@ -378,10 +546,11 @@ class TestTimeoutSession:
         """Without this, an attacker (or stale gh-auth state) could
         replay a body validated under the previous token via a 304 on
         the next ``/user`` read and bypass the #1207 identity guard."""
-        first = MagicMock()
-        first.status_code = 200
-        first.headers = {"ETag": 'W/"a"'}
-        first.content = b"under old token"
+        first = _FakeResponse(
+            status_code=200,
+            headers={"ETag": 'W/"a"'},
+            content=b"under old token",
+        )
         s = _FakeTimeoutSession(first)
         gh = GitHub("tok-old", session=s, token_fetcher=lambda: "tok-old")
         gh._s.request(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
@@ -399,10 +568,11 @@ class TestTimeoutSession:
         """No-op token refresh must not invalidate the cache —
         ``refresh_token`` runs at every assertion boundary, so wiping
         on every call would destroy the ETag win."""
-        first = MagicMock()
-        first.status_code = 200
-        first.headers = {"ETag": 'W/"a"'}
-        first.content = b"stable"
+        first = _FakeResponse(
+            status_code=200,
+            headers={"ETag": 'W/"a"'},
+            content=b"stable",
+        )
         s = _FakeTimeoutSession(first)
         gh = GitHub("tok", session=s, token_fetcher=lambda: "tok")
         gh._s.request(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
@@ -414,8 +584,8 @@ class TestTimeoutSession:
 
 
 class TestGitHubClass:
-    def _gh(self) -> tuple[GitHub, MagicMock]:
-        mock_s = MagicMock()
+    def _gh(self) -> tuple[GitHub, _FakeSession]:
+        mock_s = _FakeSession()
         return GitHub("test-token", session=mock_s), mock_s
 
     def test_sets_auth_header(self) -> None:
@@ -450,18 +620,17 @@ class TestGitHubClass:
 
     def test_get_calls_session(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [{"id": 1}]
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=[{"id": 1}])
         result = gh._get("/repos/o/r/issues")
         mock_s.get.assert_called_once_with("https://api.github.com/repos/o/r/issues")
         assert result == [{"id": 1}]
 
     def test_get_raises_on_error(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = Exception("404")
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            status_code=404,
+            raise_side_effect=Exception("404"),
+        )
         try:
             gh._get("/bad")
             raise AssertionError("should have raised")
@@ -470,8 +639,7 @@ class TestGitHubClass:
 
     def test_post_calls_session(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse()
         gh._post("/repos/o/r/issues/1/comments", body="hi")
         mock_s.post.assert_called_once_with(
             "https://api.github.com/repos/o/r/issues/1/comments",
@@ -480,9 +648,10 @@ class TestGitHubClass:
 
     def test_post_raises_on_error(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = Exception("422")
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            status_code=422,
+            raise_side_effect=Exception("422"),
+        )
         try:
             gh._post("/bad")
             raise AssertionError("should have raised")
@@ -491,20 +660,15 @@ class TestGitHubClass:
 
     def test_post_json_returns_response(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "id": 42,
-            "html_url": "https://github.com/o/r/pull/42",
-        }
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={"id": 42, "html_url": "https://github.com/o/r/pull/42"}
+        )
         result = gh._post_json("/repos/o/r/pulls", title="t", body="b")
         assert result["id"] == 42
 
     def test_patch_calls_session(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        mock_s.patch.return_value = mock_resp
+        mock_s.patch.return_value = _FakeResponse(json_data={})
         gh._patch("/repos/o/r/issues/1", state="closed")
         mock_s.patch.assert_called_once_with(
             "https://api.github.com/repos/o/r/issues/1",
@@ -513,9 +677,10 @@ class TestGitHubClass:
 
     def test_patch_raises_on_error(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = Exception("404")
-        mock_s.patch.return_value = mock_resp
+        mock_s.patch.return_value = _FakeResponse(
+            status_code=404,
+            raise_side_effect=Exception("404"),
+        )
         try:
             gh._patch("/bad")
             raise AssertionError("should have raised")
@@ -524,9 +689,7 @@ class TestGitHubClass:
 
     def test_put_calls_session(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        mock_s.put.return_value = mock_resp
+        mock_s.put.return_value = _FakeResponse(json_data={})
         gh._put("/repos/o/r/pulls/1/merge", merge_method="squash")
         mock_s.put.assert_called_once_with(
             "https://api.github.com/repos/o/r/pulls/1/merge",
@@ -535,9 +698,10 @@ class TestGitHubClass:
 
     def test_put_raises_on_error(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = Exception("405")
-        mock_s.put.return_value = mock_resp
+        mock_s.put.return_value = _FakeResponse(
+            status_code=405,
+            raise_side_effect=Exception("405"),
+        )
         try:
             gh._put("/bad")
             raise AssertionError("should have raised")
@@ -546,9 +710,7 @@ class TestGitHubClass:
 
     def test_graphql_posts_to_graphql_endpoint(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"data": {}}
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(json_data={"data": {}})
         result = gh._graphql("query { viewer { login } }", login="fido")
         url = mock_s.post.call_args.args[0]
         assert url == "https://api.github.com/graphql"
@@ -559,25 +721,25 @@ class TestGitHubClass:
 
     def test_graphql_raises_on_http_error(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = Exception("500")
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            status_code=500,
+            raise_side_effect=Exception("500"),
+        )
         with pytest.raises(Exception, match="500"):
             gh._graphql("query {}")
 
     def test_graphql_raises_on_payload_error(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"errors": [{"message": "not found"}]}
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={"errors": [{"message": "not found"}]}
+        )
         with pytest.raises(GraphQLError) as exc_info:
             gh._graphql("query {}")
         assert exc_info.value.errors == [{"message": "not found"}]
 
     def test_add_reaction_pulls(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse()
         gh.add_reaction("o/r", "pulls", 42, "rocket")
         url = mock_s.post.call_args.args[0]
         assert "repos/o/r/pulls/comments/42/reactions" in url
@@ -585,18 +747,16 @@ class TestGitHubClass:
 
     def test_add_reaction_issues(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse()
         gh.add_reaction("o/r", "issues", 7, "+1")
         url = mock_s.post.call_args.args[0]
         assert "repos/o/r/issues/comments/7/reactions" in url
 
     def test_list_reactions_pulls(self) -> None:
         gh, mock_s = self._gh()
-        page_resp = MagicMock()
-        page_resp.json.return_value = [{"id": 1, "content": "eyes"}]
-        page_resp.headers = {}  # no Link header → single page
-        mock_s.get.return_value = page_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data=[{"id": 1, "content": "eyes"}]
+        )
         result = gh.list_reactions("o/r", "pulls", 42)
         url = mock_s.get.call_args.args[0]
         assert "repos/o/r/pulls/comments/42/reactions" in url
@@ -604,10 +764,7 @@ class TestGitHubClass:
 
     def test_list_reactions_issues(self) -> None:
         gh, mock_s = self._gh()
-        page_resp = MagicMock()
-        page_resp.json.return_value = [{"id": 2, "content": "+1"}]
-        page_resp.headers = {}
-        mock_s.get.return_value = page_resp
+        mock_s.get.return_value = _FakeResponse(json_data=[{"id": 2, "content": "+1"}])
         result = gh.list_reactions("o/r", "issues", 7)
         url = mock_s.get.call_args.args[0]
         assert "repos/o/r/issues/comments/7/reactions" in url
@@ -615,25 +772,23 @@ class TestGitHubClass:
 
     def test_delete_reaction_pulls(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_s.delete.return_value = mock_resp
+        resp = _FakeResponse()
+        mock_s.delete.return_value = resp
         gh.delete_reaction("o/r", "pulls", 42, 99)
         url = mock_s.delete.call_args.args[0]
         assert "repos/o/r/pulls/comments/42/reactions/99" in url
-        mock_resp.raise_for_status.assert_called_once()
+        resp.raise_for_status.assert_called_once()
 
     def test_delete_reaction_issues(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_s.delete.return_value = mock_resp
+        mock_s.delete.return_value = _FakeResponse()
         gh.delete_reaction("o/r", "issues", 7, 55)
         url = mock_s.delete.call_args.args[0]
         assert "repos/o/r/issues/comments/7/reactions/55" in url
 
     def test_reply_to_review_comment(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse()
         gh.reply_to_review_comment("o/r", 10, "lgtm", 55)
         url = mock_s.post.call_args.args[0]
         assert "repos/o/r/pulls/10/comments" in url
@@ -643,16 +798,14 @@ class TestGitHubClass:
 
     def test_reply_to_review_comment_converts_in_reply_to(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse()
         gh.reply_to_review_comment("o/r", 10, "ok", "99")
         body = mock_s.post.call_args.kwargs["json"]
         assert body["in_reply_to"] == 99
 
     def test_edit_review_comment(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_s.patch.return_value = mock_resp
+        mock_s.patch.return_value = _FakeResponse()
         gh.edit_review_comment("o/r", 77, "updated body")
         url = mock_s.patch.call_args.args[0]
         assert "repos/o/r/pulls/comments/77" in url
@@ -662,19 +815,13 @@ class TestGitHubClass:
     def test_get_pull_comments(self) -> None:
         gh, mock_s = self._gh()
         comments = [{"id": 42, "body": "looks good"}]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = comments
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=comments)
         result = gh.get_pull_comments("o/r", 7)
         assert result == comments
 
     def test_get_pull_comments_url(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = []
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=[])
         gh.get_pull_comments("o/r", 7)
         url = mock_s.get.call_args.args[0]
         assert "repos/o/r/pulls/7/comments" in url
@@ -685,10 +832,7 @@ class TestGitHubClass:
             {"id": 1000, "state": "APPROVED", "body": ""},
             {"id": 1001, "state": "COMMENTED", "body": "nit"},
         ]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = reviews
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=reviews)
         result = gh.get_pull_reviews("o/r", 7)
         assert result == reviews
         url = mock_s.get.call_args.args[0]
@@ -697,67 +841,56 @@ class TestGitHubClass:
     def test_get_pull_comment(self) -> None:
         gh, mock_s = self._gh()
         comment = {"id": 10, "body": "hi"}
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = comment
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=comment)
         assert gh.get_pull_comment("o/r", 10) == comment
 
     def test_get_pull_comment_returns_none_on_404(self) -> None:
         import requests
 
         gh, mock_s = self._gh()
-        response = MagicMock(status_code=404)
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = requests.HTTPError(response=response)
-        mock_s.get.return_value = mock_resp
+        err_resp = _FakeResponse(status_code=404)
+        mock_s.get.return_value = _FakeResponse(
+            status_code=404,
+            raise_side_effect=requests.HTTPError(response=err_resp),
+        )
         assert gh.get_pull_comment("o/r", 10) is None
 
     def test_get_pull_comment_reraises_non_404(self) -> None:
         import requests
 
         gh, mock_s = self._gh()
-        response = MagicMock(status_code=500)
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = requests.HTTPError(response=response)
-        mock_s.get.return_value = mock_resp
+        err_resp = _FakeResponse(status_code=500)
+        mock_s.get.return_value = _FakeResponse(
+            status_code=500,
+            raise_side_effect=requests.HTTPError(response=err_resp),
+        )
         with pytest.raises(requests.HTTPError):
             gh.get_pull_comment("o/r", 10)
 
     def test_get_review_comments(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [
-            {"id": 101, "body": "nit"},
-            {"id": 102, "body": "fix"},
-        ]
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data=[{"id": 101, "body": "nit"}, {"id": 102, "body": "fix"}]
+        )
         result = gh.get_review_comments("o/r", 10, 99)
         assert result == [(101, "nit"), (102, "fix")]
 
     def test_get_review_comments_empty(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = []
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=[])
         result = gh.get_review_comments("o/r", 10, 99)
         assert result == []
 
     def test_get_review_comments_url(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = []
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=[])
         gh.get_review_comments("o/r", 10, 99)
         url = mock_s.get.call_args.args[0]
         assert "repos/o/r/pulls/10/reviews/99/comments" in url
 
     def test_comment_issue(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse()
         gh.comment_issue("o/r", 7, "hello")
         url = mock_s.post.call_args.args[0]
         assert "repos/o/r/issues/7/comments" in url
@@ -765,8 +898,7 @@ class TestGitHubClass:
 
     def test_close_issue_patches_state_closed(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_s.patch.return_value = mock_resp
+        mock_s.patch.return_value = _FakeResponse()
         gh.close_issue("owner/repo", 42)
         url = mock_s.patch.call_args.args[0]
         assert "repos/owner/repo/issues/42" in url
@@ -776,16 +908,16 @@ class TestGitHubClass:
         import requests as _requests
 
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = _requests.HTTPError("404")
-        mock_s.patch.return_value = mock_resp
+        mock_s.patch.return_value = _FakeResponse(
+            status_code=404,
+            raise_side_effect=_requests.HTTPError("404"),
+        )
         with pytest.raises(_requests.HTTPError, match="404"):
             gh.close_issue("owner/repo", 99)
 
     def test_close_pr_patches_pulls_state_closed(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_s.patch.return_value = mock_resp
+        mock_s.patch.return_value = _FakeResponse()
         gh.close_pr("owner/repo", 77)
         url = mock_s.patch.call_args.args[0]
         assert "repos/owner/repo/pulls/77" in url
@@ -795,9 +927,10 @@ class TestGitHubClass:
         import requests as _requests
 
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = _requests.HTTPError("422")
-        mock_s.patch.return_value = mock_resp
+        mock_s.patch.return_value = _FakeResponse(
+            status_code=422,
+            raise_side_effect=_requests.HTTPError("422"),
+        )
         with pytest.raises(_requests.HTTPError, match="422"):
             gh.close_pr("owner/repo", 33)
 
@@ -821,10 +954,7 @@ class TestGitHubClass:
                 "body": "reply",
             },
         ]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = comments
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=comments)
         result = gh.fetch_sibling_threads("o/r", 7)
         assert len(result) == 1
         assert result[0]["path"] == "a.py"
@@ -842,18 +972,16 @@ class TestGitHubClass:
                 "body": "orphan reply",
             },
         ]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = comments
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=comments)
         result = gh.fetch_sibling_threads("o/r", 7)
         assert result == []
 
     def test_fetch_sibling_threads_propagates_error(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = Exception("403")
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            status_code=403,
+            raise_side_effect=Exception("403"),
+        )
         with pytest.raises(Exception, match="403"):
             gh.fetch_sibling_threads("o/r", 7)
 
@@ -885,10 +1013,7 @@ class TestGitHubClass:
                 "body": "other thread",
             },
         ]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = comments
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=comments)
         result = gh.fetch_comment_thread("o/r", 7, 10)
         assert result == [
             {
@@ -918,10 +1043,7 @@ class TestGitHubClass:
                 "body": "reply",
             },
         ]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = comments
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=comments)
         result = gh.fetch_comment_thread("o/r", 7, 11)
         assert result == [
             {"id": 10, "author": "alice", "body": "root", "in_reply_to_id": None},
@@ -930,33 +1052,29 @@ class TestGitHubClass:
 
     def test_fetch_comment_thread_returns_empty_when_not_found(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = []
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=[])
         result = gh.fetch_comment_thread("o/r", 7, 999)
         assert result == []
 
     def test_fetch_comment_thread_propagates_error(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = Exception("403")
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(raise_side_effect=Exception("403"))
         with pytest.raises(Exception, match="403"):
             gh.fetch_comment_thread("o/r", 7, 10)
 
     def test_get_run_log_skips_non_failing_jobs(self) -> None:
         gh, mock_s = self._gh()
-        jobs_resp = MagicMock()
-        jobs_resp.json.return_value = {
-            "jobs": [
-                {"id": 1, "conclusion": "success"},
-                {"id": 2, "conclusion": "failure"},
-            ]
-        }
-        log_resp = MagicMock()
-        log_resp.text = "failure log\n"
-        mock_s.get.side_effect = [jobs_resp, log_resp]
+        mock_s.get.side_effect = [
+            _FakeResponse(
+                json_data={
+                    "jobs": [
+                        {"id": 1, "conclusion": "success"},
+                        {"id": 2, "conclusion": "failure"},
+                    ]
+                }
+            ),
+            _FakeResponse(text="failure log\n"),
+        ]
         result = gh.get_run_log("o/r", 42)
         assert result == "failure log\n"
         # Only one GET for logs (the success job was skipped)
@@ -964,48 +1082,41 @@ class TestGitHubClass:
 
     def test_paginate_single_page(self) -> None:
         gh, mock_s = self._gh()
-        resp = MagicMock()
-        resp.json.return_value = [{"id": 1}, {"id": 2}]
-        resp.headers = {}
-        mock_s.get.return_value = resp
+        mock_s.get.return_value = _FakeResponse(json_data=[{"id": 1}, {"id": 2}])
         result = list(gh._paginate("https://api.github.com/repos/o/r/items"))
         assert result == [{"id": 1}, {"id": 2}]
 
     def test_paginate_follows_next_link(self) -> None:
         gh, mock_s = self._gh()
-        page1 = MagicMock()
-        page1.json.return_value = [{"id": 1}]
         next_url = "https://api.github.com/repos/o/r/items?page=2"
-        page1.headers = {"Link": f'<{next_url}>; rel="next"'}
-        page2 = MagicMock()
-        page2.json.return_value = [{"id": 2}]
-        page2.headers = {}
-        mock_s.get.side_effect = [page1, page2]
+        mock_s.get.side_effect = [
+            _FakeResponse(
+                json_data=[{"id": 1}],
+                headers={"Link": f'<{next_url}>; rel="next"'},
+            ),
+            _FakeResponse(json_data=[{"id": 2}]),
+        ]
         result = list(gh._paginate("https://api.github.com/repos/o/r/items"))
         assert result == [{"id": 1}, {"id": 2}]
         assert mock_s.get.call_count == 2
         assert mock_s.get.call_args_list[1].args[0] == next_url
 
-    def _transient_resp(self, status: int) -> MagicMock:
-        resp = MagicMock()
-        resp.status_code = status
-        resp.reason = "Server Error"
-        return resp
+    def _transient_resp(self, status: int) -> _FakeResponse:
+        return _FakeResponse(status_code=status, reason="Server Error")
 
-    def _ok_resp(self, body: list[dict], link: str = "") -> MagicMock:
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.json.return_value = body
-        resp.headers = {"Link": link} if link else {}
-        return resp
+    def _ok_resp(self, body: list[dict], link: str = "") -> _FakeResponse:
+        return _FakeResponse(
+            json_data=body,
+            headers={"Link": link} if link else {},
+        )
 
     def test_retryable_get_retries_on_5xx_then_succeeds(self) -> None:
         # Regression for #664: transient 5xx on a read-only GET must be
         # retried, not propagated as an uncaught worker-thread crash.
         import requests as _requests
 
-        sleeper = MagicMock()
-        mock_s = MagicMock()
+        sleeper = _FakeCallable()
+        mock_s = _FakeSession()
         mock_s.get.side_effect = [
             self._transient_resp(500),
             self._transient_resp(503),
@@ -1024,8 +1135,8 @@ class TestGitHubClass:
     def test_retryable_get_gives_up_after_budget(self) -> None:
         import requests as _requests
 
-        sleeper = MagicMock()
-        mock_s = MagicMock()
+        sleeper = _FakeCallable()
+        mock_s = _FakeSession()
         mock_s.get.return_value = self._transient_resp(502)
         gh = GitHub("tok", session=mock_s, sleeper=sleeper)
         with pytest.raises(_requests.HTTPError, match="502"):
@@ -1037,8 +1148,8 @@ class TestGitHubClass:
     def test_retryable_get_retries_on_connection_error(self) -> None:
         import requests as _requests
 
-        sleeper = MagicMock()
-        mock_s = MagicMock()
+        sleeper = _FakeCallable()
+        mock_s = _FakeSession()
         mock_s.get.side_effect = [
             _requests.ConnectionError("boom"),
             self._ok_resp([{"ok": True}]),
@@ -1051,12 +1162,12 @@ class TestGitHubClass:
     def test_retryable_get_non_retryable_4xx_propagates_immediately(self) -> None:
         import requests as _requests
 
-        sleeper = MagicMock()
-        mock_s = MagicMock()
-        resp = MagicMock()
-        resp.status_code = 404
-        resp.raise_for_status.side_effect = _requests.HTTPError("404")
-        mock_s.get.return_value = resp
+        sleeper = _FakeCallable()
+        mock_s = _FakeSession()
+        mock_s.get.return_value = _FakeResponse(
+            status_code=404,
+            raise_side_effect=_requests.HTTPError("404"),
+        )
         gh = GitHub("tok", session=mock_s, sleeper=sleeper)
         with pytest.raises(_requests.HTTPError, match="404"):
             gh._get("/nope")
@@ -1066,30 +1177,29 @@ class TestGitHubClass:
 
     def test_delete_issue_comment_calls_session_delete(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.return_value = None
-        mock_s.delete.return_value = mock_resp
+        resp = _FakeResponse()
+        mock_s.delete.return_value = resp
         gh.delete_issue_comment("owner/repo", 42)
         mock_s.delete.assert_called_once_with(
             "https://api.github.com/repos/owner/repo/issues/comments/42"
         )
-        mock_resp.raise_for_status.assert_called_once()
+        resp.raise_for_status.assert_called_once()
 
     def test_delete_issue_comment_raises_on_error(self) -> None:
         import requests as _requests
 
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = _requests.HTTPError("404")
-        mock_s.delete.return_value = mock_resp
+        mock_s.delete.return_value = _FakeResponse(
+            raise_side_effect=_requests.HTTPError("404")
+        )
         with pytest.raises(_requests.HTTPError, match="404"):
             gh.delete_issue_comment("owner/repo", 42)
 
     def test_paginate_retries_on_5xx_mid_stream(self) -> None:
         # Multi-page pagination: a 5xx on page 2 must not abort the
         # whole walk — it retries just that page.
-        sleeper = MagicMock()
-        mock_s = MagicMock()
+        sleeper = _FakeCallable()
+        mock_s = _FakeSession()
         next_url = "https://api.github.com/repos/o/r/items?page=2"
         page1 = self._ok_resp([{"id": 1}], link=f'<{next_url}>; rel="next"')
         bad = self._transient_resp(502)
@@ -1561,9 +1671,9 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_timeline(
             [self._cross_ref_node(pr)]
         )
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"title": "Fix the crash", "body": "PR body text."}
-        mock_s.get.return_value = pr_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"title": "Fix the crash", "body": "PR body text."}
+        )
         result = gh.find_closed_prs_as_context("o/r", 206, "fido")
         assert len(result) == 1
         assert result[0] == ClosedPR(
@@ -1580,9 +1690,7 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_timeline(
             [self._cross_ref_node(pr1), self._cross_ref_node(pr2)]
         )
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"title": "t", "body": ""}
-        mock_s.get.return_value = pr_resp
+        mock_s.get.return_value = _FakeResponse(json_data={"title": "t", "body": ""})
         result = gh.find_closed_prs_as_context("o/r", 206, "fido")
         assert len(result) == 2
         assert result[0].number == 210
@@ -1597,9 +1705,9 @@ class TestGitHubClass:
         mock_s.post.return_value.json.return_value = self._gql_timeline(
             [self._cross_ref_node(pr)]
         )
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"title": "Old attempt", "body": None}
-        mock_s.get.return_value = pr_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"title": "Old attempt", "body": None}
+        )
         result = gh.find_closed_prs_as_context("o/r", 206, "fido")
         assert result == [
             ClosedPR(number=215, title="Old attempt", body="", close_reason="")
@@ -2013,15 +2121,10 @@ class TestGitHubClass:
         items: list[dict],
         has_next: bool = False,
         next_url: str | None = None,
-    ) -> MagicMock:
-        """Build a mock REST response for the sub_issues endpoint."""
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.json.return_value = items
-        resp.raise_for_status.return_value = None
+    ) -> _FakeResponse:
+        """Build a fake REST response for the sub_issues endpoint."""
         link = f'<{next_url}>; rel="next"' if (has_next and next_url) else ""
-        resp.headers = {"Link": link}
-        return resp
+        return _FakeResponse(json_data=items, headers={"Link": link})
 
     def _sub_issue_item(
         self,
@@ -2077,13 +2180,11 @@ class TestGitHubClass:
         gh, mock_s = self._gh()
         sub = self._sub_issue_item(5, state="closed", title="T", body="B")
         sub_issues_resp = self._sub_issues_page([sub])
-        pr_rest_resp = MagicMock()
-        pr_rest_resp.status_code = 200
-        pr_rest_resp.raise_for_status.return_value = None
-        pr_rest_resp.headers = {}
-        pr_rest_resp.json.return_value = {"body": "pr body text"}
         # First GET is sub_issues list, second GET is the PR body.
-        mock_s.get.side_effect = [sub_issues_resp, pr_rest_resp]
+        mock_s.get.side_effect = [
+            sub_issues_resp,
+            _FakeResponse(json_data={"body": "pr body text"}),
+        ]
         pr_node = self._gql_pr_simple(99, "MERGED", merged=True)
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [self._gql_cross_ref(pr_node)]
@@ -2107,12 +2208,10 @@ class TestGitHubClass:
         gh, mock_s = self._gh()
         sub = self._sub_issue_item(7, state="closed", title="T2", body="B2")
         sub_issues_resp = self._sub_issues_page([sub])
-        pr_rest_resp = MagicMock()
-        pr_rest_resp.status_code = 200
-        pr_rest_resp.raise_for_status.return_value = None
-        pr_rest_resp.headers = {}
-        pr_rest_resp.json.return_value = {"body": "rejected"}
-        mock_s.get.side_effect = [sub_issues_resp, pr_rest_resp]
+        mock_s.get.side_effect = [
+            sub_issues_resp,
+            _FakeResponse(json_data={"body": "rejected"}),
+        ]
         pr_node = self._gql_pr_simple(88, "CLOSED", merged=False)
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
             [self._gql_cross_ref(pr_node)]
@@ -2219,12 +2318,10 @@ class TestGitHubClass:
         gh, mock_s = self._gh()
         sub = self._sub_issue_item(5, state="closed", title="T", body="B")
         sub_issues_resp = self._sub_issues_page([sub])
-        pr_rest_resp = MagicMock()
-        pr_rest_resp.status_code = 200
-        pr_rest_resp.raise_for_status.return_value = None
-        pr_rest_resp.headers = {}
-        pr_rest_resp.json.return_value = {"body": "cross-repo body"}
-        mock_s.get.side_effect = [sub_issues_resp, pr_rest_resp]
+        mock_s.get.side_effect = [
+            sub_issues_resp,
+            _FakeResponse(json_data={"body": "cross-repo body"}),
+        ]
         # PR lives in "other/repo", not "o/r".
         pr_node = self._gql_pr_simple(77, "MERGED", merged=True, repo="other/repo")
         mock_s.post.return_value.json.return_value = self._gql_sub_timeline(
@@ -2277,9 +2374,7 @@ class TestGitHubClass:
 
     def test_get_user(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"login": "fido", "id": 1}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data={"login": "fido", "id": 1})
         result = gh.get_user()
         url = mock_s.get.call_args.args[0]
         assert url.endswith("/user")
@@ -2289,13 +2384,13 @@ class TestGitHubClass:
         from fido.types import GitIdentity
 
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "login": "FidoCanCode",
-            "id": 190991155,
-            "name": "Fido Can Code",
-        }
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={
+                "login": "FidoCanCode",
+                "id": 190991155,
+                "name": "Fido Can Code",
+            }
+        )
         assert gh.get_authenticated_identity() == GitIdentity(
             name="Fido Can Code",
             email="190991155+FidoCanCode@users.noreply.github.com",
@@ -2307,9 +2402,9 @@ class TestGitHubClass:
         from fido.types import GitIdentity
 
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"login": "fido", "id": 1, "name": None}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"login": "fido", "id": 1, "name": None}
+        )
         assert gh.get_authenticated_identity() == GitIdentity(
             name="fido", email="1+fido@users.noreply.github.com"
         )
@@ -2319,14 +2414,14 @@ class TestGitHubClass:
         real address never appears on a commit.
         """
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "login": "fido",
-            "id": 42,
-            "name": "Fido",
-            "email": "real.person@example.com",
-        }
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={
+                "login": "fido",
+                "id": 42,
+                "name": "Fido",
+                "email": "real.person@example.com",
+            }
+        )
         identity = gh.get_authenticated_identity()
         assert "real.person@example.com" not in identity.email
         assert identity.email == "42+fido@users.noreply.github.com"
@@ -2335,13 +2430,13 @@ class TestGitHubClass:
         from fido.types import GitIdentity
 
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "login": "rhencke",
-            "id": 12345,
-            "name": "Rob Hencke",
-        }
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={
+                "login": "rhencke",
+                "id": 12345,
+                "name": "Rob Hencke",
+            }
+        )
         assert gh.get_user_identity("rhencke") == GitIdentity(
             name="Rob Hencke",
             email="12345+rhencke@users.noreply.github.com",
@@ -2353,25 +2448,24 @@ class TestGitHubClass:
         from fido.types import GitIdentity
 
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"login": "ghost", "id": 99, "name": None}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"login": "ghost", "id": 99, "name": None}
+        )
         assert gh.get_user_identity("ghost") == GitIdentity(
             name="ghost", email="99+ghost@users.noreply.github.com"
         )
 
     def test_get_collaborators_filters_by_permission(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [
-            {"login": "admin-user", "role_name": "admin"},
-            {"login": "maint-user", "role_name": "maintain"},
-            {"login": "write-user", "role_name": "write"},
-            {"login": "triage-user", "role_name": "triage"},
-            {"login": "read-user", "role_name": "read"},
-        ]
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data=[
+                {"login": "admin-user", "role_name": "admin"},
+                {"login": "maint-user", "role_name": "maintain"},
+                {"login": "write-user", "role_name": "write"},
+                {"login": "triage-user", "role_name": "triage"},
+                {"login": "read-user", "role_name": "read"},
+            ]
+        )
         result = gh.get_collaborators("owner/repo")
         assert result == ["admin-user", "maint-user", "write-user"]
         url = mock_s.get.call_args.args[0]
@@ -2379,98 +2473,93 @@ class TestGitHubClass:
 
     def test_get_collaborators_preserves_order(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [
-            {"login": "second", "role_name": "write"},
-            {"login": "first", "role_name": "admin"},
-        ]
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data=[
+                {"login": "second", "role_name": "write"},
+                {"login": "first", "role_name": "admin"},
+            ]
+        )
         # API order preserved — caller uses [0] as "primary reviewer"
         assert gh.get_collaborators("o/r") == ["second", "first"]
 
     def test_get_collaborators_skips_users_missing_login(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [
-            {"role_name": "admin"},
-            {"login": "alice", "role_name": "write"},
-        ]
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data=[
+                {"role_name": "admin"},
+                {"login": "alice", "role_name": "write"},
+            ]
+        )
         assert gh.get_collaborators("o/r") == ["alice"]
 
     def test_get_collaborators_handles_missing_role(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [
-            {"login": "alice"},
-            {"login": "bob", "role_name": "admin"},
-        ]
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data=[
+                {"login": "alice"},
+                {"login": "bob", "role_name": "admin"},
+            ]
+        )
         assert gh.get_collaborators("o/r") == ["bob"]
 
     def test_get_repo_info_https(self) -> None:
         gh = GitHub("test-token")
-        mock_run = MagicMock(
+        mock_run = _FakeCallable(
             return_value=_completed("https://github.com/owner/repo.git\n")
         )
         assert gh.get_repo_info(runner=mock_run) == "owner/repo"
 
     def test_get_repo_info_ssh(self) -> None:
         gh = GitHub("test-token")
-        mock_run = MagicMock(return_value=_completed("git@github.com:owner/repo.git\n"))
+        mock_run = _FakeCallable(
+            return_value=_completed("git@github.com:owner/repo.git\n")
+        )
         assert gh.get_repo_info(runner=mock_run) == "owner/repo"
 
     def test_get_repo_info_passes_cwd(self) -> None:
         gh = GitHub("test-token")
-        mock_run = MagicMock(return_value=_completed("https://github.com/o/r.git"))
+        mock_run = _FakeCallable(return_value=_completed("https://github.com/o/r.git"))
         gh.get_repo_info(cwd="/tmp/repo", runner=mock_run)
         assert mock_run.call_args.kwargs["cwd"] == "/tmp/repo"
 
     def test_get_repo_info_raises_unknown(self) -> None:
         gh = GitHub("test-token")
-        mock_run = MagicMock(return_value=_completed("https://example.com/repo.git"))
+        mock_run = _FakeCallable(
+            return_value=_completed("https://example.com/repo.git")
+        )
         with pytest.raises(ValueError, match="Cannot parse"):
             gh.get_repo_info(runner=mock_run)
 
     def test_get_repo_info_raises_on_git_failure(self) -> None:
         gh = GitHub("test-token")
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, "git"))
+        mock_run = _FakeCallable(side_effect=subprocess.CalledProcessError(128, "git"))
         with pytest.raises(subprocess.CalledProcessError):
             gh.get_repo_info(runner=mock_run)
 
     def test_get_repo_info_raises_on_file_not_found(self) -> None:
         gh = GitHub("test-token")
-        mock_run = MagicMock(side_effect=FileNotFoundError("git not found"))
+        mock_run = _FakeCallable(side_effect=FileNotFoundError("git not found"))
         with pytest.raises(FileNotFoundError):
             gh.get_repo_info(runner=mock_run)
 
     def test_get_default_branch(self) -> None:
         gh, mock_s = self._gh()
         remote_resp = _completed("https://github.com/o/r.git\n")
-        repo_resp = MagicMock()
-        repo_resp.json.return_value = {"default_branch": "main"}
-        mock_run = MagicMock(return_value=remote_resp)
-        mock_s.get.return_value = repo_resp
+        mock_run = _FakeCallable(return_value=remote_resp)
+        mock_s.get.return_value = _FakeResponse(json_data={"default_branch": "main"})
         assert gh.get_default_branch(runner=mock_run) == "main"
 
     def test_get_default_branch_passes_cwd(self) -> None:
         gh, mock_s = self._gh()
         remote_resp = _completed("https://github.com/o/r.git\n")
-        repo_resp = MagicMock()
-        repo_resp.json.return_value = {"default_branch": "main"}
-        mock_run = MagicMock(return_value=remote_resp)
-        mock_s.get.return_value = repo_resp
+        mock_run = _FakeCallable(return_value=remote_resp)
+        mock_s.get.return_value = _FakeResponse(json_data={"default_branch": "main"})
         gh.get_default_branch(cwd=Path("/repo"), runner=mock_run)
         assert mock_run.call_args.kwargs["cwd"] == Path("/repo")
 
     def test_set_user_status_graphql(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"data": {}}
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(json_data={"data": {}})
         gh.set_user_status("working", "🚀", busy=True)
         url = mock_s.post.call_args.args[0]
         assert url.endswith("/graphql")
@@ -2482,29 +2571,35 @@ class TestGitHubClass:
 
     def test_graphql_paginate_follows_next_cursor(self) -> None:
         gh, mock_s = self._gh()
-        page1 = MagicMock()
-        page1.json.return_value = {
-            "data": {
-                "repository": {
-                    "issues": {
-                        "nodes": [{"number": 1}],
-                        "pageInfo": {"hasNextPage": True, "endCursor": "CUR1"},
+        mock_s.post.side_effect = [
+            _FakeResponse(
+                json_data={
+                    "data": {
+                        "repository": {
+                            "issues": {
+                                "nodes": [{"number": 1}],
+                                "pageInfo": {"hasNextPage": True, "endCursor": "CUR1"},
+                            }
+                        }
                     }
                 }
-            }
-        }
-        page2 = MagicMock()
-        page2.json.return_value = {
-            "data": {
-                "repository": {
-                    "issues": {
-                        "nodes": [{"number": 2}],
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+            ),
+            _FakeResponse(
+                json_data={
+                    "data": {
+                        "repository": {
+                            "issues": {
+                                "nodes": [{"number": 2}],
+                                "pageInfo": {
+                                    "hasNextPage": False,
+                                    "endCursor": None,
+                                },
+                            }
+                        }
                     }
                 }
-            }
-        }
-        mock_s.post.side_effect = [page1, page2]
+            ),
+        ]
         query = "query($cursor:String){repository{issues(after:$cursor){nodes{number} pageInfo{endCursor hasNextPage}}}}"
         results = list(gh._graphql_paginate(query, ("repository", "issues")))
         assert results == [{"number": 1}, {"number": 2}]
@@ -2516,9 +2611,7 @@ class TestGitHubClass:
 
     def test_add_assignee_posts_to_rest_endpoint(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(json_data={})
         gh.add_assignee("owner/repo", 42, "fido")
         assert "/repos/owner/repo/issues/42/assignees" in mock_s.post.call_args.args[0]
         assert mock_s.post.call_args.kwargs["json"] == {"assignees": ["fido"]}
@@ -2539,18 +2632,18 @@ class TestGitHubClass:
                 "subIssues": {"nodes": []},
             },
         ]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "data": {
-                "repository": {
-                    "issues": {
-                        "nodes": nodes,
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "data": {
+                    "repository": {
+                        "issues": {
+                            "nodes": nodes,
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
                     }
                 }
             }
-        }
-        mock_s.post.return_value = mock_resp
+        )
         result = gh.find_all_open_issues("owner", "repo")
         body = mock_s.post.call_args.kwargs["json"]
         # No login/assignee filter in variables
@@ -2572,9 +2665,7 @@ class TestGitHubClass:
                 "remaining": 4988,
             },
         }
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"resources": resources}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data={"resources": resources})
         result = gh.get_rate_limit()
         url = mock_s.get.call_args.args[0]
         assert url.endswith("/rate_limit")
@@ -2582,15 +2673,15 @@ class TestGitHubClass:
 
     def test_view_issue(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "state": "open",
-            "title": "Bug",
-            "body": "desc",
-            "created_at": "2024-01-01T00:00:00Z",
-            "labels": [{"name": "Blog"}, {"name": "enhancement"}],
-        }
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={
+                "state": "open",
+                "title": "Bug",
+                "body": "desc",
+                "created_at": "2024-01-01T00:00:00Z",
+                "labels": [{"name": "Blog"}, {"name": "enhancement"}],
+            }
+        )
         result = gh.view_issue("o/r", 5)
         assert result == {
             "state": "OPEN",
@@ -2602,15 +2693,15 @@ class TestGitHubClass:
 
     def test_view_issue_no_labels(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "state": "closed",
-            "title": "Old thing",
-            "body": None,
-            "created_at": "2024-06-01T00:00:00Z",
-            "labels": [],
-        }
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={
+                "state": "closed",
+                "title": "Old thing",
+                "body": None,
+                "created_at": "2024-06-01T00:00:00Z",
+                "labels": [],
+            }
+        )
         result = gh.view_issue("o/r", 7)
         assert result["labels"] == []
         assert result["body"] == ""
@@ -2619,24 +2710,21 @@ class TestGitHubClass:
     def test_view_issue_labels_key_absent(self) -> None:
         # Older API responses or mocks that omit "labels" should not crash.
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "state": "open",
-            "title": "No labels key",
-            "body": "hi",
-            "created_at": "2025-01-01T00:00:00Z",
-        }
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={
+                "state": "open",
+                "title": "No labels key",
+                "body": "hi",
+                "created_at": "2025-01-01T00:00:00Z",
+            }
+        )
         result = gh.view_issue("o/r", 99)
         assert result["labels"] == []
 
     def test_get_issue_comments(self) -> None:
         gh, mock_s = self._gh()
         comments = [{"id": 1, "body": "hi"}]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = comments
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=comments)
         result = gh.get_issue_comments("o/r", 9)
         url = mock_s.get.call_args.args[0]
         assert "repos/o/r/issues/9/comments" in url
@@ -2645,39 +2733,34 @@ class TestGitHubClass:
     def test_get_issue_comment(self) -> None:
         gh, mock_s = self._gh()
         comment = {"id": 9, "body": "hi"}
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = comment
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=comment)
         assert gh.get_issue_comment("o/r", 9) == comment
 
     def test_get_issue_comment_returns_none_on_404(self) -> None:
         import requests
 
         gh, mock_s = self._gh()
-        response = MagicMock(status_code=404)
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = requests.HTTPError(response=response)
-        mock_s.get.return_value = mock_resp
+        err_resp = _FakeResponse(status_code=404)
+        mock_s.get.return_value = _FakeResponse(
+            raise_side_effect=requests.HTTPError(response=err_resp)
+        )
         assert gh.get_issue_comment("o/r", 9) is None
 
     def test_get_issue_comment_reraises_non_404(self) -> None:
         import requests
 
         gh, mock_s = self._gh()
-        response = MagicMock(status_code=500)
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = requests.HTTPError(response=response)
-        mock_s.get.return_value = mock_resp
+        err_resp = _FakeResponse(status_code=500)
+        mock_s.get.return_value = _FakeResponse(
+            raise_side_effect=requests.HTTPError(response=err_resp)
+        )
         with pytest.raises(requests.HTTPError):
             gh.get_issue_comment("o/r", 9)
 
     def test_get_issue_events(self) -> None:
         gh, mock_s = self._gh()
         events = [{"event": "reopened", "created_at": "2024-06-01T00:00:00Z"}]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = events
-        mock_resp.headers = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data=events)
         result = gh.get_issue_events("o/r", 3)
         url = mock_s.get.call_args.args[0]
         assert "repos/o/r/issues/3/events" in url
@@ -2685,9 +2768,9 @@ class TestGitHubClass:
 
     def test_create_issue(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"html_url": "https://github.com/o/r/issues/42"}
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={"html_url": "https://github.com/o/r/issues/42"}
+        )
         url = gh.create_issue("o/r", "My feature request", "body text")
         assert url == "https://github.com/o/r/issues/42"
         post_url = mock_s.post.call_args.args[0]
@@ -2698,9 +2781,9 @@ class TestGitHubClass:
 
     def test_create_issue_with_labels(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"html_url": "https://github.com/o/r/issues/7"}
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={"html_url": "https://github.com/o/r/issues/7"}
+        )
         url = gh.create_issue("o/r", "Bug report", "details", labels=["bug", "help"])
         assert url == "https://github.com/o/r/issues/7"
         payload = mock_s.post.call_args.kwargs["json"]
@@ -2708,9 +2791,9 @@ class TestGitHubClass:
 
     def test_create_issue_no_labels_omits_field(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"html_url": "https://github.com/o/r/issues/8"}
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={"html_url": "https://github.com/o/r/issues/8"}
+        )
         gh.create_issue("o/r", "title", "body")
         payload = mock_s.post.call_args.kwargs["json"]
         assert "labels" not in payload
@@ -2718,19 +2801,17 @@ class TestGitHubClass:
     def test_search_issues_returns_items(self) -> None:
         gh, mock_s = self._gh()
         items = [{"number": 1, "html_url": "https://github.com/o/r/issues/1"}]
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"total_count": 1, "items": items}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"total_count": 1, "items": items}
+        )
         result = gh.search_issues("o/r", '"needle" in:body is:issue')
         assert result == items
 
     def test_search_issues_prepends_repo_qualifier(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"total_count": 0, "items": []}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"total_count": 0, "items": []}
+        )
         gh.search_issues("owner/repo", "my query")
         url = mock_s.get.call_args.args[0]
         assert "repo%3Aowner%2Frepo" in url or "repo:owner/repo" in url.replace(
@@ -2740,21 +2821,20 @@ class TestGitHubClass:
 
     def test_search_issues_empty_result(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"total_count": 0, "items": []}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"total_count": 0, "items": []}
+        )
         result = gh.search_issues("o/r", "nothing matches")
         assert result == []
 
     def test_create_pr_returns_url(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "html_url": "https://github.com/o/r/pull/10",
-            "number": 10,
-        }
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "html_url": "https://github.com/o/r/pull/10",
+                "number": 10,
+            }
+        )
         result = gh.create_pr("o/r", "title", "body", "main", "feat")
         url = mock_s.post.call_args.args[0]
         assert "repos/o/r/pulls" in url
@@ -2767,9 +2847,7 @@ class TestGitHubClass:
 
     def test_edit_pr_body(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        mock_s.patch.return_value = mock_resp
+        mock_s.patch.return_value = _FakeResponse(json_data={})
         gh.edit_pr_body("o/r", 10, "new body")
         url = mock_s.patch.call_args.args[0]
         assert "repos/o/r/pulls/10" in url
@@ -2777,9 +2855,7 @@ class TestGitHubClass:
 
     def test_get_pr_body(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"body": "PR body text"}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data={"body": "PR body text"})
         result = gh.get_pr_body("o/r", 10)
         url = mock_s.get.call_args.args[0]
         assert "repos/o/r/pulls/10" in url
@@ -2787,18 +2863,14 @@ class TestGitHubClass:
 
     def test_get_pr_body_none_returns_empty_string(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"body": None}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data={"body": None})
         result = gh.get_pr_body("o/r", 10)
         assert result == ""
 
     def test_get_pr_state_returns_open_or_closed(self) -> None:
         """Lightweight state-only fetch for the orphan-queue sweep (#1691)."""
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"state": "closed"}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data={"state": "closed"})
         result = gh.get_pr_state("o/r", 10)
         url = mock_s.get.call_args.args[0]
         assert "repos/o/r/pulls/10" in url
@@ -2806,8 +2878,7 @@ class TestGitHubClass:
 
     def test_add_pr_reviewers(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse()
         gh.add_pr_reviewers("o/r", 10, ["rhencke", "alice"])
         url = mock_s.post.call_args.args[0]
         assert "repos/o/r/pulls/10/requested_reviewers" in url
@@ -2823,54 +2894,56 @@ class TestGitHubClass:
 
     def test_pr_checks_returns_list(self) -> None:
         gh, mock_s = self._gh()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"head": {"sha": "abc123"}}
-        checks_resp = MagicMock()
-        checks_resp.json.return_value = {
-            "check_runs": [
-                {
-                    "name": "ci",
-                    "status": "completed",
-                    "conclusion": "success",
-                    "html_url": "http://...",
-                },
-            ]
-        }
-        mock_s.get.side_effect = [pr_resp, checks_resp]
+        mock_s.get.side_effect = [
+            _FakeResponse(json_data={"head": {"sha": "abc123"}}),
+            _FakeResponse(
+                json_data={
+                    "check_runs": [
+                        {
+                            "name": "ci",
+                            "status": "completed",
+                            "conclusion": "success",
+                            "html_url": "http://...",
+                        },
+                    ]
+                }
+            ),
+        ]
         result = gh.pr_checks("o/r", 10)
         assert result == [{"name": "ci", "state": "SUCCESS", "link": "http://..."}]
 
     def test_pr_checks_in_progress(self) -> None:
         gh, mock_s = self._gh()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"head": {"sha": "abc123"}}
-        checks_resp = MagicMock()
-        checks_resp.json.return_value = {
-            "check_runs": [
-                {
-                    "name": "build",
-                    "status": "in_progress",
-                    "conclusion": None,
-                    "html_url": "http://...",
-                },
-            ]
-        }
-        mock_s.get.side_effect = [pr_resp, checks_resp]
+        mock_s.get.side_effect = [
+            _FakeResponse(json_data={"head": {"sha": "abc123"}}),
+            _FakeResponse(
+                json_data={
+                    "check_runs": [
+                        {
+                            "name": "build",
+                            "status": "in_progress",
+                            "conclusion": None,
+                            "html_url": "http://...",
+                        },
+                    ]
+                }
+            ),
+        ]
         result = gh.pr_checks("o/r", 10)
         assert result[0]["state"] == "IN_PROGRESS"
 
     def test_get_required_checks_returns_context_names(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "required_status_checks": {
-                "checks": [
-                    {"context": "ci / test", "app_id": 1},
-                    {"context": "ci / lint", "app_id": 1},
-                ]
+        mock_s.get.return_value = _FakeResponse(
+            json_data={
+                "required_status_checks": {
+                    "checks": [
+                        {"context": "ci / test", "app_id": 1},
+                        {"context": "ci / lint", "app_id": 1},
+                    ]
+                }
             }
-        }
-        mock_s.get.return_value = mock_resp
+        )
         result = gh.get_required_checks("o/r", "main")
         assert result == ["ci / test", "ci / lint"]
 
@@ -2878,20 +2951,15 @@ class TestGitHubClass:
         import requests
 
         gh, mock_s = self._gh()
-        err_resp = MagicMock()
-        err_resp.status_code = 404
+        err_resp = _FakeResponse(status_code=404)
         exc = requests.HTTPError(response=err_resp)
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = exc
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(raise_side_effect=exc)
         result = gh.get_required_checks("o/r", "main")
         assert result == []
 
     def test_get_required_checks_no_required_status_checks_returns_empty(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {}
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(json_data={})
         result = gh.get_required_checks("o/r", "main")
         assert result == []
 
@@ -2899,23 +2967,16 @@ class TestGitHubClass:
         import requests
 
         gh, mock_s = self._gh()
-        err_resp = MagicMock()
-        err_resp.status_code = 500
+        err_resp = _FakeResponse(status_code=500)
         exc = requests.HTTPError(response=err_resp)
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status.side_effect = exc
-        mock_s.get.return_value = mock_resp
+        mock_s.get.return_value = _FakeResponse(raise_side_effect=exc)
         with pytest.raises(requests.HTTPError):
             gh.get_required_checks("o/r", "main")
 
     def test_pr_ready(self) -> None:
         gh, mock_s = self._gh()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"node_id": "PR_xyz"}
-        graphql_resp = MagicMock()
-        graphql_resp.json.return_value = {"data": {}}
-        mock_s.get.return_value = pr_resp
-        mock_s.post.return_value = graphql_resp
+        mock_s.get.return_value = _FakeResponse(json_data={"node_id": "PR_xyz"})
+        mock_s.post.return_value = _FakeResponse(json_data={"data": {}})
         gh.pr_ready("o/r", 10)
         body = mock_s.post.call_args.kwargs["json"]
         assert "markPullRequestReadyForReview" in body["query"]
@@ -2923,12 +2984,10 @@ class TestGitHubClass:
 
     def test_pr_merge_squash(self) -> None:
         gh, mock_s = self._gh()
-        get_resp = MagicMock()
-        get_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
-        mock_s.get.return_value = get_resp
-        put_resp = MagicMock()
-        put_resp.json.return_value = {}
-        mock_s.put.return_value = put_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"merged": False, "node_id": "PR_abc"}
+        )
+        mock_s.put.return_value = _FakeResponse(json_data={})
         gh.pr_merge("o/r", 10)
         url = mock_s.put.call_args.args[0]
         assert "repos/o/r/pulls/10/merge" in url
@@ -2936,23 +2995,19 @@ class TestGitHubClass:
 
     def test_pr_merge_no_squash(self) -> None:
         gh, mock_s = self._gh()
-        get_resp = MagicMock()
-        get_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
-        mock_s.get.return_value = get_resp
-        put_resp = MagicMock()
-        put_resp.json.return_value = {}
-        mock_s.put.return_value = put_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"merged": False, "node_id": "PR_abc"}
+        )
+        mock_s.put.return_value = _FakeResponse(json_data={})
         gh.pr_merge("o/r", 10, squash=False)
         assert mock_s.put.call_args.kwargs["json"]["merge_method"] == "merge"
 
     def test_pr_merge_auto(self) -> None:
         gh, mock_s = self._gh()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
-        graphql_resp = MagicMock()
-        graphql_resp.json.return_value = {"data": {}}
-        mock_s.get.return_value = pr_resp
-        mock_s.post.return_value = graphql_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"merged": False, "node_id": "PR_abc"}
+        )
+        mock_s.post.return_value = _FakeResponse(json_data={"data": {}})
         gh.pr_merge("o/r", 10, auto=True)
         body = mock_s.post.call_args.kwargs["json"]
         assert "enablePullRequestAutoMerge" in body["query"]
@@ -2963,18 +3018,18 @@ class TestGitHubClass:
         """Fix #787: try_enable_auto_merge enables auto-merge without
         falling back to an immediate REST merge on unapproved PRs."""
         gh, mock_s = self._gh()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
-        graphql_resp = MagicMock()
-        graphql_resp.json.return_value = {
-            "data": {
-                "enablePullRequestAutoMerge": {
-                    "pullRequest": {"autoMergeRequest": {"mergeMethod": "SQUASH"}}
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"merged": False, "node_id": "PR_abc"}
+        )
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "data": {
+                    "enablePullRequestAutoMerge": {
+                        "pullRequest": {"autoMergeRequest": {"mergeMethod": "SQUASH"}}
+                    }
                 }
             }
-        }
-        mock_s.get.return_value = pr_resp
-        mock_s.post.return_value = graphql_resp
+        )
         assert gh.try_enable_auto_merge("o/r", 10, squash=True) is True
         body = mock_s.post.call_args.kwargs["json"]
         assert "enablePullRequestAutoMerge" in body["query"]
@@ -2986,45 +3041,47 @@ class TestGitHubClass:
         must not fall back to an immediate REST merge (would 405 on
         unapproved PRs, unlike pr_merge(auto=True))."""
         gh, mock_s = self._gh()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
-        graphql_resp = MagicMock()
-        graphql_resp.json.return_value = {
-            "errors": [
-                {
-                    "type": "UNPROCESSABLE",
-                    "message": "Pull request Auto merge is not allowed for this repository",
-                }
-            ]
-        }
-        mock_s.get.return_value = pr_resp
-        mock_s.post.return_value = graphql_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"merged": False, "node_id": "PR_abc"}
+        )
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "errors": [
+                    {
+                        "type": "UNPROCESSABLE",
+                        "message": (
+                            "Pull request Auto merge is not allowed for this repository"
+                        ),
+                    }
+                ]
+            }
+        )
         assert gh.try_enable_auto_merge("o/r", 10) is False
         mock_s.put.assert_not_called()
 
     def test_try_enable_auto_merge_returns_false_on_already_merged(self) -> None:
         gh, mock_s = self._gh()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"merged": True, "node_id": "PR_abc"}
-        mock_s.get.return_value = pr_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"merged": True, "node_id": "PR_abc"}
+        )
         assert gh.try_enable_auto_merge("o/r", 10) is False
         mock_s.post.assert_not_called()
 
     def test_pr_merge_already_merged_returns_early(self) -> None:
         """If the PR is already merged, skip the merge call silently."""
         gh, mock_s = self._gh()
-        get_resp = MagicMock()
-        get_resp.json.return_value = {"merged": True, "node_id": "PR_abc"}
-        mock_s.get.return_value = get_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"merged": True, "node_id": "PR_abc"}
+        )
         gh.pr_merge("o/r", 10)
         mock_s.put.assert_not_called()
         mock_s.post.assert_not_called()
 
     def test_pr_merge_already_merged_auto_returns_early(self) -> None:
         gh, mock_s = self._gh()
-        get_resp = MagicMock()
-        get_resp.json.return_value = {"merged": True, "node_id": "PR_abc"}
-        mock_s.get.return_value = get_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"merged": True, "node_id": "PR_abc"}
+        )
         gh.pr_merge("o/r", 10, auto=True)
         mock_s.post.assert_not_called()
 
@@ -3034,18 +3091,13 @@ class TestGitHubClass:
         import requests as _requests
 
         gh, mock_s = self._gh()
-        get_responses = [
-            MagicMock(
-                json=MagicMock(return_value={"merged": False, "node_id": "PR_x"})
-            ),
-            MagicMock(json=MagicMock(return_value={"merged": True, "node_id": "PR_x"})),
+        mock_s.get.side_effect = [
+            _FakeResponse(json_data={"merged": False, "node_id": "PR_x"}),
+            _FakeResponse(json_data={"merged": True, "node_id": "PR_x"}),
         ]
-        mock_s.get.side_effect = get_responses
         err = _requests.HTTPError("405 Method Not Allowed")
-        err.response = MagicMock(status_code=405)
-        put_resp = MagicMock()
-        put_resp.raise_for_status.side_effect = err
-        mock_s.put.return_value = put_resp
+        err.response = _FakeResponse(status_code=405)
+        mock_s.put.return_value = _FakeResponse(raise_side_effect=err)
         # Should not raise — 405 + recheck shows merged.
         gh.pr_merge("o/r", 10)
         assert mock_s.get.call_count == 2
@@ -3056,20 +3108,13 @@ class TestGitHubClass:
         import requests as _requests
 
         gh, mock_s = self._gh()
-        get_responses = [
-            MagicMock(
-                json=MagicMock(return_value={"merged": False, "node_id": "PR_x"})
-            ),
-            MagicMock(
-                json=MagicMock(return_value={"merged": False, "node_id": "PR_x"})
-            ),
+        mock_s.get.side_effect = [
+            _FakeResponse(json_data={"merged": False, "node_id": "PR_x"}),
+            _FakeResponse(json_data={"merged": False, "node_id": "PR_x"}),
         ]
-        mock_s.get.side_effect = get_responses
         err = _requests.HTTPError("405 Method Not Allowed")
-        err.response = MagicMock(status_code=405)
-        put_resp = MagicMock()
-        put_resp.raise_for_status.side_effect = err
-        mock_s.put.return_value = put_resp
+        err.response = _FakeResponse(status_code=405)
+        mock_s.put.return_value = _FakeResponse(raise_side_effect=err)
         import pytest as _pytest
 
         with _pytest.raises(_requests.HTTPError):
@@ -3079,24 +3124,24 @@ class TestGitHubClass:
         """#643: if the repo has auto-merge disabled (GraphQL UNPROCESSABLE),
         fall back to an immediate squash merge rather than crashing."""
         gh, mock_s = self._gh()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
-        mock_s.get.return_value = pr_resp
-        graphql_resp = MagicMock()
-        graphql_resp.json.return_value = {
-            "data": None,
-            "errors": [
-                {
-                    "type": "UNPROCESSABLE",
-                    "path": ["enablePullRequestAutoMerge"],
-                    "message": "Pull request Auto merge is not allowed for this repository",
-                }
-            ],
-        }
-        mock_s.post.return_value = graphql_resp
-        put_resp = MagicMock()
-        put_resp.raise_for_status = MagicMock()
-        mock_s.put.return_value = put_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"merged": False, "node_id": "PR_abc"}
+        )
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "data": None,
+                "errors": [
+                    {
+                        "type": "UNPROCESSABLE",
+                        "path": ["enablePullRequestAutoMerge"],
+                        "message": (
+                            "Pull request Auto merge is not allowed for this repository"
+                        ),
+                    }
+                ],
+            }
+        )
+        mock_s.put.return_value = _FakeResponse()
         gh.pr_merge("o/r", 10, auto=True)
         mock_s.put.assert_called_once()
         # PUT body should request a squash merge via REST.
@@ -3117,20 +3162,20 @@ class TestGitHubClass:
         from fido.github import GraphQLError
 
         gh, mock_s = self._gh()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {"merged": False, "node_id": "PR_abc"}
-        mock_s.get.return_value = pr_resp
-        graphql_resp = MagicMock()
-        graphql_resp.json.return_value = {
-            "data": None,
-            "errors": [
-                {
-                    "type": "FORBIDDEN",
-                    "message": "not allowed",
-                }
-            ],
-        }
-        mock_s.post.return_value = graphql_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"merged": False, "node_id": "PR_abc"}
+        )
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "data": None,
+                "errors": [
+                    {
+                        "type": "FORBIDDEN",
+                        "message": "not allowed",
+                    }
+                ],
+            }
+        )
         import pytest as _pytest
 
         with _pytest.raises(GraphQLError):
@@ -3142,14 +3187,12 @@ class TestGitHubClass:
         import requests as _requests
 
         gh, mock_s = self._gh()
-        get_resp = MagicMock()
-        get_resp.json.return_value = {"merged": False, "node_id": "PR_x"}
-        mock_s.get.return_value = get_resp
+        mock_s.get.return_value = _FakeResponse(
+            json_data={"merged": False, "node_id": "PR_x"}
+        )
         err = _requests.HTTPError("500 Internal Server Error")
-        err.response = MagicMock(status_code=500)
-        put_resp = MagicMock()
-        put_resp.raise_for_status.side_effect = err
-        mock_s.put.return_value = put_resp
+        err.response = _FakeResponse(status_code=500)
+        mock_s.put.return_value = _FakeResponse(raise_side_effect=err)
         import pytest as _pytest
 
         with _pytest.raises(_requests.HTTPError):
@@ -3157,36 +3200,38 @@ class TestGitHubClass:
 
     def test_get_pr_returns_dict(self) -> None:
         gh, mock_s = self._gh()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {
-            "title": "Fix bug",
-            "draft": False,
-            "mergeable_state": "clean",
-            "body": "desc",
-            "node_id": "PR_1",
-        }
-        reviews_resp = MagicMock()
-        reviews_resp.json.return_value = [
-            {
-                "user": {"login": "alice"},
-                "state": "APPROVED",
-                "submitted_at": "2024-01-01T00:00:00Z",
-                "body": "Looks good!",
-            }
+        mock_s.get.side_effect = [
+            _FakeResponse(
+                json_data={
+                    "title": "Fix bug",
+                    "draft": False,
+                    "mergeable_state": "clean",
+                    "body": "desc",
+                    "node_id": "PR_1",
+                }
+            ),
+            _FakeResponse(
+                json_data=[
+                    {
+                        "user": {"login": "alice"},
+                        "state": "APPROVED",
+                        "submitted_at": "2024-01-01T00:00:00Z",
+                        "body": "Looks good!",
+                    }
+                ]
+            ),
+            _FakeResponse(
+                json_data=[
+                    {
+                        "sha": "abc",
+                        "commit": {
+                            "message": "Fix bug\n\nDetails",
+                            "committer": {"date": "2024-01-02T00:00:00Z"},
+                        },
+                    }
+                ]
+            ),
         ]
-        reviews_resp.headers = {}
-        commits_resp = MagicMock()
-        commits_resp.json.return_value = [
-            {
-                "sha": "abc",
-                "commit": {
-                    "message": "Fix bug\n\nDetails",
-                    "committer": {"date": "2024-01-02T00:00:00Z"},
-                },
-            }
-        ]
-        commits_resp.headers = {}
-        mock_s.get.side_effect = [pr_resp, reviews_resp, commits_resp]
         result = gh.get_pr("o/r", 10)
         assert result["isDraft"] is False
         assert result["mergeStateStatus"] == "CLEAN"
@@ -3213,20 +3258,18 @@ class TestGitHubClass:
 
     def test_get_pr_null_body(self) -> None:
         gh, mock_s = self._gh()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {
-            "title": "Draft title",
-            "draft": True,
-            "mergeable_state": None,
-            "body": None,
-        }
-        reviews_resp = MagicMock()
-        reviews_resp.json.return_value = []
-        reviews_resp.headers = {}
-        commits_resp = MagicMock()
-        commits_resp.json.return_value = []
-        commits_resp.headers = {}
-        mock_s.get.side_effect = [pr_resp, reviews_resp, commits_resp]
+        mock_s.get.side_effect = [
+            _FakeResponse(
+                json_data={
+                    "title": "Draft title",
+                    "draft": True,
+                    "mergeable_state": None,
+                    "body": None,
+                }
+            ),
+            _FakeResponse(json_data=[]),
+            _FakeResponse(json_data=[]),
+        ]
         result = gh.get_pr("o/r", 10)
         assert result["body"] == ""
         assert result["mergeStateStatus"] == ""
@@ -3234,11 +3277,13 @@ class TestGitHubClass:
     def test_get_review_threads(self) -> None:
         gh, mock_s = self._gh()
         nodes = [{"id": "T_1", "isResolved": False, "comments": {"nodes": []}}]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "data": {
+                    "repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}
+                }
+            }
+        )
         result = gh.get_review_threads("o", "r", 10)
         assert result == nodes
         body = mock_s.post.call_args.kwargs["json"]
@@ -3274,11 +3319,13 @@ class TestGitHubClass:
                 },
             }
         ]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "data": {
+                    "repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}
+                }
+            }
+        )
         result = gh.get_review_threads("o", "r", 10)
         author = result[0]["comments"]["nodes"][0]["author"]
         assert author["login"] == "chatgpt-codex-connector[bot]"
@@ -3302,11 +3349,13 @@ class TestGitHubClass:
                 },
             }
         ]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "data": {
+                    "repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}
+                }
+            }
+        )
         result = gh.get_review_threads("o", "r", 10)
         author = result[0]["comments"]["nodes"][0]["author"]
         assert author["login"] == "rhencke"
@@ -3333,11 +3382,13 @@ class TestGitHubClass:
                 },
             }
         ]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "data": {
+                    "repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}
+                }
+            }
+        )
         result = gh.get_review_threads("o", "r", 10)
         author = result[0]["comments"]["nodes"][0]["author"]
         assert author["login"] == "already-suffixed[bot]"
@@ -3362,20 +3413,20 @@ class TestGitHubClass:
                 },
             }
         ]
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "data": {
+                    "repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}
+                }
+            }
+        )
         # Should not raise.
         result = gh.get_review_threads("o", "r", 10)
         assert result[0]["comments"]["nodes"][0]["author"] is None
 
     def test_resolve_thread(self) -> None:
         gh, mock_s = self._gh()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"data": {}}
-        mock_s.post.return_value = mock_resp
+        mock_s.post.return_value = _FakeResponse(json_data={"data": {}})
         gh.resolve_thread("T_abc")
         body = mock_s.post.call_args.kwargs["json"]
         assert "resolveReviewThread" in body["query"]
@@ -3393,11 +3444,13 @@ class TestGitHubClass:
                 "comments": {"nodes": [{"databaseId": 99}]},
             },
         ]
-        resp = MagicMock()
-        resp.json.return_value = {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-        mock_s.post.return_value = resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "data": {
+                    "repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}
+                }
+            }
+        )
         assert gh.is_thread_resolved_for_comment("o/r", 10, 43) is True
 
     def test_is_thread_resolved_for_comment_unresolved(self) -> None:
@@ -3408,44 +3461,48 @@ class TestGitHubClass:
                 "comments": {"nodes": [{"databaseId": 99}]},
             },
         ]
-        resp = MagicMock()
-        resp.json.return_value = {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-        mock_s.post.return_value = resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "data": {
+                    "repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}
+                }
+            }
+        )
         assert gh.is_thread_resolved_for_comment("o/r", 10, 99) is False
 
     def test_is_thread_resolved_for_comment_not_found(self) -> None:
         gh, mock_s = self._gh()
         nodes: list[dict[str, object]] = []
-        resp = MagicMock()
-        resp.json.return_value = {
-            "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}
-        }
-        mock_s.post.return_value = resp
+        mock_s.post.return_value = _FakeResponse(
+            json_data={
+                "data": {
+                    "repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}
+                }
+            }
+        )
         assert gh.is_thread_resolved_for_comment("o/r", 10, 7777) is False
 
     def test_get_reviews_returns_dict(self) -> None:
         gh, mock_s = self._gh()
-        pr_resp = MagicMock()
-        pr_resp.json.return_value = {
-            "draft": True,
-            "requested_reviewers": [{"login": "alice"}],
-        }
-        reviews_resp = MagicMock()
-        reviews_resp.json.return_value = [
-            {
-                "user": {"login": "bob"},
-                "state": "CHANGES_REQUESTED",
-                "submitted_at": "2024-01-01T00:00:00Z",
-            }
+        mock_s.get.side_effect = [
+            _FakeResponse(
+                json_data={
+                    "draft": True,
+                    "requested_reviewers": [{"login": "alice"}],
+                }
+            ),
+            _FakeResponse(
+                json_data=[
+                    {
+                        "user": {"login": "bob"},
+                        "state": "CHANGES_REQUESTED",
+                        "submitted_at": "2024-01-01T00:00:00Z",
+                    }
+                ]
+            ),
+            _FakeResponse(
+                json_data=[{"commit": {"committer": {"date": "2024-01-02T00:00:00Z"}}}]
+            ),
         ]
-        reviews_resp.headers = {}
-        commits_resp = MagicMock()
-        commits_resp.json.return_value = [
-            {"commit": {"committer": {"date": "2024-01-02T00:00:00Z"}}}
-        ]
-        commits_resp.headers = {}
-        mock_s.get.side_effect = [pr_resp, reviews_resp, commits_resp]
         result = gh.get_reviews("o/r", 10)
         assert result["isDraft"] is True

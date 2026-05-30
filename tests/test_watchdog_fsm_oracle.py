@@ -34,8 +34,8 @@ Field lesson covered:
   from Running and Hung.
 """
 
+from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -75,13 +75,36 @@ def _repo(name: str = "owner/repo") -> RepoConfig:
     return RepoConfig(name=name, work_dir=Path("/tmp/repo"))
 
 
+class _FakeWatchdogRegistry:
+    """Typed fake for WorkerRegistry — only the Watchdog surface needed here."""
+
+    def __init__(self) -> None:
+        self.is_alive_return: bool = True
+        self.is_alive_side_effect: Callable[[str], bool] | None = None
+        self.is_alive_calls: list[str] = []
+        self.get_thread_crash_error_return: str | None = None
+        self.start_calls: list[_RepoConfig] = []
+
+    def is_alive(self, repo_name: str) -> bool:
+        self.is_alive_calls.append(repo_name)
+        if self.is_alive_side_effect is not None:
+            return self.is_alive_side_effect(repo_name)
+        return self.is_alive_return
+
+    def get_thread_crash_error(self, repo_name: str) -> str | None:
+        return self.get_thread_crash_error_return
+
+    def start(self, repo_cfg: _RepoConfig) -> None:
+        self.start_calls.append(repo_cfg)
+
+
 def _watchdog(
     repos: dict[str, RepoConfig] | None = None,
-) -> tuple[Watchdog, MagicMock]:
+) -> tuple[Watchdog, _FakeWatchdogRegistry]:
     if repos is None:
         repos = {"owner/repo": _repo()}
-    registry = MagicMock()
-    return Watchdog(registry, repos), registry
+    registry = _FakeWatchdogRegistry()
+    return Watchdog(registry, repos), registry  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +424,7 @@ def test_fsm_transition_persists_state_between_calls() -> None:
 def test_run_advances_fsm_on_alive_tick() -> None:
     """Watchdog.run fires WatchdogDetectAlive and leaves FSM in Running."""
     w, registry = _watchdog()
-    registry.is_alive.return_value = True
+    registry.is_alive_return = True
     w.run()
     assert isinstance(w._fsm_states.get("owner/repo"), Running)  # pyright: ignore[reportPrivateUsage]
 
@@ -421,13 +444,13 @@ def test_run_advances_fsm_through_crash_restart_cycle() -> None:
     w, registry = _watchdog({"owner/repo": repo_cfg})
 
     # Tick 1: dead thread — full crash/restart path.
-    registry.is_alive.return_value = False
-    registry.get_thread_crash_error.return_value = None
+    registry.is_alive_return = False
+    registry.get_thread_crash_error_return = None
     w.run()
     assert isinstance(w._fsm_states.get("owner/repo"), Running)  # pyright: ignore[reportPrivateUsage]
 
     # Tick 2: alive thread — WatchdogDetectAlive stays Running.
-    registry.is_alive.return_value = True
+    registry.is_alive_return = True
     w.run()
     assert isinstance(w._fsm_states.get("owner/repo"), Running)  # pyright: ignore[reportPrivateUsage]
 
@@ -446,8 +469,8 @@ def test_run_tracks_fsm_independently_per_repo() -> None:
     def is_alive(name: str) -> bool:
         return name == "org/alive"
 
-    registry.is_alive.side_effect = is_alive
-    registry.get_thread_crash_error.return_value = None
+    registry.is_alive_side_effect = is_alive
+    registry.get_thread_crash_error_return = None
     w.run()
 
     assert isinstance(w._fsm_states.get("org/alive"), Running)  # pyright: ignore[reportPrivateUsage]

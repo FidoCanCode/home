@@ -1,9 +1,8 @@
 """Tests for ClaudeSession.hold_for_handler (#658)."""
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,19 +10,98 @@ from fido import provider
 from fido.claude import ClaudeSession
 from fido.provider import SessionTalker, ThreadKind, talker_now
 
+# ── typed subprocess fakes ────────────────────────────────────────────────────
 
-def _make_session_proc(lines: list[str]) -> MagicMock:
-    proc = MagicMock()
-    proc.poll = MagicMock(return_value=None)
-    proc.wait = MagicMock(return_value=0)
-    proc.returncode = 0
-    proc.stdin = MagicMock()
-    proc.stdin.closed = False
-    stdout = MagicMock()
-    stdout.readline = MagicMock(side_effect=list(lines) + [""])
-    proc.stdout = stdout
-    proc.stderr = MagicMock()
-    return proc
+
+class _WriteCallRecord:
+    """Single write() invocation; ``args[0]`` is the string written."""
+
+    def __init__(self, args: tuple[str, ...]) -> None:
+        self.args = args
+
+
+class _FakeStdinWrite:
+    """Callable that records ``stdin.write()`` calls with a typed log."""
+
+    def __init__(self) -> None:
+        self.call_args_list: list[_WriteCallRecord] = []
+
+    def __call__(self, data: str) -> None:
+        self.call_args_list.append(_WriteCallRecord((data,)))
+
+
+class _FakeStdin:
+    """Fake process stdin: records writes, exposes ``closed`` flag."""
+
+    def __init__(self) -> None:
+        self.closed: bool = False
+        self.write: _FakeStdinWrite = _FakeStdinWrite()
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeStdout:
+    """Fake stdout that returns pre-loaded lines then EOF."""
+
+    def __init__(self, lines: list[str] | None = None) -> None:
+        self._lines: list[str] = list(lines or [])
+        self._idx: int = 0
+
+    def readline(self) -> str:
+        if self._idx < len(self._lines):
+            line = self._lines[self._idx]
+            self._idx += 1
+            return line
+        return ""
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeStderr:
+    """Fake process stderr — no-op iteration and close.
+
+    ``ClaudeSession._start_stderr_pump`` iterates over stderr in a background
+    thread; returning an empty iterator silences the pump without deadlocking.
+    """
+
+    def __iter__(self) -> Iterator[str]:
+        return iter([])
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeProc:
+    """Minimal ``subprocess.Popen`` fake for ClaudeSession tests."""
+
+    def __init__(self, lines: list[str] | None = None) -> None:
+        self.pid: int = 0
+        self.returncode: int = 0
+        self.stdin: _FakeStdin = _FakeStdin()
+        self.stdout: _FakeStdout = _FakeStdout(lines)
+        self.stderr: _FakeStderr = _FakeStderr()
+
+    def kill(self) -> None:
+        pass
+
+    def terminate(self) -> None:
+        pass
+
+    def poll(self) -> int | None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return 0
+
+
+def _make_session_proc(lines: list[str]) -> _FakeProc:
+    return _FakeProc(lines)
 
 
 class _SpyClaudeSession(ClaudeSession):
@@ -57,8 +135,8 @@ def _setup_session(
     return ClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=MagicMock(return_value=proc),
-        selector=MagicMock(return_value=([proc.stdout], [], [])),
+        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
+        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
         repo_name=repo,
         model="claude-opus-4-6",
         register_talker=register_talker,
@@ -132,8 +210,8 @@ def test_hold_preempt_fires_cancel_when_worker_holds(tmp_path: Path) -> None:
     session = _SpyClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=MagicMock(return_value=proc),
-        selector=MagicMock(return_value=([proc.stdout], [], [])),
+        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
+        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
         repo_name="owner/repo",
         model="claude-opus-4-6",
         talker_resolver=fake_talker,
@@ -161,8 +239,8 @@ def test_hold_preempt_no_fire_when_no_worker_holder(tmp_path: Path) -> None:
     session = _SpyClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=MagicMock(return_value=proc),
-        selector=MagicMock(return_value=([proc.stdout], [], [])),
+        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
+        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
         repo_name="owner/repo",
         model="claude-opus-4-6",
         talker_resolver=lambda _repo: None,
@@ -198,8 +276,8 @@ def test_hold_preempt_skipped_when_no_preempt_worker_flag(tmp_path: Path) -> Non
     session = _SpyClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=MagicMock(return_value=proc),
-        selector=MagicMock(return_value=([proc.stdout], [], [])),
+        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
+        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
         repo_name="owner/repo",
         model="claude-opus-4-6",
         talker_resolver=fake_talker,
@@ -263,15 +341,8 @@ def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
 
     system_file = tmp_path / "system.md"
     system_file.write_text("sys")
-    proc = MagicMock()
+    proc = _FakeProc()
     proc.pid = 55555
-    proc.poll = MagicMock(return_value=None)
-    proc.wait = MagicMock(return_value=0)
-    proc.returncode = 0
-    proc.stdin = MagicMock()
-    proc.stdin.closed = False
-    proc.stdout = MagicMock()
-    proc.stderr = MagicMock()
 
     # Worker turn: readline blocks until cancel fires, then returns EOF.
     worker_blocked = threading.Event()
@@ -282,14 +353,14 @@ def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
         cancel_received.wait(timeout=5.0)
         return ""  # EOF — worker exits iter_events
 
-    proc.stdout.readline = MagicMock(side_effect=blocking_readline)
+    proc.stdout.readline = blocking_readline  # type: ignore[method-assign]
 
     # Selector: immediately returns stdout as ready so iter_events calls readline.
     session = ClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=MagicMock(return_value=proc),
-        selector=MagicMock(return_value=([proc.stdout], [], [])),
+        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
+        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
         repo_name="owner/repo",
         model="claude-opus-4-6",
     )
@@ -376,7 +447,7 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
     # from the prior turn (those were drained inside iter_events when the
     # worker turn closed cleanly on type=result).
     #
-    # The same proc mock is used for both the initial spawn and any
+    # The same proc fake is used for both the initial spawn and any
     # subsequent _respawn call (triggered by prompt()'s switch_tools when
     # transitioning from worker tools → READ_ONLY_ALLOWED_TOOLS).  Because
     # popen always returns the same object, _selector and _proc stay in sync
@@ -386,8 +457,8 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
     session = ClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=MagicMock(return_value=proc),
-        selector=MagicMock(return_value=([proc.stdout], [], [])),
+        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
+        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
         repo_name="owner/repo",
         model="claude-opus-4-6",
         talker_resolver=fake_talker,
@@ -530,9 +601,9 @@ def test_hold_reraises_leak_error_and_releases_lock(tmp_path: Path) -> None:
 class _RecordingProc:
     """Hand-rolled subprocess.Popen-shaped fake that records ``kill()`` calls.
 
-    Used in place of MagicMock so the test follows the project rule of
-    "hand-rolled typed fakes" for new tests; we only need ``pid``,
-    ``kill``, and the methods ``stop`` touches during cleanup.
+    Used so the test follows the project rule of hand-rolled typed fakes for
+    new tests; we only need ``pid``, ``kill``, and the methods ``stop``
+    touches during cleanup.
     """
 
     def __init__(self, pid: int = 99999) -> None:
@@ -540,8 +611,7 @@ class _RecordingProc:
         self.kill_calls = 0
         self.kill_raises: BaseException | None = None
         self.returncode: int | None = None
-        self.stdin = MagicMock()
-        self.stdin.closed = False
+        self.stdin: _FakeStdin = _FakeStdin()
         # ``stop()`` invokes wait/kill on shutdown — accept calls but no
         # actual subprocess work to do.
         self._wait_returncode = 0
@@ -645,15 +715,14 @@ class _StreamingForeverProc:
     def __init__(self) -> None:
         self.pid = 88888
         self.returncode: int | None = None
-        self.stdin = MagicMock()
-        self.stdin.closed = False
+        self.stdin: _FakeStdin = _FakeStdin()
         self.kill_calls = 0
         self._eof = threading.Event()
         self._first_readline = threading.Event()
         # Pretend stdout is the proc itself — the selector returns this
         # object as "ready" and ``iter_events`` calls ``readline`` on it.
         self.stdout = self
-        self.stderr = MagicMock()
+        self.stderr: _FakeStderr = _FakeStderr()
 
     def readline(self) -> str:
         # Signal first readline so the test can synchronize on the
@@ -702,9 +771,7 @@ def test_force_release_unblocks_wedged_holder_end_to_end(tmp_path: Path) -> None
     session._proc = fake_proc  # type: ignore[assignment]
     # Selector: stdout always reported ready so iter_events keeps
     # calling readline on the streaming proc.
-    session._selector = MagicMock(  # type: ignore[assignment]
-        return_value=([fake_proc.stdout], [], [])
-    )
+    session._selector = lambda *_a, **_kw: ([fake_proc.stdout], [], [])  # type: ignore[assignment]
 
     holder_done = threading.Event()
     holder_exception: list[BaseException] = []
@@ -756,5 +823,5 @@ def test_force_release_unblocks_wedged_holder_end_to_end(tmp_path: Path) -> None
     finally:
         provider.set_thread_kind(None)
         # Don't call session.stop — the proc is already in EOF state and
-        # ``stop`` would call wait/kill on the MagicMock'd default proc.
+        # ``stop`` would call wait/kill on the initial default proc.
         # Letting the daemon thread reap on process exit is sufficient.

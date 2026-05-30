@@ -1,6 +1,5 @@
 import datetime
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 from frozendict import frozendict
@@ -19,6 +18,110 @@ from fido.provider import (
 from fido.session_agent import SessionBackedAgent
 
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Call-recording stub (replaces MagicMock for method-level stubbing)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCallRecorder:
+    """Callable that records calls and supports configurable return/side-effect.
+
+    side_effect may be:
+    - a list  → consumed sequentially; exception items raised, others returned
+    - a BaseException instance → raised on every call
+    - a callable → invoked and its return value returned
+    - None (default) → return_value is returned
+    """
+
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value: object = return_value
+        self._side_effect: object = None
+        self._side_effect_idx: int = 0
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    @property
+    def side_effect(self) -> object:
+        return self._side_effect
+
+    @side_effect.setter
+    def side_effect(self, value: object) -> None:
+        self._side_effect = value
+        self._side_effect_idx = 0
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append((args, kwargs))
+        se = self._side_effect
+        if se is not None:
+            if isinstance(se, list):
+                item = se[self._side_effect_idx]
+                self._side_effect_idx += 1
+                if isinstance(item, BaseException):
+                    raise item
+                return item
+            if isinstance(se, BaseException):
+                raise se
+            if callable(se):
+                return se(*args, **kwargs)
+        return self.return_value
+
+    @property
+    def call_args_list(self) -> list[tuple[tuple[object, ...], dict[str, object]]]:
+        return list(self._calls)
+
+    @property
+    def call_count(self) -> int:
+        return len(self._calls)
+
+    @property
+    def called(self) -> bool:
+        return bool(self._calls)
+
+    def assert_not_called(self) -> None:
+        assert not self._calls, (
+            f"Expected not called but got {len(self._calls)} call(s)"
+        )
+
+    def assert_called_once(self) -> None:
+        assert len(self._calls) == 1, f"Expected 1 call but got {len(self._calls)}"
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) == 1, f"Expected 1 call but got {len(self._calls)}"
+        actual_args, actual_kwargs = self._calls[0]
+        assert actual_args == args and actual_kwargs == kwargs, (
+            f"Expected call({args!r}, {kwargs!r}) "
+            f"but got call({actual_args!r}, {actual_kwargs!r})"
+        )
+
+
+class _FakeSession:
+    """Typed fake for session objects used by SessionBackedAgent tests."""
+
+    def __init__(
+        self,
+        *,
+        owner: str = "",
+        pid: int = 0,
+        session_id: str | None = None,
+        dropped_session_count: int = 0,
+        sent_count: int = 0,
+        received_count: int = 0,
+        is_alive_return: bool = True,
+    ) -> None:
+        self.owner: str = owner
+        self.pid: int = pid
+        self.session_id: str | None = session_id
+        self.dropped_session_count: int = dropped_session_count
+        self.sent_count: int = sent_count
+        self.received_count: int = received_count
+        self.last_turn_cancelled: bool = False
+        self.prompt: _FakeCallRecorder = _FakeCallRecorder()
+        self.recover: _FakeCallRecorder = _FakeCallRecorder()
+        self.switch_model: _FakeCallRecorder = _FakeCallRecorder()
+        self.is_alive: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=is_alive_return
+        )
 
 
 def _make_fido_state_with_repo(repo_name: str) -> FidoState:
@@ -46,7 +149,7 @@ class _FakeAgent(SessionBackedAgent):
         state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
         self._session_factory = (
-            MagicMock() if session_factory is None else session_factory
+            _FakeCallRecorder() if session_factory is None else session_factory
         )
         super().__init__(
             session_fn=session_fn,
@@ -77,15 +180,15 @@ class TestSessionBackedAgent:
             agent._spawn_owned_session(ProviderModel("model"))
 
     def test_session_properties_attach_and_detach(self) -> None:
-        session = MagicMock(
+        session = _FakeSession(
             owner="worker",
             pid=123,
             session_id="sess-1",
             dropped_session_count=2,
             sent_count=10,
             received_count=8,
+            is_alive_return=True,
         )
-        session.is_alive.return_value = True
         agent = _FakeAgent(session=session)
         assert agent.session is session
         assert agent.session_owner == "worker"
@@ -130,8 +233,8 @@ class TestSessionBackedAgent:
     def test_ensure_session_spawns_owned_and_switches_existing(
         self, tmp_path: Path
     ) -> None:
-        spawned = MagicMock()
-        factory = MagicMock(return_value=spawned)
+        spawned = object()
+        factory = _FakeCallRecorder(return_value=spawned)
         agent = _FakeAgent(
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
@@ -139,7 +242,7 @@ class TestSessionBackedAgent:
         )
         agent.ensure_session(agent.voice_model)
         factory.assert_called_once_with(agent.voice_model)
-        attached = MagicMock()
+        attached = _FakeSession()
         agent = _FakeAgent(session=attached)
         agent.ensure_session(agent.brief_model)
         attached.switch_model.assert_called_once_with(agent.brief_model)
@@ -148,7 +251,7 @@ class TestSessionBackedAgent:
         assert _FakeAgent().recover_session() is False
 
     def test_recover_session_delegates_to_attached_session(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         agent = _FakeAgent(session=session)
         assert agent.recover_session() is True
         session.recover.assert_called_once_with()
@@ -156,9 +259,9 @@ class TestSessionBackedAgent:
     def test_resolve_turn_prefers_live_session_over_owned_spawn(
         self, tmp_path: Path
     ) -> None:
-        resolved = MagicMock()
+        resolved = _FakeSession()
         resolved.prompt.return_value = "ok"
-        factory = MagicMock()
+        factory = _FakeCallRecorder()
         agent = _FakeAgent(
             session_fn=lambda: resolved,
             session_system_file=tmp_path / "persona.md",
@@ -205,7 +308,7 @@ class TestSessionBackedAgent:
             )
 
     def test_shared_helper_methods_and_json_parsing(self) -> None:
-        session = MagicMock(session_id="sess-1")
+        session = _FakeSession(session_id="sess-1")
         session.prompt.side_effect = [
             "reply text",
             "branch-name\nextra",
@@ -226,14 +329,14 @@ class TestSessionBackedAgent:
         assert agent.resume_status("sess-1", "resume") == "resumed status"
 
     def test_status_emoji_returns_empty_on_empty_or_bad_json(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.prompt.side_effect = ["", "not json"]
         agent = _FakeAgent(session=session)
         assert agent.generate_status_emoji("emoji", "system") == ""
         assert agent.generate_status_emoji("emoji", "system") == ""
 
     def test_resume_status_requires_matching_live_session(self) -> None:
-        session = MagicMock(session_id="other")
+        session = _FakeSession(session_id="other")
         agent = _FakeAgent(session=session)
         with pytest.raises(
             RuntimeError,
@@ -242,16 +345,15 @@ class TestSessionBackedAgent:
             agent.resume_status("sess-1", "resume")
 
     def test_resume_status_uses_resolved_session_when_not_attached(self) -> None:
-        session = MagicMock(session_id="sess-1")
+        session = _FakeSession(session_id="sess-1")
         session.prompt.return_value = "resumed status"
         agent = _FakeAgent(session_fn=lambda: session)
         assert agent.resume_status("sess-1", "resume") == "resumed status"
 
     def test_prompt_with_recovery_recovers_after_dead_prompt_failure(self) -> None:
-        session = MagicMock()
+        session = _FakeSession(is_alive_return=False)
         session.prompt.side_effect = [BrokenPipeError("boom"), "done"]
         session.last_turn_cancelled = False
-        session.is_alive.return_value = False
         agent = _FakeAgent(session=session)
         assert agent.run_turn("hi", model=agent.voice_model) == "done"
         session.recover.assert_called_once_with()
@@ -278,7 +380,7 @@ class TestSessionBackedAgent:
         Locked in by the FSM oracle from
         ``models/cancel_survives_respawn.v``: any path that observes
         ``CancelFire`` cannot return ``RetNormal``."""
-        session = MagicMock()
+        session = _FakeSession(is_alive_return=False)
         # ``cancel_observed`` on the exception is the authoritative
         # channel — real :meth:`PromptSession.prompt` impls capture
         # the cancel bit INSIDE the lock at the moment of failure and
@@ -289,7 +391,6 @@ class TestSessionBackedAgent:
         boom.cancel_observed = True  # type: ignore[attr-defined]
         session.prompt.side_effect = boom
         session.last_turn_cancelled = True
-        session.is_alive.return_value = False
         agent = _FakeAgent(session=session)
         assert agent.run_turn("hi", model=agent.voice_model) == ""
         # Prompt MUST NOT have been retried — that's the bug.
@@ -300,7 +401,7 @@ class TestSessionBackedAgent:
         session.recover.assert_called_once_with()
 
     def test_prompt_with_recovery_raises_after_second_dead_empty_result(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.prompt.side_effect = ["", ""]
         session.last_turn_cancelled = False
         session.is_alive.side_effect = [False, False]
@@ -314,15 +415,14 @@ class TestSessionBackedAgent:
         # without recovery, so a BrokenPipe from a stale subprocess killed
         # the worker thread and left the persistent ClaudeSession FSM stuck
         # in Sending forever.
-        session = MagicMock()
+        session = _FakeSession(is_alive_return=False)
         session.prompt.side_effect = [BrokenPipeError("boom"), "ok"]
-        session.is_alive.return_value = False
         agent = _FakeAgent(session=session)
         assert agent.generate_reply("hi") == "ok"
         session.recover.assert_called_once_with()
 
     def test_run_turn_retries_after_preempt(self) -> None:
-        session = MagicMock()
+        session = _FakeSession()
         session.last_turn_cancelled = False
         prompts = iter(["partial", "done"])
 
@@ -341,7 +441,7 @@ class TestSessionBackedAgent:
         assert agent.state_updater is None
 
     def test_state_updater_stores_injected_updater(self) -> None:
-        fake: AtomicUpdater[FidoState] = MagicMock()
+        _, fake = create_atomic(_make_fido_state_with_repo("test/repo"))
         agent = _FakeAgent(state_updater=fake)
         assert agent.state_updater is fake
 

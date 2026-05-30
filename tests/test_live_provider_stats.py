@@ -7,11 +7,10 @@ after the whole turn finishes.
 
 import json
 import queue
-import subprocess
 import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock
 
 from frozendict import frozendict
 
@@ -84,19 +83,74 @@ class _StatePublisher:
             self._received_event.set()
 
 
-def _make_proc_with_queue(line_queue: "queue.Queue[str]") -> MagicMock:
-    """Build a mock Popen whose ``readline`` blocks on *line_queue*."""
-    proc = MagicMock(spec=subprocess.Popen)
-    proc.pid = 99999
-    proc.stdin = MagicMock()
-    proc.stdin.closed = False
-    proc.stdout = MagicMock()
-    proc.stdout.readline = line_queue.get  # blocks until a line is available
-    proc.stderr = MagicMock()
-    proc.poll = MagicMock(return_value=None)  # process is alive
-    proc.wait = MagicMock(return_value=0)
-    proc.returncode = 0
-    return proc
+class _FakeStdin:
+    """Fake stdin that accepts writes and tracks closed state."""
+
+    def __init__(self) -> None:
+        self.closed: bool = False
+
+    def write(self, data: str) -> None:  # noqa: ARG002
+        pass
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeQueueStdout:
+    """Fake stdout whose readline() blocks on a queue."""
+
+    def __init__(self, q: "queue.Queue[str]") -> None:
+        self._q = q
+
+    def readline(self) -> str:
+        return self._q.get()
+
+    def close(self) -> None:
+        pass
+
+    def __iter__(self) -> Iterator[str]:
+        return iter([])
+
+
+class _FakeStderr:
+    """Minimal stderr stub."""
+
+    def close(self) -> None:
+        pass
+
+    def __iter__(self) -> Iterator[str]:
+        return iter([])
+
+
+class _FakeProcWithQueue:
+    """Fake Popen whose stdout is backed by a queue for test control."""
+
+    def __init__(self, line_queue: "queue.Queue[str]") -> None:
+        self.pid: int = 99999
+        self.returncode: int = 0
+        self.stdin: _FakeStdin = _FakeStdin()
+        self.stdout: _FakeQueueStdout = _FakeQueueStdout(line_queue)
+        self.stderr: _FakeStderr = _FakeStderr()
+
+    def poll(self) -> int | None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+        return 0
+
+    def terminate(self) -> None:
+        """No-op: fake proc has no real OS process to signal."""
+
+    def kill(self) -> None:
+        """No-op: fake proc has no real OS process to kill."""
+
+
+def _make_proc_with_queue(line_queue: "queue.Queue[str]") -> _FakeProcWithQueue:
+    """Build a fake Popen whose ``readline`` blocks on *line_queue*."""
+    return _FakeProcWithQueue(line_queue)
 
 
 def _make_queue_session(
@@ -113,14 +167,12 @@ def _make_queue_session(
     system_file = tmp_path / "system.md"
     system_file.write_text("you are fido")
     proc = _make_proc_with_queue(line_queue)
-    fake_popen = MagicMock(return_value=proc)
     # selector always says proc.stdout is ready — no actual select() call
-    fake_selector = MagicMock(return_value=([proc.stdout], [], []))
     return ClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=fake_popen,
-        selector=fake_selector,
+        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
+        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
         repo_name=_REPO,
         snapshot_publisher=publisher,
     )
@@ -208,8 +260,8 @@ class TestLiveProviderStats:
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
-            popen=MagicMock(return_value=proc),
-            selector=MagicMock(return_value=([proc.stdout], [], [])),
+            popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
+            selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
             repo_name=_REPO,
         )
 

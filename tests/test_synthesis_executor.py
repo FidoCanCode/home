@@ -1,13 +1,125 @@
 """Tests for fido.synthesis_executor — CommentResponse dispatch to GitHub effects."""
 
-from unittest.mock import MagicMock
-
 import pytest
 
 from fido.rocq.replied_comment_claims import ReviewAct, ReviewAnswer
 from fido.synthesis import CommentResponse, Insight
 from fido.synthesis_executor import CommentTarget, SynthesisExecutor
 from fido.types import RescopeIntent
+
+# ---------------------------------------------------------------------------
+# Call-recording stub (replaces MagicMock for method-level stubbing)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCallRecorder:
+    """Callable that records calls and supports configurable return/side-effect.
+
+    side_effect may be:
+    - a list  → consumed sequentially; exception items are raised, others returned
+    - a BaseException instance → raised on every call
+    - a callable → invoked and its return value returned
+    - None (default) → return_value is returned
+    """
+
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value: object = return_value
+        self._side_effect: object = None
+        self._side_effect_idx: int = 0
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    @property
+    def side_effect(self) -> object:
+        return self._side_effect
+
+    @side_effect.setter
+    def side_effect(self, value: object) -> None:
+        self._side_effect = value
+        self._side_effect_idx = 0
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append((args, kwargs))
+        se = self._side_effect
+        if se is not None:
+            if isinstance(se, list):
+                item = se[self._side_effect_idx]
+                self._side_effect_idx += 1
+                if isinstance(item, BaseException):
+                    raise item
+                return item
+            if isinstance(se, BaseException):
+                raise se
+            if callable(se):
+                return se(*args, **kwargs)
+        return self.return_value
+
+    @property
+    def call_args_list(self) -> list[tuple[tuple[object, ...], dict[str, object]]]:
+        return list(self._calls)
+
+    @property
+    def call_count(self) -> int:
+        return len(self._calls)
+
+    @property
+    def call_args(self) -> tuple[tuple[object, ...], dict[str, object]]:
+        assert self._calls, "call_args: no calls recorded"
+        return self._calls[-1]
+
+    @property
+    def called(self) -> bool:
+        return bool(self._calls)
+
+    def assert_not_called(self) -> None:
+        assert not self._calls, (
+            f"Expected not called but got {len(self._calls)} call(s)"
+        )
+
+    def assert_called_once(self) -> None:
+        assert len(self._calls) == 1, f"Expected 1 call but got {len(self._calls)}"
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) == 1, f"Expected 1 call but got {len(self._calls)}"
+        actual_args, actual_kwargs = self._calls[0]
+        assert actual_args == args and actual_kwargs == kwargs, (
+            f"Expected call({args!r}, {kwargs!r}) "
+            f"but got call({actual_args!r}, {actual_kwargs!r})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Typed fake collaborators
+# ---------------------------------------------------------------------------
+
+
+class _FakeGH:
+    """Fake GitHub collaborator with call-recording stubs."""
+
+    def __init__(self) -> None:
+        self.reply_to_review_comment: _FakeCallRecorder = _FakeCallRecorder(
+            return_value={"id": 999}
+        )
+        self.comment_issue: _FakeCallRecorder = _FakeCallRecorder(
+            return_value={"id": 999}
+        )
+        self.add_reaction: _FakeCallRecorder = _FakeCallRecorder()
+        self.delete_reaction: _FakeCallRecorder = _FakeCallRecorder()
+        self.list_reactions: _FakeCallRecorder = _FakeCallRecorder(return_value=[])
+
+
+class _FakeRescope:
+    """Fake rescope trigger with a call-recording trigger_rescope stub."""
+
+    def __init__(self) -> None:
+        self.trigger_rescope: _FakeCallRecorder = _FakeCallRecorder()
+
+
+class _FakeInsightFiler:
+    """Fake insight filer with a call-recording file_insight stub."""
+
+    def __init__(self) -> None:
+        self.file_insight: _FakeCallRecorder = _FakeCallRecorder()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -37,8 +149,8 @@ def _make_insight(
     return Insight(title=title, hook=hook, why=why)
 
 
-def _make_insight_filer() -> MagicMock:
-    return MagicMock()
+def _make_insight_filer() -> _FakeInsightFiler:
+    return _FakeInsightFiler()
 
 
 def _make_target(
@@ -57,15 +169,12 @@ def _make_target(
     )
 
 
-def _make_gh() -> MagicMock:
-    gh = MagicMock()
-    gh.reply_to_review_comment.return_value = {"id": 999}
-    gh.comment_issue.return_value = {"id": 999}
-    return gh
+def _make_gh() -> _FakeGH:
+    return _FakeGH()
 
 
-def _make_rescope() -> MagicMock:
-    return MagicMock()
+def _make_rescope() -> _FakeRescope:
+    return _FakeRescope()
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +208,7 @@ class TestCommentTarget:
 class TestExecutorPostsReply:
     def test_posts_review_comment_reply(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
         target = _make_target(comment_type="pulls")
 
         executor.execute(_make_response(reply_text="Good point."), target)
@@ -110,7 +219,7 @@ class TestExecutorPostsReply:
 
     def test_posts_issue_comment_for_issues_type(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
         target = _make_target(comment_type="issues")
 
         executor.execute(_make_response(reply_text="Thanks!"), target)
@@ -120,7 +229,7 @@ class TestExecutorPostsReply:
 
     def test_always_posts_reply(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         executor.execute(_make_response(), _make_target())
 
@@ -135,7 +244,7 @@ class TestExecutorPostsReply:
 class TestExecutorEmojiReaction:
     def test_adds_reaction_when_emoji_present(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         executor.execute(_make_response(emoji="rocket"), _make_target())
 
@@ -143,7 +252,7 @@ class TestExecutorEmojiReaction:
 
     def test_no_reaction_when_emoji_none(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         executor.execute(_make_response(emoji=None), _make_target())
 
@@ -151,7 +260,7 @@ class TestExecutorEmojiReaction:
 
     def test_reaction_uses_target_comment_type(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
         target = _make_target(comment_type="issues", comment_id=77)
 
         executor.execute(_make_response(emoji="heart"), target)
@@ -168,7 +277,7 @@ class TestExecutorRescope:
     def test_triggers_rescope_when_change_request_present(self) -> None:
         gh = _make_gh()
         rescope = _make_rescope()
-        executor = SynthesisExecutor(gh, rescope=rescope)
+        executor = SynthesisExecutor(gh, rescope=rescope)  # type: ignore[arg-type]
 
         executor.execute(_make_response(change_request="Add logging"), _make_target())
 
@@ -185,12 +294,13 @@ class TestExecutorRescope:
         # prompt can render per-author attribution.
         gh = _make_gh()
         rescope = _make_rescope()
-        executor = SynthesisExecutor(gh, rescope=rescope)
+        executor = SynthesisExecutor(gh, rescope=rescope)  # type: ignore[arg-type]
         target = _make_target(author="bob")
 
         executor.execute(_make_response(change_request="Add tests"), target)
 
         intent = rescope.trigger_rescope.call_args[0][0]
+        assert isinstance(intent, RescopeIntent)
         assert intent.author == "bob"
 
     def test_rescope_intent_author_defaults_to_empty_when_unset(self) -> None:
@@ -199,7 +309,7 @@ class TestExecutorRescope:
         # author rather than crashing.
         gh = _make_gh()
         rescope = _make_rescope()
-        executor = SynthesisExecutor(gh, rescope=rescope)
+        executor = SynthesisExecutor(gh, rescope=rescope)  # type: ignore[arg-type]
         target = CommentTarget(
             repo="owner/repo",
             pr=1,
@@ -210,23 +320,25 @@ class TestExecutorRescope:
         executor.execute(_make_response(change_request="Add tests"), target)
 
         intent = rescope.trigger_rescope.call_args[0][0]
+        assert isinstance(intent, RescopeIntent)
         assert intent.author == ""
 
     def test_rescope_intent_comment_id_matches_target(self) -> None:
         gh = _make_gh()
         rescope = _make_rescope()
-        executor = SynthesisExecutor(gh, rescope=rescope)
+        executor = SynthesisExecutor(gh, rescope=rescope)  # type: ignore[arg-type]
         target = _make_target(comment_id=999)
 
         executor.execute(_make_response(change_request="Refactor"), target)
 
         intent = rescope.trigger_rescope.call_args[0][0]
+        assert isinstance(intent, RescopeIntent)
         assert intent.comment_id == 999
 
     def test_no_rescope_when_change_request_none(self) -> None:
         gh = _make_gh()
         rescope = _make_rescope()
-        executor = SynthesisExecutor(gh, rescope=rescope)
+        executor = SynthesisExecutor(gh, rescope=rescope)  # type: ignore[arg-type]
 
         executor.execute(_make_response(change_request=None), _make_target())
 
@@ -234,7 +346,7 @@ class TestExecutorRescope:
 
     def test_no_rescope_trigger_configured_does_not_crash(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)  # no rescope trigger
+        executor = SynthesisExecutor(gh)  # no rescope trigger  # type: ignore[arg-type]
 
         # Should not raise — just logs a warning
         executor.execute(_make_response(change_request="Add logging"), _make_target())
@@ -248,7 +360,7 @@ class TestExecutorRescope:
 class TestExecutorOutcome:
     def test_returns_review_act_when_change_request_present(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         outcome = executor.execute(
             _make_response(change_request="Reorder tasks"), _make_target()
@@ -258,7 +370,7 @@ class TestExecutorOutcome:
 
     def test_returns_review_answer_when_no_change_request(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         outcome = executor.execute(_make_response(), _make_target())
 
@@ -266,7 +378,7 @@ class TestExecutorOutcome:
 
     def test_emoji_only_returns_review_answer(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         outcome = executor.execute(_make_response(emoji="rocket"), _make_target())
 
@@ -274,7 +386,7 @@ class TestExecutorOutcome:
 
     def test_both_emoji_and_change_request_returns_review_act(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         outcome = executor.execute(
             _make_response(emoji="heart", change_request="Fix parser"),
@@ -293,12 +405,17 @@ class TestExecutorEffectOrder:
     def test_reply_before_reaction(self) -> None:
         """Reply is always posted before adding a reaction."""
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
         call_order: list[str] = []
-        gh.reply_to_review_comment.side_effect = lambda *a, **kw: call_order.append(
-            "reply"
-        )
-        gh.add_reaction.side_effect = lambda *a, **kw: call_order.append("reaction")
+
+        def _reply(*_a: object, **_kw: object) -> None:
+            call_order.append("reply")
+
+        def _reaction(*_a: object, **_kw: object) -> None:
+            call_order.append("reaction")
+
+        gh.reply_to_review_comment.side_effect = _reply
+        gh.add_reaction.side_effect = _reaction
 
         executor.execute(_make_response(emoji="rocket"), _make_target())
 
@@ -308,14 +425,17 @@ class TestExecutorEffectOrder:
         """Reply is always posted before triggering rescope."""
         gh = _make_gh()
         rescope = _make_rescope()
-        executor = SynthesisExecutor(gh, rescope=rescope)
+        executor = SynthesisExecutor(gh, rescope=rescope)  # type: ignore[arg-type]
         call_order: list[str] = []
-        gh.reply_to_review_comment.side_effect = lambda *a, **kw: call_order.append(
-            "reply"
-        )
-        rescope.trigger_rescope.side_effect = lambda *a, **kw: call_order.append(
-            "rescope"
-        )
+
+        def _reply(*_a: object, **_kw: object) -> None:
+            call_order.append("reply")
+
+        def _rescope(*_a: object, **_kw: object) -> None:
+            call_order.append("rescope")
+
+        gh.reply_to_review_comment.side_effect = _reply
+        rescope.trigger_rescope.side_effect = _rescope
 
         executor.execute(_make_response(change_request="Add tests"), _make_target())
 
@@ -325,15 +445,21 @@ class TestExecutorEffectOrder:
         """Full ordering: reply → reaction → rescope."""
         gh = _make_gh()
         rescope = _make_rescope()
-        executor = SynthesisExecutor(gh, rescope=rescope)
+        executor = SynthesisExecutor(gh, rescope=rescope)  # type: ignore[arg-type]
         call_order: list[str] = []
-        gh.reply_to_review_comment.side_effect = lambda *a, **kw: call_order.append(
-            "reply"
-        )
-        gh.add_reaction.side_effect = lambda *a, **kw: call_order.append("reaction")
-        rescope.trigger_rescope.side_effect = lambda *a, **kw: call_order.append(
-            "rescope"
-        )
+
+        def _reply(*_a: object, **_kw: object) -> None:
+            call_order.append("reply")
+
+        def _reaction(*_a: object, **_kw: object) -> None:
+            call_order.append("reaction")
+
+        def _rescope(*_a: object, **_kw: object) -> None:
+            call_order.append("rescope")
+
+        gh.reply_to_review_comment.side_effect = _reply
+        gh.add_reaction.side_effect = _reaction
+        rescope.trigger_rescope.side_effect = _rescope
 
         executor.execute(
             _make_response(emoji="heart", change_request="Reorder"),
@@ -353,7 +479,7 @@ class TestExecutorEffectsOnly:
 
     def test_does_not_post_reply(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         executor.execute_effects_only(_make_response("My reply."), _make_target())
 
@@ -366,11 +492,16 @@ class TestExecutorEffectsOnly:
             {"id": 42, "content": "eyes", "user": {"login": "fidocancode"}},
         ]
         call_order: list[str] = []
-        gh.delete_reaction.side_effect = lambda *a, **kw: call_order.append(
-            "remove_eyes"
-        )
-        gh.add_reaction.side_effect = lambda *a, **kw: call_order.append("add_emoji")
-        executor = SynthesisExecutor(gh, fido_logins=frozenset({"fidocancode"}))
+
+        def _remove(*_a: object, **_kw: object) -> None:
+            call_order.append("remove_eyes")
+
+        def _add(*_a: object, **_kw: object) -> None:
+            call_order.append("add_emoji")
+
+        gh.delete_reaction.side_effect = _remove
+        gh.add_reaction.side_effect = _add
+        executor = SynthesisExecutor(gh, fido_logins=frozenset({"fidocancode"}))  # type: ignore[arg-type]
 
         executor.execute_effects_only(_make_response(emoji="rocket"), _make_target())
 
@@ -381,7 +512,7 @@ class TestExecutorEffectsOnly:
         gh.list_reactions.return_value = [
             {"id": 42, "content": "eyes", "user": {"login": "fidocancode"}},
         ]
-        executor = SynthesisExecutor(gh, fido_logins=frozenset({"fidocancode"}))
+        executor = SynthesisExecutor(gh, fido_logins=frozenset({"fidocancode"}))  # type: ignore[arg-type]
 
         executor.execute_effects_only(_make_response(), _make_target())
 
@@ -393,7 +524,7 @@ class TestExecutorEffectsOnly:
             {"id": 42, "content": "eyes", "user": {"login": "fidocancode"}},
             {"id": 99, "content": "eyes", "user": {"login": "rhencke"}},
         ]
-        executor = SynthesisExecutor(gh, fido_logins=frozenset({"fidocancode"}))
+        executor = SynthesisExecutor(gh, fido_logins=frozenset({"fidocancode"}))  # type: ignore[arg-type]
 
         executor.execute_effects_only(_make_response(), _make_target())
 
@@ -406,7 +537,7 @@ class TestExecutorEffectsOnly:
             {"id": 10, "content": "heart"},
             {"id": 11, "content": "+1"},
         ]
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         executor.execute_effects_only(_make_response(), _make_target())
 
@@ -415,7 +546,7 @@ class TestExecutorEffectsOnly:
     def test_list_reactions_error_does_not_propagate(self) -> None:
         gh = _make_gh()
         gh.list_reactions.side_effect = RuntimeError("API error")
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         # Should not raise
         outcome = executor.execute_effects_only(_make_response(), _make_target())
@@ -425,7 +556,7 @@ class TestExecutorEffectsOnly:
     def test_adds_emoji_reaction(self) -> None:
         gh = _make_gh()
         gh.list_reactions.return_value = []
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         executor.execute_effects_only(
             _make_response(emoji="heart"), _make_target(comment_type="issues")
@@ -436,7 +567,7 @@ class TestExecutorEffectsOnly:
     def test_no_emoji_no_add_reaction(self) -> None:
         gh = _make_gh()
         gh.list_reactions.return_value = []
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         executor.execute_effects_only(_make_response(emoji=None), _make_target())
 
@@ -446,7 +577,7 @@ class TestExecutorEffectsOnly:
         gh = _make_gh()
         gh.list_reactions.return_value = []
         rescope = _make_rescope()
-        executor = SynthesisExecutor(gh, rescope=rescope)
+        executor = SynthesisExecutor(gh, rescope=rescope)  # type: ignore[arg-type]
 
         executor.execute_effects_only(
             _make_response(change_request="Add logging"), _make_target()
@@ -463,7 +594,7 @@ class TestExecutorEffectsOnly:
         gh = _make_gh()
         gh.list_reactions.return_value = []
         rescope = _make_rescope()
-        executor = SynthesisExecutor(gh, rescope=rescope)
+        executor = SynthesisExecutor(gh, rescope=rescope)  # type: ignore[arg-type]
 
         executor.execute_effects_only(
             _make_response(change_request=None), _make_target()
@@ -474,7 +605,7 @@ class TestExecutorEffectsOnly:
     def test_no_rescope_trigger_configured_does_not_crash(self) -> None:
         gh = _make_gh()
         gh.list_reactions.return_value = []
-        executor = SynthesisExecutor(gh)  # no rescope trigger
+        executor = SynthesisExecutor(gh)  # no rescope trigger  # type: ignore[arg-type]
 
         # Should not raise
         executor.execute_effects_only(
@@ -484,7 +615,7 @@ class TestExecutorEffectsOnly:
     def test_returns_review_act_when_change_request_present(self) -> None:
         gh = _make_gh()
         gh.list_reactions.return_value = []
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         outcome = executor.execute_effects_only(
             _make_response(change_request="Add logging"), _make_target()
@@ -495,7 +626,7 @@ class TestExecutorEffectsOnly:
     def test_returns_review_answer_when_no_change_request(self) -> None:
         gh = _make_gh()
         gh.list_reactions.return_value = []
-        executor = SynthesisExecutor(gh)
+        executor = SynthesisExecutor(gh)  # type: ignore[arg-type]
 
         outcome = executor.execute_effects_only(
             _make_response(change_request=None), _make_target()
@@ -514,7 +645,7 @@ class TestExecutorInsightFiling:
 
     def test_no_filer_configured_does_not_crash(self) -> None:
         gh = _make_gh()
-        executor = SynthesisExecutor(gh)  # no insight_filer
+        executor = SynthesisExecutor(gh)  # no insight_filer  # type: ignore[arg-type]
 
         # Should not raise even with insights present
         executor.execute(_make_response(insights=[_make_insight()]), _make_target())
@@ -522,7 +653,7 @@ class TestExecutorInsightFiling:
     def test_no_insights_does_not_call_filer(self) -> None:
         gh = _make_gh()
         filer = _make_insight_filer()
-        executor = SynthesisExecutor(gh, insight_filer=filer)
+        executor = SynthesisExecutor(gh, insight_filer=filer)  # type: ignore[arg-type]
 
         executor.execute(_make_response(insights=[]), _make_target())
 
@@ -531,7 +662,7 @@ class TestExecutorInsightFiling:
     def test_files_each_insight(self) -> None:
         gh = _make_gh()
         filer = _make_insight_filer()
-        executor = SynthesisExecutor(gh, insight_filer=filer)
+        executor = SynthesisExecutor(gh, insight_filer=filer)  # type: ignore[arg-type]
         insight1 = _make_insight(title="First")
         insight2 = _make_insight(title="Second")
         target = _make_target()
@@ -546,7 +677,7 @@ class TestExecutorInsightFiling:
     def test_passes_target_to_filer(self) -> None:
         gh = _make_gh()
         filer = _make_insight_filer()
-        executor = SynthesisExecutor(gh, insight_filer=filer)
+        executor = SynthesisExecutor(gh, insight_filer=filer)  # type: ignore[arg-type]
         insight = _make_insight()
         target = _make_target(comment_id=777, repo="org/repo", pr=5)
 
@@ -558,7 +689,7 @@ class TestExecutorInsightFiling:
         gh = _make_gh()
         gh.list_reactions.return_value = []
         filer = _make_insight_filer()
-        executor = SynthesisExecutor(gh, insight_filer=filer)
+        executor = SynthesisExecutor(gh, insight_filer=filer)  # type: ignore[arg-type]
         insight = _make_insight()
         target = _make_target()
 
@@ -592,7 +723,7 @@ class TestExecutorInsightFiling:
         gh = _make_gh()
         gh.list_reactions.return_value = []
         filer = _make_insight_filer()
-        executor = SynthesisExecutor(gh, insight_filer=filer)
+        executor = SynthesisExecutor(gh, insight_filer=filer)  # type: ignore[arg-type]
 
         executor.execute_effects_only(_make_response(insights=[]), _make_target())
 

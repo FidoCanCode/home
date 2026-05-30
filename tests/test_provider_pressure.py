@@ -2,8 +2,9 @@
 
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from pathlib import Path
 
 from frozendict import frozendict
 
@@ -18,10 +19,12 @@ from fido.appstate import (
 from fido.atomic import AtomicReader, AtomicUpdater, create_atomic
 from fido.config import RepoConfig, RepoMembership
 from fido.provider import (
+    ProviderAPI,
     ProviderID,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
 )
+from fido.provider_factory import DefaultProviderFactory
 from fido.provider_pressure import (
     _REFRESH_INTERVAL,  # noqa: PLC2701
     ProviderPressureMonitor,
@@ -42,8 +45,6 @@ def _state_with_repos(
 
 
 def _repo(name: str, *, provider: ProviderID = ProviderID.CLAUDE_CODE) -> RepoConfig:
-    from pathlib import Path
-
     return RepoConfig(
         name=name,
         work_dir=Path("/tmp/fake"),
@@ -62,24 +63,76 @@ def _window(name: str, used: int, limit: int) -> ProviderLimitWindow:
     )
 
 
+class _FakeProviderAPI:
+    """Typed fake for :class:`~fido.provider.ProviderAPI` — only the
+    ``get_limit_snapshot`` surface needed by :class:`ProviderPressureMonitor`.
+    """
+
+    def __init__(
+        self,
+        return_value: ProviderLimitSnapshot | None = None,
+        side_effect: BaseException | None = None,
+    ) -> None:
+        self._return_value = return_value
+        self._side_effect = side_effect
+
+    @property
+    def provider_id(self) -> ProviderID:
+        return ProviderID.CLAUDE_CODE
+
+    def get_limit_snapshot(self) -> ProviderLimitSnapshot:
+        if self._side_effect is not None:
+            raise self._side_effect
+        if self._return_value is not None:
+            return self._return_value
+        return ProviderLimitSnapshot(provider=ProviderID.CLAUDE_CODE)
+
+
+class _FakeProviderFactory(DefaultProviderFactory):
+    """Typed fake for :class:`~fido.provider_factory.DefaultProviderFactory`
+    — only the ``create_api`` surface needed by
+    :class:`ProviderPressureMonitor`.
+
+    Supports two modes: a fixed *api* returned for every repo, or a
+    per-call *api_factory* callable that receives the :class:`RepoConfig`
+    and returns a :class:`_FakeProviderAPI`.  Tracks call count so tests
+    can assert on polling frequency.
+    """
+
+    def __init__(
+        self,
+        api: _FakeProviderAPI | None = None,
+        api_factory: Callable[[RepoConfig], _FakeProviderAPI] | None = None,
+    ) -> None:
+        super().__init__(session_system_file=Path("/dev/null"))
+        self._test_api = api
+        self._test_api_factory = api_factory
+        self.create_api_call_count: int = 0
+
+    def create_api(self, repo_cfg: RepoConfig) -> ProviderAPI:
+        self.create_api_call_count += 1
+        if self._test_api_factory is not None:
+            return self._test_api_factory(repo_cfg)
+        if self._test_api is not None:
+            return self._test_api
+        return _FakeProviderAPI()
+
+
 def _factory_with_pressure(
     pressure_window: ProviderLimitWindow | None = None,
     *,
     raises: BaseException | None = None,
-) -> MagicMock:
-    """Return a mock DefaultProviderFactory whose create_api returns an
-    api whose get_limit_snapshot returns a single window (or raises)."""
-    factory = MagicMock()
-    api = MagicMock()
-    if raises is not None:
-        api.get_limit_snapshot.side_effect = raises
-    else:
-        windows = (pressure_window,) if pressure_window is not None else ()
-        api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+) -> _FakeProviderFactory:
+    """Return a typed fake factory whose ``create_api`` returns an API
+    whose ``get_limit_snapshot`` returns a single window (or raises)."""
+    windows = (pressure_window,) if pressure_window is not None else ()
+    api = _FakeProviderAPI(
+        return_value=ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE, windows=windows
-        )
-    factory.create_api.return_value = api
-    return factory
+        ),
+        side_effect=raises,
+    )
+    return _FakeProviderFactory(api=api)
 
 
 # ── _snapshot_from_status ─────────────────────────────────────────────────────
@@ -153,7 +206,7 @@ class TestRefresh:
             provider_factory=factory,
         )
         monitor.refresh()
-        assert factory.create_api.call_count == 1
+        assert factory.create_api_call_count == 1
 
     def test_failure_keeps_prior_snapshot_for_repos_using_that_provider(self) -> None:
         reader, updater = _state_with_repos("owner/repo-a")
@@ -181,20 +234,17 @@ class TestRefresh:
         # repo-a uses claude (raises), repo-b uses codex (succeeds).
         reader, updater = _state_with_repos("owner/repo-a", "owner/repo-b")
 
-        factory = MagicMock()
-
-        def create_api(repo_cfg: RepoConfig) -> MagicMock:
-            api = MagicMock()
+        def make_api(repo_cfg: RepoConfig) -> _FakeProviderAPI:
             if repo_cfg.provider is ProviderID.CLAUDE_CODE:
-                api.get_limit_snapshot.side_effect = RuntimeError("claude down")
-            else:
-                api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
+                return _FakeProviderAPI(side_effect=RuntimeError("claude down"))
+            return _FakeProviderAPI(
+                return_value=ProviderLimitSnapshot(
                     provider=ProviderID.CODEX,
                     windows=(_window("primary", used=12, limit=100),),
                 )
-            return api
+            )
 
-        factory.create_api.side_effect = create_api
+        factory = _FakeProviderFactory(api_factory=make_api)
 
         monitor = ProviderPressureMonitor(
             repos={
@@ -261,13 +311,13 @@ class TestStartThread:
         publish_count = [0]
         second_publish = threading.Event()
 
-        factory = MagicMock()
-        api = MagicMock()
-        api.get_limit_snapshot.return_value = ProviderLimitSnapshot(
-            provider=ProviderID.CLAUDE_CODE,
-            windows=(_window("five_hour", used=1, limit=100),),
+        api = _FakeProviderAPI(
+            return_value=ProviderLimitSnapshot(
+                provider=ProviderID.CLAUDE_CODE,
+                windows=(_window("five_hour", used=1, limit=100),),
+            )
         )
-        factory.create_api.return_value = api
+        factory = _FakeProviderFactory(api=api)
 
         monitor = ProviderPressureMonitor(
             repos={"owner/repo-a": _repo("owner/repo-a")},

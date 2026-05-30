@@ -3,7 +3,6 @@ import queue
 import subprocess
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -243,6 +242,89 @@ class _FakeSessionResolver:
 
     def resolve(self) -> object:
         return self._session
+
+
+# ---------------------------------------------------------------------------
+# Call-recording stub (replaces MagicMock for method-level stubbing)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCallRecorder:
+    """Callable that records calls and supports configurable return/side-effect.
+
+    side_effect may be a BaseException instance (raised), a callable
+    (invoked), or None (return_value is returned).
+    """
+
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value: object = return_value
+        self._side_effect: object = None
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    @property
+    def side_effect(self) -> object:
+        return self._side_effect
+
+    @side_effect.setter
+    def side_effect(self, value: object) -> None:
+        self._side_effect = value
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append((args, kwargs))
+        se = self._side_effect
+        if se is not None:
+            if isinstance(se, BaseException):
+                raise se
+            if callable(se):
+                return se(*args, **kwargs)
+        return self.return_value
+
+    @property
+    def call_count(self) -> int:
+        return len(self._calls)
+
+    def assert_not_called(self) -> None:
+        assert not self._calls, (
+            f"Expected not called but got {len(self._calls)} call(s)"
+        )
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) == 1, f"Expected 1 call but got {len(self._calls)}"
+        actual_args, actual_kwargs = self._calls[0]
+        assert actual_args == args and actual_kwargs == kwargs, (
+            f"Expected call({args!r}, {kwargs!r}) "
+            f"but got call({actual_args!r}, {actual_kwargs!r})"
+        )
+
+
+class _FakeCodexSessionStub:
+    """Minimal session stub for CodexClient injection tests."""
+
+    def __init__(self) -> None:
+        self.prompt: _FakeCallRecorder = _FakeCallRecorder()
+        self.session_id: str | None = None
+        self.owner: str = ""
+        self.pid: int | None = None
+        self.dropped_session_count: int = 0
+        self.sent_count: int = 0
+        self.received_count: int = 0
+        self.last_turn_cancelled: bool = False
+
+    def is_alive(self) -> bool:
+        return True
+
+    def recover(self) -> None:
+        pass
+
+    def switch_model(self, model: object) -> None:  # noqa: ARG002
+        pass
+
+
+class _FakeCodexAgent:
+    """Minimal agent stub for Codex injection tests."""
+
+    def __init__(self) -> None:
+        self.attach_session: _FakeCallRecorder = _FakeCallRecorder()
 
 
 class TestCodexHelper:
@@ -1059,9 +1141,11 @@ class TestCodexSession:
         )
         boom = BrokenPipeError("codex pipe gone")
         boom.cancel_observed = True  # type: ignore[attr-defined]
-        session._prompt_inner = MagicMock(  # type: ignore[method-assign]
-            side_effect=boom
-        )
+
+        def _raise_boom(*_a: object, **_kw: object) -> None:
+            raise boom
+
+        session._prompt_inner = _raise_boom  # type: ignore[method-assign]
         with pytest.raises(BrokenPipeError) as exc_info:
             session.prompt("hi")
         assert exc_info.value.cancel_observed is True
@@ -1109,12 +1193,14 @@ class TestCodexSession:
             model="gpt-5.5",
             client_factory=_FakeAppServerFactory(fake),
         )
+
         # Replace _prompt_inner to raise a bare exception (no
         # ``cancel_observed`` attached) — simulates ``__enter__``
         # failure path.
-        session._prompt_inner = MagicMock(  # type: ignore[method-assign]
-            side_effect=RuntimeError("enter failed")
-        )
+        def _raise_enter_failed(*_a: object, **_kw: object) -> None:
+            raise RuntimeError("enter failed")
+
+        session._prompt_inner = _raise_enter_failed  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="enter failed") as exc_info:
             session.prompt("hi")
         assert exc_info.value.cancel_observed is False
@@ -1200,19 +1286,22 @@ class TestCodexSession:
 
 class TestCodexClient:
     def test_model_slots_and_provider_id(self) -> None:
-        client = CodexClient(session=MagicMock())
+        client = CodexClient(session=_FakeCodexSessionStub())  # type: ignore[arg-type]
         assert client.provider_id == ProviderID.CODEX
         assert client.voice_model == ProviderModel("gpt-5.5", "xhigh")
         assert client.work_model == ProviderModel("gpt-5.5", "medium")
         assert client.brief_model == ProviderModel("gpt-5.5", "low")
 
     def test_supports_no_commit_reset_is_true(self) -> None:
-        assert CodexClient(session=MagicMock()).supports_no_commit_reset is True
+        assert (
+            CodexClient(session=_FakeCodexSessionStub()).supports_no_commit_reset
+            is True
+        )  # type: ignore[arg-type]
 
     def test_spawns_owned_session_with_resume_id(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("persona")
-        session = MagicMock()
+        session = _FakeCodexSessionStub()
         factory = _FakeSessionFactory(session)
         client = CodexClient(
             session_system_file=system_file,
@@ -1277,9 +1366,9 @@ class TestCodexClient:
         assert fake.requests[1][1]["effort"] == "medium"
 
     def test_provider_errors_pass_through(self) -> None:
-        session = MagicMock()
+        session = _FakeCodexSessionStub()
         session.prompt.side_effect = CodexProviderError(message="rate limit")
-        client = CodexClient(session=session)
+        client = CodexClient(session=session)  # type: ignore[arg-type]
         with pytest.raises(CodexProviderError, match="rate limit"):
             client.run_turn("hello", model=client.work_model)
 
@@ -1301,7 +1390,7 @@ class TestCodexClient:
         assert runner.calls[1][0][-3:] == ["resume", "sess-1", "-"]
 
     def test_extract_session_id(self) -> None:
-        client = CodexClient(session=MagicMock())
+        client = CodexClient(session=_FakeCodexSessionStub())  # type: ignore[arg-type]
         assert (
             client.extract_session_id(
                 '{"type":"thread.started","thread_id":"codex-sess"}'
@@ -1312,20 +1401,20 @@ class TestCodexClient:
 
 class TestCodex:
     def test_default_provider_id_and_injected_components(self) -> None:
-        api = MagicMock()
-        agent = MagicMock()
-        provider = Codex(api=api, agent=agent)
+        api = _FakeCodexSessionStub()  # identity-check only; no methods called
+        agent = _FakeCodexAgent()
+        provider = Codex(api=api, agent=agent)  # type: ignore[arg-type]
         assert provider.provider_id == ProviderID.CODEX
         assert provider.api is api
         assert provider.agent is agent
 
     def test_default_agent_receives_session(self) -> None:
-        session = MagicMock()
-        provider = Codex(session=session)
+        session = _FakeCodexSessionStub()
+        provider = Codex(session=session)  # type: ignore[arg-type]
         assert provider.agent.session is session
 
     def test_injected_agent_receives_session(self) -> None:
-        agent = MagicMock()
-        session = MagicMock()
-        Codex(agent=agent, session=session)
+        agent = _FakeCodexAgent()
+        session = _FakeCodexSessionStub()
+        Codex(agent=agent, session=session)  # type: ignore[arg-type]
         agent.attach_session.assert_called_once_with(session)

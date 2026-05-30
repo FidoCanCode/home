@@ -3,7 +3,6 @@
 import json
 import logging
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -18,6 +17,82 @@ def _task_file(tmp_path: Path) -> Path:
     git_dir = tmp_path / ".git" / "fido"
     git_dir.mkdir(parents=True)
     return git_dir / "tasks.json"
+
+
+class _FakeCallRecorder:
+    """Typed callable that records every invocation."""
+
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value: object = return_value
+        self._side_effect: object = None
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    @property
+    def side_effect(self) -> object:
+        return self._side_effect
+
+    @side_effect.setter
+    def side_effect(self, value: object) -> None:
+        self._side_effect = value
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append((args, kwargs))
+        se = self._side_effect
+        if se is not None:
+            if isinstance(se, BaseException):
+                raise se
+            if callable(se):
+                return se(*args, **kwargs)
+        return self.return_value
+
+    def assert_not_called(self) -> None:
+        assert not self._calls, f"expected no calls, got {len(self._calls)}"
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
+        actual_args, actual_kwargs = self._calls[0]
+        assert actual_args == args and actual_kwargs == kwargs, (
+            f"expected {args!r} / {kwargs!r}, got {actual_args!r} / {actual_kwargs!r}"
+        )
+
+
+class _FakeGitHub:
+    """Minimal GitHub fake for CLI tests.
+
+    Only exposes the methods that ``Cmd.complete`` / ``complete_with_resolve``
+    actually calls: ``get_user``, ``get_review_threads``, and
+    ``resolve_thread``.  ``get_pull_comments`` is included because some tests
+    set it up (legacy of an earlier implementation path) even though the
+    current oracle path does not call it.
+    """
+
+    def __init__(self) -> None:
+        self.get_user: _FakeCallRecorder = _FakeCallRecorder(return_value="")
+        self.get_pull_comments: _FakeCallRecorder = _FakeCallRecorder(return_value=[])
+        self.get_review_threads: _FakeCallRecorder = _FakeCallRecorder(return_value=[])
+        self.resolve_thread: _FakeCallRecorder = _FakeCallRecorder()
+
+
+class _FakeArgs:
+    """Minimal argparse.Namespace substitute."""
+
+    def __init__(self, command: str) -> None:
+        self.command = command
+
+
+class _FakeParser:
+    """Minimal argparse.ArgumentParser substitute.
+
+    Returns a fixed :class:`_FakeArgs` from :meth:`parse_args` so tests can
+    drive the ``match args.command`` branch without going through the real
+    parser.
+    """
+
+    def __init__(self, fake_args: _FakeArgs) -> None:
+        self._fake_args = fake_args
+
+    def parse_args(self, argv: object) -> _FakeArgs:
+        return self._fake_args
 
 
 # ── build_parser ──────────────────────────────────────────────────────────────
@@ -91,7 +166,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=MagicMock()).add(
+        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path, TaskType.SPEC, "my task", "some description"
         )
         capsys.readouterr()  # consume add output
@@ -106,7 +181,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=MagicMock()).add(tmp_path, TaskType.CI, "bare task", "")
+        Cmd(github=_FakeGitHub()).add(tmp_path, TaskType.CI, "bare task", "")  # type: ignore[arg-type]
         capsys.readouterr()
 
         tasks = Tasks(tmp_path).list()
@@ -117,7 +192,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=MagicMock()).add(
+        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path, TaskType.THREAD, "threaded", "", comment_id=42, repo="a/b", pr=7
         )
         capsys.readouterr()
@@ -130,7 +205,7 @@ class TestCmdAdd:
     ) -> None:
         """comment_id without repo/pr still sets a thread for dedup purposes."""
         _task_file(tmp_path)
-        Cmd(github=MagicMock()).add(
+        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path, TaskType.THREAD, "threaded", "", comment_id=99
         )
         capsys.readouterr()
@@ -142,7 +217,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=MagicMock()).add(
+        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path,
             TaskType.THREAD,
             "first title",
@@ -152,7 +227,7 @@ class TestCmdAdd:
             pr=7,
         )
         capsys.readouterr()
-        Cmd(github=MagicMock()).add(
+        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path,
             TaskType.THREAD,
             "different title",
@@ -171,7 +246,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=MagicMock()).add(tmp_path, TaskType.SPEC, "my task", "")
+        Cmd(github=_FakeGitHub()).add(tmp_path, TaskType.SPEC, "my task", "")  # type: ignore[arg-type]
         out = capsys.readouterr().out
         data = json.loads(out)
         assert data["title"] == "my task"
@@ -186,7 +261,7 @@ class TestCmdComplete:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        cmd = Cmd(github=MagicMock())
+        cmd = Cmd(github=_FakeGitHub())  # type: ignore[arg-type]
         task = cmd.add(tmp_path, TaskType.SPEC, "task to finish", "")
         capsys.readouterr()
         cmd.complete(tmp_path, task["id"])
@@ -206,7 +281,7 @@ class TestCmdComplete:
             title="threaded task", task_type=TaskType.THREAD, thread=thread
         )
 
-        mock_github = MagicMock()
+        mock_github = _FakeGitHub()
         mock_github.get_user.return_value = "fido-bot"
         # The originating commenter is the repo owner ("a") so the
         # auto-resolve oracle classifies them as CommentByActionable.
@@ -244,7 +319,7 @@ class TestCmdComplete:
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
-            Cmd(github=mock_github).complete(tmp_path, task["id"])
+            Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_called_once_with("thread_node_abc")
         assert "thread resolved: thread_node_abc" in caplog.text
@@ -262,7 +337,7 @@ class TestCmdComplete:
             title="threaded task", task_type=TaskType.THREAD, thread=thread
         )
 
-        mock_github = MagicMock()
+        mock_github = _FakeGitHub()
         mock_github.get_user.return_value = "fido-bot"
         mock_github.get_pull_comments.return_value = [
             {
@@ -300,7 +375,7 @@ class TestCmdComplete:
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
-            Cmd(github=mock_github).complete(tmp_path, task["id"])
+            Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_not_called()
         assert "not resolving" in caplog.text
@@ -315,11 +390,11 @@ class TestCmdComplete:
             title="threaded task", task_type=TaskType.THREAD, thread=thread
         )
 
-        mock_github = MagicMock()
+        mock_github = _FakeGitHub()
         mock_github.get_user.return_value = "fido-bot"
         mock_github.get_pull_comments.return_value = []
 
-        Cmd(github=mock_github).complete(tmp_path, task["id"])
+        Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_not_called()
 
@@ -333,12 +408,12 @@ class TestCmdComplete:
             title="threaded task", task_type=TaskType.THREAD, thread=thread
         )
 
-        mock_github = MagicMock()
+        mock_github = _FakeGitHub()
         mock_github.get_user.side_effect = RuntimeError("network error")
 
         # Should not raise; exception is swallowed and logged
         with caplog.at_level(logging.WARNING, logger="fido"):
-            Cmd(github=mock_github).complete(tmp_path, task["id"])
+            Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
         assert "thread resolution skipped" in caplog.text
 
     def test_completes_task_with_thread_already_resolved(self, tmp_path: Path) -> None:
@@ -349,7 +424,7 @@ class TestCmdComplete:
             title="threaded task", task_type=TaskType.THREAD, thread=thread
         )
 
-        mock_github = MagicMock()
+        mock_github = _FakeGitHub()
         mock_github.get_user.return_value = "fido-bot"
         mock_github.get_pull_comments.return_value = [
             {
@@ -367,7 +442,7 @@ class TestCmdComplete:
             }
         ]
 
-        Cmd(github=mock_github).complete(tmp_path, task["id"])
+        Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_not_called()
 
@@ -380,15 +455,15 @@ class TestCmdComplete:
             title="task", task_type=TaskType.THREAD, thread={"repo": "a/b"}
         )
 
-        mock_github = MagicMock()
-        Cmd(github=mock_github).complete(tmp_path, task["id"])
+        mock_github = _FakeGitHub()
+        Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_not_called()
 
     def test_complete_nonexistent_id_no_error(self, tmp_path: Path) -> None:
         """Completing a non-existent task ID should not raise."""
         _task_file(tmp_path)
-        Cmd(github=MagicMock()).complete(tmp_path, "nonexistent-id")
+        Cmd(github=_FakeGitHub()).complete(tmp_path, "nonexistent-id")  # type: ignore[arg-type]
 
 
 # ── Cmd.list ──────────────────────────────────────────────────────────────────
@@ -399,7 +474,7 @@ class TestCmdList:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        cmd = Cmd(github=MagicMock())
+        cmd = Cmd(github=_FakeGitHub())  # type: ignore[arg-type]
         cmd.add(tmp_path, TaskType.SPEC, "alpha", "")
         capsys.readouterr()
         cmd.add(tmp_path, TaskType.SPEC, "beta", "desc")
@@ -415,7 +490,7 @@ class TestCmdList:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=MagicMock()).list(tmp_path)
+        Cmd(github=_FakeGitHub()).list(tmp_path)  # type: ignore[arg-type]
         out = capsys.readouterr().out
         assert json.loads(out) == []
 
@@ -428,7 +503,7 @@ class TestMain:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "spec", "task title"], _GitHub=MagicMock)
+        main([str(tmp_path), "add", "spec", "task title"], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
         capsys.readouterr()
 
         tasks = Tasks(tmp_path).list()
@@ -451,7 +526,7 @@ class TestMain:
                 "--pr",
                 "3",
             ],
-            _GitHub=MagicMock,
+            _GitHub=_FakeGitHub,  # type: ignore[arg-type]
         )
         capsys.readouterr()
 
@@ -462,10 +537,10 @@ class TestMain:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "spec", "finish me"], _GitHub=MagicMock)
+        main([str(tmp_path), "add", "spec", "finish me"], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
         out = capsys.readouterr().out
         task_id = json.loads(out)["id"]
-        main([str(tmp_path), "complete", task_id], _GitHub=MagicMock)
+        main([str(tmp_path), "complete", task_id], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
 
         assert Tasks(tmp_path).list()[0]["status"] == "completed"
 
@@ -473,9 +548,9 @@ class TestMain:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "spec", "one"], _GitHub=MagicMock)
+        main([str(tmp_path), "add", "spec", "one"], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
         capsys.readouterr()
-        main([str(tmp_path), "list"], _GitHub=MagicMock)
+        main([str(tmp_path), "list"], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
         out = capsys.readouterr().out
         data = json.loads(out)
         assert data[0]["title"] == "one"
@@ -486,12 +561,8 @@ class TestMain:
 
     def test_unknown_command_raises(self, tmp_path: Path) -> None:
         """Fallback case in match statement raises AssertionError."""
-        from unittest.mock import MagicMock
-
-        fake_args = MagicMock()
-        fake_args.command = "bogus"
-        fake_parser = MagicMock()
-        fake_parser.parse_args.return_value = fake_args
+        fake_args = _FakeArgs("bogus")
+        fake_parser = _FakeParser(fake_args)
 
         with pytest.raises(AssertionError, match="unreachable"):
-            main([], _GitHub=MagicMock, _build_parser=lambda: fake_parser)
+            main([], _GitHub=_FakeGitHub, _build_parser=lambda: fake_parser)  # type: ignore[arg-type]

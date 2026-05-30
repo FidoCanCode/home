@@ -1,12 +1,35 @@
 from pathlib import Path
-from unittest.mock import MagicMock
 
+from fido.config import RepoConfig
 from fido.events import _maybe_abort_for_new_task
+from fido.provider import ProviderID
 from fido.rocq import task_queue_rescope as oracle
 from fido.state import State
 from fido.tasks import Tasks, _apply_reorder
 from fido.types import TaskStatus, TaskType
 from fido.worker import _pick_next_task
+
+
+class _FakeRegistry:
+    """Typed stub for :class:`~fido.worker.ActivityReporter` — only the
+    ``abort_task`` method needed by ``_maybe_abort_for_new_task``."""
+
+    def __init__(self) -> None:
+        self.abort_task_calls: list[tuple[str, str]] = []
+
+    def abort_task(self, repo_name: str, *, task_id: str) -> None:
+        self.abort_task_calls.append((repo_name, task_id))
+
+
+class _FakeTaskList:
+    """Typed stub for :class:`~fido.tasks.Tasks` — only the ``list`` method
+    needed by ``_maybe_abort_for_new_task``."""
+
+    def __init__(self, tasks: list[dict]) -> None:
+        self._tasks = tasks
+
+    def list(self) -> list[dict]:
+        return self._tasks
 
 
 def _kind(task_type: str, title: str) -> object:
@@ -437,9 +460,11 @@ def test_batched_rescope_converges_for_permuted_releases() -> None:
 
 
 def test_abort_decision_matches_oracle(tmp_path: Path) -> None:
-    repo_cfg = MagicMock()
-    repo_cfg.work_dir = tmp_path
-    repo_cfg.name = "owner/repo"
+    repo_cfg = RepoConfig(
+        name="owner/repo",
+        work_dir=tmp_path,
+        provider=ProviderID.CLAUDE_CODE,
+    )
     State(tmp_path / ".git" / "fido").save({"current_task_id": "t-current"})
     task_list = [
         {
@@ -457,7 +482,7 @@ def test_abort_decision_matches_oracle(tmp_path: Path) -> None:
         },
     ]
     new_task = task_list[1]
-    registry = MagicMock()
+    registry = _FakeRegistry()
     ids, _order, rows = _oracle_state(task_list)
     lease = ids["t-current"]
     expected = oracle.should_abort_for_new_task(ids["t-thread"], lease, rows)
@@ -465,13 +490,13 @@ def test_abort_decision_matches_oracle(tmp_path: Path) -> None:
     _maybe_abort_for_new_task(
         repo_cfg,
         new_task,
-        registry,
+        registry,  # type: ignore[arg-type]
         _state=State(tmp_path / ".git" / "fido"),
-        _tasks=MagicMock(list=MagicMock(return_value=task_list)),
+        _tasks=_FakeTaskList(task_list),  # type: ignore[arg-type]
     )
 
     assert expected is True
-    registry.abort_task.assert_called_once_with("owner/repo", task_id="t-current")
+    assert registry.abort_task_calls == [("owner/repo", "t-current")]
 
 
 def test_tasks_unblock_matches_oracle(tmp_path: Path) -> None:

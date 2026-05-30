@@ -4,8 +4,8 @@ import logging
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 from frozendict import frozendict
@@ -28,6 +28,193 @@ from fido.registry import (
 )
 from fido.rocq import worker_registry_crash as registry_fsm
 from tests.fakes import _FakeDispatcher
+
+# ── typed fakes ───────────────────────────────────────────────────────────────
+
+
+class _FakeCallArgs:
+    """Stores one call's args + kwargs; supports attribute and index access,
+    and iteration for 2-element destructuring (``args, kwargs = call_args``)."""
+
+    def __init__(self, args: tuple[object, ...], kwargs: dict[str, object]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    def __iter__(self) -> Iterator[object]:
+        yield self.args
+        yield self.kwargs
+
+    def __getitem__(self, idx: int) -> object:
+        return (self.args, self.kwargs)[idx]
+
+
+class _FakeCallRecorder:
+    """Generic recording callable — return_value and assertion helpers."""
+
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value: object = return_value
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self._calls)
+
+    @property
+    def call_args(self) -> _FakeCallArgs | None:
+        if not self._calls:
+            return None
+        args, kwargs = self._calls[-1]
+        return _FakeCallArgs(args, kwargs)
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append((args, kwargs))
+        return self.return_value
+
+    def assert_called_once(self) -> None:
+        assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
+        actual_args, actual_kwargs = self._calls[0]
+        assert actual_args == args, f"args: {actual_args!r} != {args!r}"
+        assert actual_kwargs == kwargs, f"kwargs: {actual_kwargs!r} != {kwargs!r}"
+
+    def assert_not_called(self) -> None:
+        assert not self._calls, f"expected no calls, got {len(self._calls)}"
+
+
+class _FakeAgent:
+    """Fake provider agent with a configurable session handle and recovery recorder."""
+
+    def __init__(self) -> None:
+        self.session: object = None
+        self.recover_session: _FakeCallRecorder = _FakeCallRecorder()
+
+
+class _FakeProvider:
+    """Fake provider instance — holds a _FakeAgent for session/recovery tests."""
+
+    def __init__(self) -> None:
+        self.agent: _FakeAgent = _FakeAgent()
+
+
+class _FakeThread:
+    """Fake WorkerThread for WorkerRegistry tests.
+
+    Scalar attributes mirror WorkerThread's public contract; all method
+    calls are recorded via _FakeCallRecorder so tests can assert on call
+    counts and arguments without MagicMock.
+    """
+
+    def __init__(self) -> None:
+        # Scalar attrs (tests set these directly)
+        self.was_stopped: bool = False
+        self._session_issue: int | None = None
+        self.crash_error: str | None = None
+        self.session_owner: str | None = None
+        self.session_alive: bool = False
+        self.session_pid: int | None = None
+        self.session_dropped_count: int = 0
+        self.session_sent_count: int = 0
+        self.session_received_count: int = 0
+        # Method recorders
+        self.is_alive: _FakeCallRecorder = _FakeCallRecorder(return_value=False)
+        self.detach_provider: _FakeCallRecorder = _FakeCallRecorder(return_value=None)
+        self.start: _FakeCallRecorder = _FakeCallRecorder()
+        self.wake: _FakeCallRecorder = _FakeCallRecorder()
+        self.stop: _FakeCallRecorder = _FakeCallRecorder()
+        self.join: _FakeCallRecorder = _FakeCallRecorder()
+        self.abort_task: _FakeCallRecorder = _FakeCallRecorder()
+        self.recover_provider: _FakeCallRecorder = _FakeCallRecorder(return_value=False)
+        self.current_provider: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=_FakeProvider()
+        )
+
+
+class _FakeThreadFactory:
+    """Fake thread factory for WorkerRegistry.
+
+    Records every call; returns a pre-built _FakeThread (``return_value``) or
+    the next entry from ``side_effect`` when provided.
+    """
+
+    def __init__(
+        self,
+        return_value: _FakeThread | None = None,
+        side_effect: list[_FakeThread] | None = None,
+    ) -> None:
+        self.return_value: _FakeThread = (
+            return_value if return_value is not None else _FakeThread()
+        )
+        self.side_effect: list[_FakeThread] | None = side_effect
+        self._side_effect_iter: Iterator[_FakeThread] | None = (
+            iter(side_effect) if side_effect is not None else None
+        )
+        self.call_count: int = 0
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> _FakeThread:
+        self._calls.append((args, kwargs))
+        self.call_count += 1
+        if self._side_effect_iter is not None:
+            return next(self._side_effect_iter)
+        return self.return_value
+
+    @property
+    def call_args(self) -> _FakeCallArgs | None:
+        if not self._calls:
+            return None
+        args, kwargs = self._calls[-1]
+        return _FakeCallArgs(args, kwargs)
+
+    @property
+    def call_args_list(self) -> list[_FakeCallArgs]:
+        return [_FakeCallArgs(args, kwargs) for args, kwargs in self._calls]
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert self.call_count == 1, f"expected 1 call, got {self.call_count}"
+        actual_args, actual_kwargs = self._calls[0]
+        assert actual_args == args, f"args: {actual_args!r} != {args!r}"
+        assert actual_kwargs == kwargs, f"kwargs: {actual_kwargs!r} != {kwargs!r}"
+
+
+class _FakeRegistryStub:
+    """Minimal WorkerRegistry stub for _make_thread tests."""
+
+    def __init__(self) -> None:
+        self.get_issue_cache: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=object()
+        )
+
+
+class _FakeGitHub:
+    """Opaque GitHub stub — passed through _make_thread for identity assertions."""
+
+
+class _FakeWorkerThreadClass:
+    """Fake WorkerThread class (callable) for _make_thread tests.
+
+    Records the constructor call so tests can inspect positional and
+    keyword arguments without MagicMock.
+    """
+
+    def __init__(self) -> None:
+        self.return_value: _FakeThread = _FakeThread()
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def __call__(self, *args: object, **kwargs: object) -> _FakeThread:
+        self._calls.append((args, kwargs))
+        return self.return_value
+
+    @property
+    def call_args(self) -> _FakeCallArgs | None:
+        if not self._calls:
+            return None
+        args, kwargs = self._calls[-1]
+        return _FakeCallArgs(args, kwargs)
+
+    def assert_called_once(self) -> None:
+        assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
 
 
 class RepoConfig(_RepoConfig):
@@ -63,8 +250,8 @@ class TestWorkerRegistry:
         *,
         repos: list[str] | None = None,
         work_dir: Path | None = None,
-    ) -> tuple[WorkerRegistry, MagicMock, object]:
-        factory = MagicMock()
+    ) -> tuple[WorkerRegistry, _FakeThreadFactory, object]:
+        factory = _FakeThreadFactory()
         reader, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -93,9 +280,9 @@ class TestWorkerRegistry:
 
     def test_start_rescues_session_from_crashed_thread(self, tmp_path: Path) -> None:
         """Provider rescued from a crashed (dead, not _stop) thread and passed to replacement."""
-        mock_provider = MagicMock()
-        threads = [MagicMock(), MagicMock()]
-        factory = MagicMock(side_effect=threads)
+        mock_provider = _FakeProvider()
+        threads = [_FakeThread(), _FakeThread()]
+        factory = _FakeThreadFactory(side_effect=threads)
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -129,9 +316,9 @@ class TestWorkerRegistry:
         and the replacement worker's first send() hits "Send rejected in
         state Sending" — turning a single crash into a permanent loop.
         """
-        mock_provider = MagicMock()
-        threads = [MagicMock(), MagicMock()]
-        factory = MagicMock(side_effect=threads)
+        mock_provider = _FakeProvider()
+        threads = [_FakeThread(), _FakeThread()]
+        factory = _FakeThreadFactory(side_effect=threads)
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -152,8 +339,8 @@ class TestWorkerRegistry:
         self, tmp_path: Path
     ) -> None:
         """No provider rescue when the old thread exited via orderly stop()."""
-        threads = [MagicMock(), MagicMock()]
-        factory = MagicMock(side_effect=threads)
+        threads = [_FakeThread(), _FakeThread()]
+        factory = _FakeThreadFactory(side_effect=threads)
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -167,7 +354,7 @@ class TestWorkerRegistry:
         # Simulate orderly shutdown: was_stopped is True (session was already stopped)
         threads[0].is_alive.return_value = False
         threads[0].was_stopped = True
-        threads[0].detach_provider.return_value = MagicMock()
+        threads[0].detach_provider.return_value = _FakeProvider()
         reg.start(cfg)
         _, kwargs = factory.call_args_list[1]
         assert kwargs["provider"] is None
@@ -200,7 +387,7 @@ class TestWorkerRegistry:
         factory.return_value.stop.assert_called_once()
 
     def test_stop_all_calls_stop_on_every_thread(self, tmp_path: Path) -> None:
-        factory = MagicMock(side_effect=[MagicMock(), MagicMock()])
+        factory = _FakeThreadFactory(side_effect=[_FakeThread(), _FakeThread()])
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -224,8 +411,8 @@ class TestWorkerRegistry:
         assert factory.return_value is not None  # sanity
 
     def test_stop_all_calls_stop_count(self, tmp_path: Path) -> None:
-        threads = [MagicMock(), MagicMock()]
-        factory = MagicMock(side_effect=threads)
+        threads = [_FakeThread(), _FakeThread()]
+        factory = _FakeThreadFactory(side_effect=threads)
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -294,7 +481,7 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         factory.return_value.is_alive.return_value = True
         factory.return_value.was_stopped = False
         factory.return_value.session_owner = None
@@ -325,7 +512,7 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         factory.return_value.is_alive.return_value = True
         factory.return_value.was_stopped = False
         factory.return_value.session_owner = None
@@ -434,7 +621,7 @@ class TestWorkerRegistry:
 
     def test_get_session_delegates_to_thread(self, tmp_path: Path) -> None:
         reg, factory, reader = self._make_registry()
-        fake_session = MagicMock()
+        fake_session = object()
         factory.return_value.current_provider.return_value.agent.session = fake_session
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_session("foo/bar") is fake_session
@@ -670,8 +857,8 @@ class TestWorkerRegistry:
 
     def test_crash_record_survives_start(self, tmp_path: Path) -> None:
         """crash_record is preserved across start() so history accumulates."""
-        threads = [MagicMock(), MagicMock()]
-        factory = MagicMock(side_effect=threads)
+        threads = [_FakeThread(), _FakeThread()]
+        factory = _FakeThreadFactory(side_effect=threads)
         reader, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -692,8 +879,8 @@ class TestWorkerRegistry:
         assert crash.last_error == "boom"
 
     def test_start_replaces_existing_thread_entry(self, tmp_path: Path) -> None:
-        threads = [MagicMock(), MagicMock()]
-        factory = MagicMock(side_effect=threads)
+        threads = [_FakeThread(), _FakeThread()]
+        factory = _FakeThreadFactory(side_effect=threads)
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -724,7 +911,7 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        WorkerRegistry(MagicMock(), updater)
+        WorkerRegistry(_FakeThreadFactory(), updater)
         assert reader.get().repos == {}
 
     def test_start_publishes_thread_snapshot(self, tmp_path: Path) -> None:
@@ -736,16 +923,8 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         factory.return_value.is_alive.return_value = True
-        factory.return_value.was_stopped = False
-        factory.return_value.session_owner = None
-        factory.return_value.session_alive = False
-        factory.return_value.session_pid = None
-        factory.return_value.session_dropped_count = 0
-        factory.return_value.session_sent_count = 0
-        factory.return_value.session_received_count = 0
-        factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         snap = reader.get().repos["foo/bar"].thread
@@ -760,16 +939,8 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         factory.return_value.is_alive.return_value = True
-        factory.return_value.was_stopped = False
-        factory.return_value.session_owner = None
-        factory.return_value.session_alive = False
-        factory.return_value.session_pid = None
-        factory.return_value.session_dropped_count = 0
-        factory.return_value.session_sent_count = 0
-        factory.return_value.session_received_count = 0
-        factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         snap = reader.get().repos["foo/bar"].thread
@@ -784,16 +955,9 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         factory.return_value.is_alive.return_value = False
         factory.return_value.was_stopped = True
-        factory.return_value.session_owner = None
-        factory.return_value.session_alive = False
-        factory.return_value.session_pid = None
-        factory.return_value.session_dropped_count = 0
-        factory.return_value.session_sent_count = 0
-        factory.return_value.session_received_count = 0
-        factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         snap = reader.get().repos["foo/bar"].thread
@@ -808,16 +972,14 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         factory.return_value.is_alive.return_value = True
-        factory.return_value.was_stopped = False
         factory.return_value.session_owner = "worker-home"
         factory.return_value.session_alive = True
         factory.return_value.session_pid = 12345
         factory.return_value.session_dropped_count = 2
         factory.return_value.session_sent_count = 7
         factory.return_value.session_received_count = 5
-        factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         provider = reader.get().repos["foo/bar"].provider
@@ -838,15 +1000,8 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         factory.return_value.is_alive.return_value = False
-        factory.return_value.was_stopped = False
-        factory.return_value.session_owner = None
-        factory.return_value.session_alive = False
-        factory.return_value.session_pid = None
-        factory.return_value.session_dropped_count = 0
-        factory.return_value.session_sent_count = 0
-        factory.return_value.session_received_count = 0
         factory.return_value.crash_error = "RuntimeError: boom"
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
@@ -863,16 +1018,8 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         factory.return_value.is_alive.return_value = True
-        factory.return_value.was_stopped = False
-        factory.return_value.session_owner = None
-        factory.return_value.session_alive = False
-        factory.return_value.session_pid = None
-        factory.return_value.session_dropped_count = 0
-        factory.return_value.session_sent_count = 0
-        factory.return_value.session_received_count = 0
-        factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         snap = reader.get().repos["foo/bar"].thread
@@ -891,18 +1038,10 @@ class TestWorkerRegistry:
 
     def test_thread_snapshot_is_per_repo(self, tmp_path: Path) -> None:
         """Each repo gets its own ThreadSnapshot on its RepoState."""
-        threads = [MagicMock(), MagicMock()]
+        threads = [_FakeThread(), _FakeThread()]
         for t in threads:
             t.is_alive.return_value = True
-            t.was_stopped = False
-            t.session_owner = None
-            t.session_alive = False
-            t.session_pid = None
-            t.session_dropped_count = 0
-            t.session_sent_count = 0
-            t.session_received_count = 0
-            t.crash_error = None
-        factory = MagicMock(side_effect=threads)
+        factory = _FakeThreadFactory(side_effect=threads)
         reader, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -928,16 +1067,8 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         factory.return_value.is_alive.return_value = True
-        factory.return_value.was_stopped = False
-        factory.return_value.session_owner = None
-        factory.return_value.session_alive = False
-        factory.return_value.session_pid = None
-        factory.return_value.session_dropped_count = 0
-        factory.return_value.session_sent_count = 0
-        factory.return_value.session_received_count = 0
-        factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         snap = reader.get().repos["foo/bar"].thread
@@ -955,16 +1086,8 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         factory.return_value.is_alive.return_value = True
-        factory.return_value.was_stopped = False
-        factory.return_value.session_owner = None
-        factory.return_value.session_alive = False
-        factory.return_value.session_pid = None
-        factory.return_value.session_dropped_count = 0
-        factory.return_value.session_sent_count = 0
-        factory.return_value.session_received_count = 0
-        factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         # Simulate what the watchdog does: thread has died and crash_error is set
@@ -985,16 +1108,8 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         factory.return_value.is_alive.return_value = True
-        factory.return_value.was_stopped = False
-        factory.return_value.session_owner = None
-        factory.return_value.session_alive = False
-        factory.return_value.session_pid = None
-        factory.return_value.session_dropped_count = 0
-        factory.return_value.session_sent_count = 0
-        factory.return_value.session_received_count = 0
-        factory.return_value.crash_error = None
         reg = WorkerRegistry(factory, updater)
         reg.start(_repo("foo/bar", tmp_path))
         # Simulate what join() does: thread exits and was_stopped is set
@@ -1015,7 +1130,7 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         reg = WorkerRegistry(factory, updater)
         reg.stop_and_join("unknown/repo")  # must not raise
 
@@ -1025,9 +1140,9 @@ class TestMakeThread:
         self, tmp_path: Path
     ) -> None:
         cfg = _repo("foo/bar", tmp_path)
-        mock_registry = MagicMock()
-        mock_gh = MagicMock()
-        mock_wt_cls = MagicMock()
+        mock_registry = _FakeRegistryStub()
+        mock_gh = _FakeGitHub()
+        mock_wt_cls = _FakeWorkerThreadClass()
         fake_dispatcher = _FakeDispatcher()
         result = _make_thread(
             cfg,
@@ -1058,11 +1173,11 @@ class TestMakeThread:
         work_dir = tmp_path / "myrepo"
         work_dir.mkdir()
         cfg = _repo("foo/bar", work_dir)
-        mock_wt_cls = MagicMock()
+        mock_wt_cls = _FakeWorkerThreadClass()
         _make_thread(
             cfg,
-            MagicMock(),
-            gh=MagicMock(),
+            _FakeRegistryStub(),
+            gh=_FakeGitHub(),
             dispatchers={"foo/bar": _FakeDispatcher()},
             _WorkerThread=mock_wt_cls,
         )
@@ -1080,11 +1195,11 @@ class TestMakeThread:
             log_level="DEBUG",
             sub_dir=tmp_path,
         )
-        mock_wt_cls = MagicMock()
+        mock_wt_cls = _FakeWorkerThreadClass()
         _make_thread(
             cfg,
-            MagicMock(),
-            gh=MagicMock(),
+            _FakeRegistryStub(),
+            gh=_FakeGitHub(),
             config=config,
             dispatchers={"foo/bar": _FakeDispatcher()},
             _WorkerThread=mock_wt_cls,
@@ -1093,11 +1208,11 @@ class TestMakeThread:
 
     def test_repo_cfg_forwarded_to_worker_thread(self, tmp_path: Path) -> None:
         cfg = _repo("foo/bar", tmp_path)
-        mock_wt_cls = MagicMock()
+        mock_wt_cls = _FakeWorkerThreadClass()
         _make_thread(
             cfg,
-            MagicMock(),
-            gh=MagicMock(),
+            _FakeRegistryStub(),
+            gh=_FakeGitHub(),
             dispatchers={"foo/bar": _FakeDispatcher()},
             _WorkerThread=mock_wt_cls,
         )
@@ -1106,7 +1221,7 @@ class TestMakeThread:
     def test_state_updater_forwarded_to_worker_thread(self, tmp_path: Path) -> None:
         """_make_thread passes state_updater through to WorkerThread."""
         cfg = _repo("foo/bar", tmp_path)
-        mock_wt_cls = MagicMock()
+        mock_wt_cls = _FakeWorkerThreadClass()
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -1116,8 +1231,8 @@ class TestMakeThread:
         )
         _make_thread(
             cfg,
-            MagicMock(),
-            gh=MagicMock(),
+            _FakeRegistryStub(),
+            gh=_FakeGitHub(),
             dispatchers={"foo/bar": _FakeDispatcher()},
             state_updater=updater,
             _WorkerThread=mock_wt_cls,
@@ -1127,11 +1242,11 @@ class TestMakeThread:
     def test_state_updater_defaults_to_none(self, tmp_path: Path) -> None:
         """_make_thread passes state_updater=None when not provided."""
         cfg = _repo("foo/bar", tmp_path)
-        mock_wt_cls = MagicMock()
+        mock_wt_cls = _FakeWorkerThreadClass()
         _make_thread(
             cfg,
-            MagicMock(),
-            gh=MagicMock(),
+            _FakeRegistryStub(),
+            gh=_FakeGitHub(),
             dispatchers={"foo/bar": _FakeDispatcher()},
             _WorkerThread=mock_wt_cls,
         )
@@ -1141,7 +1256,7 @@ class TestMakeThread:
 class TestMakeRegistry:
     def test_returns_worker_registry(self, tmp_path: Path) -> None:
         cfg = _repo("foo/bar", tmp_path)
-        mock_thread = MagicMock()
+        mock_thread = _FakeThread()
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -1151,18 +1266,18 @@ class TestMakeRegistry:
         )
         registry = make_registry(
             {"foo/bar": cfg},
-            MagicMock(),
+            _FakeGitHub(),
             dispatchers={},
             state_updater=updater,
-            _thread_factory=MagicMock(return_value=mock_thread),
+            _thread_factory=_FakeThreadFactory(return_value=mock_thread),
         )
         assert isinstance(registry, WorkerRegistry)
 
     def test_starts_thread_for_each_repo(self, tmp_path: Path) -> None:
         cfg1 = _repo("foo/bar", tmp_path)
         cfg2 = _repo("foo/baz", tmp_path)
-        mock_thread = MagicMock()
-        mock_factory = MagicMock(return_value=mock_thread)
+        mock_thread = _FakeThread()
+        mock_factory = _FakeThreadFactory(return_value=mock_thread)
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -1172,7 +1287,7 @@ class TestMakeRegistry:
         )
         make_registry(
             {"foo/bar": cfg1, "foo/baz": cfg2},
-            MagicMock(),
+            _FakeGitHub(),
             dispatchers={},
             state_updater=updater,
             _thread_factory=mock_factory,
@@ -1190,7 +1305,7 @@ class TestMakeRegistry:
         )
         registry = make_registry(
             {},
-            MagicMock(),
+            _FakeGitHub(),
             dispatchers={},
             state_updater=updater,
         )
@@ -1199,7 +1314,7 @@ class TestMakeRegistry:
 
     def test_wakes_registered_repos(self, tmp_path: Path) -> None:
         cfg = _repo("foo/bar", tmp_path)
-        mock_thread = MagicMock()
+        mock_thread = _FakeThread()
         mock_thread.is_alive.return_value = True
         _, updater = create_atomic(
             FidoState(
@@ -1210,10 +1325,10 @@ class TestMakeRegistry:
         )
         reg = make_registry(
             {"foo/bar": cfg},
-            MagicMock(),
+            _FakeGitHub(),
             dispatchers={},
             state_updater=updater,
-            _thread_factory=MagicMock(return_value=mock_thread),
+            _thread_factory=_FakeThreadFactory(return_value=mock_thread),
         )
         assert reg.is_alive("foo/bar") is True
 
@@ -1229,7 +1344,7 @@ class TestMakeRegistry:
             log_level="DEBUG",
             sub_dir=tmp_path,
         )
-        mock_factory = MagicMock(return_value=MagicMock())
+        mock_factory = _FakeThreadFactory()
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -1239,7 +1354,7 @@ class TestMakeRegistry:
         )
         make_registry(
             {"foo/bar": cfg},
-            MagicMock(),
+            _FakeGitHub(),
             config,
             dispatchers={},
             state_updater=updater,
@@ -1250,7 +1365,7 @@ class TestMakeRegistry:
     def test_state_updater_forwarded_to_thread_factory(self, tmp_path: Path) -> None:
         """make_registry passes state_updater through to the thread factory."""
         cfg = _repo("foo/bar", tmp_path)
-        mock_factory = MagicMock(return_value=MagicMock())
+        mock_factory = _FakeThreadFactory()
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -1260,7 +1375,7 @@ class TestMakeRegistry:
         )
         make_registry(
             {"foo/bar": cfg},
-            MagicMock(),
+            _FakeGitHub(),
             dispatchers={},
             state_updater=updater,
             _thread_factory=mock_factory,
@@ -1277,7 +1392,7 @@ class TestWebhookActivity:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(MagicMock(), updater)
+        reg = WorkerRegistry(_FakeThreadFactory(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         assert reg.get_webhook_activities("foo/bar") == []
         with reg.webhook_activity("foo/bar", "triaging"):
@@ -1296,7 +1411,7 @@ class TestWebhookActivity:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(MagicMock(), updater)
+        reg = WorkerRegistry(_FakeThreadFactory(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with _pytest.raises(RuntimeError):
             with reg.webhook_activity("foo/bar", "oops"):
@@ -1311,7 +1426,7 @@ class TestWebhookActivity:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(MagicMock(), updater)
+        reg = WorkerRegistry(_FakeThreadFactory(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "first"):
             with reg.webhook_activity("foo/bar", "second"):
@@ -1329,7 +1444,7 @@ class TestWebhookActivity:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(MagicMock(), updater)
+        reg = WorkerRegistry(_FakeThreadFactory(), updater)
         reg.start(_repo("a/b", tmp_path))
         reg.start(_repo("c/d", tmp_path))
         with reg.webhook_activity("a/b", "work-ab"):
@@ -1347,7 +1462,7 @@ class TestWebhookActivity:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(MagicMock(), updater)
+        reg = WorkerRegistry(_FakeThreadFactory(), updater)
         assert reg.get_webhook_activities("ghost/repo") == []
 
     def test_handle_can_update_description(self, tmp_path: Path) -> None:
@@ -1358,7 +1473,7 @@ class TestWebhookActivity:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(MagicMock(), updater)
+        reg = WorkerRegistry(_FakeThreadFactory(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling") as activity:
             assert reg.get_webhook_activities("foo/bar")[0].description == "handling"
@@ -1373,7 +1488,7 @@ class TestWebhookActivity:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(MagicMock(), updater)
+        reg = WorkerRegistry(_FakeThreadFactory(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling") as activity:
             pass
@@ -1388,7 +1503,7 @@ class TestWebhookActivity:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(MagicMock(), updater)
+        reg = WorkerRegistry(_FakeThreadFactory(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling"):
             reg.set_webhook_description("foo/bar", -1, "triaging")
@@ -1402,7 +1517,7 @@ class TestWebhookActivity:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(MagicMock(), updater)
+        reg = WorkerRegistry(_FakeThreadFactory(), updater)
         reg.set_webhook_description("ghost/repo", 1, "triaging")
         assert reg.get_webhook_activities("ghost/repo") == []
 
@@ -1415,7 +1530,7 @@ class TestWebhookActivity:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(MagicMock(), updater)
+        reg = WorkerRegistry(_FakeThreadFactory(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "handling"):
             acts = reader.get().repos["foo/bar"].webhook_activities
@@ -1432,7 +1547,7 @@ class TestWebhookActivity:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(MagicMock(), updater)
+        reg = WorkerRegistry(_FakeThreadFactory(), updater)
         reg.start(_repo("foo/bar", tmp_path))
         with reg.webhook_activity("foo/bar", "original") as handle:
             handle.set_description("updated")
@@ -1448,7 +1563,7 @@ class TestRescoping:
     lens has a target to write into."""
 
     def _reg(self) -> tuple[WorkerRegistry, object]:
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         reader, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -1492,7 +1607,7 @@ class TestParityPublishers:
     leaves of :class:`FidoState` (#1696 parity)."""
 
     def _reg(self, tmp_path: Path) -> tuple[WorkerRegistry, object]:
-        factory = MagicMock()
+        factory = _FakeThreadFactory()
         reader, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -1592,7 +1707,7 @@ class TestUntriagedInbox:
                 process_started_at=_EPOCH,
             )
         )
-        return WorkerRegistry(MagicMock(), updater)
+        return WorkerRegistry(_FakeThreadFactory(), updater)
 
     # ── has_untriaged ─────────────────────────────────────────────────────
 
@@ -1829,7 +1944,7 @@ class TestPreemptionFsmOracle:
                 process_started_at=_EPOCH,
             )
         )
-        return WorkerRegistry(MagicMock(), updater)
+        return WorkerRegistry(_FakeThreadFactory(), updater)
 
     # ── worker_blocked_when_nonempty ─────────────────────────────────────
 
@@ -2061,7 +2176,7 @@ class TestRegistryFsmOracle:
                 process_started_at=_EPOCH,
             )
         )
-        return WorkerRegistry(MagicMock(), updater)
+        return WorkerRegistry(_FakeThreadFactory(), updater)
 
     def _cfg(self, tmp_path: Path, name: str = "foo/bar") -> RepoConfig:
         return _repo(name, tmp_path)
@@ -2146,8 +2261,8 @@ class TestRegistryFsmOracle:
         self, tmp_path: Path
     ) -> None:
         """start() after crash fires ThreadDies then Rescue: Active → Crashed → Active."""
-        threads = [MagicMock(), MagicMock()]
-        factory = MagicMock(side_effect=threads)
+        threads = [_FakeThread(), _FakeThread()]
+        factory = _FakeThreadFactory(side_effect=threads)
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -2175,8 +2290,8 @@ class TestRegistryFsmOracle:
         self, tmp_path: Path
     ) -> None:
         """start() after orderly stop fires ThreadStops then Launch: Active → Stopped → Active."""
-        threads = [MagicMock(), MagicMock()]
-        factory = MagicMock(side_effect=threads)
+        threads = [_FakeThread(), _FakeThread()]
+        factory = _FakeThreadFactory(side_effect=threads)
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -2205,8 +2320,8 @@ class TestRegistryFsmOracle:
         This surfaces the coordination violation immediately rather than silently
         replacing the live thread.
         """
-        threads = [MagicMock(), MagicMock()]
-        factory = MagicMock(side_effect=threads)
+        threads = [_FakeThread(), _FakeThread()]
+        factory = _FakeThreadFactory(side_effect=threads)
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),
@@ -2217,15 +2332,15 @@ class TestRegistryFsmOracle:
         reg = WorkerRegistry(factory, updater)
         cfg = self._cfg(tmp_path)
         reg.start(cfg)
-        # Leave thread alive (is_alive() returns a truthy MagicMock by default)
+        # Leave thread alive
         threads[0].is_alive.return_value = True
         with pytest.raises(AssertionError, match="worker_registry_crash FSM"):
             reg.start(cfg)
 
     def test_fsm_state_is_tracked_per_repo(self, tmp_path: Path) -> None:
         """FSM state is independent for each repo — no cross-repo contamination."""
-        threads = [MagicMock(), MagicMock()]
-        factory = MagicMock(side_effect=threads)
+        threads = [_FakeThread(), _FakeThread()]
+        factory = _FakeThreadFactory(side_effect=threads)
         _, updater = create_atomic(
             FidoState(
                 repos=frozendict(),

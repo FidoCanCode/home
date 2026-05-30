@@ -1,12 +1,9 @@
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
-from fido.claude import ClaudeClient
-from fido.prompts import Prompts
 from fido.rocq import pr_body_task_store as oracle
 from fido.rocq import thread_auto_resolve as thread_oracle
 from fido.tasks import (
@@ -40,15 +37,154 @@ from fido.tasks import (
 )
 from fido.types import RescopeIntent, TaskStatus, TaskType
 
+# ── typed fakes ───────────────────────────────────────────────────────────────
 
-def _client(run_turn_return: str = "") -> MagicMock:
-    """Create a mock ClaudeClient with a configurable run_turn return."""
-    client = MagicMock(spec=ClaudeClient)
-    client.voice_model = "claude-opus-4-6"
-    client.work_model = "claude-sonnet-4-6"
-    client.brief_model = "claude-haiku-4-5"
-    client.run_turn.return_value = run_turn_return
-    return client
+
+class _FakeCallArgs:
+    """Stores a single call's positional and keyword args; supports index access
+    so ``call_args[0]`` returns the positional args tuple (MagicMock compat)."""
+
+    def __init__(self, args: tuple[object, ...], kwargs: dict[str, object]) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+    def __getitem__(self, idx: int) -> object:
+        return (self.args, self.kwargs)[idx]
+
+    def __eq__(self, other: object) -> bool:
+        # unittest.mock.call is a 3-tuple (name, args, kwargs); plain 2-tuples
+        # are (args, kwargs).  Handle both so _FakeCallArgs compares equal to
+        # call(…) objects as well as bare tuples.
+        try:
+            n = len(other)  # type: ignore[arg-type]
+        except TypeError:
+            return NotImplemented  # type: ignore[return-value]
+        try:
+            if n == 3:
+                return self.args == other[1] and self.kwargs == other[2]  # type: ignore[index]
+            return self.args == other[0] and self.kwargs == other[1]  # type: ignore[index]
+        except TypeError, IndexError:
+            return NotImplemented  # type: ignore[return-value]
+
+
+class _FakeCallRecorder:
+    """Generic recording callable — return_value, side_effect, and assertion helpers."""
+
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value: object = return_value
+        self._side_effect: object = None
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self._calls)
+
+    @property
+    def call_args(self) -> _FakeCallArgs | None:
+        if not self._calls:
+            return None
+        args, kwargs = self._calls[-1]
+        return _FakeCallArgs(args, kwargs)
+
+    @property
+    def side_effect(self) -> object:
+        return self._side_effect
+
+    @side_effect.setter
+    def side_effect(self, value: object) -> None:
+        self._side_effect = iter(value) if isinstance(value, list) else value
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append((args, kwargs))
+        se = self._side_effect
+        if se is not None:
+            if isinstance(se, type) and issubclass(se, BaseException):
+                raise se()
+            if isinstance(se, BaseException):
+                raise se
+            if hasattr(se, "__next__"):
+                val = next(se)  # type: ignore[call-overload]
+                if isinstance(val, BaseException):
+                    raise val
+                return val
+            if callable(se):
+                return se(*args, **kwargs)
+        return self.return_value
+
+    def assert_called_once(self) -> None:
+        assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
+        actual_args, actual_kwargs = self._calls[0]
+        assert actual_args == args, f"args: {actual_args!r} != {args!r}"
+        assert actual_kwargs == kwargs, f"kwargs: {actual_kwargs!r} != {kwargs!r}"
+
+    @property
+    def call_args_list(self) -> list[_FakeCallArgs]:
+        return [_FakeCallArgs(args, kwargs) for args, kwargs in self._calls]
+
+    @property
+    def called(self) -> bool:
+        return bool(self._calls)
+
+    def assert_not_called(self) -> None:
+        assert not self._calls, f"expected no calls, got {len(self._calls)}"
+
+
+class _FakeClaudeClient:
+    """Minimal ClaudeClient stub for reorder_tasks tests."""
+
+    def __init__(self, run_turn_return: str = "") -> None:
+        self.voice_model: str = "claude-opus-4-6"
+        self.work_model: str = "claude-sonnet-4-6"
+        self.brief_model: str = "claude-haiku-4-5"
+        self.run_turn: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=run_turn_return
+        )
+
+
+class _FakePrompts:
+    """Minimal Prompts stub — all methods are _FakeCallRecorder instances."""
+
+    def __init__(self) -> None:
+        self.rescope_prompt: _FakeCallRecorder = _FakeCallRecorder()
+        self.rescope_duplicate_nudge: _FakeCallRecorder = _FakeCallRecorder()
+        self.rescope_prompt_verdicts: _FakeCallRecorder = _FakeCallRecorder()
+        self.rescope_verdicts_parse_nudge: _FakeCallRecorder = _FakeCallRecorder()
+        self.rescope_parse_nudge: _FakeCallRecorder = _FakeCallRecorder()
+        self.critic_system_prompt: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=""
+        )
+        self.task_creation_critic_prompt: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=""
+        )
+        self.task_completion_critic_prompt: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=""
+        )
+        self.reply_prose_claim_grounding_prompt: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=""
+        )
+        self.insight_dedup_critic_prompt: _FakeCallRecorder = _FakeCallRecorder(
+            return_value=""
+        )
+
+
+class _FakeGitHub:
+    """Minimal GitHub stub for TestTasksCompleteWithResolve."""
+
+    def __init__(self) -> None:
+        self.get_user: _FakeCallRecorder = _FakeCallRecorder(return_value=None)
+        self.get_review_threads: _FakeCallRecorder = _FakeCallRecorder(return_value=[])
+        self.resolve_thread: _FakeCallRecorder = _FakeCallRecorder()
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+
+def _client(run_turn_return: str = "") -> _FakeClaudeClient:
+    """Create a fake ClaudeClient with a configurable run_turn return."""
+    return _FakeClaudeClient(run_turn_return)
 
 
 def _task_file(tmp_path: Path) -> Path:
@@ -4072,15 +4208,10 @@ class TestReorderTasks:
         # Initial response has parse errors → nudge fires → empty
         # response from Opus on the nudge → batch dropped.  Exercises
         # the empty-after-parse-error-nudge log + early-return.
-        from unittest.mock import MagicMock
-
         Tasks(tmp_path).add(title="Original", task_type=TaskType.SPEC)
         before = Tasks(tmp_path).list()
         bad_raw = json.dumps({"operations": [{"op": "bogus", "id": "x"}]})
-        client = MagicMock(spec=ClaudeClient)
-        client.voice_model = "claude-opus-4-6"
-        client.work_model = "claude-sonnet-4-6"
-        client.brief_model = "claude-haiku-4-5"
+        client = _FakeClaudeClient()
         # First call returns the unparseable response; nudge call
         # returns empty so the loop drops the batch.
         client.run_turn.side_effect = [bad_raw, ""]
@@ -4248,16 +4379,17 @@ class TestReorderTasks:
         self, tmp_path: Path
     ) -> None:
         self._add(tmp_path, "Task A")
-        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts = _FakePrompts()
         mock_prompts.rescope_prompt.return_value = "prompt text"
         reorder_tasks(
             Tasks(tmp_path),
             "feat: added thing",
             agent=_client(""),
-            prompts=mock_prompts,
+            prompts=mock_prompts,  # type: ignore[arg-type]
         )
         mock_prompts.rescope_prompt.assert_called_once()
         call_kwargs = mock_prompts.rescope_prompt.call_args
+        assert call_kwargs is not None
         assert call_kwargs[0][1] == "feat: added thing"
         assert len(call_kwargs[0][0]) == 1
 
@@ -5012,7 +5144,7 @@ class TestReorderTasks:
         )
         client = _client()
         client.run_turn.side_effect = [dup_response, fixed_response]
-        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts = _FakePrompts()
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
@@ -5040,7 +5172,7 @@ class TestReorderTasks:
         )
         client = _client()
         client.run_turn.side_effect = [dup_response] * 4
-        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts = _FakePrompts()
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
@@ -5062,7 +5194,7 @@ class TestReorderTasks:
         )
         client = _client()
         client.run_turn.side_effect = [dup_response] * 4
-        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts = _FakePrompts()
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
@@ -5088,7 +5220,7 @@ class TestReorderTasks:
         )
         client = _client()
         client.run_turn.side_effect = [dup_response, ""]
-        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts = _FakePrompts()
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
@@ -5110,7 +5242,7 @@ class TestReorderTasks:
         )
         client = _client()
         client.run_turn.side_effect = [dup_response, "not json"]
-        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts = _FakePrompts()
         mock_prompts.rescope_prompt.return_value = "prompt"
         mock_prompts.rescope_duplicate_nudge.return_value = "nudge"
         reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
@@ -5128,7 +5260,7 @@ class TestReorderTasks:
             ]
         )
         client = _client(raw)
-        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts = _FakePrompts()
         mock_prompts.rescope_prompt.return_value = "prompt"
         reorder_tasks(Tasks(tmp_path), "", agent=client, prompts=mock_prompts)
         mock_prompts.rescope_duplicate_nudge.assert_not_called()
@@ -5151,10 +5283,10 @@ class TestReorderTasksVerdictWiring:
             )
         ]
         raw = json.dumps({"verdicts": [{"intent_comment_id": 101, "outcome": "no_op"}]})
-        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts = _FakePrompts()
         mock_prompts.rescope_prompt_verdicts.return_value = "VERDICT PROMPT"
         # legacy ops prompt MUST NOT be invoked
-        mock_prompts.rescope_prompt = MagicMock()
+        mock_prompts.rescope_prompt = _FakeCallRecorder()
         reorder_tasks(
             Tasks(tmp_path),
             "",
@@ -5168,9 +5300,9 @@ class TestReorderTasksVerdictWiring:
     def test_uses_ops_prompt_when_no_intents(self, tmp_path: Path) -> None:
         self._add(tmp_path, "A")
         raw = json.dumps({"operations": []})
-        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts = _FakePrompts()
         mock_prompts.rescope_prompt.return_value = "OPS PROMPT"
-        mock_prompts.rescope_prompt_verdicts = MagicMock()
+        mock_prompts.rescope_prompt_verdicts = _FakeCallRecorder()
         reorder_tasks(Tasks(tmp_path), "", agent=_client(raw), prompts=mock_prompts)
         mock_prompts.rescope_prompt.assert_called_once()
         mock_prompts.rescope_prompt_verdicts.assert_not_called()
@@ -5237,7 +5369,7 @@ class TestReorderTasksVerdictWiring:
         )
         agent = _client()
         agent.run_turn.side_effect = [bad_raw, valid_raw]
-        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts = _FakePrompts()
         mock_prompts.rescope_prompt_verdicts.return_value = "VERDICT PROMPT"
         mock_prompts.rescope_verdicts_parse_nudge.return_value = "VERDICT NUDGE"
         reorder_tasks(
@@ -5404,7 +5536,7 @@ class TestReorderTasksVerdictWiring:
                 ]
             }
         )
-        mock_prompts = MagicMock(spec=Prompts)
+        mock_prompts = _FakePrompts()
         mock_prompts.rescope_prompt_verdicts.return_value = "VERDICT PROMPT"
         reorder_tasks(
             Tasks(tmp_path),
@@ -7124,14 +7256,14 @@ class TestTasksCompleteWithResolve:
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.SPEC)
         Tasks(work_dir).complete_with_resolve(
-            task["id"], MagicMock(), syncer=lambda _w, _g: None
+            task["id"], _FakeGitHub(), syncer=lambda _w, _g: None
         )
         assert Tasks(work_dir).list()[0]["status"] == "completed"
 
     def test_no_thread_does_not_call_github(self, tmp_path: Path) -> None:
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.SPEC)
-        gh = MagicMock()
+        gh = _FakeGitHub()
         Tasks(work_dir).complete_with_resolve(
             task["id"], gh, syncer=lambda _w, _g: None
         )
@@ -7142,7 +7274,7 @@ class TestTasksCompleteWithResolve:
         """Thread dict with missing pr/comment_id skips resolution."""
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.THREAD, thread={"repo": "a/b"})
-        gh = MagicMock()
+        gh = _FakeGitHub()
         Tasks(work_dir).complete_with_resolve(
             task["id"], gh, syncer=lambda _w, _g: None
         )
@@ -7151,7 +7283,7 @@ class TestTasksCompleteWithResolve:
     def test_nonexistent_id_does_not_raise(self, tmp_path: Path) -> None:
         work_dir = self._work_dir(tmp_path)
         Tasks(work_dir).complete_with_resolve(
-            "nonexistent-id", MagicMock(), syncer=lambda _w, _g: None
+            "nonexistent-id", _FakeGitHub(), syncer=lambda _w, _g: None
         )
 
     def test_triggers_background_sync(self, tmp_path: Path) -> None:
@@ -7160,7 +7292,7 @@ class TestTasksCompleteWithResolve:
         the completion and the PR-ready/merge step (#988)."""
         work_dir = self._work_dir(tmp_path)
         task = Tasks(work_dir).add("task", TaskType.SPEC)
-        gh = MagicMock()
+        gh = _FakeGitHub()
         sync_calls: list[tuple[Any, Any]] = []
         Tasks(work_dir).complete_with_resolve(
             task["id"],
@@ -7173,7 +7305,7 @@ class TestTasksCompleteWithResolve:
         """Sync still fires even when the task_id isn't found — caller
         intent ('I just tried to complete something') is the trigger."""
         work_dir = self._work_dir(tmp_path)
-        gh = MagicMock()
+        gh = _FakeGitHub()
         sync_calls: list[tuple[Any, Any]] = []
         Tasks(work_dir).complete_with_resolve(
             "nonexistent-id",
@@ -7191,7 +7323,7 @@ class TestTasksCompleteWithResolve:
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
         task = Tasks(work_dir).add("threaded task", TaskType.THREAD, thread=thread)
 
-        gh = MagicMock()
+        gh = _FakeGitHub()
         gh.get_user.return_value = "fido-bot"
         gh.get_review_threads.return_value = [
             {
@@ -7223,7 +7355,7 @@ class TestTasksCompleteWithResolve:
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
         task = Tasks(work_dir).add("threaded task", TaskType.THREAD, thread=thread)
 
-        gh = MagicMock()
+        gh = _FakeGitHub()
         gh.get_user.return_value = "fido-bot"
         gh.get_review_threads.return_value = [
             {
@@ -7251,7 +7383,7 @@ class TestTasksCompleteWithResolve:
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
         task = Tasks(work_dir).add("threaded task", TaskType.THREAD, thread=thread)
 
-        gh = MagicMock()
+        gh = _FakeGitHub()
         gh.get_user.return_value = "fido-bot"
         gh.get_review_threads.return_value = []
 
@@ -7268,7 +7400,7 @@ class TestTasksCompleteWithResolve:
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
         task = Tasks(work_dir).add("threaded task", TaskType.THREAD, thread=thread)
 
-        gh = MagicMock()
+        gh = _FakeGitHub()
         gh.get_user.return_value = "fido-bot"
         gh.get_review_threads.return_value = [
             {
@@ -7295,7 +7427,7 @@ class TestTasksCompleteWithResolve:
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
         task = Tasks(work_dir).add("threaded task", TaskType.THREAD, thread=thread)
 
-        gh = MagicMock()
+        gh = _FakeGitHub()
         gh.get_user.return_value = "fido-bot"
         gh.get_review_threads.return_value = [
             {
@@ -7327,7 +7459,7 @@ class TestTasksCompleteWithResolve:
             thread={"repo": "a/b", "pr": 1, "comment_id": 77},
         )
 
-        gh = MagicMock()
+        gh = _FakeGitHub()
         gh.get_user.return_value = "fido-bot"
         gh.get_review_threads.return_value = [
             {
@@ -7360,7 +7492,7 @@ class TestTasksCompleteWithResolve:
         thread = {"repo": "a/b", "pr": 1, "comment_id": 42}
         task = Tasks(work_dir).add("threaded task", TaskType.THREAD, thread=thread)
 
-        gh = MagicMock()
+        gh = _FakeGitHub()
         gh.get_user.side_effect = RuntimeError("network error")
 
         with caplog.at_level(logging.WARNING, logger="fido"):
@@ -7499,7 +7631,7 @@ class TestReorderTasksDropCounterDropBump:
         client = _client(ops_response)
         # First call: ops envelope; second call: critic verdict.
         client.run_turn.side_effect = [ops_response, critic_verdict]
-        prompts = Prompts("p")
+        prompts = _FakePrompts()
 
         reorder_tasks(
             Tasks(tmp_path),

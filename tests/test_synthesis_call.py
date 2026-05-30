@@ -2,7 +2,6 @@
 
 import json
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -20,6 +19,131 @@ from fido.synthesis_call import (
     extract_json_objects,
 )
 from fido.types import ActiveIssue, ActivePR
+
+# ---------------------------------------------------------------------------
+# Call-recording stub (replaces MagicMock for method-level stubbing)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCallRecorder:
+    """Callable that records calls and supports configurable return/side-effect.
+
+    side_effect may be:
+    - a list  → consumed sequentially; exception items are raised, others returned
+    - a BaseException instance → raised on every call
+    - a callable → invoked and its return value returned
+    - None (default) → return_value is returned
+    """
+
+    def __init__(self, return_value: object = None) -> None:
+        self.return_value: object = return_value
+        self._side_effect: object = None
+        self._side_effect_idx: int = 0
+        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    @property
+    def side_effect(self) -> object:
+        return self._side_effect
+
+    @side_effect.setter
+    def side_effect(self, value: object) -> None:
+        self._side_effect = value
+        self._side_effect_idx = 0
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        self._calls.append((args, kwargs))
+        se = self._side_effect
+        if se is not None:
+            if isinstance(se, list):
+                item = se[self._side_effect_idx]
+                self._side_effect_idx += 1
+                if isinstance(item, BaseException):
+                    raise item
+                return item
+            if isinstance(se, BaseException):
+                raise se
+            if callable(se):
+                return se(*args, **kwargs)
+        return self.return_value
+
+    @property
+    def call_args_list(self) -> list[tuple[tuple[object, ...], dict[str, object]]]:
+        return list(self._calls)
+
+    @property
+    def call_count(self) -> int:
+        return len(self._calls)
+
+    @property
+    def call_args(self) -> tuple[tuple[object, ...], dict[str, object]]:
+        assert self._calls, "call_args: no calls recorded"
+        return self._calls[-1]
+
+    @property
+    def called(self) -> bool:
+        return bool(self._calls)
+
+    def assert_not_called(self) -> None:
+        assert not self._calls, (
+            f"Expected not called but got {len(self._calls)} call(s)"
+        )
+
+    def assert_called_once(self) -> None:
+        assert len(self._calls) == 1, f"Expected 1 call but got {len(self._calls)}"
+
+    def assert_called_once_with(self, *args: object, **kwargs: object) -> None:
+        assert len(self._calls) == 1, f"Expected 1 call but got {len(self._calls)}"
+        actual_args, actual_kwargs = self._calls[0]
+        assert actual_args == args and actual_kwargs == kwargs, (
+            f"Expected call({args!r}, {kwargs!r}) "
+            f"but got call({actual_args!r}, {actual_kwargs!r})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Typed fake helpers
+# ---------------------------------------------------------------------------
+
+
+class _FakeAgent:
+    """Fake agent with a call-recording run_turn stub."""
+
+    def __init__(self, return_value: object = None) -> None:
+        self.run_turn: _FakeCallRecorder = _FakeCallRecorder()
+        if isinstance(return_value, list):
+            self.run_turn.side_effect = return_value
+        elif return_value is not None:
+            self.run_turn.return_value = return_value
+
+
+class _FakePrompts:
+    """Fake prompt-builder with call-recording method stubs."""
+
+    def __init__(
+        self,
+        system: str = "sys",
+        user: str = "user",
+        followup_system: str = "followup-sys",
+        critic_system: str = "critic-sys",
+    ) -> None:
+        self.synthesis_system_prompt = _FakeCallRecorder(return_value=system)
+        self.synthesis_followup_system_prompt = _FakeCallRecorder(
+            return_value=followup_system
+        )
+        self.critic_system_prompt = _FakeCallRecorder(return_value=critic_system)
+        self.synthesis_prompt = _FakeCallRecorder(return_value=user)
+        self.intent_coverage_critic_prompt = _FakeCallRecorder(return_value="")
+        self.reply_prose_claim_grounding_prompt = _FakeCallRecorder(return_value="")
+
+
+class _FakeFailurePrompts:
+    """Fake failure-explanation prompt-builder."""
+
+    def __init__(self, failure_text: str = "fallback prompt: str") -> None:
+        self.synthesis_failure_explanation_prompt = _FakeCallRecorder(
+            return_value=failure_text
+        )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -46,17 +170,12 @@ def _make_raw(
     return json.dumps(obj)
 
 
-def _make_agent(return_value: str | list[str]) -> MagicMock:
-    """Return a mock agent whose run_turn returns *return_value*.
+def _make_agent(return_value: object) -> _FakeAgent:
+    """Return a fake agent whose run_turn returns *return_value*.
 
     If *return_value* is a list, successive calls return successive elements.
     """
-    agent = MagicMock()
-    if isinstance(return_value, list):
-        agent.run_turn.side_effect = return_value
-    else:
-        agent.run_turn.return_value = return_value
-    return agent
+    return _FakeAgent(return_value)
 
 
 # HOL-15 / #1909: stubs for the intent-coverage critic turn.  Threaded
@@ -75,13 +194,13 @@ def _make_prompts(
     user: str = "user",
     followup_system: str = "followup-sys",
     critic_system: str = "critic-sys",
-) -> MagicMock:
-    prompts = MagicMock()
-    prompts.synthesis_system_prompt.return_value = system
-    prompts.synthesis_followup_system_prompt.return_value = followup_system
-    prompts.critic_system_prompt.return_value = critic_system
-    prompts.synthesis_prompt.return_value = user
-    return prompts
+) -> _FakePrompts:
+    return _FakePrompts(
+        system=system,
+        user=user,
+        followup_system=followup_system,
+        critic_system=critic_system,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +420,10 @@ class TestCallSynthesis:
         prompts = _make_prompts()
 
         result = call_synthesis(
-            "Please fix this", is_bot=False, agent=agent, prompts=prompts
+            "Please fix this",
+            is_bot=False,
+            agent=agent,
+            prompts=prompts,  # type: ignore[arg-type]
         )
 
         assert result.reply_text == "Great feedback!"
@@ -315,7 +437,7 @@ class TestCallSynthesis:
         agent = _make_agent(_make_raw())
         prompts = _make_prompts(system="my-system-prompt")
 
-        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         # Check the first call (synthesis); the verify turn is the second call.
         _, kwargs = agent.run_turn.call_args_list[0]
@@ -325,7 +447,7 @@ class TestCallSynthesis:
         agent = _make_agent(_make_raw())
         prompts = _make_prompts(user="my-user-prompt")
 
-        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         # Check the first call (synthesis); the verify turn is the second call.
         args, _ = agent.run_turn.call_args_list[0]
@@ -338,7 +460,7 @@ class TestCallSynthesis:
         agent = _make_agent([raw_bad, raw_good, _CRITIC_PASS, "Yes"])
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.reply_text == "Fixed!"
         assert agent.run_turn.call_count == 4
@@ -350,12 +472,13 @@ class TestCallSynthesis:
         agent = _make_agent([raw_bad, raw_good, "Yes"])
         prompts = _make_prompts(user="base-prompt")
 
-        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         first_call_prompt = agent.run_turn.call_args_list[0][0][0]
         second_call_prompt = agent.run_turn.call_args_list[1][0][0]
         assert first_call_prompt == "base-prompt"
         assert second_call_prompt != "base-prompt"
+        assert isinstance(second_call_prompt, str)
         assert second_call_prompt.startswith("base-prompt")
 
     def test_exhausts_all_retries_and_raises(self) -> None:
@@ -363,7 +486,7 @@ class TestCallSynthesis:
         prompts = _make_prompts()
 
         with pytest.raises(SynthesisExhaustedError, match="exhausted"):
-            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert agent.run_turn.call_count == MAX_RETRIES
 
@@ -372,7 +495,7 @@ class TestCallSynthesis:
         prompts = _make_prompts()
 
         with pytest.raises(SynthesisExhaustedError, match="Constraint B"):
-            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
     def test_passes_issue_to_system_prompt(self) -> None:
         agent = _make_agent(_make_raw())
@@ -380,7 +503,11 @@ class TestCallSynthesis:
         issue = ActiveIssue(number=7, title="Fix crash", body="It crashes.")
 
         call_synthesis(
-            "comment", is_bot=False, agent=agent, prompts=prompts, issue=issue
+            "comment",
+            is_bot=False,
+            agent=agent,
+            prompts=prompts,
+            issue=issue,  # type: ignore[arg-type]
         )
 
         prompts.synthesis_system_prompt.assert_called_once_with(issue=issue, pr=None)
@@ -394,7 +521,12 @@ class TestCallSynthesis:
         )
 
         call_synthesis(
-            "comment", is_bot=False, agent=agent, prompts=prompts, issue=issue, pr=pr
+            "comment",
+            is_bot=False,
+            agent=agent,
+            prompts=prompts,
+            issue=issue,
+            pr=pr,  # type: ignore[arg-type]
         )
 
         prompts.synthesis_system_prompt.assert_called_once_with(issue=issue, pr=pr)
@@ -403,7 +535,7 @@ class TestCallSynthesis:
         agent = _make_agent(_make_raw())
         prompts = _make_prompts()
 
-        call_synthesis("comment", is_bot=True, agent=agent, prompts=prompts)
+        call_synthesis("comment", is_bot=True, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         call_kwargs = prompts.synthesis_prompt.call_args
         assert call_kwargs[1]["is_bot"] is True
@@ -414,19 +546,23 @@ class TestCallSynthesis:
         ctx = {"pr_title": "My PR"}
 
         call_synthesis(
-            "comment", is_bot=False, context=ctx, agent=agent, prompts=prompts
+            "comment",
+            is_bot=False,
+            context=ctx,
+            agent=agent,
+            prompts=prompts,  # type: ignore[arg-type]
         )
 
         call_kwargs = prompts.synthesis_prompt.call_args
         assert call_kwargs[1]["context"] == ctx
 
     def test_provider_error_propagates_immediately(self) -> None:
-        agent = MagicMock()
+        agent = _FakeAgent()
         agent.run_turn.side_effect = RuntimeError("provider down")
         prompts = _make_prompts()
 
         with pytest.raises(RuntimeError, match="provider down"):
-            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         # No retries — provider errors propagate immediately
         assert agent.run_turn.call_count == 1
@@ -440,7 +576,7 @@ class TestCallSynthesis:
         agent = _make_agent(raw)
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.emoji == "heart"
         assert result.change_request == "Drop the parser refactor"
@@ -449,7 +585,7 @@ class TestCallSynthesis:
         agent = _make_agent(_make_raw())
         prompts = _make_prompts()
 
-        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         call_kwargs = prompts.synthesis_prompt.call_args
         assert call_kwargs[1].get("context") is None
@@ -463,10 +599,10 @@ class TestCallSynthesis:
 # ---------------------------------------------------------------------------
 
 
-def _make_failure_prompts(failure_text: str = "fallback prompt: str") -> MagicMock:
-    prompts = MagicMock()
-    prompts.synthesis_failure_explanation_prompt.return_value = failure_text
-    return prompts
+def _make_failure_prompts(
+    failure_text: str = "fallback prompt: str",
+) -> _FakeFailurePrompts:
+    return _FakeFailurePrompts(failure_text)
 
 
 class TestCallFailureExplanation:
@@ -475,7 +611,9 @@ class TestCallFailureExplanation:
         prompts = _make_failure_prompts("explain failure")
 
         result = call_failure_explanation(
-            "please fix this", agent=agent, prompts=prompts
+            "please fix this",
+            agent=agent,
+            prompts=prompts,  # type: ignore[arg-type]
         )
 
         assert result.reply_text == "Sorry, I couldn't reply — please rephrase."
@@ -493,7 +631,7 @@ class TestCallFailureExplanation:
         agent = _make_agent("   Plain reply.\n\n")
         prompts = _make_failure_prompts()
 
-        result = call_failure_explanation("comment", agent=agent, prompts=prompts)
+        result = call_failure_explanation("comment", agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.reply_text == "Plain reply."
 
@@ -503,7 +641,7 @@ class TestCallFailureExplanation:
         agent = _make_agent(["", "Eventually a real reply."])
         prompts = _make_failure_prompts("base")
 
-        result = call_failure_explanation("comment", agent=agent, prompts=prompts)
+        result = call_failure_explanation("comment", agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.reply_text == "Eventually a real reply."
         assert agent.run_turn.call_count == 2
@@ -511,6 +649,7 @@ class TestCallFailureExplanation:
         first_call_arg = agent.run_turn.call_args_list[0][0][0]
         second_call_arg = agent.run_turn.call_args_list[1][0][0]
         assert first_call_arg == "base"
+        assert isinstance(second_call_arg, str)
         assert second_call_arg.startswith("base")
         assert second_call_arg != first_call_arg  # nudge was appended
 
@@ -519,7 +658,7 @@ class TestCallFailureExplanation:
         prompts = _make_failure_prompts()
 
         with pytest.raises(SynthesisExhaustedError, match="failure-explanation"):
-            call_failure_explanation("comment", agent=agent, prompts=prompts)
+            call_failure_explanation("comment", agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert agent.run_turn.call_count == MAX_RETRIES
 
@@ -529,7 +668,7 @@ class TestCallFailureExplanation:
         agent = _make_agent([None, "real reply"])  # type: ignore[list-item]
         prompts = _make_failure_prompts()
 
-        result = call_failure_explanation("comment", agent=agent, prompts=prompts)
+        result = call_failure_explanation("comment", agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.reply_text == "real reply"
 
@@ -542,7 +681,7 @@ class TestCallFailureExplanation:
         agent = _make_agent("Sorry, please try again.")
         prompts = _make_failure_prompts()
 
-        call_failure_explanation("comment", agent=agent, prompts=prompts)
+        call_failure_explanation("comment", agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         _, kwargs = agent.run_turn.call_args_list[0]
         assert kwargs.get("retry_on_preempt") is True
@@ -572,7 +711,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "Yes", _CRITIC_PASS])
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.change_request is None
         # synthesis + verify + critic
@@ -584,7 +723,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "No", "Update the test coverage", _CRITIC_PASS])
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.change_request == "Update the test coverage"
         assert result.reply_text == "This looks fine."
@@ -597,7 +736,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "No", "Add missing tests", _CRITIC_PASS])
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.reply_text == "Understood."
 
@@ -609,7 +748,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent(raw)
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.change_request == "Fix the tests"
         # synthesis + critic — no verify (change_request already set)
@@ -621,7 +760,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "NO.", "Handle the edge case", _CRITIC_PASS])
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.change_request == "Handle the edge case"
 
@@ -633,7 +772,7 @@ class TestCallSynthesisVerificationTurn:
         )
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.change_request == "Fix the linting"
 
@@ -643,7 +782,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "No", "", _CRITIC_PASS])
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.change_request is None
         # synthesis + verify + derive (even empty) + critic
@@ -655,7 +794,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "No", "Add the missing test", _CRITIC_PASS])
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.change_request == "Add the missing test"
         assert result.emoji == "rocket"
@@ -669,7 +808,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "No", "Add the missing test", _CRITIC_PASS])
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.change_request == "Add the missing test"
         assert len(result.insights) == 1
@@ -685,7 +824,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "No", "Fix the thing"])
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.reasoning == "my private chain-of-thought"
 
@@ -700,7 +839,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "Yes"])
         prompts = _make_prompts()
 
-        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         # First call is the synthesis turn itself.
         _, kwargs = agent.run_turn.call_args_list[0]
@@ -714,7 +853,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "Yes"])
         prompts = _make_prompts()
 
-        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         _, kwargs = agent.run_turn.call_args_list[1]
         assert kwargs.get("retry_on_preempt") is True
@@ -725,7 +864,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "No", "Add missing tests"])
         prompts = _make_prompts()
 
-        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         _, kwargs = agent.run_turn.call_args_list[2]
         assert kwargs.get("retry_on_preempt") is True
@@ -738,7 +877,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "Yes"])
         prompts = _make_prompts()
 
-        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         # The second call is the verification turn.
         _, kwargs = agent.run_turn.call_args_list[1]
@@ -752,7 +891,7 @@ class TestCallSynthesisVerificationTurn:
         agent = _make_agent([raw, "No", "Add missing tests"])
         prompts = _make_prompts()
 
-        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         # Third call is the derive turn.
         _, kwargs = agent.run_turn.call_args_list[2]
@@ -778,7 +917,7 @@ class TestCallSynthesisVerificationTurn:
             critic_system="SYNTHESIS_CRITIC",
         )
 
-        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         # Idx 0: main synthesis with the JSON-only system prompt.
         _, synth_kwargs = agent.run_turn.call_args_list[0]
@@ -804,7 +943,7 @@ class TestCallSynthesisVerificationTurn:
             critic_system="SYNTHESIS_CRITIC",
         )
 
-        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         _, derive_kwargs = agent.run_turn.call_args_list[2]
         assert derive_kwargs.get("system_prompt") == "SYNTHESIS_FOLLOWUP"
@@ -820,7 +959,7 @@ class TestCallSynthesisVerificationTurn:
         ]
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.reply_text == "Original reply."
         assert result.change_request is None
@@ -839,7 +978,7 @@ class TestCallSynthesisVerificationTurn:
         ]
         prompts = _make_prompts()
 
-        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+        result = call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
         assert result.reply_text == "Original reply."
         assert result.change_request is None
@@ -856,7 +995,7 @@ class TestCallSynthesisVerificationTurn:
         prompts = _make_prompts()
 
         with pytest.raises(ContextOverflowError):
-            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
     def test_session_leak_error_propagates_from_verify_turn(self) -> None:
         """SessionLeakError in verify must propagate — not be swallowed."""
@@ -868,7 +1007,7 @@ class TestCallSynthesisVerificationTurn:
         prompts = _make_prompts()
 
         with pytest.raises(SessionLeakError):
-            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
     def test_context_overflow_error_propagates_from_intent_critic(self) -> None:
         """After the PR #1932 reorder, the intent-coverage critic runs
@@ -900,7 +1039,7 @@ class TestCallSynthesisVerificationTurn:
         prompts = _make_prompts()
 
         with pytest.raises(ContextOverflowError):
-            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
     def test_session_leak_error_propagates_from_derive_turn(self) -> None:
         """SessionLeakError in derive must propagate — not be swallowed."""
@@ -912,7 +1051,7 @@ class TestCallSynthesisVerificationTurn:
         prompts = _make_prompts()
 
         with pytest.raises(SessionLeakError):
-            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
+            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -1291,8 +1430,7 @@ class TestIntentCoverageCritic:
             [raw_v1, _CRITIC_PASS, prose_fail, raw_v2, _CRITIC_PASS, prose_pass]
         )
         prompts = _make_prompts()
-        # Also stub the reply-prose prompt method on the MagicMock
-        # so the critic's prompt-build doesn't blow up.
+        # Stub the reply-prose prompt method so the critic's prompt-build doesn't blow up.
         prompts.reply_prose_claim_grounding_prompt.return_value = "reply-prose-prompt"
 
         result = call_synthesis(

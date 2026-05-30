@@ -23,10 +23,12 @@ Bugs covered:
   #979 — cross-thread stdin writes corrupted the claude protocol stream
 """
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from fido.claude import ClaudeSession
 from fido.rocq.claude_session import (
     AwaitingReply,
     CancelFire,
@@ -41,6 +43,36 @@ from fido.rocq.claude_session import (
     TurnReturn,
     transition,
 )
+
+
+class _FakeIO:
+    """Minimal stream stub for ClaudeSession subprocess injection."""
+
+    def __init__(self) -> None:
+        self.closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __iter__(self) -> Iterator[str]:
+        return iter([])
+
+
+class _FakeProc:
+    """Minimal subprocess.Popen stub for ClaudeSession subprocess injection."""
+
+    def __init__(self) -> None:
+        self.pid: int = 1
+        self.stdin: _FakeIO = _FakeIO()
+        self.stdout: _FakeIO = _FakeIO()
+        self.stderr: _FakeIO = _FakeIO()
+
+    def poll(self) -> int | None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
 
 # ---------------------------------------------------------------------------
 # Bug #979 — cross-thread stdin writes corrupt the claude protocol stream
@@ -307,27 +339,19 @@ def test_stream_transition_crashes_on_invalid_event(tmp_path: Path) -> None:
     which the FSM rejects (Idle + CancelFire → None).  The oracle must
     raise AssertionError immediately, not silently accept the invalid event.
     """
-    from unittest.mock import MagicMock
-
-    from fido.claude import ClaudeSession
-
     system_file = tmp_path / "system.md"
     system_file.write_text("sys")
-    proc = MagicMock()
-    proc.pid = 1
-    proc.stdin = MagicMock()
-    proc.stdout = MagicMock()
-    proc.stderr = MagicMock()
-    proc.poll = MagicMock(return_value=None)
-    fake_popen = MagicMock(return_value=proc)
-    fake_selector = MagicMock(return_value=([], [], []))
 
+    proc = _FakeProc()
     session = ClaudeSession(
-        system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+        system_file,
+        work_dir=tmp_path,
+        popen=lambda *args, **kwargs: proc,  # type: ignore[arg-type]
+        selector=lambda *args, **kwargs: ([], [], []),  # type: ignore[arg-type]
     )
-    assert isinstance(session._stream_state, Idle)
+    assert isinstance(session._stream_state, Idle)  # pyright: ignore[reportPrivateUsage]
 
     with pytest.raises(AssertionError, match="claude_session FSM"):
-        session._stream_transition(CancelFire())  # Idle + CancelFire → None
+        session._stream_transition(CancelFire())  # pyright: ignore[reportPrivateUsage]  # Idle + CancelFire → None
 
     session.stop()
