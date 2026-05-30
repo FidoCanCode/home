@@ -11100,17 +11100,13 @@ class TestNewDelegationMethods:
                 registry: object,
                 agent: object,
                 prompts: object,
-                rewrite_fn: object,
-                sync_fn: object = None,
-                sync_tasks_fn: object = None,
             ) -> dict[str, object]:  # type: ignore[override]
-                calls.append((registry, agent, prompts, rewrite_fn, {}))
+                calls.append((registry, agent, prompts))
                 return {"k": "v"}
 
         fake_registry = MagicMock(spec=ActivityReporter)
         fake_agent = MagicMock()
         fake_prompts = MagicMock()
-        fake_rewrite = MagicMock()
         worker = Worker(
             tmp_path,
             MagicMock(),
@@ -11121,7 +11117,6 @@ class TestNewDelegationMethods:
             fake_registry,
             fake_agent,
             fake_prompts,
-            fake_rewrite,
         )
         assert len(calls) == 1
         assert calls[0][0] is fake_registry

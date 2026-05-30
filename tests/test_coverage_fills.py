@@ -2249,14 +2249,29 @@ class TestEventsCreateTaskExitUntriaged:
             def create_agent(self, *args: object, **kwargs: object) -> object:
                 return _FakeProviderAgent()
 
+        class _FakeCommitSummarizer:
+            def __call__(self, work_dir: Path) -> str:
+                return "summary"
+
+        class _FakeThreadStarter:
+            def __init__(self, fn: Callable[..., None]) -> None:
+                self._fn = fn
+
+            def start(self, thread: object) -> None:
+                self._fn(thread)
+
+        class _FakeBackgroundSyncer:
+            def __call__(self, work_dir: Path, gh: object) -> None:
+                pass
+
         dispatcher = Dispatcher(
             config,  # type: ignore[arg-type]
             repo_cfg,  # type: ignore[arg-type]
             gh,  # type: ignore[arg-type]
-            get_commit_summary_fn=lambda wd: "summary",
-            thread_start_fn=boom,
+            commit_summarizer=_FakeCommitSummarizer(),
+            thread_starter=_FakeThreadStarter(boom),
             reorder_coalesce_state={},
-            sync_fn=lambda *a, **kw: None,
+            background_syncer=_FakeBackgroundSyncer(),
             provider_factory=_FakeFactory(),  # type: ignore[arg-type]
         )
         with pytest.raises(RuntimeError, match="explode"):
@@ -2761,7 +2776,7 @@ class TestEventsClaimReplyOutboxEffectsDelivered:
                 repo_cfg,
                 delivery_id="d1",
                 promise_ids=["promise-1"],
-                _store_factory=_StoreStub,
+                store_factory=_StoreStub,
             )
 
 

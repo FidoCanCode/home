@@ -7,7 +7,7 @@ import logging
 import re
 import subprocess
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -5296,10 +5296,6 @@ class Worker:
             log.debug("rescope_before_pick: fewer than 2 pending tasks — skipping")
             return
 
-        from fido.events import (
-            _rewrite_pr_description,  # pyright: ignore[reportPrivateUsage]
-        )
-
         commit_summary = self._get_commit_summary_fn()
         # _make_reorder_kwargs always wires up on_inprogress_affected (#1336);
         # at pick time there is no in-progress task so the callback won't fire,
@@ -5314,7 +5310,6 @@ class Worker:
             self._registry,
             self._provider_agent,
             self._get_prompts(),
-            _rewrite_pr_description,
         )
         log.info("rescope_before_pick: rescoping task list before next pick")
         self._reorder_tasks_fn(self._tasks, commit_summary, reorder_kwargs)
@@ -5327,15 +5322,11 @@ class Worker:
         registry: "ActivityReporter",
         agent: ProviderAgent,
         prompts: Prompts,
-        rewrite_fn: Callable[..., None],
-        sync_fn: Callable[[Path, Any], None] | None = None,
     ) -> dict[str, Any]:
         return self._dispatcher._make_reorder_kwargs(  # pyright: ignore[reportPrivateUsage]
             registry,
             agent,
             prompts,
-            rewrite_fn,
-            sync_fn,
         )
 
     def _reorder_tasks_fn(
