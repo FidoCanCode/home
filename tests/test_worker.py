@@ -1,6 +1,7 @@
 """Tests for fido.worker — WorkerContext, lock acquisition, git context."""
 
 import contextlib
+import inspect
 import json
 import logging
 import subprocess
@@ -10754,7 +10755,7 @@ class TestRescopeBeforePick:
         mock_reorder = MagicMock()
         worker._reorder_tasks_fn = mock_reorder
         worker._get_commit_summary_fn = MagicMock(return_value="abc def")
-        worker._make_reorder_kwargs_fn = MagicMock(return_value={})
+        worker._make_reorder_kwargs_fn = MagicMock(return_value=({}, []))
         worker.rescope_before_pick()
         mock_reorder.assert_called_once()
 
@@ -10769,7 +10770,7 @@ class TestRescopeBeforePick:
         mock_reorder = MagicMock()
         worker._reorder_tasks_fn = mock_reorder
         worker._get_commit_summary_fn = MagicMock(return_value="")
-        worker._make_reorder_kwargs_fn = MagicMock(return_value={})
+        worker._make_reorder_kwargs_fn = MagicMock(return_value=({}, []))
         worker.rescope_before_pick()
         assert mock_reorder.call_args[0][0] is worker._tasks
 
@@ -10781,7 +10782,7 @@ class TestRescopeBeforePick:
         mock_reorder = MagicMock()
         worker._reorder_tasks_fn = mock_reorder
         worker._get_commit_summary_fn = MagicMock(return_value="abc123 first commit")
-        worker._make_reorder_kwargs_fn = MagicMock(return_value={})
+        worker._make_reorder_kwargs_fn = MagicMock(return_value=({}, []))
         worker.rescope_before_pick()
         assert mock_reorder.call_args[0][1] == "abc123 first commit"
 
@@ -10795,7 +10796,7 @@ class TestRescopeBeforePick:
         worker._reorder_tasks_fn = MagicMock()
         worker._get_commit_summary_fn = MagicMock(return_value="")
         worker._make_reorder_kwargs_fn = MagicMock(
-            side_effect=lambda reg, *a, **kw: captured_registry.append(reg) or {}
+            side_effect=lambda reg, *a, **kw: (captured_registry.append(reg) or {}, [])
         )
         worker.rescope_before_pick()
         assert captured_registry == [worker._registry]  # noqa: SLF001
@@ -10814,9 +10815,59 @@ class TestRescopeBeforePick:
         mock_reorder = MagicMock()
         worker._reorder_tasks_fn = mock_reorder
         worker._get_commit_summary_fn = MagicMock(return_value="")
-        worker._make_reorder_kwargs_fn = MagicMock(return_value={})
+        worker._make_reorder_kwargs_fn = MagicMock(return_value=({}, []))
         worker.rescope_before_pick()
         mock_reorder.assert_called_once()
+
+
+class TestRescopeBeforePickRealKwargs:
+    """Regression test for #1955: ``rescope_before_pick`` consumes the
+    dict half of ``_make_reorder_kwargs``'s tuple return; nothing in
+    that dict may be a side-channel that ``reorder_tasks`` does not
+    accept.  The previous shape (``_after_applies`` stored inside
+    ``kwargs``) crashed every rescope with TypeError."""
+
+    def test_real_make_reorder_kwargs_does_not_leak_side_channels(
+        self, tmp_path: Path
+    ) -> None:
+        # Build a real Dispatcher so ``_make_reorder_kwargs`` runs
+        # the production code path, then verify every key in the
+        # returned kwargs is a valid ``reorder_tasks`` parameter
+        # name.  This catches any future drift where someone adds a
+        # side-channel kwarg to the dict.
+        from fido.events import Dispatcher
+        from fido.tasks import reorder_tasks
+
+        gh = MagicMock()
+        cfg = Config(
+            port=9000,
+            secret=b"test",
+            repos={
+                "owner/repo": RepoConfig(
+                    name="owner/repo",
+                    work_dir=tmp_path,
+                    provider=ProviderID.CLAUDE_CODE,
+                )
+            },
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        dispatcher = Dispatcher(cfg, cfg.repos["owner/repo"], gh)
+        kwargs, after_applies = dispatcher._make_reorder_kwargs(  # noqa: SLF001
+            MagicMock(spec=ActivityReporter),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        )
+        # The after-apply chain lives outside kwargs.
+        assert isinstance(after_applies, list)
+        # Every key in kwargs must be a valid ``reorder_tasks`` parameter.
+        reorder_params = set(inspect.signature(reorder_tasks).parameters)
+        leaked = set(kwargs) - reorder_params
+        assert leaked == set(), (
+            f"side-channel kwargs leaked into reorder_tasks call: {leaked}"
+        )
 
 
 class TestRunRescopeIntegration:
@@ -11026,9 +11077,9 @@ class TestNewDelegationMethods:
                 rewrite_fn: object,
                 sync_fn: object = None,
                 sync_tasks_fn: object = None,
-            ) -> dict[str, object]:  # type: ignore[override]
+            ) -> tuple[dict[str, object], list[object]]:  # type: ignore[override]
                 calls.append((registry, agent, prompts, rewrite_fn, {}))
-                return {"k": "v"}
+                return {"k": "v"}, []
 
         fake_registry = MagicMock(spec=ActivityReporter)
         fake_agent = MagicMock()
@@ -11049,7 +11100,7 @@ class TestNewDelegationMethods:
         assert len(calls) == 1
         assert calls[0][0] is fake_registry
         assert calls[0][1] is fake_agent
-        assert result == {"k": "v"}
+        assert result == ({"k": "v"}, [])
 
     def test_reorder_tasks_fn_delegates_to_collaborator(self, tmp_path: Path) -> None:
         mock_fn = MagicMock()

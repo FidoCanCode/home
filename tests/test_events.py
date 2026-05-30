@@ -7261,7 +7261,7 @@ class TestMakeReorderKwargsActiveContext:
 
     def test_no_issue_key_omitted_when_no_state(self, tmp_path: Path) -> None:
         gh = MagicMock()
-        kwargs = Dispatcher(
+        kwargs, _ = Dispatcher(
             self._cfg(tmp_path), self._repo_cfg(tmp_path), gh
         )._make_reorder_kwargs(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         assert "issue" not in kwargs
@@ -7272,7 +7272,7 @@ class TestMakeReorderKwargsActiveContext:
         State(fido_dir).save({"issue": 5})
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "Do the thing", "body": "Details."}
-        kwargs = Dispatcher(
+        kwargs, _ = Dispatcher(
             self._cfg(tmp_path), self._repo_cfg(tmp_path), gh
         )._make_reorder_kwargs(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         assert "issue" in kwargs
@@ -7288,7 +7288,7 @@ class TestMakeReorderKwargsActiveContext:
         gh = MagicMock()
         gh.view_issue.return_value = {"title": "t", "body": ""}
         gh.get_pr.return_value = {"title": "Fix it (closes #5)", "body": ""}
-        kwargs = Dispatcher(
+        kwargs, _ = Dispatcher(
             self._cfg(tmp_path), self._repo_cfg(tmp_path), gh
         )._make_reorder_kwargs(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         assert "pr" in kwargs
@@ -7328,7 +7328,7 @@ class TestMakeReorderKwargsAfterApply:
         def after_apply() -> None:
             calls.append("after_apply")
 
-        kwargs = Dispatcher(
+        kwargs, _ = Dispatcher(
             self._cfg(tmp_path), self._cfg(tmp_path).repos["owner/repo"], gh
         )._make_reorder_kwargs(
             MagicMock(),
