@@ -17672,18 +17672,39 @@ class TestWorkerThread:
         wt._wake.wait.assert_called_once()
 
     def test_run_halts_on_claude_leak_error(self, tmp_path: Path) -> None:
-        """SessionLeakError in the worker loop calls os._exit(3)."""
-        wt = self._make_thread(tmp_path)
-        exits: list[int] = []
-        WorkerThread._fn_exit = exits.append  # type: ignore[assignment]
-        try:
-            # Force the loop to raise a leak error on the first iteration.
-            wt._registry = MagicMock()
-            wt._registry.report_activity.side_effect = provider.SessionLeakError("leak")
-            wt.run()
-        finally:
-            del WorkerThread._fn_exit
-        assert exits == [3]
+        """SessionLeakError in the worker loop calls os._exit(3) via OsProcess."""
+
+        class _FakeOsProcess:
+            def __init__(self) -> None:
+                self.exit_calls: list[int] = []
+
+            def exit(self, code: int) -> None:
+                self.exit_calls.append(code)
+
+            def execvp(
+                self, file: str, args: list[str]
+            ) -> None: ...  # pragma: no cover
+
+            def chdir(self, path: object) -> None: ...  # pragma: no cover
+
+            def install_signal(
+                self, signum: int, handler: object
+            ) -> object:  # pragma: no cover
+                return None
+
+        os_proc = _FakeOsProcess()
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            os_proc=os_proc,
+        )
+        # Force the loop to raise a leak error on the first iteration.
+        wt._registry = MagicMock()
+        wt._registry.report_activity.side_effect = provider.SessionLeakError("leak")
+        wt.run()
+        assert os_proc.exit_calls == [3]
 
     # ── config / repo_cfg injection ───────────────────────────────────────
 

@@ -201,7 +201,6 @@ def _restore_handler_fns() -> object:
         "_fn_spawn_bg": WebhookHandler._fn_spawn_bg,
         "_fn_after_do_post": WebhookHandler._fn_after_do_post,
         "_fn_runner_dir": WebhookHandler._fn_runner_dir,
-        "_fn_exit": WebhookHandler._fn_exit,
         "infra": WebhookHandler.infra,
         "static_files": WebhookHandler.static_files,
         "_restart_fsm_state": WebhookHandler._restart_fsm_state,
@@ -993,7 +992,7 @@ class TestProcessAction:
             assert "handling webhook action" not in args
 
     def test_claude_leak_halts_process(self, server: tuple) -> None:
-        """SessionLeakError from a webhook handler calls os._exit(3)."""
+        """SessionLeakError from a webhook handler calls os._exit(3) via OsProcess."""
         url, cfg = server
         payload = {
             **_payload(),
@@ -1004,10 +1003,12 @@ class TestProcessAction:
         WebhookHandler._fn_launch_worker = MagicMock(
             side_effect=provider.SessionLeakError("leaked")
         )
-        exits: list[int] = []
-        WebhookHandler._fn_exit = exits.append  # type: ignore[assignment]
+        os_proc = _FakeOsProcess()
+        WebhookHandler.infra = dataclasses.replace(
+            WebhookHandler.infra, os_proc=os_proc
+        )
         _post_webhook(url, cfg, "pull_request", payload)
-        assert exits == [3]
+        assert os_proc.exit_calls == [3]
 
     def test_exception_in_process_action_does_not_crash(self, server: tuple) -> None:
         url, cfg = server

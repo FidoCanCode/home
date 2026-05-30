@@ -4,7 +4,6 @@ import fcntl
 import hashlib
 import json
 import logging
-import os
 import re
 import subprocess
 import threading
@@ -37,7 +36,14 @@ from fido.harness_commit import (
     RealCommitOracle,
     RealDecisionOracle,
 )
-from fido.infra import Clock, ProcessRunner, RealClock, RealProcessRunner
+from fido.infra import (
+    Clock,
+    OsProcess,
+    ProcessRunner,
+    RealClock,
+    RealOsProcess,
+    RealProcessRunner,
+)
 from fido.issue_cache import IssueCache, IssueNode
 from fido.nudges import Nudges
 from fido.prompts import Prompts, render_active_context
@@ -5611,12 +5617,7 @@ class WorkerThread(threading.Thread):
     with no provider-attached session and creates a fresh session on its first
     iteration.
 
-    ``_fn_exit`` is a class-level injectable: override it on a test subclass to
-    intercept the ``SessionLeakError`` halt path instead of actually calling
-    ``os._exit``.
     """
-
-    _fn_exit: Callable[[int], None] = os._exit  # type: ignore[assignment]
 
     def __init__(
         self,
@@ -5635,6 +5636,7 @@ class WorkerThread(threading.Thread):
         provider_factory: DefaultProviderFactory,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
+        os_proc: OsProcess | None = None,
         _state: State | None = None,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
@@ -5642,6 +5644,7 @@ class WorkerThread(threading.Thread):
         self._repo_name = repo_name
         self._gh = gh
         self._registry = registry
+        self._os_proc: OsProcess = os_proc if os_proc is not None else RealOsProcess()
         self._membership = membership
         self._wake = threading.Event()
         self._abort_task = AbortHandle()
@@ -6065,7 +6068,7 @@ class WorkerThread(threading.Thread):
                 "claude leak detected in worker thread for %s — halting",
                 self._repo_name,
             )
-            type(self)._fn_exit(3)
+            self._os_proc.exit(3)
         except Exception as exc:
             self.crash_error = f"{type(exc).__name__}: {exc}"
             log.exception("WorkerThread %s: unexpected error", self.name)
