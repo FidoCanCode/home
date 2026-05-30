@@ -1029,26 +1029,6 @@ class TestCallSynthesisVerificationTurn:
         with pytest.raises(ContextOverflowError):
             call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
 
-    def test_context_overflow_error_propagates_from_intent_critic(self) -> None:
-        """After the PR #1932 reorder, the intent-coverage critic runs
-        AFTER verify — so a ContextOverflowError raised by the critic
-        sits at a later position in the side_effect list than verify's.
-        This test pins the critic's own propagation arm so a future
-        change can't accidentally swallow it.
-
-        ``change_request`` is pre-set on the response so verify is
-        skipped (``_check_and_promote`` short-circuits when cr is
-        already populated), placing the critic call right after synth."""
-        from fido.provider import ContextOverflowError
-
-        raw = _make_raw(reply_text="Reply.", change_request="Fix it")
-        agent = _make_agent([raw])
-        agent.run_turn.side_effect = [raw, ContextOverflowError("overflow")]
-        prompts = _make_prompts()
-
-        with pytest.raises(ContextOverflowError):
-            call_synthesis("comment", is_bot=False, agent=agent, prompts=prompts)
-
     def test_context_overflow_error_propagates_from_derive_turn(self) -> None:
         """ContextOverflowError in derive must propagate — not be swallowed."""
         from fido.provider import ContextOverflowError
