@@ -5266,7 +5266,11 @@ class Worker:
         assert self._repo_cfg is not None, (
             "Worker._repo_cfg is required for rescope_before_pick"
         )
-        reorder_kwargs = self._make_reorder_kwargs_fn(
+        # ``_make_reorder_kwargs`` returns ``(kwargs, after_applies)``.
+        # ``rescope_before_pick`` has no per-caller after-apply hook,
+        # so the list is empty and can be discarded — ``on_done``'s
+        # closure still references the (empty) list and is shape-stable.
+        reorder_kwargs, _ = self._make_reorder_kwargs_fn(
             self._registry,
             self._provider_agent,
             self._get_prompts(),
@@ -5285,7 +5289,7 @@ class Worker:
         prompts: Prompts,
         rewrite_fn: Callable[..., None],
         sync_fn: Callable[[Path, Any], None] | None = None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], list[Callable[[], None]]]:
         return self._dispatcher._make_reorder_kwargs(  # pyright: ignore[reportPrivateUsage]
             registry,
             agent,
