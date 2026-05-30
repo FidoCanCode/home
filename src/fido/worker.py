@@ -166,7 +166,6 @@ def _remove_stale_index_lock(
     work_dir: Path,
     *,
     stale_after_seconds: float = _STALE_INDEX_LOCK_SECONDS,
-    _now: Callable[..., datetime] = datetime.now,
 ) -> bool:
     """Remove ``<work_dir>/.git/index.lock`` iff it is older than
     *stale_after_seconds*.  Returns ``True`` when a stale lock was
@@ -183,7 +182,7 @@ def _remove_stale_index_lock(
         stat = lock.stat()
     except FileNotFoundError:
         return False
-    age = _now(tz=timezone.utc).timestamp() - stat.st_mtime
+    age = datetime.now(tz=timezone.utc).timestamp() - stat.st_mtime
     if age < stale_after_seconds:
         return False
     lock.unlink()
@@ -334,6 +333,23 @@ def _queued_comment_payload(queued: PRCommentQueueRecord) -> dict[str, Any]:
 def _sub_dir() -> Path:
     """Return the path to the sub/ skill-instructions directory."""
     return default_sub_dir()
+
+
+class SubDirProvider(Protocol):
+    """Returns the path to the sub/ skill-instructions directory.
+
+    Wraps :func:`_sub_dir` / :func:`~fido.config.default_sub_dir` so callers
+    can be tested without touching the real filesystem path.
+    """
+
+    def sub_dir(self) -> Path: ...
+
+
+class _RealSubDirProvider:
+    """Real :class:`SubDirProvider` — delegates to :func:`default_sub_dir`."""
+
+    def sub_dir(self) -> Path:
+        return default_sub_dir()
 
 
 def acquire_lock(fido_dir: Path) -> IO[str]:
@@ -999,18 +1015,43 @@ def _ci_oracle_snapshot(
     )
 
 
+class CITaskPicker(Protocol):
+    """Selects the next task to execute from the CI oracle task queue.
+
+    Wraps :func:`~fido.rocq.ci_task_lifecycle.pick_next_task` so
+    :func:`_assert_ci_failure_matches_oracle` can be tested with a fake
+    picker that returns a deliberately wrong result to exercise the
+    assertion path.
+    """
+
+    def pick_next_task(
+        self,
+        order: list[int],
+        rows: dict[int, ci_oracle.TaskRow],
+    ) -> int | None: ...
+
+
+class _RealCITaskPicker:
+    """Real :class:`CITaskPicker` — delegates to :func:`ci_oracle.pick_next_task`."""
+
+    def pick_next_task(
+        self,
+        order: list[int],
+        rows: dict[int, ci_oracle.TaskRow],
+    ) -> int | None:
+        return ci_oracle.pick_next_task(order, rows)
+
+
+_DEFAULT_CI_TASK_PICKER: CITaskPicker = _RealCITaskPicker()
+
+
 def _assert_ci_failure_matches_oracle(
     task_list: list[dict[str, Any]],
     check_name: str,
     state: str,
     run_id: str,
-    _pick_next_task_fn: Callable[..., Any] | None = None,
+    picker: CITaskPicker = _DEFAULT_CI_TASK_PICKER,
 ) -> None:
-    _pick_fn = (
-        _pick_next_task_fn
-        if _pick_next_task_fn is not None
-        else ci_oracle.pick_next_task
-    )
     order, rows = _ci_oracle_task_rows(task_list)
     new_task = len(order) + 1
     result, created_task = ci_oracle.record_ci_failure(
@@ -1023,7 +1064,7 @@ def _assert_ci_failure_matches_oracle(
     )
     store_order, next_rows = result
     _store, next_order = store_order
-    picked = _pick_fn(next_order, next_rows)
+    picked = picker.pick_next_task(next_order, next_rows)
     if picked != created_task:
         raise AssertionError(
             "ci_task_lifecycle oracle: admitted CI failure was not first pickup"
@@ -1480,6 +1521,8 @@ _DEFAULT_HARNESS_COMMITTER_FACTORY: HarnessCommitterFactory = (
 )
 _DEFAULT_TASK_SYNCER: TaskSyncer = _RealTaskSyncer()
 _DEFAULT_CLOCK: Clock = RealClock()
+_DEFAULT_RUNNER: ProcessRunner = RealProcessRunner()
+_DEFAULT_SUB_DIR_PROVIDER: SubDirProvider = _RealSubDirProvider()
 
 
 class Worker:
@@ -1520,6 +1563,8 @@ class Worker:
         harness_committer_factory: HarnessCommitterFactory,
         task_syncer: TaskSyncer,
         clock: Clock,
+        runner: ProcessRunner,
+        sub_dir_provider: SubDirProvider,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
         background_syncer: BackgroundTaskSyncer,
@@ -1580,6 +1625,8 @@ class Worker:
         self._harness_committer_factory = harness_committer_factory
         self._task_syncer = task_syncer
         self._clock = clock
+        self._runner = runner
+        self._sub_dir_provider = sub_dir_provider
         self._background_syncer = background_syncer
         self._task_reorderer = task_reorderer
         self._commit_summarizer = commit_summarizer
@@ -1668,31 +1715,27 @@ class Worker:
             pre_baked_description=pre_baked_description,
         )
 
-    def _get_prompts(self, *, _sub_dir_fn: Callable[..., Path] = _sub_dir) -> Prompts:
+    def _get_prompts(self) -> Prompts:
         """Return the injected Prompts or build one from the persona file."""
         if self._prompts is not None:
             return self._prompts
-        persona_path = _sub_dir_fn() / "persona.md"
+        persona_path = self._sub_dir_provider.sub_dir() / "persona.md"
         try:
             persona = persona_path.read_text()
         except OSError:
             persona = ""
         return Prompts(persona)
 
-    def resolve_git_dir(
-        self, *, _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
-    ) -> Path:
+    def resolve_git_dir(self) -> Path:
         """Return the absolute .git directory for self.work_dir."""
-        return _resolve_git_dir(self.work_dir, _run=_run)
+        return _resolve_git_dir(self.work_dir, _run=self._runner.run)
 
-    def create_context(
-        self, *, _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
-    ) -> WorkerContext:
+    def create_context(self) -> WorkerContext:
         """Build a WorkerContext for self.work_dir, acquiring the fido lock.
 
         Raises LockHeld if the lock is already held.
         """
-        git_dir = self.resolve_git_dir(_run=_run)
+        git_dir = self.resolve_git_dir()
         fido_dir = git_dir / "fido"
         lock_fd = acquire_lock(fido_dir)
         return WorkerContext(
@@ -1798,8 +1841,6 @@ class Worker:
         self,
         what: str,
         busy: bool = True,
-        *,
-        _sub_dir_fn: Callable[..., Path] = _sub_dir,
     ) -> None:
         """Set the authenticated user's GitHub status using provider-generated text.
 
@@ -1813,7 +1854,7 @@ class Worker:
         logs and returns — status is best-effort and callers should not block
         on it.
         """
-        prompts = self._get_prompts(_sub_dir_fn=_sub_dir_fn)
+        prompts = self._get_prompts()
 
         ctx = (
             self._registry.status_update()
@@ -2048,9 +2089,6 @@ class Worker:
         self,
         args: list[str],
         check: bool = True,
-        *,
-        _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-        _now: Callable[..., datetime] = datetime.now,
     ) -> subprocess.CompletedProcess[str]:
         """Run a git command in self.work_dir.
 
@@ -2063,7 +2101,7 @@ class Worker:
         """
 
         def _call() -> subprocess.CompletedProcess[str]:
-            return _run(
+            return self._runner.run(
                 ["git", *args],
                 cwd=self.work_dir,
                 capture_output=True,
@@ -2076,7 +2114,7 @@ class Worker:
         except subprocess.CalledProcessError as exc:
             if not _stderr_is_index_lock_error(exc.stderr or ""):
                 raise
-            if not _remove_stale_index_lock(self.work_dir, _now=_now):
+            if not _remove_stale_index_lock(self.work_dir):
                 raise
             log.warning(
                 "git: removed stale .git/index.lock in %s and retrying %s",
@@ -5902,6 +5940,8 @@ class WorkerThread(threading.Thread):
             harness_committer_factory=_DEFAULT_HARNESS_COMMITTER_FACTORY,
             task_syncer=_DEFAULT_TASK_SYNCER,
             clock=_DEFAULT_CLOCK,
+            runner=_DEFAULT_RUNNER,
+            sub_dir_provider=_DEFAULT_SUB_DIR_PROVIDER,
             dispatcher=self._dispatcher,
             issue_cache=self._issue_cache,
             background_syncer=tasks.sync_tasks_background,

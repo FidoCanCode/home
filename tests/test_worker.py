@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import ANY, MagicMock, call
 
 import pytest
@@ -196,6 +197,52 @@ class _FakeTaskSyncer:
         self.sync_tasks: MagicMock = MagicMock()
 
 
+class _FakeProcessRunner:
+    """Typed :class:`~fido.infra.ProcessRunner` fake for worker tests.
+
+    Pre-programs a sequence of results/errors returned in order.  Each entry
+    in *results* is either a :class:`subprocess.CompletedProcess` (returned)
+    or a :class:`subprocess.CalledProcessError` (raised).  When *results* is
+    omitted, every ``run()`` call returns a success result with *stdout*.
+
+    Records every ``run()`` call (cmd + kwargs) so tests can assert on the
+    commands issued and kwargs forwarded.
+    """
+
+    def __init__(
+        self,
+        results: "list[subprocess.CompletedProcess[str] | subprocess.CalledProcessError] | None" = None,
+        *,
+        stdout: str = "",
+    ) -> None:
+        self._results = list(results) if results is not None else None
+        self._stdout = stdout
+        self.calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def run(self, cmd: Any, **kwargs: Any) -> "subprocess.CompletedProcess[str]":  # noqa: ANN401
+        self.calls.append((cmd, kwargs))
+        if self._results is not None:
+            item = self._results.pop(0)
+            if isinstance(item, subprocess.CalledProcessError):
+                raise item
+            return item
+        return subprocess.CompletedProcess(cmd, 0, stdout=self._stdout, stderr="")
+
+
+class _FakeSubDirProvider:
+    """Typed :class:`~fido.worker.SubDirProvider` fake for worker tests.
+
+    Returns a fixed :class:`~pathlib.Path` from :meth:`sub_dir` so tests
+    can point the worker at a temporary directory containing fake persona files.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def sub_dir(self) -> Path:
+        return self._path
+
+
 def _enqueue_pr_comment(tmp_path: Path, *, pr_number: int = 1) -> None:
     FidoStore(tmp_path).enqueue_pr_comment(
         delivery_id=f"delivery-{pr_number}",
@@ -274,6 +321,10 @@ class Worker(_WorkerBase):
             kwargs["task_syncer"] = worker_module._DEFAULT_TASK_SYNCER  # pyright: ignore[reportPrivateUsage]
         if "clock" not in kwargs:
             kwargs["clock"] = worker_module._DEFAULT_CLOCK  # pyright: ignore[reportPrivateUsage]
+        if "runner" not in kwargs:
+            kwargs["runner"] = worker_module._DEFAULT_RUNNER  # pyright: ignore[reportPrivateUsage]
+        if "sub_dir_provider" not in kwargs:
+            kwargs["sub_dir_provider"] = worker_module._DEFAULT_SUB_DIR_PROVIDER  # pyright: ignore[reportPrivateUsage]
         if "background_syncer" not in kwargs:
             kwargs["background_syncer"] = lambda _w, _g: None
         if "task_reorderer" not in kwargs:
@@ -464,34 +515,41 @@ class TestRepoNameFilter:
 
 
 class TestResolveGitDir:
-    def _make_worker(self, tmp_path: Path) -> Worker:
-        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
+    def _make_worker(
+        self, tmp_path: Path, runner: _FakeProcessRunner | None = None
+    ) -> Worker:
+        return Worker(
+            tmp_path,
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            runner=runner or _FakeProcessRunner(stdout="/default/.git"),
+        )
 
     def test_returns_path(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="/some/repo/.git\n"))
-        result = self._make_worker(tmp_path).resolve_git_dir(_run=mock_run)
+        runner = _FakeProcessRunner(stdout="/some/repo/.git\n")
+        result = Worker(tmp_path, MagicMock(), runner=runner).resolve_git_dir()
         assert result == Path("/some/repo/.git")
 
     def test_strips_whitespace(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="  /a/b/.git  \n"))
-        result = self._make_worker(tmp_path).resolve_git_dir(_run=mock_run)
+        runner = _FakeProcessRunner(stdout="  /a/b/.git  \n")
+        result = Worker(tmp_path, MagicMock(), runner=runner).resolve_git_dir()
         assert result == Path("/a/b/.git")
 
     def test_calls_correct_command(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="/a/.git"))
-        self._make_worker(tmp_path).resolve_git_dir(_run=mock_run)
-        mock_run.assert_called_once_with(
-            ["git", "rev-parse", "--absolute-git-dir"],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        runner = _FakeProcessRunner(stdout="/a/.git")
+        Worker(tmp_path, MagicMock(), runner=runner).resolve_git_dir()
+        assert len(runner.calls) == 1
+        cmd, kwargs = runner.calls[0]
+        assert cmd == ["git", "rev-parse", "--absolute-git-dir"]
+        assert kwargs["cwd"] == tmp_path
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["check"] is True
 
     def test_propagates_called_process_error(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, "git"))
+        runner = _FakeProcessRunner(results=[subprocess.CalledProcessError(128, "git")])
         with pytest.raises(subprocess.CalledProcessError):
-            self._make_worker(tmp_path).resolve_git_dir(_run=mock_run)
+            Worker(tmp_path, MagicMock(), runner=runner).resolve_git_dir()
 
 
 class TestAcquireLock:
@@ -563,15 +621,18 @@ class TestWorkerContextManager:
 
 
 class TestCreateContext:
-    def _mock_run(self, git_dir: Path) -> MagicMock:
-        return MagicMock(return_value=MagicMock(stdout=str(git_dir) + "\n"))
+    def _runner(self, git_dir: Path) -> _FakeProcessRunner:
+        return _FakeProcessRunner(stdout=str(git_dir) + "\n")
 
     def test_returns_worker_context(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
         ctx = Worker(
-            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-        ).create_context(_run=self._mock_run(git_dir))
+            tmp_path,
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            runner=self._runner(git_dir),
+        ).create_context()
         assert isinstance(ctx, WorkerContext)
         assert ctx.work_dir == tmp_path
         assert ctx.git_dir == git_dir
@@ -582,8 +643,11 @@ class TestCreateContext:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
         ctx = Worker(
-            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-        ).create_context(_run=self._mock_run(git_dir))
+            tmp_path,
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            runner=self._runner(git_dir),
+        ).create_context()
         assert ctx.fido_dir.is_dir()
         ctx.lock_fd.close()
 
@@ -595,8 +659,11 @@ class TestCreateContext:
         try:
             with pytest.raises(LockHeld):
                 Worker(
-                    tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-                ).create_context(_run=self._mock_run(git_dir))
+                    tmp_path,
+                    MagicMock(),
+                    registry=MagicMock(spec=ActivityReporter),
+                    runner=self._runner(git_dir),
+                ).create_context()
         finally:
             fd1.close()
 
@@ -845,7 +912,8 @@ class TestWorker:
             gh,
             session=self._session(status="writing tests"),
             registry=MagicMock(spec=ActivityReporter),
-        ).set_status("writing tests", _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("writing tests")
         gh.set_user_status.assert_called_once_with("writing tests", "🐕", busy=True)
 
     def test_set_status_busy_false_forwarded(self, tmp_path: Path) -> None:
@@ -856,7 +924,8 @@ class TestWorker:
             gh,
             session=self._session(status="napping", emoji="😴"),
             registry=MagicMock(spec=ActivityReporter),
-        ).set_status("napping", busy=False, _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("napping", busy=False)
         gh.set_user_status.assert_called_once_with("napping", "😴", busy=False)
 
     def test_set_status_uses_what_as_fallback_when_status_empty(
@@ -869,7 +938,8 @@ class TestWorker:
             gh,
             session=self._session(status="", emoji=":dog:"),
             registry=MagicMock(spec=ActivityReporter),
-        ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("idle")
         assert gh.set_user_status.call_args[0][0] == "idle"
 
     def test_set_status_emoji_fallback_when_empty(self, tmp_path: Path) -> None:
@@ -880,7 +950,8 @@ class TestWorker:
             gh,
             session=self._session(status="Sniffing endpoints", emoji=""),
             registry=MagicMock(spec=ActivityReporter),
-        ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("idle")
         gh.set_user_status.assert_called_once_with(
             "Sniffing endpoints", ":dog:", busy=True
         )
@@ -894,7 +965,8 @@ class TestWorker:
             gh,
             session=self._session(status=long_text),
             registry=MagicMock(spec=ActivityReporter),
-        ).set_status("something", _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("something")
         called_text = gh.set_user_status.call_args[0][0]
         assert len(called_text) == 80
 
@@ -907,8 +979,12 @@ class TestWorker:
         (tmp_path / "persona.md").write_text("I am Fido.")
         with caplog.at_level(logging.INFO, logger="fido"):
             Worker(
-                tmp_path, gh, session=None, registry=MagicMock(spec=ActivityReporter)
-            ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
+                tmp_path,
+                gh,
+                session=None,
+                registry=MagicMock(spec=ActivityReporter),
+                sub_dir_provider=_FakeSubDirProvider(tmp_path),
+            ).set_status("idle")
         gh.set_user_status.assert_not_called()
         assert "no session available" in caplog.text
 
@@ -925,7 +1001,8 @@ class TestWorker:
                 gh,
                 session=self._session(status="", emoji=":dog:"),
                 registry=MagicMock(spec=ActivityReporter),
-            ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
+                sub_dir_provider=_FakeSubDirProvider(tmp_path),
+            ).set_status("idle")
         assert "falling back" in caplog.text
 
     def test_set_status_logs_info_on_success(
@@ -941,7 +1018,8 @@ class TestWorker:
                 gh,
                 session=self._session(status="fetching"),
                 registry=MagicMock(spec=ActivityReporter),
-            ).set_status("fetching", _sub_dir_fn=lambda: tmp_path)
+                sub_dir_provider=_FakeSubDirProvider(tmp_path),
+            ).set_status("fetching")
         assert "set_status" in caplog.text
 
     def test_set_status_falls_back_to_empty_persona_on_oserror(
@@ -950,9 +1028,12 @@ class TestWorker:
         gh = self._make_gh()
         missing_dir = tmp_path / "no_such_dir"
         session = self._session(status="working")
-        Worker(tmp_path, gh, session=session).set_status(
-            "working", _sub_dir_fn=lambda: missing_dir
-        )
+        Worker(
+            tmp_path,
+            gh,
+            session=session,
+            sub_dir_provider=_FakeSubDirProvider(missing_dir),
+        ).set_status("working")
         prompt_arg = session.prompt.call_args[0][0]
         assert "working (busy)" in prompt_arg
 
@@ -961,8 +1042,12 @@ class TestWorker:
         (tmp_path / "persona.md").write_text("I am Fido.")
         session = self._session(status="working")
         Worker(
-            tmp_path, gh, session=session, registry=MagicMock(spec=ActivityReporter)
-        ).set_status("working", _sub_dir_fn=lambda: tmp_path)
+            tmp_path,
+            gh,
+            session=session,
+            registry=MagicMock(spec=ActivityReporter),
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("working")
         assert session.prompt.call_args[1]["system_prompt"] is not None
 
     def test_set_status_reports_activity_to_registry(self, tmp_path: Path) -> None:
@@ -975,7 +1060,8 @@ class TestWorker:
             repo_name="owner/myrepo",
             registry=registry,
             session=self._session(status="working"),
-        ).set_status("working", busy=True, _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("working", busy=True)
         registry.report_activity.assert_called_once_with(
             "owner/myrepo", "working", True
         )
@@ -992,7 +1078,8 @@ class TestWorker:
             repo_name="owner/repo",
             registry=registry,
             session=self._session(status="working"),
-        ).set_status("working", _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("working")
         registry.status_update.assert_called_once()
 
     def test_set_status_serializes_concurrent_calls_via_registry_lock(
@@ -1055,6 +1142,7 @@ class TestWorker:
                 repo_name=f"owner/repo{i}",
                 registry=registry,
                 session=make_session(),
+                sub_dir_provider=_FakeSubDirProvider(tmp_path / "nosub"),
             )
             for i in range(3)
         ]
@@ -1062,7 +1150,6 @@ class TestWorker:
             threading.Thread(
                 target=w.set_status,
                 args=("working",),
-                kwargs={"_sub_dir_fn": lambda: tmp_path / "nosub"},
             )
             for w in workers
         ]
@@ -2688,6 +2775,8 @@ class TestAssertGitIdentity:
                 harness_committer_factory=worker_module._DEFAULT_HARNESS_COMMITTER_FACTORY,  # pyright: ignore[reportPrivateUsage]
                 task_syncer=worker_module._DEFAULT_TASK_SYNCER,  # pyright: ignore[reportPrivateUsage]
                 clock=worker_module._DEFAULT_CLOCK,  # pyright: ignore[reportPrivateUsage]
+                runner=worker_module._DEFAULT_RUNNER,  # pyright: ignore[reportPrivateUsage]
+                sub_dir_provider=worker_module._DEFAULT_SUB_DIR_PROVIDER,  # pyright: ignore[reportPrivateUsage]
                 dispatcher=_FakeDispatcher(),
                 issue_cache=IssueCache("test/repo"),
                 background_syncer=lambda _w, _g: None,
@@ -4530,51 +4619,49 @@ class TestParseStatusNudge:
 class TestGit:
     """Tests for Worker._git helper."""
 
-    def test_calls_subprocess_run_with_git_prefix(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
-            ["status"], _run=mock_run
+    def _worker(self, tmp_path: Path, runner: _FakeProcessRunner) -> Worker:
+        return Worker(
+            tmp_path,
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            runner=runner,
         )
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
-        assert args[0] == "git"
-        assert args[1] == "status"
+
+    def test_calls_subprocess_run_with_git_prefix(self, tmp_path: Path) -> None:
+        runner = _FakeProcessRunner()
+        self._worker(tmp_path, runner)._git(["status"])
+        assert len(runner.calls) == 1
+        cmd = runner.calls[0][0]
+        assert cmd[0] == "git"
+        assert cmd[1] == "status"
 
     def test_passes_work_dir_as_cwd(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
-            ["status"], _run=mock_run
-        )
-        assert mock_run.call_args[1]["cwd"] == tmp_path
+        runner = _FakeProcessRunner()
+        self._worker(tmp_path, runner)._git(["status"])
+        assert runner.calls[0][1]["cwd"] == tmp_path
 
     def test_check_true_by_default(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
-            ["status"], _run=mock_run
-        )
-        assert mock_run.call_args[1]["check"] is True
+        runner = _FakeProcessRunner()
+        self._worker(tmp_path, runner)._git(["status"])
+        assert runner.calls[0][1]["check"] is True
 
     def test_check_false_propagated(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(returncode=1))
-        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
-            ["status"], check=False, _run=mock_run
+        runner = _FakeProcessRunner(
+            results=[subprocess.CompletedProcess([], 1, stdout="", stderr="")]
         )
-        assert mock_run.call_args[1]["check"] is False
+        self._worker(tmp_path, runner)._git(["status"], check=False)
+        assert runner.calls[0][1]["check"] is False
 
     def test_propagates_called_process_error(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, "git"))
+        runner = _FakeProcessRunner(results=[subprocess.CalledProcessError(1, "git")])
         with pytest.raises(subprocess.CalledProcessError):
-            Worker(
-                tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-            )._git(["checkout", "no-such-branch"], _run=mock_run)
+            self._worker(tmp_path, runner)._git(["checkout", "no-such-branch"])
 
     def test_capture_output_and_text_set(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
-            ["log"], _run=mock_run
-        )
-        assert mock_run.call_args[1]["capture_output"] is True
-        assert mock_run.call_args[1]["text"] is True
+        runner = _FakeProcessRunner()
+        self._worker(tmp_path, runner)._git(["log"])
+        assert runner.calls[0][1]["capture_output"] is True
+        assert runner.calls[0][1]["text"] is True
 
     def test_stale_index_lock_removed_and_retried(self, tmp_path: Path) -> None:
         """First call fails with git's index.lock error; when the lock
@@ -4588,24 +4675,17 @@ class TestGit:
         old = datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp()
         _os.utime(lock, (old, old))
 
-        calls: list[int] = []
-        success = MagicMock(returncode=0)
+        lock_error = subprocess.CalledProcessError(
+            128,
+            "git",
+            stderr="fatal: Unable to create '.git/index.lock': File exists.",
+        )
+        success = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        runner = _FakeProcessRunner(results=[lock_error, success])
 
-        def _run(*args: object, **kwargs: object) -> object:  # noqa: ARG001
-            calls.append(1)
-            if len(calls) == 1:
-                raise subprocess.CalledProcessError(
-                    128,
-                    args[0],
-                    stderr="fatal: Unable to create '.git/index.lock': File exists.",
-                )
-            return success
-
-        result = Worker(
-            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-        )._git(["add", "-A"], _run=_run)
+        result = self._worker(tmp_path, runner)._git(["add", "-A"])
         assert result is success
-        assert len(calls) == 2
+        assert len(runner.calls) == 2
         assert not lock.exists()
 
     def test_fresh_index_lock_not_removed(self, tmp_path: Path) -> None:
@@ -4616,32 +4696,29 @@ class TestGit:
         lock = git_dir / "index.lock"
         lock.write_bytes(b"fresh")
 
-        mock_run = MagicMock(
-            side_effect=subprocess.CalledProcessError(
-                128,
-                "git",
-                stderr="fatal: Unable to create '.git/index.lock': File exists.",
-            )
+        lock_error = subprocess.CalledProcessError(
+            128,
+            "git",
+            stderr="fatal: Unable to create '.git/index.lock': File exists.",
         )
+        runner = _FakeProcessRunner(results=[lock_error])
         with pytest.raises(subprocess.CalledProcessError):
-            Worker(
-                tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-            )._git(["add", "-A"], _run=mock_run)
+            self._worker(tmp_path, runner)._git(["add", "-A"])
         assert lock.exists()
-        assert mock_run.call_count == 1
+        assert len(runner.calls) == 1
 
     def test_non_lock_error_propagates_without_retry(self, tmp_path: Path) -> None:
         """Other git failures must not trigger the lock self-heal."""
-        mock_run = MagicMock(
-            side_effect=subprocess.CalledProcessError(
-                128, "git", stderr="fatal: not a git repository"
-            )
+        runner = _FakeProcessRunner(
+            results=[
+                subprocess.CalledProcessError(
+                    128, "git", stderr="fatal: not a git repository"
+                )
+            ]
         )
         with pytest.raises(subprocess.CalledProcessError):
-            Worker(
-                tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-            )._git(["status"], _run=mock_run)
-        assert mock_run.call_count == 1
+            self._worker(tmp_path, runner)._git(["status"])
+        assert len(runner.calls) == 1
 
 
 class TestStaleIndexLockHelpers:

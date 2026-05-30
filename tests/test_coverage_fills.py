@@ -2529,6 +2529,14 @@ class TestWorkerExecuteTaskBranches:
         assert "10" in context and "20" in context and "30" in context
 
 
+class _FakeCITaskPicker:
+    """Typed :class:`~fido.worker.CITaskPicker` fake that always returns a mismatched
+    value — used to exercise the assertion path in ``_assert_ci_failure_matches_oracle``."""
+
+    def pick_next_task(self, order: object, rows: object) -> str:
+        return "mismatched-task"
+
+
 class TestWorkerOracleAssertion:
     """Cover the AssertionError raise in _assert_ci_failure_matches_oracle
     (worker.py:849-852)."""
@@ -2537,7 +2545,7 @@ class TestWorkerOracleAssertion:
         from fido.worker import _assert_ci_failure_matches_oracle
 
         task_list: list[dict] = []
-        # Inject a fake pick_next_task that returns a value that does NOT
+        # Inject a typed fake picker that returns a value that does NOT
         # match the just-admitted CI failure → fires the assertion.
         with pytest.raises(AssertionError, match="not first pickup"):
             _assert_ci_failure_matches_oracle(
@@ -2545,7 +2553,7 @@ class TestWorkerOracleAssertion:
                 "tests",
                 "FAILURE",
                 "run-1",
-                _pick_next_task_fn=lambda *a, **k: "mismatched-task",
+                picker=_FakeCITaskPicker(),
             )
 
 
