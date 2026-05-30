@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from types import TracebackType
-from typing import IO, Any
+from typing import IO, Any, Protocol
 from urllib.parse import urlparse
 
 import requests
@@ -327,13 +327,52 @@ def _spawn_bg(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
     threading.Thread(target=fn, args=args, daemon=True).start()
 
 
-def _noop_after_post() -> None:
-    """Default no-op hook called at the end of do_POST.
+class WebhookActions(Protocol):
+    """Grouped collaborator injected on :class:`WebhookHandler`.
 
-    Tests override _fn_after_do_post to synchronise without sleeping — the
-    hook fires after _fn_spawn_bg so any captured background thread is in
-    the capture list before the test wakes up.
+    Groups the six external actions that vary between production and tests
+    so the handler can be tested without patching module-level names.
+    Tests set ``WebhookHandler.actions`` to a test double; production leaves
+    the class attribute at its default ``RealWebhookActions()`` instance.
     """
+
+    def reply_to_review(
+        self, action: Action, config: Config, repo_cfg: RepoConfig, gh: GitHub
+    ) -> None: ...
+
+    def launch_worker(self, repo_cfg: RepoConfig, registry: WorkerRegistry) -> None: ...
+
+    def spawn_bg(self, fn: Callable[..., Any], args: tuple[Any, ...]) -> None: ...
+
+    def after_do_post(self) -> None: ...
+
+    def runner_dir(self) -> Path: ...
+
+    def kill_active_children(self) -> None: ...
+
+
+class RealWebhookActions:
+    """Production implementation of :class:`WebhookActions`."""
+
+    def reply_to_review(
+        self, action: Action, config: Config, repo_cfg: RepoConfig, gh: GitHub
+    ) -> None:
+        reply_to_review(action, config, repo_cfg, gh)
+
+    def launch_worker(self, repo_cfg: RepoConfig, registry: WorkerRegistry) -> None:
+        launch_worker(repo_cfg, registry)
+
+    def spawn_bg(self, fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
+        _spawn_bg(fn, args)
+
+    def after_do_post(self) -> None:
+        """No-op in production — tests override to synchronise with do_POST."""
+
+    def runner_dir(self) -> Path:
+        return _runner_dir()
+
+    def kill_active_children(self) -> None:
+        kill_active_children()
 
 
 class WebhookHandler(BaseHTTPRequestHandler):
@@ -363,12 +402,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
     # Infrastructure ports — set by server.run() composition root.
     infra: Infra = real_infra()
     static_files: StaticFiles | None = None
-    _fn_reply_to_review = staticmethod(reply_to_review)
-    _fn_launch_worker = staticmethod(launch_worker)
-    _fn_spawn_bg = staticmethod(_spawn_bg)
-    _fn_after_do_post = staticmethod(_noop_after_post)
-    _fn_runner_dir = staticmethod(_runner_dir)
-    _fn_kill_active_children = staticmethod(kill_active_children)
+    # Webhook action collaborator — tests replace this with a typed fake.
+    actions: WebhookActions = RealWebhookActions()
     # Per-process ingress deduplication oracle (webhook_ingress_dedupe.v).
     # Shared across all handler instances via the class attribute so every
     # request on every thread sees the same delivery-ID table.  Created once
@@ -418,7 +453,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         try:
             self._do_post_inner()
         finally:
-            type(self)._fn_after_do_post()
+            self.actions.after_do_post()
 
     def _do_post_inner(self) -> None:
         content_length = int(self.headers.get("Content-Length", 0))
@@ -559,7 +594,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         # Process in background thread so we don't block the server.
         if action:
-            type(self)._fn_spawn_bg(self._process_action, (action, repo_cfg))
+            self.actions.spawn_bg(self._process_action, (action, repo_cfg))
 
     def _preempt_worker_best_effort(self, repo_name: str) -> None:
         """Try to interrupt the current worker after durable demand is recorded."""
@@ -900,7 +935,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
             if action.review_comments:
                 activity.set_description("replying to review thread")
-                type(self)._fn_reply_to_review(action, self.config, repo_cfg, gh)
+                self.actions.reply_to_review(action, self.config, repo_cfg, gh)
                 handled = True  # inline comments handled individually
 
             # Top-level PR comments (issue_comment) — no reply_to, but has comment_body
@@ -934,7 +969,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             # Non-comment events just trigger fido worker — no task needed.
             # The unblock for comment events ran above, before handlers,
             # to close a race with the background rescope (codex on #1738).
-            type(self)._fn_launch_worker(repo_cfg, self.registry)
+            self.actions.launch_worker(repo_cfg, self.registry)
         except provider.SessionLeakError:
             # Let the outer _process_action handler halt fido — we must not
             # swallow a leak into the generic "confused reaction" path below.
@@ -1016,7 +1051,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             log.exception("failed to post error reaction on comment %s", comment_id)
 
     def _self_restart(self, repo_name: str, *, reason: str = "") -> None:
-        runner_dir = type(self)._fn_runner_dir()
+        runner_dir = self.actions.runner_dir()
         self_repo = _get_self_repo(runner_dir, self.infra.proc)
         if self_repo != repo_name:
             return  # Not our repo — nothing to do.
@@ -1064,7 +1099,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # FSM oracle: StoppingWorkers → KillingChildren.  Validates
         # workers_before_children: all workers stopped before kill fires.
         self._restart_fsm_transition(restart_fsm.WorkersStopped())
-        type(self)._fn_kill_active_children()
+        self.actions.kill_active_children()
         # FSM oracle: KillingChildren → Exiting.  Validates
         # exit_requires_full_teardown: process only exits after full teardown.
         self._restart_fsm_transition(restart_fsm.ChildrenKilled())

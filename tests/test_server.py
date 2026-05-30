@@ -42,7 +42,12 @@ from fido.events import (
 )
 from fido.infra import Infra
 from fido.provider import ProviderID
-from fido.server import FidoHTTPServer, PreflightError, WebhookHandler
+from fido.server import (
+    FidoHTTPServer,
+    PreflightError,
+    WebhookHandler,
+    _runner_dir,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+)
 from fido.store import FidoStore
 from fido.tasks import Tasks
 from fido.types import TaskStatus, TaskType
@@ -132,9 +137,9 @@ def _client(return_value: str = "", *, side_effect: object = None) -> MagicMock:
 # that assert on work done after the ack (background threads, _self_restart)
 # therefore cannot rely on urlopen() returning to mean "server is done".
 #
-# Solution: _restore_handler_fns (autouse) overrides two injectables:
-#   _fn_after_do_post → signals _post_done so _post_webhook can wait
-#   _fn_spawn_bg      → captures the background thread so _post_webhook can join
+# Solution: _restore_handler_fns (autouse) installs a _FakeWebhookActions whose
+#   after_do_post → signals _post_done so _post_webhook can wait
+#   spawn_bg      → captures the background thread so _post_webhook can join
 #
 # _post_webhook:  wait for _post_done → join any captured threads → return status
 #
@@ -152,6 +157,27 @@ def _capturing_spawn_bg(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
 
 def _signal_post_done() -> None:
     _post_done.set()
+
+
+class _FakeWebhookActions:
+    """Test double for WebhookActions.
+
+    Stores callable instance attributes so tests can replace individual
+    collaborators with MagicMocks or custom callables.  Default values
+    match the synchronisation contract the test suite depends on:
+    - ``after_do_post``: signals _post_done so _post_webhook can wait.
+    - ``spawn_bg``: captures background threads so _post_webhook can join.
+    - ``runner_dir``: real _runner_dir so self-restart tests that don't
+      override it get a non-matching repo and return early.
+    """
+
+    def __init__(self) -> None:
+        self.launch_worker: Any = MagicMock()
+        self.reply_to_review: Any = MagicMock()
+        self.spawn_bg: Any = _capturing_spawn_bg
+        self.after_do_post: Any = _signal_post_done
+        self.runner_dir: Any = _runner_dir
+        self.kill_active_children: Any = MagicMock()
 
 
 # ------------------------------------------------------------------------------
@@ -196,11 +222,7 @@ def _restore_handler_fns() -> object:
     saved = {
         "_gh": WebhookHandler._gh,
         "dispatchers": WebhookHandler.dispatchers,
-        "_fn_reply_to_review": WebhookHandler._fn_reply_to_review,
-        "_fn_launch_worker": WebhookHandler._fn_launch_worker,
-        "_fn_spawn_bg": WebhookHandler._fn_spawn_bg,
-        "_fn_after_do_post": WebhookHandler._fn_after_do_post,
-        "_fn_runner_dir": WebhookHandler._fn_runner_dir,
+        "actions": WebhookHandler.actions,
         "infra": WebhookHandler.infra,
         "static_files": WebhookHandler.static_files,
         "_restart_fsm_state": WebhookHandler._restart_fsm_state,
@@ -210,11 +232,11 @@ def _restore_handler_fns() -> object:
     # the second test to run would see the delivery as already dispatched and
     # suppress it via the Redeliver path.
     WebhookHandler.ingress_oracle = WebhookIngressOracle()
-    # Override _fn_after_do_post for all tests so _post_webhook can wait for
+    # Install a _FakeWebhookActions for all tests so _post_webhook can wait for
     # do_POST to complete without sleeping (see module-level comment above).
-    WebhookHandler._fn_after_do_post = staticmethod(  # type: ignore[assignment]
-        _signal_post_done
-    )
+    # The fake defaults after_do_post=_signal_post_done and
+    # spawn_bg=_capturing_spawn_bg.
+    WebhookHandler.actions = _FakeWebhookActions()  # type: ignore[assignment]
     _post_done.clear()
     yield
     with _bg_threads_lock:
@@ -232,7 +254,6 @@ def server(tmp_path: Path) -> object:
     WebhookHandler.state_reader = MagicMock()
     WebhookHandler._gh = MagicMock()
     WebhookHandler.dispatchers = {"owner/repo": Dispatcher(cfg, repo_cfg, MagicMock())}
-    WebhookHandler._fn_spawn_bg = staticmethod(_capturing_spawn_bg)  # type: ignore[assignment]
     srv = HTTPServer(("127.0.0.1", 0), WebhookHandler)
     port = srv.server_address[1]
     t = threading.Thread(
@@ -679,8 +700,8 @@ def _post_webhook(url: str, cfg: Config, event: str, payload: dict) -> int:
     _post_done.clear()
     resp = urllib.request.urlopen(req)
     # The wfile socket is unbuffered: _respond() sends bytes immediately, so
-    # urlopen() returns before do_POST() finishes.  Wait for _fn_after_do_post
-    # to fire (set by _restore_handler_fns autouse fixture) before asserting.
+    # urlopen() returns before do_POST() finishes.  Wait for after_do_post
+    # to fire (set by _FakeWebhookActions in _restore_handler_fns) before asserting.
     _post_done.wait(timeout=5.0)
     # Join any background thread captured by _capturing_spawn_bg.
     with _bg_threads_lock:
@@ -809,7 +830,7 @@ class TestProcessAction:
             "pull_request": {"number": 7, "merged": True},
         }
         mock_worker = MagicMock()
-        WebhookHandler._fn_launch_worker = mock_worker
+        WebhookHandler.actions.launch_worker = mock_worker  # type: ignore[assignment]
         WebhookHandler._fn_create_task = MagicMock()
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
@@ -840,7 +861,7 @@ class TestProcessAction:
             )
         }
         WebhookHandler._fn_create_task = mock_task
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
         mock_task.assert_not_called()
@@ -868,7 +889,7 @@ class TestProcessAction:
         fake = _ReplyFakeDispatcher(WebhookHandler.dispatchers["owner/repo"])
         WebhookHandler.dispatchers = {"owner/repo": fake}
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
         assert len(fake.reply_to_comment_calls) == 0
@@ -905,7 +926,7 @@ class TestProcessAction:
             )
         }
         WebhookHandler._fn_create_task = mock_task
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
         mock_task.assert_not_called()
@@ -942,7 +963,7 @@ class TestProcessAction:
             )
         }
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         with caplog.at_level(logging.INFO, logger="fido.server"):
             status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
@@ -966,8 +987,8 @@ class TestProcessAction:
             "pull_request": {"number": 9},
         }
         mock_review = MagicMock()
-        WebhookHandler._fn_reply_to_review = mock_review
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.reply_to_review = mock_review  # type: ignore[assignment]
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         status = _post_webhook(url, cfg, "pull_request_review", payload)
         assert status == 200
         mock_review.assert_not_called()
@@ -984,7 +1005,7 @@ class TestProcessAction:
             "action": "closed",
             "pull_request": {"number": 14, "merged": True},
         }
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
         for call in WebhookHandler.registry.report_activity.call_args_list:
@@ -1000,7 +1021,7 @@ class TestProcessAction:
             "pull_request": {"number": 99, "merged": True},
         }
         WebhookHandler._gh = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock(
+        WebhookHandler.actions.launch_worker = MagicMock(  # type: ignore[assignment]
             side_effect=provider.SessionLeakError("leaked")
         )
         os_proc = _FakeOsProcess()
@@ -1018,7 +1039,9 @@ class TestProcessAction:
             "pull_request": {"number": 13, "merged": True},
         }
         WebhookHandler._gh = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock(side_effect=Exception("explode"))
+        WebhookHandler.actions.launch_worker = MagicMock(
+            side_effect=Exception("explode")
+        )  # type: ignore[assignment]
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
         # server still alive — no crash
@@ -1035,7 +1058,9 @@ class TestProcessAction:
         }
         mock_gh = MagicMock()
         WebhookHandler._gh = mock_gh
-        WebhookHandler._fn_launch_worker = MagicMock(side_effect=RuntimeError("boom"))
+        WebhookHandler.actions.launch_worker = MagicMock(
+            side_effect=RuntimeError("boom")
+        )  # type: ignore[assignment]
         _post_webhook(url, cfg, "pull_request", payload)
         mock_gh.add_reaction.assert_not_called()
 
@@ -1057,8 +1082,10 @@ class TestProcessAction:
         }
         mock_gh = MagicMock()
         WebhookHandler._gh = mock_gh
-        WebhookHandler._fn_reply_to_review = MagicMock(side_effect=RuntimeError("boom"))
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.reply_to_review = MagicMock(
+            side_effect=RuntimeError("boom")
+        )  # type: ignore[assignment]
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         _post_webhook(url, cfg, "pull_request_review", payload)
         mock_gh.add_reaction.assert_not_called()
 
@@ -1114,7 +1141,7 @@ class TestProcessAction:
                 reply_to_issue_comment_side_effect=_reply_side_effect
             )
         }
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         action = Action(
             prompt="test",
             comment_body="please fix",
@@ -1210,7 +1237,7 @@ class TestProcessAction:
                 reply_to_comment_return=("ANSWER", []),
             )
         }
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         status = _post_webhook(url, cfg, "pull_request_review_comment", payload)
         assert status == 200
         tasks = Tasks(work_dir).list()
@@ -1244,7 +1271,7 @@ class TestProcessAction:
                 reply_to_issue_comment_return=("ANSWER", []),
             )
         }
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         status = _post_webhook(url, cfg, "issue_comment", payload)
         assert status == 200
         tasks = Tasks(work_dir).list()
@@ -1260,7 +1287,7 @@ class TestProcessAction:
             "action": "closed",
             "pull_request": {"number": 72, "merged": True},
         }
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         status = _post_webhook(url, cfg, "pull_request", payload)
         assert status == 200
         tasks = Tasks(work_dir).list()
@@ -1274,7 +1301,7 @@ class TestProcessAction:
         fake = _ReplyFakeDispatcher(WebhookHandler.dispatchers["owner/repo"])
         WebhookHandler.dispatchers = {"owner/repo": fake}
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         payload = {
             **_payload(),
             "action": "created",
@@ -1293,7 +1320,7 @@ class TestProcessAction:
         assert status == 200
         mock_session.hold_for_handler.assert_not_called()
         assert len(fake.reply_to_comment_calls) == 0
-        WebhookHandler._fn_launch_worker.assert_called_once()
+        WebhookHandler.actions.launch_worker.assert_called_once()
 
     def test_issue_comment_handler_stays_off_provider(self, server: tuple) -> None:
         """Top-level PR comment ingestion queues durably without provider use."""
@@ -1303,7 +1330,7 @@ class TestProcessAction:
         fake = _ReplyFakeDispatcher(WebhookHandler.dispatchers["owner/repo"])
         WebhookHandler.dispatchers = {"owner/repo": fake}
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         payload = {
             **_payload(),
             "action": "created",
@@ -1326,7 +1353,7 @@ class TestProcessAction:
         assert status == 200
         mock_session.hold_for_handler.assert_not_called()
         assert len(fake.reply_to_issue_comment_calls) == 0
-        WebhookHandler._fn_launch_worker.assert_called_once()
+        WebhookHandler.actions.launch_worker.assert_called_once()
 
     def test_publish_provider_snapshot_inside_hold_for_handler(
         self, tmp_path: Path
@@ -1404,7 +1431,7 @@ class TestProcessAction:
         reg.get_session = patched_get_session  # type: ignore[method-assign]
 
         WebhookHandler._fn_create_task = MagicMock()  # type: ignore[assignment]
-        WebhookHandler._fn_launch_worker = MagicMock()  # type: ignore[assignment]
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         action = Action(
             prompt="test",
@@ -1510,7 +1537,7 @@ class TestProcessAction:
         reg.get_session = patched_get_session  # type: ignore[method-assign]
 
         WebhookHandler._fn_create_task = MagicMock()  # type: ignore[assignment]
-        WebhookHandler._fn_launch_worker = MagicMock()  # type: ignore[assignment]
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         action = Action(
             prompt="test",
@@ -1612,7 +1639,7 @@ class TestProcessActionInner:
         )
         mock_task = MagicMock()
         WebhookHandler._fn_create_task = mock_task
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         fake = _FakeDispatcher(reply_to_comment_return=("ACT", ["add logging"]))
         handler.dispatchers = {"owner/repo": fake}
@@ -1642,7 +1669,7 @@ class TestProcessActionInner:
             is_bot=False,
         )
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         fake = _FakeDispatcher()
         handler.dispatchers = {"owner/repo": fake}
@@ -1671,7 +1698,7 @@ class TestProcessActionInner:
             },
             comment_body="boom",
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         handler.dispatchers = {
             "owner/repo": _FakeDispatcher(
@@ -1702,7 +1729,7 @@ class TestProcessActionInner:
             },
             comment_body="boom",
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         handler.dispatchers = {
             "owner/repo": _FakeDispatcher(
@@ -1721,8 +1748,8 @@ class TestProcessActionInner:
             review_comments=[{"id": 9, "body": "lgtm"}],
         )
         mock_reply = MagicMock()
-        WebhookHandler._fn_reply_to_review = mock_reply
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.reply_to_review = mock_reply  # type: ignore[assignment]
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         handler._process_action_inner(action, repo_cfg, self._activity())
         mock_reply.assert_called_once()
@@ -1744,7 +1771,7 @@ class TestProcessActionInner:
             comment_body="any thoughts?",
         )
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         fake = _FakeDispatcher(reply_to_issue_comment_return=("ANSWER", []))
         handler.dispatchers = {"owner/repo": fake}
@@ -1771,7 +1798,7 @@ class TestProcessActionInner:
             },
             comment_body="dup",
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         fake = _FakeDispatcher()
         handler.dispatchers = {"owner/repo": fake}
@@ -1797,7 +1824,7 @@ class TestProcessActionInner:
             },
             comment_body="boom",
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         handler.dispatchers = {
             "owner/repo": _FakeDispatcher(
@@ -1826,7 +1853,7 @@ class TestProcessActionInner:
             comment_body="please fix this",
             is_bot=False,
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         handler.dispatchers = {
             "owner/repo": _FakeDispatcher(reply_to_comment_return=("ANSWER", []))
@@ -1851,7 +1878,7 @@ class TestProcessActionInner:
             comment_body="any thoughts?",
             is_bot=False,
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         handler.dispatchers = {
             "owner/repo": _FakeDispatcher(reply_to_issue_comment_return=("ANSWER", []))
@@ -1898,7 +1925,7 @@ class TestProcessActionInner:
             comment_body="please fix this",
             is_bot=False,
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         handler.dispatchers = {
             "owner/repo": _FakeDispatcher(reply_to_comment_return=("ANSWER", []))
@@ -1926,7 +1953,7 @@ class TestProcessActionInner:
             comment_body="automated feedback",
             is_bot=True,
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         handler.dispatchers = {
             "owner/repo": _FakeDispatcher(reply_to_comment_return=("ANSWER", []))
@@ -1940,7 +1967,7 @@ class TestProcessActionInner:
     ) -> None:
         """Non-comment webhook actions (no reply_to, no comment_body) → no reaction."""
         action = Action(prompt="push event")
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         handler._process_action_inner(action, repo_cfg, self._activity())
         handler.gh.add_reaction.assert_not_called()
@@ -1964,7 +1991,7 @@ class TestProcessActionInner:
             comment_body="please fix",
             is_bot=False,
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         handler.dispatchers = {
             "owner/repo": _FakeDispatcher(reply_to_comment_return=("ANSWER", []))
@@ -1991,7 +2018,7 @@ class TestProcessActionInner:
             comment_body="please fix",
             is_bot=False,
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         # Subclass: _prepare_reply is a dedup skip (returns None); track remove calls.
         remove_calls: list[int] = []
 
@@ -2032,7 +2059,7 @@ class TestProcessActionInner:
             },
             is_bot=False,
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         # Subclass: _prepare_reply is a dedup skip (returns None); track remove calls.
         remove_calls_2: list[int] = []
 
@@ -2075,7 +2102,7 @@ class TestProcessActionInner:
             comment_body="please fix",
             is_bot=False,
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         remove_order: list[str] = []
 
         class _OrderSpyHandler(WebhookHandler):
@@ -2122,7 +2149,7 @@ class TestProcessActionInner:
             },
             # comment_body intentionally None — matches _queued_pr_comment_action shape
         )
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         handler = self._handler(cfg)
         handler._process_action_inner(action, repo_cfg, self._activity())
         handler.gh.add_reaction.assert_any_call("owner/repo", "pulls", 444, "eyes")
@@ -2234,7 +2261,7 @@ class TestSynchronousPreemption:
     background thread spawns (#955).
 
     ``_do_post_inner`` calls ``session.preempt_worker()`` synchronously, then
-    delegates to ``_fn_spawn_bg``.  The ordering guarantee is what fixes the
+    delegates to ``actions.spawn_bg``.  The ordering guarantee is what fixes the
     race: the cancel signal reaches the provider *before* the handler thread
     can be de-scheduled and the worker turn can complete.
     """
@@ -2277,10 +2304,10 @@ class TestSynchronousPreemption:
             call_order.append("spawn")
             original_spawn(fn, args)
 
-        WebhookHandler._fn_spawn_bg = staticmethod(tracking_spawn)  # type: ignore[assignment]
+        WebhookHandler.actions.spawn_bg = tracking_spawn  # type: ignore[assignment]
 
     def test_preempt_fires_before_background_spawn(self, server: tuple) -> None:
-        """``session.preempt_worker()`` must be called before ``_fn_spawn_bg``
+        """``session.preempt_worker()`` must be called before ``actions.spawn_bg``
         for a webhook action that reports durable demand."""
         url, cfg = server
 
@@ -2300,7 +2327,7 @@ class TestSynchronousPreemption:
             )
         }
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         status = _post_webhook(url, cfg, "issue_comment", self._issue_comment_payload())
         assert status == 200
@@ -2343,7 +2370,7 @@ class TestSynchronousPreemption:
             )
         }
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         with caplog.at_level(logging.ERROR, logger="fido.server"):
             status = _post_webhook(
@@ -2405,7 +2432,7 @@ class TestSynchronousPreemption:
             )
         }
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         with caplog.at_level(logging.WARNING, logger="fido.server"):
             status = _post_webhook(
@@ -2471,7 +2498,7 @@ class TestSynchronousPreemption:
             )
         }
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         with caplog.at_level(logging.WARNING, logger="fido.server"):
             status = _post_webhook(
@@ -2500,7 +2527,7 @@ class TestSynchronousPreemption:
 
         mock_session = MagicMock()
         WebhookHandler.registry.get_session.return_value = mock_session
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
         WebhookHandler._fn_create_task = MagicMock()
 
         payload = {
@@ -2527,7 +2554,7 @@ class TestSynchronousPreemption:
             )
         }
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         status = _post_webhook(
             url, cfg, "issue_comment", self._issue_comment_payload(901)
@@ -2587,7 +2614,7 @@ class TestUntriagedInboxWiring:
             )
         }
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         status = _post_webhook(url, cfg, "issue_comment", self._issue_comment_payload())
         assert status == 200
@@ -2596,7 +2623,7 @@ class TestUntriagedInboxWiring:
     def test_enter_untriaged_called_for_ci_failure(self, server: tuple) -> None:
         """CI failures do not use the model, but they still preempt workers."""
         url, cfg = server
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         status = _post_webhook(url, cfg, "check_run", self._check_run_failure_payload())
 
@@ -2610,7 +2637,7 @@ class TestUntriagedInboxWiring:
         """A PR-merge webhook does not use the model — enter_untriaged must NOT
         be called."""
         url, cfg = server
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         payload = {
             **_payload(),
@@ -2632,7 +2659,7 @@ class TestUntriagedInboxWiring:
             )
         }
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         status = _post_webhook(
             url, cfg, "issue_comment", self._issue_comment_payload(951)
@@ -2651,7 +2678,7 @@ class TestUntriagedInboxWiring:
             )
         }
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         status = _post_webhook(
             url, cfg, "issue_comment", self._issue_comment_payload(952)
@@ -2665,7 +2692,7 @@ class TestUntriagedInboxWiring:
         """exit_untriaged must NOT be called when the action does not use the
         model — there was no matching enter."""
         url, cfg = server
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         payload = {
             **_payload(),
@@ -2677,7 +2704,7 @@ class TestUntriagedInboxWiring:
         WebhookHandler.registry.exit_untriaged.assert_not_called()
 
     def test_enter_fires_before_background_spawn(self, server: tuple) -> None:
-        """enter_untriaged must be called before _fn_spawn_bg so the inbox is
+        """enter_untriaged must be called before actions.spawn_bg so the inbox is
         non-empty before the background thread runs."""
         url, cfg = server
 
@@ -2695,7 +2722,7 @@ class TestUntriagedInboxWiring:
             call_order.append("spawn")
             original_spawn(fn, args)
 
-        WebhookHandler._fn_spawn_bg = staticmethod(tracking_spawn)  # type: ignore[assignment]
+        WebhookHandler.actions.spawn_bg = tracking_spawn  # type: ignore[assignment]
         WebhookHandler.dispatchers = {
             "owner/repo": _ReplyFakeDispatcher(
                 WebhookHandler.dispatchers["owner/repo"],
@@ -2703,7 +2730,7 @@ class TestUntriagedInboxWiring:
             )
         }
         WebhookHandler._fn_create_task = MagicMock()
-        WebhookHandler._fn_launch_worker = MagicMock()
+        WebhookHandler.actions.launch_worker = MagicMock()  # type: ignore[assignment]
 
         status = _post_webhook(
             url, cfg, "issue_comment", self._issue_comment_payload(953)
@@ -3522,11 +3549,70 @@ _PUSH_PAYLOAD = {
 }
 
 
-class TestNoop:
-    def test_noop_after_post_is_callable_and_silent(self) -> None:
-        from fido.server import _noop_after_post
+class TestRealWebhookActions:
+    def test_after_do_post_is_silent(self) -> None:
+        from fido.server import RealWebhookActions
 
-        _noop_after_post()  # default hook — must not raise
+        RealWebhookActions().after_do_post()  # no-op in production — must not raise
+
+    def test_runner_dir_returns_package_parent(self) -> None:
+        from fido.server import RealWebhookActions
+
+        result = RealWebhookActions().runner_dir()
+        assert (result / "fido" / "server.py").exists()
+
+    def test_kill_active_children_no_op_when_no_children(self) -> None:
+        from fido.server import RealWebhookActions
+
+        RealWebhookActions().kill_active_children()  # no tracked children — must not raise
+
+    def test_spawn_bg_runs_function_in_thread(self) -> None:
+        import time
+
+        from fido.server import RealWebhookActions
+
+        results: list[int] = []
+        RealWebhookActions().spawn_bg(results.append, (42,))
+        # give the daemon thread time to run
+        deadline = time.monotonic() + 5.0
+        while not results and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert results == [42]
+
+    def test_reply_to_review_delegates_to_events(self, tmp_path: Path) -> None:
+        """reply_to_review is currently a no-op stub — must not raise."""
+        from fido.config import RepoMembership
+        from fido.server import RealWebhookActions
+
+        cfg = Config(
+            port=0,
+            secret=b"s",
+            repos={},
+            allowed_bots=frozenset(),
+            log_level="WARNING",
+            sub_dir=tmp_path / "sub",
+        )
+        repo_cfg = RepoConfig(
+            name="owner/repo",
+            work_dir=tmp_path,
+            membership=RepoMembership(collaborators=frozenset()),
+        )
+        action = Action(prompt="test")
+        mock_gh: Any = MagicMock()
+        RealWebhookActions().reply_to_review(action, cfg, repo_cfg, mock_gh)
+
+    def test_launch_worker_delegates_to_registry(self, tmp_path: Path) -> None:
+        from fido.config import RepoMembership
+        from fido.server import RealWebhookActions
+
+        repo_cfg = RepoConfig(
+            name="owner/repo",
+            work_dir=tmp_path,
+            membership=RepoMembership(collaborators=frozenset()),
+        )
+        mock_registry: Any = MagicMock()
+        RealWebhookActions().launch_worker(repo_cfg, mock_registry)
+        mock_registry.wake.assert_called_once_with("owner/repo")
 
 
 class TestParseRepoFromUrl:
@@ -4142,7 +4228,7 @@ class TestSelfRestart:
     def test_triggers_restart_exit_on_matching_repo(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.actions.runner_dir = lambda: tmp_path  # type: ignore[assignment]
             os_proc = _FakeOsProcess()
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner(
@@ -4169,7 +4255,7 @@ class TestSelfRestart:
         BEFORE exiting for the host supervisor."""
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.actions.runner_dir = lambda: tmp_path  # type: ignore[assignment]
             call_log: list[str] = []
 
             def _kill() -> None:
@@ -4181,7 +4267,7 @@ class TestSelfRestart:
             real_stop_and_join.side_effect = lambda repo: call_log.append(
                 f"stop_and_join:{repo}"
             )
-            WebhookHandler._fn_kill_active_children = staticmethod(_kill)  # type: ignore[assignment]
+            WebhookHandler.actions.kill_active_children = _kill  # type: ignore[assignment]
 
             os_proc = _FakeOsProcess()
 
@@ -4219,7 +4305,7 @@ class TestSelfRestart:
     def test_skips_when_self_repo_mismatch(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.actions.runner_dir = lambda: tmp_path  # type: ignore[assignment]
             proc = _FakeProcessRunner(
                 [MagicMock(stdout="git@github.com:other/repo.git\n")]
             )
@@ -4240,7 +4326,7 @@ class TestSelfRestart:
     def test_skips_when_self_repo_unknown(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.actions.runner_dir = lambda: tmp_path  # type: ignore[assignment]
             os_proc = _FakeOsProcess()
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner([FileNotFoundError()]),
@@ -4264,7 +4350,7 @@ class TestSelfRestart:
         """
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.actions.runner_dir = lambda: tmp_path  # type: ignore[assignment]
             os_proc = _FakeOsProcess()
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner(
@@ -4290,7 +4376,7 @@ class TestSelfRestart:
         worker intact."""
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.actions.runner_dir = lambda: tmp_path  # type: ignore[assignment]
             proc = _FakeProcessRunner(
                 [
                     MagicMock(stdout="git@github.com:owner/fido.git\n"),
@@ -4315,7 +4401,7 @@ class TestSelfRestart:
     def test_push_to_default_branch_triggers_restart(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.actions.runner_dir = lambda: tmp_path  # type: ignore[assignment]
             os_proc = _FakeOsProcess()
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner(
@@ -4338,7 +4424,7 @@ class TestSelfRestart:
     def test_push_to_non_default_branch_ignored(self, tmp_path: Path) -> None:
         srv, url, cfg, mock_registry = self._make_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.actions.runner_dir = lambda: tmp_path  # type: ignore[assignment]
             proc = _FakeProcessRunner([])
             os_proc = _FakeOsProcess()
             WebhookHandler.infra = Infra(
@@ -4389,7 +4475,7 @@ class TestSelfRestart:
         """Self-restart fires for merged PR even when the repo is not registered."""
         srv, url, cfg = self._make_unregistered_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.actions.runner_dir = lambda: tmp_path  # type: ignore[assignment]
             os_proc = _FakeOsProcess()
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner(
@@ -4415,7 +4501,7 @@ class TestSelfRestart:
         """Self-restart fires for push to default branch even when repo is not registered."""
         srv, url, cfg = self._make_unregistered_server(tmp_path)
         try:
-            WebhookHandler._fn_runner_dir = lambda: tmp_path  # type: ignore[assignment]
+            WebhookHandler.actions.runner_dir = lambda: tmp_path  # type: ignore[assignment]
             os_proc = _FakeOsProcess()
             WebhookHandler.infra = Infra(
                 proc=_FakeProcessRunner(
