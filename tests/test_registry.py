@@ -1,5 +1,6 @@
 """Tests for fido.registry — WorkerRegistry lifecycle management."""
 
+import datetime as dt
 import logging
 import subprocess
 import threading
@@ -217,6 +218,22 @@ class _FakeWorkerThreadClass:
         assert len(self._calls) == 1, f"expected 1 call, got {len(self._calls)}"
 
 
+class _FakeClock:
+    """Minimal :class:`~fido.infra.Clock` fake for registry tests."""
+
+    def __init__(self, now_value: dt.datetime) -> None:
+        self._now_value = now_value
+
+    def sleep(self, secs: float) -> None:
+        pass
+
+    def monotonic(self) -> float:
+        return 0.0
+
+    def now(self) -> dt.datetime:
+        return self._now_value
+
+
 class RepoConfig(_RepoConfig):
     def __init__(
         self,
@@ -250,6 +267,7 @@ class TestWorkerRegistry:
         *,
         repos: list[str] | None = None,
         work_dir: Path | None = None,
+        clock: _FakeClock | None = None,
     ) -> tuple[WorkerRegistry, _FakeThreadFactory, object]:
         factory = _FakeThreadFactory()
         reader, updater = create_atomic(
@@ -259,7 +277,7 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(factory, updater)
+        reg = WorkerRegistry(factory, updater, clock=clock)
         if repos:
             # Pre-populated registries need a real git work_dir
             # because registry.start resolves git_dir at construction
@@ -691,22 +709,25 @@ class TestWorkerRegistry:
         assert activity.busy is False
 
     def test_report_activity_records_last_progress_at(self, tmp_path: Path) -> None:
-        import datetime as dt
-
         fixed = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
-        reg, _, reader = self._make_registry(repos=["foo/bar"], work_dir=tmp_path)
-        reg.report_activity("foo/bar", "busy", busy=True, _now=lambda: fixed)
+        clock = _FakeClock(fixed)
+        reg, _, reader = self._make_registry(
+            repos=["foo/bar"], work_dir=tmp_path, clock=clock
+        )
+        reg.report_activity("foo/bar", "busy", busy=True)
         activity = reader.get().repos["foo/bar"].activity
         assert activity.last_progress_at == fixed
 
     def test_report_activity_updates_last_progress_at(self, tmp_path: Path) -> None:
-        import datetime as dt
-
         t1 = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
         t2 = dt.datetime(2026, 1, 1, 12, 5, 0, tzinfo=dt.timezone.utc)
-        reg, _, reader = self._make_registry(repos=["foo/bar"], work_dir=tmp_path)
-        reg.report_activity("foo/bar", "first", busy=True, _now=lambda: t1)
-        reg.report_activity("foo/bar", "second", busy=True, _now=lambda: t2)
+        clock = _FakeClock(t1)
+        reg, _, reader = self._make_registry(
+            repos=["foo/bar"], work_dir=tmp_path, clock=clock
+        )
+        reg.report_activity("foo/bar", "first", busy=True)
+        clock._now_value = t2
+        reg.report_activity("foo/bar", "second", busy=True)
         activity = reader.get().repos["foo/bar"].activity
         assert activity.last_progress_at == t2
 

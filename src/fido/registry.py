@@ -6,8 +6,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from fido import provider as provider_module
 from fido.appstate import (
@@ -27,7 +26,7 @@ from fido.appstate import (
 from fido.atomic import AtomicUpdater
 from fido.config import Config, RepoConfig, default_sub_dir
 from fido.github import GitHub
-from fido.infra import ProcessRunner, RealProcessRunner
+from fido.infra import Clock, ProcessRunner, RealClock, RealProcessRunner
 from fido.issue_cache import CacheMetrics, IssueCache
 from fido.provider import PromptSession, Provider
 from fido.provider_factory import DefaultProviderFactory
@@ -47,9 +46,22 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def _utcnow() -> datetime:
-    """Return the current UTC time as a timezone-aware datetime."""
-    return datetime.now(tz=timezone.utc)
+class ThreadFactory(Protocol):
+    """Creates a :class:`WorkerThread` for a given repo config.
+
+    Injected into :class:`WorkerRegistry` so tests can supply fake threads
+    without patching module-level names.  The interface mirrors the kwargs
+    that :meth:`WorkerRegistry.start` passes when creating or rescuing a
+    thread.
+    """
+
+    def __call__(
+        self,
+        cfg: RepoConfig,
+        *,
+        provider: Provider | None = None,
+        session_issue: int | None = None,
+    ) -> WorkerThread: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,9 +102,10 @@ class WorkerRegistry:
 
     def __init__(
         self,
-        thread_factory: Callable[..., WorkerThread],
+        thread_factory: ThreadFactory,
         state_updater: "AtomicUpdater[FidoState]",
         runner: ProcessRunner | None = None,
+        clock: Clock | None = None,
     ) -> None:
         # _threads is single-writer: only start() (called from the watchdog
         # daemon thread or from the startup sequence) ever writes to it.
@@ -112,6 +125,7 @@ class WorkerRegistry:
         self._runner: ProcessRunner = (
             runner if runner is not None else RealProcessRunner()
         )
+        self._clock: Clock = clock if clock is not None else RealClock()
         # Owner-side crash records: the watchdog increments death_count here,
         # then publishes the result into FidoState via a pure lens write.
         # Only the watchdog thread writes; start() reads during crash recovery
@@ -284,7 +298,7 @@ class WorkerRegistry:
         thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
         self._threads[repo_cfg.name] = thread
         _name = repo_cfg.name
-        _now = _utcnow()
+        _now = self._clock.now()
         # Prepopulate the full RepoState with zero values.  Crash history
         # comes from the class-owned _crash_records (not from FidoState),
         # so this is a pure write — no read-modify-write CAS.
@@ -388,8 +402,6 @@ class WorkerRegistry:
         repo_name: str,
         what: str,
         busy: bool,
-        *,
-        _now: Callable[[], datetime] = _utcnow,
     ) -> None:
         """Record what *repo_name*'s worker is currently doing.
 
@@ -399,7 +411,10 @@ class WorkerRegistry:
         ``repos[name]`` key is prepopulated by :meth:`start`).
         """
         activity = WorkerActivity(
-            repo_name=repo_name, what=what, busy=busy, last_progress_at=_now()
+            repo_name=repo_name,
+            what=what,
+            busy=busy,
+            last_progress_at=self._clock.now(),
         )
         _name = repo_name
         self._state_updater.update(lambda root: root.repos[_name].activity, activity)
@@ -418,7 +433,7 @@ class WorkerRegistry:
         new_crash = WorkerCrash(
             death_count=existing.death_count + 1,
             last_error=error,
-            last_crash_time=_utcnow(),
+            last_crash_time=self._clock.now(),
         )
         self._crash_records[repo_name] = new_crash
         _name = repo_name
@@ -503,8 +518,6 @@ class WorkerRegistry:
         self,
         repo_name: str,
         description: str,
-        *,
-        _now: Callable[[], datetime] = _utcnow,
     ) -> Generator[WebhookActivityHandle, None, None]:
         """Register an in-flight webhook handler for the duration of the block.
 
@@ -523,7 +536,7 @@ class WorkerRegistry:
         activity = WebhookActivity(
             handle_id=id(object()),  # cheap unique id per call
             description=description,
-            started_at=_now(),
+            started_at=self._clock.now(),
             thread_id=threading.get_ident(),
         )
         handle = WebhookActivityHandle(repo_name, activity.handle_id, self)

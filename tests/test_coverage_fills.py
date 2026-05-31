@@ -826,7 +826,7 @@ class TestStatusFallbacks:
             window_name="hourly",
             pressure=0.5,
         )
-        result = _styled_provider_status(status, c=Color(), _palette_for=lambda p: None)
+        result = _styled_provider_status(status, c=Color(), palette_fn=lambda p: None)
         assert "claude-code" in result
 
     def test_styled_repo_provider_no_palette(self) -> None:
@@ -835,7 +835,7 @@ class TestStatusFallbacks:
         from fido.status import _styled_repo_provider
 
         repo = self._make_repo()
-        result = _styled_repo_provider(repo, c=Color(), _palette_for=lambda p: None)  # type: ignore[arg-type]
+        result = _styled_repo_provider(repo, c=Color(), palette_fn=lambda p: None)  # type: ignore[arg-type]
         assert "claude-code" in result
 
     def test_should_show_worker_line_when_paused(self) -> None:
