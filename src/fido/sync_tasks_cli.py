@@ -4,7 +4,15 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from fido.github import GitHub
+from fido.github import (
+    GitHub,
+    _gh_token,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+)
+from fido.infra import RealClock, RealProcessRunner
+from fido.tasks import (
+    RealGitDirResolver,
+    _auto_complete_ask_tasks,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+)
 
 
 def main(
@@ -18,7 +26,18 @@ def main(
 
     args = sys.argv[1:] if argv is None else argv
     work_dir = Path(args[0]) if args else Path.cwd()
-    _sync_tasks(work_dir, _GitHub())
+    runner = RealProcessRunner()
+    gh = _GitHub(
+        runner=runner,
+        clock=RealClock(),
+        token_fetcher=lambda: _gh_token(runner=runner),
+    )
+    _sync_tasks(
+        work_dir,
+        gh,
+        git_dir_resolver=RealGitDirResolver(runner),
+        auto_completer=_auto_complete_ask_tasks,
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

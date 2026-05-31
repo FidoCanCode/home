@@ -27,6 +27,7 @@ from fido.appstate import (
 from fido.atomic import AtomicUpdater
 from fido.config import Config, RepoConfig, default_sub_dir
 from fido.github import GitHub
+from fido.infra import ProcessRunner, RealProcessRunner
 from fido.issue_cache import CacheMetrics, IssueCache
 from fido.provider import PromptSession, Provider
 from fido.provider_factory import DefaultProviderFactory
@@ -91,6 +92,7 @@ class WorkerRegistry:
         self,
         thread_factory: Callable[..., WorkerThread],
         state_updater: "AtomicUpdater[FidoState]",
+        runner: ProcessRunner | None = None,
     ) -> None:
         # _threads is single-writer: only start() (called from the watchdog
         # daemon thread or from the startup sequence) ever writes to it.
@@ -107,6 +109,9 @@ class WorkerRegistry:
         # value at a Lens path.  The read face (AtomicReader) lives in the
         # composition root; this class never reads the snapshot.
         self._state_updater: AtomicUpdater[FidoState] = state_updater
+        self._runner: ProcessRunner = (
+            runner if runner is not None else RealProcessRunner()
+        )
         # Owner-side crash records: the watchdog increments death_count here,
         # then publishes the result into FidoState via a pure lens write.
         # Only the watchdog thread writes; start() reads during crash recovery
@@ -257,7 +262,7 @@ class WorkerRegistry:
         # same resolved path (#1696 codex P1 round 5).  Failing
         # loudly here surfaces a misconfigured workspace at startup
         # rather than as a confusing flock-on-a-file error later.
-        git_dir = _resolve_git_dir(repo_cfg.work_dir)  # pyright: ignore[reportPrivateUsage]
+        git_dir = _resolve_git_dir(repo_cfg.work_dir, runner=self._runner)  # pyright: ignore[reportPrivateUsage]
         fido_dir = git_dir / "fido"
         repo = Repo(
             name=repo_cfg.name,
@@ -964,6 +969,7 @@ def make_registry(
     *,
     dispatchers: "dict[str, Dispatcher]",
     state_updater: "AtomicUpdater[FidoState]",
+    runner: ProcessRunner | None = None,
     _thread_factory: Callable[..., WorkerThread] = _make_thread,
 ) -> WorkerRegistry:
     """Create a :class:`WorkerRegistry` and start threads for all repos.
@@ -990,7 +996,7 @@ def make_registry(
             state_updater=state_updater,
         )
 
-    registry = WorkerRegistry(factory, state_updater)
+    registry = WorkerRegistry(factory, state_updater, runner=runner)
     for repo_cfg in repos.values():
         registry.start(repo_cfg)
     return registry

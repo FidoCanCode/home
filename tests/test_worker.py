@@ -23,6 +23,7 @@ from fido.appstate import (
 )
 from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
+from fido.infra import RealProcessRunner
 from fido.issue_cache import IssueCache, IssueNode
 from fido.nudges import Nudges
 from fido.prompts import Prompts
@@ -4981,6 +4982,7 @@ class TestWritePrDescription:
             issue,
             task_list or [],
             existing_body,
+            runner=RealProcessRunner(),
             agent=mock_cc,
         )
         return result, mock_cc
@@ -5197,7 +5199,9 @@ class TestWritePrDescription:
         with pytest.raises(
             ValueError, match="_write_pr_description requires agent or pre_baked"
         ):
-            _write_pr_description(Path("/tmp"), gh, "owner/repo", 99, 42, [])
+            _write_pr_description(
+                Path("/tmp"), gh, "owner/repo", 99, 42, [], runner=_FakeProcessRunner()
+            )
 
     def test_pre_baked_description_skips_provider(self, tmp_path: Path) -> None:
         """When pre_baked_description is provided, the LLM call is skipped
@@ -5212,6 +5216,7 @@ class TestWritePrDescription:
             99,
             42,
             [{"title": "x", "status": "pending"}],
+            runner=RealProcessRunner(),
             agent=agent,
             pre_baked_description="## Summary\n\n- thing\n\nFixes #42.",
         )
@@ -5233,6 +5238,7 @@ class TestWritePrDescription:
             99,
             42,
             [{"title": "x", "status": "pending"}],
+            runner=RealProcessRunner(),
             pre_baked_description="## Summary\n\nbody.",
         )
         body = gh.edit_pr_body.call_args[0][2]
@@ -5250,6 +5256,7 @@ class TestWritePrDescription:
             99,
             42,
             [{"title": "x", "status": "pending"}],
+            runner=RealProcessRunner(),
             pre_baked_description="## Summary\n\nbody.\n\nFixes #42.",
         )
         body = gh.edit_pr_body.call_args[0][2]
@@ -5268,6 +5275,7 @@ class TestWritePrDescription:
             99,
             42,
             [{"title": "x", "status": "pending"}],
+            runner=RealProcessRunner(),
             pre_baked_description="## Summary\n\nbody.\n\nFixes #42",
         )
         body = gh.edit_pr_body.call_args[0][2]
@@ -11719,7 +11727,7 @@ class TestExecuteTask:
         worker._tasks.complete_with_resolve.assert_called_once_with(
             task["id"],
             gh,
-            syncer=sync_tasks_background,
+            syncer=ANY,
             collaborators=frozenset({"owner"}),
             allowed_bots=frozenset(),
         )
@@ -11825,7 +11833,7 @@ class TestExecuteTask:
         worker._tasks.complete_with_resolve.assert_called_once_with(
             task["id"],
             gh,
-            syncer=sync_tasks_background,
+            syncer=ANY,
             collaborators=frozenset({"owner"}),
             allowed_bots=frozenset(),
         )
@@ -16360,23 +16368,23 @@ class TestRunPromoteMergeIntegration:
 
 class TestResolveGitDirModuleLevel:
     def test_returns_path_from_stdout(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="/some/repo/.git\n"))
-        assert _resolve_git_dir(tmp_path, _run=mock_run) == Path("/some/repo/.git")
+        runner = _FakeProcessRunner(stdout="/some/repo/.git\n")
+        assert _resolve_git_dir(tmp_path, runner=runner) == Path("/some/repo/.git")
 
     def test_passes_absolute_git_dir_flag(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="/repo/.git\n"))
-        _resolve_git_dir(tmp_path, _run=mock_run)
-        assert "--absolute-git-dir" in mock_run.call_args[0][0]
+        runner = _FakeProcessRunner(stdout="/repo/.git\n")
+        _resolve_git_dir(tmp_path, runner=runner)
+        assert "--absolute-git-dir" in runner.calls[0][0]
 
     def test_raises_on_subprocess_failure(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, "git"))
+        runner = _FakeProcessRunner(results=[subprocess.CalledProcessError(1, "git")])
         with pytest.raises(subprocess.CalledProcessError):
-            _resolve_git_dir(tmp_path, _run=mock_run)
+            _resolve_git_dir(tmp_path, runner=runner)
 
     def test_passes_cwd(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="/repo/.git\n"))
-        _resolve_git_dir(tmp_path, _run=mock_run)
-        assert mock_run.call_args.kwargs["cwd"] == tmp_path
+        runner = _FakeProcessRunner(stdout="/repo/.git\n")
+        _resolve_git_dir(tmp_path, runner=runner)
+        assert runner.calls[0][1]["cwd"] == tmp_path
 
 
 class TestFormatWorkQueue:
@@ -16471,7 +16479,7 @@ class TestPrBodyLock:
         subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True, exist_ok=True)
-        with pr_body_lock(tmp_path):
+        with pr_body_lock(tmp_path, runner=RealProcessRunner()):
             assert (fido_dir / "sync.lock").exists()
 
     def test_lock_blocks_sync_tasks(self, tmp_path: Path) -> None:
@@ -16483,12 +16491,12 @@ class TestPrBodyLock:
         fido_dir.mkdir(parents=True, exist_ok=True)
         (fido_dir / "state.json").write_text('{"issue": 1}')
         gh = MagicMock()
-        with pr_body_lock(tmp_path):
+        with pr_body_lock(tmp_path, runner=RealProcessRunner()):
             sync_tasks(
                 tmp_path,
                 gh,
-                _resolve_git_dir_fn=MagicMock(return_value=tmp_path / ".git"),
-                _auto_complete_ask_tasks_fn=MagicMock(),
+                git_dir_resolver=MagicMock(return_value=tmp_path / ".git"),
+                auto_completer=MagicMock(),
             )
         # sync_tasks should have skipped (couldn't acquire LOCK_NB)
         gh.find_pr.assert_not_called()
@@ -16638,10 +16646,10 @@ class TestSyncTasks:
         (fido_dir / "state.json").write_text(f'{{"issue": {issue}}}')
 
     def _sync_kwargs(self, fido_dir: Path) -> dict:
-        """Return injection kwargs for sync_tasks pointing _resolve_git_dir at fido_dir.parent."""
+        """Return injection kwargs for sync_tasks pointing git_dir_resolver at fido_dir.parent."""
         return {
-            "_resolve_git_dir_fn": MagicMock(return_value=fido_dir.parent),
-            "_auto_complete_ask_tasks_fn": MagicMock(),
+            "git_dir_resolver": MagicMock(return_value=fido_dir.parent),
+            "auto_completer": MagicMock(),
         }
 
     def test_warns_when_git_dir_not_resolved(
@@ -16654,9 +16662,10 @@ class TestSyncTasks:
             sync_tasks(
                 tmp_path,
                 gh,
-                _resolve_git_dir_fn=MagicMock(
+                git_dir_resolver=MagicMock(
                     side_effect=subprocess.CalledProcessError(1, "git")
                 ),
+                auto_completer=MagicMock(),
             )
         assert "could not resolve git dir" in caplog.text
 
@@ -17020,20 +17029,38 @@ class TestSyncTasksBackground:
     def test_starts_daemon_thread(self, tmp_path: Path) -> None:
         gh = MagicMock()
         started: list = []
-        sync_tasks_background(tmp_path, gh, _start=started.append)
+        sync_tasks_background(
+            tmp_path,
+            gh,
+            git_dir_resolver=MagicMock(),
+            auto_completer=MagicMock(),
+            starter=started.append,
+        )
         assert len(started) == 1
         assert started[0].daemon is True
 
     def test_thread_name_includes_dir_name(self, tmp_path: Path) -> None:
         gh = MagicMock()
         captured: list = []
-        sync_tasks_background(tmp_path, gh, _start=captured.append)
+        sync_tasks_background(
+            tmp_path,
+            gh,
+            git_dir_resolver=MagicMock(),
+            auto_completer=MagicMock(),
+            starter=captured.append,
+        )
         assert tmp_path.name in captured[0].name
 
     def test_thread_target_is_sync_tasks(self, tmp_path: Path) -> None:
         gh = MagicMock()
         captured: list = []
-        sync_tasks_background(tmp_path, gh, _start=captured.append)
+        sync_tasks_background(
+            tmp_path,
+            gh,
+            git_dir_resolver=MagicMock(),
+            auto_completer=MagicMock(),
+            starter=captured.append,
+        )
         assert captured[0]._target is sync_tasks
 
 

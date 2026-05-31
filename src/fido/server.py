@@ -36,7 +36,11 @@ from fido.events import (
     reply_to_review,
     thread_lineage_comment_ids,
 )
-from fido.github import GitHub, GraphQLError
+from fido.github import (
+    GitHub,
+    GraphQLError,
+    _gh_token,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+)
 from fido.infra import (
     Clock,
     Filesystem,
@@ -1284,7 +1288,11 @@ def run(
     infra = real_infra()
     WebhookHandler.infra = infra
 
-    gh = _GitHub()
+    gh = _GitHub(
+        runner=infra.proc,
+        clock=infra.clock,
+        token_fetcher=lambda: _gh_token(runner=infra.proc),
+    )
     try:
         _preflight_tools(infra.fs)
         _preflight_sub_dir(config, infra.fs)
@@ -1330,6 +1338,7 @@ def run(
         config,
         dispatchers=dispatchers,
         state_updater=state_updater,
+        runner=infra.proc,
     )
     WebhookHandler.registry = registry
     WebhookHandler.state_reader = state_reader

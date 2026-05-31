@@ -7,8 +7,17 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fido.github import GitHub
-from fido.tasks import Tasks, sync_tasks_background
+from fido.github import (
+    GitHub,
+    _gh_token,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+)
+from fido.infra import ProcessRunner, RealClock, RealProcessRunner
+from fido.tasks import (
+    RealBackgroundSyncer,
+    RealThreadStarter,
+    Tasks,
+    _auto_complete_ask_tasks,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+)
 from fido.types import TaskType
 
 log = logging.getLogger(__name__)
@@ -17,8 +26,9 @@ log = logging.getLogger(__name__)
 class Cmd:
     """CLI command handler with injectable dependencies for testability."""
 
-    def __init__(self, *, github: GitHub) -> None:
+    def __init__(self, *, github: GitHub, runner: ProcessRunner) -> None:
         self._github = github
+        self._runner = runner
 
     def add(
         self,
@@ -48,7 +58,13 @@ class Cmd:
 
     def complete(self, work_dir: Path, task_id: str) -> None:
         Tasks(work_dir).complete_with_resolve(
-            task_id, self._github, syncer=sync_tasks_background
+            task_id,
+            self._github,
+            syncer=RealBackgroundSyncer(
+                runner=self._runner,
+                auto_completer=_auto_complete_ask_tasks,
+                starter=RealThreadStarter(),
+            ),
         )
 
     def list(self, work_dir: Path) -> None:
@@ -98,7 +114,15 @@ def main(
 ) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    cmd = Cmd(github=_GitHub())
+    runner = RealProcessRunner()
+    cmd = Cmd(
+        github=_GitHub(
+            runner=runner,
+            clock=RealClock(),
+            token_fetcher=lambda: _gh_token(runner=runner),
+        ),
+        runner=runner,
+    )
 
     match args.command:
         case "add":

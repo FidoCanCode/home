@@ -1186,6 +1186,7 @@ def _write_pr_description(
     task_list: list[dict[str, Any]],
     existing_body: str = "",
     *,
+    runner: ProcessRunner,
     agent: ProviderAgent | None = None,
     pre_baked_description: str = "",
 ) -> None:
@@ -1291,7 +1292,7 @@ def _write_pr_description(
     new_body = f"{new_desc.strip()}{divider}{rest}"
     # Hold sync.lock during the PATCH so concurrent sync_tasks calls (which
     # also acquire this lock) cannot interleave and overwrite each other.
-    with tasks.pr_body_lock(work_dir):
+    with tasks.pr_body_lock(work_dir, runner=runner):
         gh.edit_pr_body(repo, pr_number, new_body)
     log.info("_write_pr_description: PR #%s description written", pr_number)
 
@@ -1510,8 +1511,17 @@ class _RealTaskSyncer:  # pragma: no cover
     Tests inject a fake :class:`TaskSyncer` instead.
     """
 
+    def __init__(self, runner: ProcessRunner) -> None:
+        self._runner = runner
+
     def sync_tasks(self, work_dir: Path, gh: GitHub, *, blocking: bool = False) -> None:
-        tasks.sync_tasks(work_dir, gh, blocking=blocking)
+        tasks.sync_tasks(
+            work_dir,
+            gh,
+            blocking=blocking,
+            git_dir_resolver=tasks.RealGitDirResolver(self._runner),
+            auto_completer=tasks._auto_complete_ask_tasks,  # pyright: ignore[reportPrivateUsage]
+        )
 
 
 _DEFAULT_PROMPT_BUILDER: PromptBuilder = _RealPromptBuilder()
@@ -1519,9 +1529,9 @@ _DEFAULT_PROVIDER_RUNNER: ProviderRunner = _RealProviderRunner()
 _DEFAULT_HARNESS_COMMITTER_FACTORY: HarnessCommitterFactory = (
     _RealHarnessCommitterFactory()
 )
-_DEFAULT_TASK_SYNCER: TaskSyncer = _RealTaskSyncer()
 _DEFAULT_CLOCK: Clock = RealClock()
 _DEFAULT_RUNNER: ProcessRunner = RealProcessRunner()
+_DEFAULT_TASK_SYNCER: TaskSyncer = _RealTaskSyncer(runner=_DEFAULT_RUNNER)
 _DEFAULT_SUB_DIR_PROVIDER: SubDirProvider = _RealSubDirProvider()
 
 
@@ -1711,6 +1721,7 @@ class Worker:
             issue,
             task_list,
             existing_body,
+            runner=self._runner,
             agent=agent,
             pre_baked_description=pre_baked_description,
         )
@@ -1728,7 +1739,7 @@ class Worker:
 
     def resolve_git_dir(self) -> Path:
         """Return the absolute .git directory for self.work_dir."""
-        return _resolve_git_dir(self.work_dir, _run=self._runner.run)
+        return _resolve_git_dir(self.work_dir, runner=self._runner)
 
     def create_context(self) -> WorkerContext:
         """Build a WorkerContext for self.work_dir, acquiring the fido lock.
@@ -3817,7 +3828,11 @@ class Worker:
         self._tasks.complete_with_resolve(
             task["id"],
             self.gh,
-            syncer=tasks.sync_tasks_background,
+            syncer=tasks.RealBackgroundSyncer(
+                runner=self._runner,
+                auto_completer=tasks._auto_complete_ask_tasks,  # pyright: ignore[reportPrivateUsage]
+                starter=tasks.RealThreadStarter(),
+            ),
             collaborators=repo_ctx.collaborators,
             allowed_bots=allowed_bots,
         )
@@ -5670,6 +5685,7 @@ class WorkerThread(threading.Thread):
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
         os_proc: OsProcess | None = None,
+        runner: ProcessRunner | None = None,
         _state: State | None = None,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
@@ -5678,6 +5694,9 @@ class WorkerThread(threading.Thread):
         self._gh = gh
         self._registry = registry
         self._os_proc: OsProcess = os_proc if os_proc is not None else RealOsProcess()
+        self._runner_proc: ProcessRunner = (
+            runner if runner is not None else RealProcessRunner()
+        )
         self._membership = membership
         self._wake = threading.Event()
         self._abort_task = AbortHandle()
@@ -5939,7 +5958,11 @@ class WorkerThread(threading.Thread):
             sub_dir_provider=_DEFAULT_SUB_DIR_PROVIDER,
             dispatcher=self._dispatcher,
             issue_cache=self._issue_cache,
-            background_syncer=tasks.sync_tasks_background,
+            background_syncer=tasks.RealBackgroundSyncer(
+                runner=_DEFAULT_RUNNER,
+                auto_completer=tasks._auto_complete_ask_tasks,  # pyright: ignore[reportPrivateUsage]
+                starter=tasks.RealThreadStarter(),
+            ),
             task_reorderer=tasks.reorder_tasks,  # pyright: ignore[reportArgumentType]
             commit_summarizer=_fev._get_commit_summary,  # pyright: ignore[reportPrivateUsage]
         )
@@ -5952,7 +5975,7 @@ class WorkerThread(threading.Thread):
         "no persistence available" rather than raising.
         """
         try:
-            return _resolve_git_dir(self.work_dir) / "fido"
+            return _resolve_git_dir(self.work_dir, runner=self._runner_proc) / "fido"
         except subprocess.CalledProcessError, FileNotFoundError, OSError:
             return None
 

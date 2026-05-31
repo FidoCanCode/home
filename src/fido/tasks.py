@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 from fido.claude import ClaudeClient
 from fido.github import GitHub
+from fido.infra import ProcessRunner
 from fido.prompts import Prompts
 from fido.provider import READ_ONLY_ALLOWED_TOOLS, ProviderAgent
 from fido.rocq import pr_body_task_store as task_store_oracle
@@ -41,6 +42,50 @@ from fido.types import (
 )
 
 log = logging.getLogger(__name__)
+
+
+class GitDirResolver(Protocol):
+    """Typed collaborator that resolves the git directory for a working tree."""
+
+    def __call__(self, work_dir: Path) -> Path: ...
+
+
+class AutoCompleter(Protocol):
+    """Typed collaborator that auto-completes resolved ASK tasks on sync."""
+
+    def __call__(
+        self, work_dir: Path, gh: GitHub, repo: str, pr_number: int | str
+    ) -> None: ...
+
+
+class ThreadStarter(Protocol):
+    """Typed collaborator that starts a :class:`threading.Thread`."""
+
+    def __call__(self, t: threading.Thread) -> None: ...
+
+
+class ProviderAgentFactory(Protocol):
+    """Typed collaborator that constructs a :class:`~fido.provider.ProviderAgent`."""
+
+    def __call__(self) -> ProviderAgent: ...
+
+
+class RealGitDirResolver:
+    """Real :class:`GitDirResolver` — delegates to :func:`~fido.state._resolve_git_dir`."""
+
+    def __init__(self, runner: ProcessRunner) -> None:
+        self._runner = runner
+
+    def __call__(self, work_dir: Path) -> Path:
+        return _resolve_git_dir(work_dir, runner=self._runner)
+
+
+class RealThreadStarter:
+    """Real :class:`ThreadStarter` — calls :meth:`threading.Thread.start`."""
+
+    def __call__(self, t: threading.Thread) -> None:
+        t.start()
+
 
 # Maximum number of nudge retries when Opus proposes duplicate task titles.
 _RESCOPE_MAX_NUDGES = 3
@@ -1198,7 +1243,7 @@ def _apply_queue_to_body(body: str, queue: str) -> str:
     return body[:start] + "\n" + queue + "\n" + body[end:]
 
 
-def _auto_complete_ask_tasks(
+def _auto_complete_ask_tasks(  # pyright: ignore[reportUnusedFunction]  # imported by worker/cli
     work_dir: Path,
     gh: GitHub,
     repo: str,
@@ -1237,7 +1282,7 @@ def _auto_complete_ask_tasks(
 
 
 @contextmanager
-def pr_body_lock(work_dir: Path) -> Iterator[None]:
+def pr_body_lock(work_dir: Path, *, runner: ProcessRunner) -> Iterator[None]:
     """Blocking exclusive lock on the PR-body sync.lock file.
 
     Acquires LOCK_EX (blocking, not LOCK_NB) so callers wait rather than
@@ -1245,7 +1290,7 @@ def pr_body_lock(work_dir: Path) -> Iterator[None]:
     also acquires this same lock (with LOCK_NB).  Prevents a description
     rewrite from overwriting a concurrent work-queue sync.
     """
-    git_dir = _resolve_git_dir(work_dir)
+    git_dir = _resolve_git_dir(work_dir, runner=runner)
     fido_dir = git_dir / "fido"
     fido_dir.mkdir(parents=True, exist_ok=True)
     lock_path = fido_dir / "sync.lock"
@@ -1262,8 +1307,8 @@ def sync_tasks(
     gh: GitHub,
     *,
     blocking: bool = False,
-    _resolve_git_dir_fn: Callable[[Path], Path] = _resolve_git_dir,
-    _auto_complete_ask_tasks_fn: Callable[..., None] = _auto_complete_ask_tasks,
+    git_dir_resolver: GitDirResolver,
+    auto_completer: AutoCompleter,
 ) -> None:
     """Sync tasks.json → PR body work queue.
 
@@ -1274,7 +1319,7 @@ def sync_tasks(
     if a background sync holds the lock with stale data.
     """
     try:
-        git_dir = _resolve_git_dir_fn(work_dir)
+        git_dir = git_dir_resolver(work_dir)
     except subprocess.CalledProcessError:
         log.warning("sync_tasks: could not resolve git dir for %s", work_dir)
         return
@@ -1309,7 +1354,7 @@ def sync_tasks(
             return
 
         pr_number = pr_data["number"]
-        _auto_complete_ask_tasks_fn(work_dir, gh, repo, pr_number)
+        auto_completer(work_dir, gh, repo, pr_number)
 
         task_list = Tasks(work_dir).list()
         if not task_list:
@@ -3595,7 +3640,7 @@ def reorder_tasks(
     *,
     intents: list[RescopeIntent] | None = None,
     agent: ProviderAgent | None = None,
-    _client_factory: Callable[[], ProviderAgent] | None = None,
+    _client_factory: ProviderAgentFactory | None = None,
     prompts: Prompts | None = None,
     issue: ActiveIssue | None = None,
     pr: ActivePR | None = None,
@@ -4104,16 +4149,51 @@ def sync_tasks_background(
     work_dir: Path,
     gh: GitHub,
     *,
-    _start: Callable[[threading.Thread], None] = threading.Thread.start,
+    git_dir_resolver: GitDirResolver,
+    auto_completer: AutoCompleter,
+    starter: ThreadStarter,
 ) -> None:
     """Launch :func:`sync_tasks` in a daemon background thread."""
     t = threading.Thread(
         target=sync_tasks,
-        args=(work_dir, gh),
+        kwargs={
+            "work_dir": work_dir,
+            "gh": gh,
+            "git_dir_resolver": git_dir_resolver,
+            "auto_completer": auto_completer,
+        },
         name=f"sync-{work_dir.name}",
         daemon=True,
     )
-    _start(t)
+    starter(t)
+
+
+class RealBackgroundSyncer:
+    """Real :class:`BackgroundSyncer` — launches :func:`sync_tasks` in a thread.
+
+    Satisfies both :class:`BackgroundSyncer` (tasks.py) and
+    :class:`~fido.events.BackgroundTaskSyncer` (events.py) — both require
+    ``__call__(work_dir, gh) -> None``.
+    """
+
+    def __init__(
+        self,
+        runner: ProcessRunner,
+        auto_completer: AutoCompleter,
+        starter: ThreadStarter,
+    ) -> None:
+        self._runner = runner
+        self._auto_completer = auto_completer
+        self._starter = starter
+
+    def __call__(self, work_dir: Path, gh: GitHub) -> None:
+        sync_tasks_background(
+            work_dir,
+            gh,
+            git_dir_resolver=RealGitDirResolver(self._runner),
+            auto_completer=self._auto_completer,
+            starter=self._starter,
+        )
 
 
 def _build_task_list_snapshot(task_list: list[dict[str, Any]]) -> "TaskListSnapshot":

@@ -3,22 +3,28 @@
 import logging
 import os
 import re
-import subprocess
 import threading
-import time
 import urllib.parse
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import requests as _requests
 
+from fido.infra import Clock, ProcessRunner
 from fido.types import ClosedPR, ClosedSubIssue, GitIdentity
 
 log = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT: int = 30  # seconds for all outbound GitHub HTTP requests
+
+
+class TokenFetcher(Protocol):
+    """Typed collaborator for fetching a GitHub token on demand."""
+
+    def __call__(self) -> str: ...
+
 
 # Matches GitHub's closing-keyword syntax in PR body/title text.
 # Used to identify closing PRs for already-closed issues, where
@@ -305,8 +311,8 @@ def _auto_merge_unavailable(exc: GraphQLError) -> bool:
     return False
 
 
-def _gh_token(
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+def _gh_token(  # pyright: ignore[reportUnusedFunction]  # imported by cli/server
+    runner: ProcessRunner,
     environ: Mapping[str, str] = os.environ,
 ) -> str:
     """Return a GitHub token from env or the gh CLI.
@@ -317,11 +323,12 @@ def _gh_token(
     """
     token = environ.get("GITHUB_TOKEN", "")
     if not token:
-        result = runner(
+        result = runner.run(
             ["gh", "auth", "token"],
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -340,10 +347,14 @@ class GitHub:
         self,
         token: str | None = None,
         session: _requests.Session | None = None,
-        sleeper: Callable[[float], None] = time.sleep,
-        token_fetcher: Callable[[], str] = _gh_token,
+        *,
+        runner: ProcessRunner,
+        clock: Clock,
+        token_fetcher: TokenFetcher,
     ) -> None:
         self._s = session if session is not None else _TimeoutSession()
+        self._runner = runner
+        self._clock = clock
         self._token_fetcher = token_fetcher
         self._token = token if token is not None else token_fetcher()
         self._s.headers.update(
@@ -353,7 +364,6 @@ class GitHub:
                 "X-GitHub-Api-Version": "2022-11-28",
             }
         )
-        self._sleep = sleeper
 
     def clear_repo_cache(self, repo: str) -> int:
         """Drop all cached GET responses for ``repo`` from the session.
@@ -430,7 +440,7 @@ class GitHub:
                     last_exc,
                     delay,
                 )
-                self._sleep(delay)
+                self._clock.sleep(delay)
         assert last_exc is not None
         raise last_exc
 
@@ -1173,7 +1183,6 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
     def get_repo_info(
         self,
         cwd: Path | str | None = None,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> str:
         """Return 'owner/repo' for the repo at cwd, parsed from the git remote.
 
@@ -1182,13 +1191,12 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         if git is not installed.  Raises ``ValueError`` if the remote URL is
         not a recognised GitHub format.
         """
-        result = runner(
+        result = self._runner.run(
             ["git", "remote", "get-url", "origin"],
             capture_output=True,
             text=True,
             timeout=10,
             cwd=cwd,
-            check=True,
         )
         url = result.stdout.strip().removesuffix(".git")
         if url.startswith("https://github.com/"):
@@ -1200,10 +1208,9 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
     def get_default_branch(
         self,
         cwd: Path | str | None = None,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> str:
         """Return the default branch for the repo at cwd."""
-        repo = self.get_repo_info(cwd=cwd, runner=runner)
+        repo = self.get_repo_info(cwd=cwd)
         data = self._get(f"/repos/{repo}")
         return data["default_branch"]
 

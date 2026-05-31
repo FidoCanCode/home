@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from fido.cli import Cmd, build_parser, main
+from fido.infra import RealProcessRunner
 from fido.tasks import Tasks
 from fido.types import TaskType
 
@@ -64,13 +65,29 @@ class _FakeGitHub:
     ``resolve_thread``.  ``get_pull_comments`` is included because some tests
     set it up (legacy of an earlier implementation path) even though the
     current oracle path does not call it.
+
+    Accepts the same constructor signature as :class:`~fido.github.GitHub`
+    so it can be passed as ``_GitHub=_FakeGitHub`` to :func:`~fido.cli.main`.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        token: str | None = None,
+        session: object = None,
+        *,
+        runner: object = None,
+        clock: object = None,
+        token_fetcher: object = None,
+    ) -> None:
         self.get_user: _FakeCallRecorder = _FakeCallRecorder(return_value="")
         self.get_pull_comments: _FakeCallRecorder = _FakeCallRecorder(return_value=[])
         self.get_review_threads: _FakeCallRecorder = _FakeCallRecorder(return_value=[])
         self.resolve_thread: _FakeCallRecorder = _FakeCallRecorder()
+
+
+def _cmd(github: "_FakeGitHub | object") -> Cmd:
+    """Construct a ``Cmd`` with the given github fake and a noop runner."""
+    return Cmd(github=github, runner=RealProcessRunner())  # type: ignore[arg-type]
 
 
 class _FakeArgs:
@@ -166,7 +183,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path, TaskType.SPEC, "my task", "some description"
         )
         capsys.readouterr()  # consume add output
@@ -181,7 +198,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).add(tmp_path, TaskType.CI, "bare task", "")  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(tmp_path, TaskType.CI, "bare task", "")  # type: ignore[arg-type]
         capsys.readouterr()
 
         tasks = Tasks(tmp_path).list()
@@ -192,7 +209,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path, TaskType.THREAD, "threaded", "", comment_id=42, repo="a/b", pr=7
         )
         capsys.readouterr()
@@ -205,7 +222,7 @@ class TestCmdAdd:
     ) -> None:
         """comment_id without repo/pr still sets a thread for dedup purposes."""
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path, TaskType.THREAD, "threaded", "", comment_id=99
         )
         capsys.readouterr()
@@ -217,7 +234,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path,
             TaskType.THREAD,
             "first title",
@@ -227,7 +244,7 @@ class TestCmdAdd:
             pr=7,
         )
         capsys.readouterr()
-        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path,
             TaskType.THREAD,
             "different title",
@@ -246,7 +263,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).add(tmp_path, TaskType.SPEC, "my task", "")  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(tmp_path, TaskType.SPEC, "my task", "")  # type: ignore[arg-type]
         out = capsys.readouterr().out
         data = json.loads(out)
         assert data["title"] == "my task"
@@ -261,7 +278,7 @@ class TestCmdComplete:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        cmd = Cmd(github=_FakeGitHub())  # type: ignore[arg-type]
+        cmd = _cmd(_FakeGitHub())  # type: ignore[arg-type]
         task = cmd.add(tmp_path, TaskType.SPEC, "task to finish", "")
         capsys.readouterr()
         cmd.complete(tmp_path, task["id"])
@@ -319,7 +336,7 @@ class TestCmdComplete:
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
-            Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
+            _cmd(mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_called_once_with("thread_node_abc")
         assert "thread resolved: thread_node_abc" in caplog.text
@@ -375,7 +392,7 @@ class TestCmdComplete:
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
-            Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
+            _cmd(mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_not_called()
         assert "not resolving" in caplog.text
@@ -394,7 +411,7 @@ class TestCmdComplete:
         mock_github.get_user.return_value = "fido-bot"
         mock_github.get_pull_comments.return_value = []
 
-        Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
+        _cmd(mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_not_called()
 
@@ -413,7 +430,7 @@ class TestCmdComplete:
 
         # Should not raise; exception is swallowed and logged
         with caplog.at_level(logging.WARNING, logger="fido"):
-            Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
+            _cmd(mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
         assert "thread resolution skipped" in caplog.text
 
     def test_completes_task_with_thread_already_resolved(self, tmp_path: Path) -> None:
@@ -442,7 +459,7 @@ class TestCmdComplete:
             }
         ]
 
-        Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
+        _cmd(mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_not_called()
 
@@ -456,14 +473,14 @@ class TestCmdComplete:
         )
 
         mock_github = _FakeGitHub()
-        Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
+        _cmd(mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_not_called()
 
     def test_complete_nonexistent_id_no_error(self, tmp_path: Path) -> None:
         """Completing a non-existent task ID should not raise."""
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).complete(tmp_path, "nonexistent-id")  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).complete(tmp_path, "nonexistent-id")  # type: ignore[arg-type]
 
 
 # ── Cmd.list ──────────────────────────────────────────────────────────────────
@@ -474,7 +491,7 @@ class TestCmdList:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        cmd = Cmd(github=_FakeGitHub())  # type: ignore[arg-type]
+        cmd = _cmd(_FakeGitHub())  # type: ignore[arg-type]
         cmd.add(tmp_path, TaskType.SPEC, "alpha", "")
         capsys.readouterr()
         cmd.add(tmp_path, TaskType.SPEC, "beta", "desc")
@@ -490,7 +507,7 @@ class TestCmdList:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).list(tmp_path)  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).list(tmp_path)  # type: ignore[arg-type]
         out = capsys.readouterr().out
         assert json.loads(out) == []
 

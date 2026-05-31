@@ -1668,12 +1668,23 @@ class BackgroundTaskSyncer(Protocol):
 
 
 class _RealBackgroundTaskSyncer:
-    """Real :class:`BackgroundTaskSyncer` — delegates to sync_tasks_background."""
+    """Real :class:`BackgroundTaskSyncer` — delegates to :class:`~fido.tasks.RealBackgroundSyncer`."""
+
+    def __init__(self, runner: ProcessRunner) -> None:
+        self._runner = runner
 
     def __call__(self, work_dir: Path, gh: GitHub) -> None:
-        from fido.tasks import sync_tasks_background
+        from fido.tasks import (  # noqa: PLC0415
+            RealBackgroundSyncer,
+            RealThreadStarter,
+            _auto_complete_ask_tasks,  # pyright: ignore[reportPrivateUsage]
+        )
 
-        sync_tasks_background(work_dir, gh)
+        RealBackgroundSyncer(
+            runner=self._runner,
+            auto_completer=_auto_complete_ask_tasks,
+            starter=RealThreadStarter(),
+        )(work_dir, gh)
 
 
 class CommitSummarizer(Protocol):
@@ -1736,6 +1747,9 @@ class PrDescriptionWriter(Protocol):
 class _RealPrDescriptionWriter:
     """Real :class:`PrDescriptionWriter` — imports and calls worker._write_pr_description."""
 
+    def __init__(self, runner: ProcessRunner) -> None:
+        self._runner = runner
+
     def __call__(
         self,
         work_dir: Path,
@@ -1760,6 +1774,7 @@ class _RealPrDescriptionWriter:
             issue,
             task_list,
             existing_body,
+            runner=self._runner,
             agent=agent,
         )
 
@@ -1769,10 +1784,14 @@ _DEFAULT_SYNTHESIS_CALLER: SynthesisCaller = _RealSynthesisCaller()
 _DEFAULT_THREAD_STARTER: ThreadStarter = _RealThreadStarter()
 _DEFAULT_TASK_REORDERER: TaskReorderer = _RealTaskReorderer()
 _DEFAULT_PR_REWRITER: PrDescriptionRewriter = _RealPrDescriptionRewriter()
-_DEFAULT_BACKGROUND_SYNCER: BackgroundTaskSyncer = _RealBackgroundTaskSyncer()
+_DEFAULT_BACKGROUND_SYNCER: BackgroundTaskSyncer = _RealBackgroundTaskSyncer(
+    runner=RealProcessRunner()
+)
 _DEFAULT_COMMIT_SUMMARIZER: CommitSummarizer = _RealCommitSummarizer()
 _DEFAULT_STORE_FACTORY: StoreFactory = _RealStoreFactory()
-_DEFAULT_PR_DESCRIPTION_WRITER: PrDescriptionWriter = _RealPrDescriptionWriter()
+_DEFAULT_PR_DESCRIPTION_WRITER: PrDescriptionWriter = _RealPrDescriptionWriter(
+    runner=_DEFAULT_RUNNER
+)
 
 
 class Dispatcher:
