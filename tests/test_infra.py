@@ -65,6 +65,17 @@ class TestRealClock:
         t2 = time.monotonic()
         assert t1 <= result <= t2
 
+    def test_now_returns_utc_datetime(self) -> None:
+        """now() returns a timezone-aware UTC datetime."""
+        import datetime as _dt
+
+        before = _dt.datetime.now(_dt.UTC)
+        result = RealClock().now()
+        after = _dt.datetime.now(_dt.UTC)
+        assert isinstance(result, _dt.datetime)
+        assert result.tzinfo is not None
+        assert before <= result <= after
+
 
 class TestRealFilesystem:
     def test_which_returns_path_when_tool_found(self) -> None:

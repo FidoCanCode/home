@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +52,49 @@ def _completed(
     )
 
 
+# ── Typed fake helpers for protocol collaborators ─────────────────────────────
+
+
+class _FuncPopenRunner:
+    """Wraps a raw callable as a PopenRunner for test closures."""
+
+    def __init__(self, fn: Callable[..., object]) -> None:
+        self._fn = fn
+
+    def spawn(self, cmd: object, **kwargs: object) -> object:
+        return self._fn(cmd, **kwargs)
+
+
+class _FuncSelector:
+    """Wraps a raw callable as an IOSelector for test closures."""
+
+    def __init__(self, fn: Callable[..., object]) -> None:
+        self._fn = fn
+
+    def select(
+        self,
+        rlist: list[object],
+        wlist: list[object],
+        xlist: list[object],
+        timeout: float | None = None,
+    ) -> object:
+        return self._fn(rlist, wlist, xlist, timeout)
+
+
+def _make_popen(proc: object) -> MagicMock:
+    """Return a MagicMock PopenRunner whose spawn() returns *proc*."""
+    m = MagicMock()
+    m.spawn.return_value = proc
+    return m
+
+
+def _make_selector(result: object) -> MagicMock:
+    """Return a MagicMock IOSelector whose select() returns *result*."""
+    m = MagicMock()
+    m.select.return_value = result
+    return m
+
+
 class TestTrunc:
     def test_str_truncates_long_string(self) -> None:
         t = _Trunc("x" * (_LOG_LINE_TRUNCATE + 50))
@@ -69,11 +113,12 @@ class TestTrunc:
 
 class TestClaudeHelper:
     def test_calls_subprocess_run_with_prompt(self) -> None:
-        mock_run = MagicMock(return_value=_completed("out"))
+        mock_run = MagicMock()
+        mock_run.run.return_value = _completed("out")
         result = _claude(
             "--print", "-p", "hello", prompt="input", timeout=5, runner=mock_run
         )
-        mock_run.assert_called_once_with(
+        mock_run.run.assert_called_once_with(
             ["claude", "--print", "-p", "hello"],
             input="input",
             capture_output=True,
@@ -83,16 +128,18 @@ class TestClaudeHelper:
         assert result.stdout == "out"
 
     def test_defaults(self) -> None:
-        mock_run = MagicMock(return_value=_completed())
+        mock_run = MagicMock()
+        mock_run.run.return_value = _completed()
         _claude("--version", runner=mock_run)
-        _, kwargs = mock_run.call_args
+        _, kwargs = mock_run.run.call_args
         assert kwargs["timeout"] == 30
         assert kwargs["input"] is None
 
     def test_no_prompt(self) -> None:
-        mock_run = MagicMock(return_value=_completed("x"))
+        mock_run = MagicMock()
+        mock_run.run.return_value = _completed("x")
         _claude("--help", runner=mock_run)
-        assert mock_run.call_args.kwargs["input"] is None
+        assert mock_run.run.call_args.kwargs["input"] is None
 
     def test_default_runner_uses_explicit_popen(self) -> None:
         """When no runner is overridden, _claude drives Popen directly so
@@ -101,11 +148,11 @@ class TestClaudeHelper:
         fake_proc.args = ["claude", "--print"]
         fake_proc.returncode = 0
         fake_proc.communicate = MagicMock(return_value=("hello", ""))
-        fake_popen = MagicMock(return_value=fake_proc)
+        fake_popen = _make_popen(fake_proc)
         result = _claude(
             "--print", "-p", "hi", prompt="body", timeout=5, popen=fake_popen
         )
-        fake_popen.assert_called_once()
+        fake_popen.spawn.assert_called_once()
         fake_proc.communicate.assert_called_once_with(input="body", timeout=5)
         assert result.stdout == "hello"
         assert result.returncode == 0
@@ -115,9 +162,9 @@ class TestClaudeHelper:
         fake_proc.args = ["claude", "--version"]
         fake_proc.returncode = 0
         fake_proc.communicate = MagicMock(return_value=("1.0", ""))
-        fake_popen = MagicMock(return_value=fake_proc)
+        fake_popen = _make_popen(fake_proc)
         _claude("--version", popen=fake_popen)
-        assert fake_popen.call_args.kwargs["stdin"] is subprocess.DEVNULL
+        assert fake_popen.spawn.call_args.kwargs["stdin"] is subprocess.DEVNULL
 
     def test_default_runner_kills_on_timeout(self) -> None:
         """TimeoutExpired from communicate → kill → re-raise with output."""
@@ -139,7 +186,7 @@ class TestClaudeHelper:
                 "hi",
                 prompt="x",
                 timeout=5,
-                popen=MagicMock(return_value=fake_proc),
+                popen=_make_popen(fake_proc),
             )
         fake_proc.kill.assert_called_once()
         assert exc_info.value.output == "partial"
@@ -164,7 +211,7 @@ class TestClaudeHelper:
                 "hi",
                 prompt="x",
                 timeout=5,
-                popen=MagicMock(return_value=fake_proc),
+                popen=_make_popen(fake_proc),
             )
 
 
@@ -226,11 +273,12 @@ class TestRunStreaming:
 
         # Selector always reports stdout-not-ready → loop falls through to
         # the idle-timeout check on every iteration.
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_selector = _make_selector(([], [], []))
         # Virtual clock: first call seeds ``last_activity`` at 0; subsequent
         # calls jump past idle_timeout so the check trips on iteration one.
         times = iter([0.0, 1.0])
-        fake_clock = MagicMock(side_effect=lambda: next(times))
+        fake_clock = MagicMock()
+        fake_clock.monotonic.side_effect = lambda: next(times)
 
         with pytest.raises(ClaudeStreamError) as exc_info:
             list(
@@ -238,7 +286,7 @@ class TestRunStreaming:
                     ["anything"],
                     stdin_file,
                     idle_timeout=0.1,
-                    popen=MagicMock(return_value=proc),
+                    popen=_make_popen(proc),
                     selector=fake_selector,
                     clock=fake_clock,
                 )
@@ -277,8 +325,8 @@ class TestRunStreaming:
         mock_proc.wait.return_value = 0
         mock_proc.returncode = 0
 
-        mock_popen = MagicMock(return_value=mock_proc)
-        mock_selector = MagicMock(return_value=([], [], []))
+        mock_popen = _make_popen(mock_proc)
+        mock_selector = _make_selector(([], [], []))
 
         result = "".join(
             _run_streaming(
@@ -309,8 +357,8 @@ class TestRunStreaming:
         mock_proc.wait.return_value = 0
         mock_proc.returncode = 0
 
-        mock_popen = MagicMock(return_value=mock_proc)
-        mock_selector = MagicMock(return_value=([mock_stdout], [], []))
+        mock_popen = _make_popen(mock_proc)
+        mock_selector = _make_selector(([mock_stdout], [], []))
 
         result = "".join(
             _run_streaming(
@@ -518,7 +566,7 @@ class TestRunStreamingTracksChildren:
         proc = self._make_proc(["one\n"])
         captured: list = []
 
-        def fake_popen(*args: object, **kwargs: object) -> object:
+        def fake_popen_fn(*args: object, **kwargs: object) -> object:
             captured.append(proc in _active_children)
             return proc
 
@@ -530,8 +578,8 @@ class TestRunStreamingTracksChildren:
                 ["claude"],
                 stdin_file,
                 idle_timeout=1.0,
-                popen=fake_popen,
-                selector=fake_select,
+                popen=_FuncPopenRunner(fake_popen_fn),
+                selector=_FuncSelector(fake_select),
             )
         )
         # Was registered (popen sees it not yet in set, but it is by the time
@@ -621,7 +669,7 @@ class TestRunStreamingTracksChildren:
 
         observed: list = []
 
-        def fake_popen(*args: object, **kwargs: object) -> object:
+        def fake_popen_fn(*args: object, **kwargs: object) -> object:
             return proc
 
         def fake_select(rs: object, ws: object, xs: object, t: float) -> object:
@@ -635,8 +683,8 @@ class TestRunStreamingTracksChildren:
                     ["claude"],
                     stdin_file,
                     idle_timeout=1.0,
-                    popen=fake_popen,
-                    selector=fake_select,
+                    popen=_FuncPopenRunner(fake_popen_fn),
+                    selector=_FuncSelector(fake_select),
                 )
             )
         finally:
@@ -718,14 +766,12 @@ def _make_session(
     """Construct a :class:`_SpyClaudeSession` injecting *proc* as the subprocess."""
     system_file = tmp_path / "system.md"
     system_file.write_text("you are fido")
-    fake_popen = MagicMock(return_value=proc)
-    fake_selector = MagicMock(return_value=([proc.stdout], [], []))
     return _SpyClaudeSession(
         system_file,
         work_dir=tmp_path,
         idle_timeout=idle_timeout,
-        popen=fake_popen,
-        selector=fake_selector,
+        popen=_make_popen(proc),
+        selector=_make_selector(([proc.stdout], [], [])),
         repo_name="owner/repo",
     )
 
@@ -735,12 +781,12 @@ class TestClaudeSessionInit:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         proc = _make_session_proc([])
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([], [], []))
         ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        cmd = fake_popen.call_args.args[0]
+        cmd = fake_popen.spawn.call_args.args[0]
         assert cmd[0] == "claude"
         assert "--input-format" in cmd
         assert "stream-json" in cmd[cmd.index("--input-format") + 1]
@@ -770,8 +816,8 @@ class TestClaudeSessionInit:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         proc = _make_session_proc([])
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([], [], []))
         ClaudeSession(
             system_file,
             work_dir=tmp_path,
@@ -779,7 +825,7 @@ class TestClaudeSessionInit:
             selector=fake_selector,
             tools=READ_ONLY_ALLOWED_TOOLS,
         )
-        cmd = fake_popen.call_args.args[0]
+        cmd = fake_popen.spawn.call_args.args[0]
         assert "--permission-mode" in cmd
         assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
         assert "--allowedTools" in cmd
@@ -791,10 +837,10 @@ class TestClaudeSessionInit:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         proc = _make_session_proc([])
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([], [], []))
         ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
-        kwargs = fake_popen.call_args.kwargs
+        kwargs = fake_popen.spawn.call_args.kwargs
         assert kwargs["stdin"] == subprocess.PIPE
         assert kwargs["stdout"] == subprocess.PIPE
         assert kwargs["text"] is True
@@ -803,19 +849,19 @@ class TestClaudeSessionInit:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         proc = _make_session_proc([])
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([], [], []))
         ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
-        assert fake_popen.call_args.kwargs["cwd"] == tmp_path
+        assert fake_popen.spawn.call_args.kwargs["cwd"] == tmp_path
 
     def test_registers_in_active_children(self, tmp_path: Path) -> None:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         proc = _make_session_proc([])
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
         assert proc in _active_children
         # cleanup
@@ -965,8 +1011,9 @@ class TestClaudeSessionMessageCounts:
             [_json.dumps({"type": "result", "result": "done"}) + "\n"]
         )
         new_proc = _make_session_proc([])
-        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
-        fake_selector = MagicMock(return_value=([old_proc.stdout], [], []))
+        fake_popen = MagicMock()
+        fake_popen.spawn.side_effect = [old_proc, new_proc]
+        fake_selector = _make_selector(([old_proc.stdout], [], []))
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
@@ -996,8 +1043,8 @@ class TestClaudeSessionMessageCounts:
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
-            popen=MagicMock(return_value=proc),
-            selector=MagicMock(return_value=([proc.stdout], [], [])),
+            popen=_make_popen(proc),
+            selector=_make_selector(([proc.stdout], [], [])),
             snapshot_publisher=Recorder(),
         )
         session.send("hello")
@@ -1023,8 +1070,8 @@ class TestClaudeSessionMessageCounts:
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
-            popen=MagicMock(return_value=proc),
-            selector=MagicMock(return_value=([proc.stdout], [], [])),
+            popen=_make_popen(proc),
+            selector=_make_selector(([proc.stdout], [], [])),
             snapshot_publisher=Recorder(),
         )
         session.send("hello")
@@ -1133,7 +1180,7 @@ class TestClaudeSessionDrainToBoundary:
         session._stream_state = stream_fsm.Sending()
         # selector reports no pending data; proc.poll() says alive initially
         # (for the front-door check) then exited once drain loop polls.
-        session._selector = MagicMock(return_value=([], [], []))
+        session._selector = _make_selector(([], [], []))
         poll_results = iter([None] + [0] * 10)
         proc.poll = MagicMock(side_effect=lambda: next(poll_results))
         session._drain_to_boundary(deadline=1.0)
@@ -1146,7 +1193,7 @@ class TestClaudeSessionDrainToBoundary:
         session = _make_session(tmp_path, proc)
         session._stream_state = stream_fsm.Sending()
         # No pending data, process stays alive → loop just times out
-        session._selector = MagicMock(return_value=([], [], []))
+        session._selector = _make_selector(([], [], []))
         session._drain_to_boundary(deadline=0.01)
         assert len(session.recover_calls) == 1
         assert isinstance(session._stream_state, stream_fsm.Idle)
@@ -1161,7 +1208,7 @@ class TestClaudeSessionDrainToBoundary:
         session = _make_session(tmp_path, proc)
         session._stream_state = stream_fsm.Sending()
         # selector returns no-data so we hit the cancel check on each loop
-        session._selector = MagicMock(return_value=([], [], []))
+        session._selector = _make_selector(([], [], []))
         # Set cancel immediately — simulates preempt arriving during drain
         session._cancel.set()
         session._drain_to_boundary(deadline=5.0)
@@ -1193,7 +1240,9 @@ class TestClaudeSessionDrainToBoundary:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         session = ClaudeSession(
-            system_file, popen=MagicMock(return_value=proc), selector=tracking_selector
+            system_file,
+            popen=_make_popen(proc),
+            selector=_FuncSelector(tracking_selector),
         )
         session._stream_state = stream_fsm.Sending()
         session._drain_to_boundary()
@@ -1401,9 +1450,9 @@ class TestClaudeSessionIterEvents:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         proc = _make_session_proc([], poll_returns=0)
-        fake_popen = MagicMock(return_value=proc)
+        fake_popen = _make_popen(proc)
         # selector never returns ready — forces poll() branch
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
         events = list(session.iter_events())
         assert events == []
@@ -1436,9 +1485,9 @@ class TestClaudeSessionIterEvents:
         system_file.write_text("sys")
         proc = _make_session_proc([])
         proc.poll = MagicMock(return_value=None)  # never exits
-        fake_popen = MagicMock(return_value=proc)
+        fake_popen = _make_popen(proc)
         # selector never ready, process never exits → triggers idle timeout
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
             system_file,
             idle_timeout=0.0,
@@ -1450,7 +1499,7 @@ class TestClaudeSessionIterEvents:
         assert exc_info.value.returncode == _RETURNCODE_IDLE_TIMEOUT
         proc.kill.assert_called()
         # recover() must spawn a replacement process after killing
-        assert fake_popen.call_count == 2
+        assert fake_popen.spawn.call_count == 2
 
     def test_cancel_cleared_at_iter_events_start(self, tmp_path: Path) -> None:
         # A cancel set before iter_events() is called is cleared at the start of
@@ -1543,7 +1592,7 @@ class TestClaudeSessionIterEvents:
                 return ([], [], [])
             return ([proc.stdout], [], [])
 
-        session._selector = selector_arming_cancel
+        session._selector = _FuncSelector(selector_arming_cancel)
         events = list(session.iter_events())
         types = [e["type"] for e in events]
         assert "control_response" in types
@@ -1583,7 +1632,7 @@ class TestClaudeSessionIterEvents:
         proc.poll = MagicMock(return_value=None)
         proc.kill = MagicMock()
         proc.wait = MagicMock(return_value=0)
-        fake_popen = MagicMock(return_value=proc)
+        fake_popen = _make_popen(proc)
 
         session_ref: list[ClaudeSession] = []
 
@@ -1598,7 +1647,9 @@ class TestClaudeSessionIterEvents:
         try:
             _claude_mod._CANCEL_DRAIN_TIMEOUT = 0.05
             session = ClaudeSession(
-                system_file, popen=fake_popen, selector=selector_that_cancels
+                system_file,
+                popen=fake_popen,
+                selector=_FuncSelector(selector_that_cancels),
             )
             session_ref.append(session)
             session._recover = MagicMock()  # type: ignore[method-assign]
@@ -1630,7 +1681,9 @@ class TestClaudeSessionIterEvents:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         session = ClaudeSession(
-            system_file, popen=MagicMock(return_value=proc), selector=tracking_selector
+            system_file,
+            popen=_make_popen(proc),
+            selector=_FuncSelector(tracking_selector),
         )
         list(session.iter_events())
         # Every select call must include the wakeup fd alongside stdout
@@ -1651,7 +1704,7 @@ class TestClaudeSessionIterEvents:
         proc.poll = MagicMock(return_value=None)
         proc.kill = MagicMock()
         proc.wait = MagicMock(return_value=0)
-        fake_popen = MagicMock(return_value=proc)
+        fake_popen = _make_popen(proc)
 
         session_ref: list[ClaudeSession] = []
 
@@ -1669,7 +1722,7 @@ class TestClaudeSessionIterEvents:
         try:
             _claude_mod._CANCEL_DRAIN_TIMEOUT = 0.05
             session = ClaudeSession(
-                system_file, popen=fake_popen, selector=staged_selector
+                system_file, popen=fake_popen, selector=_FuncSelector(staged_selector)
             )
             session_ref.append(session)
             # Put the FSM in an active turn state so the cancel triggers
@@ -1880,10 +1933,10 @@ class TestClaudeSessionSpawnTools:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         proc = _make_session_proc([])
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([], [], []))
         ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
-        cmd = fake_popen.call_args.args[0]
+        cmd = fake_popen.spawn.call_args.args[0]
         assert "--allowedTools" not in cmd
 
     def test_allowed_tools_flag_included_when_restricted(self, tmp_path: Path) -> None:
@@ -1892,15 +1945,15 @@ class TestClaudeSessionSpawnTools:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         proc = _make_session_proc([])
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([], [], []))
         ClaudeSession(
             system_file,
             popen=fake_popen,
             selector=fake_selector,
             tools=READ_ONLY_ALLOWED_TOOLS,
         )
-        cmd = fake_popen.call_args.args[0]
+        cmd = fake_popen.spawn.call_args.args[0]
         assert "--allowedTools" in cmd
         assert cmd[cmd.index("--allowedTools") + 1] == READ_ONLY_ALLOWED_TOOLS
 
@@ -1909,8 +1962,8 @@ class TestClaudeSessionSpawnTools:
         system_file = tmp_path / "system.md"
         system_file.write_text("sys")
         proc = _make_session_proc([])
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([], [], []))
         ClaudeSession(
             system_file,
             popen=fake_popen,
@@ -1918,7 +1971,7 @@ class TestClaudeSessionSpawnTools:
             tools=READ_ONLY_ALLOWED_TOOLS,
             session_id="sess-123",
         )
-        cmd = fake_popen.call_args.args[0]
+        cmd = fake_popen.spawn.call_args.args[0]
         assert "--allowedTools" in cmd
         assert "--resume" in cmd
         assert cmd.index("--allowedTools") < cmd.index("--resume")
@@ -2013,15 +2066,16 @@ class TestClaudeSessionIsAliveAndReset:
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
         new_proc = _make_session_proc([])
-        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = MagicMock()
+        fake_popen.spawn.side_effect = [old_proc, new_proc]
+        fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
         session.reset("claude-sonnet-4-6")
         assert session._proc is new_proc
-        assert fake_popen.call_count == 2
-        cmd = fake_popen.call_args.args[0]
+        assert fake_popen.spawn.call_count == 2
+        cmd = fake_popen.spawn.call_args.args[0]
         assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-6"
 
     def test_reset_registers_new_proc_in_active_children(self, tmp_path: Path) -> None:
@@ -2029,8 +2083,9 @@ class TestClaudeSessionIsAliveAndReset:
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
         new_proc = _make_session_proc([])
-        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = MagicMock()
+        fake_popen.spawn.side_effect = [old_proc, new_proc]
+        fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
@@ -2045,8 +2100,9 @@ class TestClaudeSessionIsAliveAndReset:
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
         new_proc = _make_session_proc([])
-        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = MagicMock()
+        fake_popen.spawn.side_effect = [old_proc, new_proc]
+        fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
@@ -2064,8 +2120,9 @@ class TestClaudeSessionIsAliveAndReset:
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
         new_proc = _make_session_proc([])
-        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = MagicMock()
+        fake_popen.spawn.side_effect = [old_proc, new_proc]
+        fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
@@ -2081,18 +2138,19 @@ class TestClaudeSessionIsAliveAndReset:
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
         new_proc = _make_session_proc([])
-        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
+        fake_popen = MagicMock()
+        fake_popen.spawn.side_effect = [old_proc, new_proc]
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
             popen=fake_popen,
-            selector=MagicMock(return_value=([], [], [])),
+            selector=_make_selector(([], [], [])),
         )
         session._session_id = "sid-123"
         session.reset()
         assert session._session_id == ""
         # Second spawn call had no --resume.
-        second_cmd = fake_popen.call_args_list[1].args[0]
+        second_cmd = fake_popen.spawn.call_args_list[1].args[0]
         assert "--resume" not in second_cmd
 
     def test_reset_skips_kill_when_process_already_dead(self, tmp_path: Path) -> None:
@@ -2100,8 +2158,9 @@ class TestClaudeSessionIsAliveAndReset:
         system_file.write_text("sys")
         old_proc = _make_session_proc([], poll_returns=0)  # already dead
         new_proc = _make_session_proc([])
-        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = MagicMock()
+        fake_popen.spawn.side_effect = [old_proc, new_proc]
+        fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
@@ -2118,8 +2177,9 @@ class TestClaudeSessionIsAliveAndReset:
         old_proc = _make_session_proc([])
         old_proc.kill = MagicMock(side_effect=OSError("already dead"))
         new_proc = _make_session_proc([])
-        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = MagicMock()
+        fake_popen.spawn.side_effect = [old_proc, new_proc]
+        fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
@@ -2138,8 +2198,9 @@ class TestClaudeSessionIsAliveAndReset:
         old_proc = _make_session_proc([])
         old_proc.wait = MagicMock(side_effect=_subprocess.TimeoutExpired("x", 1))
         new_proc = _make_session_proc([])
-        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = MagicMock()
+        fake_popen.spawn.side_effect = [old_proc, new_proc]
+        fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
@@ -2153,8 +2214,9 @@ class TestClaudeSessionIsAliveAndReset:
         system_file.write_text("sys")
         old_proc = _make_session_proc([])
         new_proc = _make_session_proc([])
-        fake_popen = MagicMock(side_effect=[old_proc, new_proc])
-        fake_selector = MagicMock(return_value=([], [], []))
+        fake_popen = MagicMock()
+        fake_popen.spawn.side_effect = [old_proc, new_proc]
+        fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
             system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
         )
@@ -2441,8 +2503,8 @@ class TestClaudeSessionLock:
         system_file.write_text("persona")
         proc = _make_session_proc([])
         proc.pid = 11111
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([proc.stdout], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([proc.stdout], [], []))
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
@@ -2479,8 +2541,8 @@ class TestClaudeSessionLock:
             ]
         )
         proc.pid = 11111
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([proc.stdout], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([proc.stdout], [], []))
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
@@ -2515,8 +2577,8 @@ class TestClaudeSessionLock:
         system_file.write_text("persona")
         proc = _make_session_proc(['{"type":"result","result":"recovered"}\n'])
         proc.pid = 33333
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([proc.stdout], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([proc.stdout], [], []))
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
@@ -2528,7 +2590,7 @@ class TestClaudeSessionLock:
         try:
             with session._stream_lock:
                 session._stream_state = stream_fsm.AwaitingReply()
-            spawn_count_before = fake_popen.call_count
+            spawn_count_before = fake_popen.spawn.call_count
             # ``allowed_tools=None`` matches session._tools so switch_tools
             # is a no-op — isolates the spawn count to the defensive
             # ``recover()`` path.
@@ -2536,7 +2598,7 @@ class TestClaudeSessionLock:
                 "hi there", model="claude-opus-4-6", allowed_tools=None
             )
             assert result == "recovered"
-            assert fake_popen.call_count > spawn_count_before
+            assert fake_popen.spawn.call_count > spawn_count_before
         finally:
             session.stop()
 
@@ -2553,8 +2615,8 @@ class TestClaudeSessionLock:
         system_file.write_text("persona")
         proc = _make_session_proc(['{"type":"result","result":"after-cancel"}\n'])
         proc.pid = 44444
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([proc.stdout], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([proc.stdout], [], []))
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
@@ -2566,7 +2628,7 @@ class TestClaudeSessionLock:
         try:
             with session._stream_lock:
                 session._stream_state = stream_fsm.Cancelled()
-            spawn_count_before = fake_popen.call_count
+            spawn_count_before = fake_popen.spawn.call_count
             # ``allowed_tools=None`` keeps switch_tools a no-op so the
             # spawn count reflects only what the defensive cleanup does
             # (which should be: nothing for Cancelled).
@@ -2574,7 +2636,7 @@ class TestClaudeSessionLock:
                 "hi there", model="claude-opus-4-6", allowed_tools=None
             )
             assert result == "after-cancel"
-            assert fake_popen.call_count == spawn_count_before
+            assert fake_popen.spawn.call_count == spawn_count_before
         finally:
             session.stop()
 
@@ -2590,8 +2652,8 @@ class TestClaudeSessionLock:
             ]
         )
         proc.pid = 22222
-        fake_popen = MagicMock(return_value=proc)
-        fake_selector = MagicMock(return_value=([proc.stdout], [], []))
+        fake_popen = _make_popen(proc)
+        fake_selector = _make_selector(([proc.stdout], [], []))
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
@@ -2625,12 +2687,12 @@ class TestClaudeSessionLock:
         system_file = tmp_path / "system.md"
         system_file.write_text("you are fido")
         proc = _make_session_proc([])
-        fake_popen = MagicMock(return_value=proc)
+        fake_popen = _make_popen(proc)
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
             popen=fake_popen,
-            selector=MagicMock(return_value=([proc.stdout], [], [])),
+            selector=_make_selector(([proc.stdout], [], [])),
         )
         with session:
             assert session.owner is None
@@ -2732,8 +2794,10 @@ class TestClaudeSessionPreemptLatency:
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
-            popen=MagicMock(return_value=proc),
-            selector=_select.select,  # real select — wakeup pipe must work
+            popen=_make_popen(proc),
+            selector=_FuncSelector(
+                _select.select
+            ),  # real select — wakeup pipe must work
             repo_name="test/latency",
             idle_timeout=30.0,
         )
@@ -2751,9 +2815,9 @@ class TestClaudeSessionPreemptLatency:
             timeout: float,
         ) -> tuple[list[object], list[object], list[object]]:
             worker_in_select.set()
-            return real_selector(rlist, wlist, xlist, timeout)
+            return real_selector.select(rlist, wlist, xlist, timeout)
 
-        session._selector = instrumented_selector
+        session._selector = _FuncSelector(instrumented_selector)
 
         def worker() -> None:
             with session:
@@ -3355,12 +3419,14 @@ class TestClaudeAPI:
         session = MagicMock()
         session.get.return_value = response
         times = iter([100.0, 160.0, 200.0])
+        fake_clock = MagicMock()
+        fake_clock.monotonic.side_effect = lambda: next(times)
         api = ClaudeAPI(
             session=session,
             oauth_state_fn=lambda: type(
                 "OAuthState", (), {"access_token": "tok-123"}
             )(),
-            monotonic=lambda: next(times),
+            clock=fake_clock,
         )
 
         first = api.get_limit_snapshot()

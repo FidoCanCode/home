@@ -45,6 +45,22 @@ from fido.rocq.claude_session import (
 )
 
 
+class _FixedPopenRunner:
+    def __init__(self, proc: object) -> None:
+        self._proc = proc
+
+    def spawn(self, *args: object, **kwargs: object) -> object:
+        return self._proc
+
+
+class _FixedSelector:
+    def __init__(self, result: tuple) -> None:
+        self._result = result
+
+    def select(self, *args: object, **kwargs: object) -> tuple:
+        return self._result
+
+
 class _FakeIO:
     """Minimal stream stub for ClaudeSession subprocess injection."""
 
@@ -346,8 +362,8 @@ def test_stream_transition_crashes_on_invalid_event(tmp_path: Path) -> None:
     session = ClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=lambda *args, **kwargs: proc,  # type: ignore[arg-type]
-        selector=lambda *args, **kwargs: ([], [], []),  # type: ignore[arg-type]
+        popen=_FixedPopenRunner(proc),
+        selector=_FixedSelector(([], [], [])),
     )
     assert isinstance(session._stream_state, Idle)  # pyright: ignore[reportPrivateUsage]
 

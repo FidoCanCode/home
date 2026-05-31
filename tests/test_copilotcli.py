@@ -6,6 +6,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,17 +116,44 @@ class _FakeCallArgs:
 
 
 class _FakeRunner:
-    """Callable returning a fixed CompletedProcess; exposes ``call_args``."""
+    """ProcessRunner fake returning a fixed CompletedProcess; exposes ``call_args``."""
 
     def __init__(self, result: subprocess.CompletedProcess[str]) -> None:
         self._result = result
         self.call_args: _FakeCallArgs | None = None
 
-    def __call__(
+    def run(
         self, args: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         self.call_args = _FakeCallArgs((args,), kwargs)
         return self._result
+
+
+class _FakePopenRunner:
+    """Wraps a callable as a PopenRunner for _TerminalManager tests."""
+
+    def __init__(self, fn: Callable[..., object]) -> None:
+        self._fn = fn
+
+    def spawn(self, cmd: object, **kwargs: object) -> object:
+        return self._fn(cmd, **kwargs)
+
+
+class _FakeClock:
+    """Fake Clock backed by mutable list cells for CopilotCLIAPI tests."""
+
+    def __init__(self, times: list[float], now: datetime) -> None:
+        self.times = times
+        self._now = now
+
+    def monotonic(self) -> float:
+        return self.times[0]
+
+    def now(self) -> datetime:
+        return self._now
+
+    def sleep(self, secs: float) -> None:
+        pass
 
 
 class _FakeACPRuntime:
@@ -689,7 +717,9 @@ class TestTerminalManager:
     def test_terminal_record_handles_signal_exit(self) -> None:
         process = FakeProcess("", "", 0)
         process.returncode = -signal.SIGTERM
-        manager = _TerminalManager(popen=lambda *args, **kwargs: process)
+        manager = _TerminalManager(
+            popen=_FakePopenRunner(lambda *args, **kwargs: process)
+        )
         terminal_id = manager.create("sleep")
         output, truncated, exit_code, signal_name = manager.output(terminal_id)
         assert output == ""
@@ -700,7 +730,9 @@ class TestTerminalManager:
     def test_terminal_record_handles_normal_exit(self) -> None:
         process = FakeProcess("", "", 0)
         process.returncode = 7
-        manager = _TerminalManager(popen=lambda *args, **kwargs: process)
+        manager = _TerminalManager(
+            popen=_FakePopenRunner(lambda *args, **kwargs: process)
+        )
         terminal_id = manager.create("sleep")
         output, truncated, exit_code, signal_name = manager.output(terminal_id)
         assert output == ""
@@ -710,7 +742,9 @@ class TestTerminalManager:
 
     def test_create_output_wait_and_release(self) -> None:
         manager = _TerminalManager(
-            popen=lambda *args, **kwargs: FakeProcess("hello", " world", 0)
+            popen=_FakePopenRunner(
+                lambda *args, **kwargs: FakeProcess("hello", " world", 0)
+            )
         )
         terminal_id = manager.create("echo", args=["hi"], output_byte_limit=4)
         # Join reader threads explicitly rather than sleeping so the test is
@@ -729,7 +763,9 @@ class TestTerminalManager:
     def test_kill_kills_running_process(self) -> None:
         process = FakeProcess("x", "", 0)
         process.returncode = None
-        manager = _TerminalManager(popen=lambda *args, **kwargs: process)
+        manager = _TerminalManager(
+            popen=_FakePopenRunner(lambda *args, **kwargs: process)
+        )
         terminal_id = manager.create("sleep")
         manager.kill(terminal_id)
         assert process.kill_calls == 1
@@ -737,7 +773,9 @@ class TestTerminalManager:
     def test_wait_returns_signal_name(self) -> None:
         process = FakeProcess("", "", 0)
         process._wait_returncode = -signal.SIGTERM
-        manager = _TerminalManager(popen=lambda *args, **kwargs: process)
+        manager = _TerminalManager(
+            popen=_FakePopenRunner(lambda *args, **kwargs: process)
+        )
         terminal_id = manager.create("sleep")
         assert manager.wait(terminal_id) == (None, "SIGTERM")
 
@@ -758,12 +796,12 @@ class TestTerminalManager:
 
         process = TimeoutProcess()
 
-        def popen(*args: object, **kwargs: object) -> object:
+        def popen_fn(*args: object, **kwargs: object) -> object:
             del args
             process.last_env = kwargs["env"]
             return process
 
-        manager = _TerminalManager(popen=popen)
+        manager = _TerminalManager(popen=_FakePopenRunner(popen_fn))
         terminal_id = manager.create(
             "echo",
             env=[SimpleNamespace(name="COPILOT_TEST", value="yes")],
@@ -776,7 +814,7 @@ class TestTerminalManager:
 
         release_process = TimeoutProcess()
         release_manager = _TerminalManager(
-            popen=lambda *args, **kwargs: release_process
+            popen=_FakePopenRunner(lambda *args, **kwargs: release_process)
         )
         release_id = release_manager.create("echo")
         release_manager.release(release_id)
@@ -1740,15 +1778,14 @@ class TestCopilotCLIAPI:
         monotonic_start: float = 0.0,
         pause_seconds: float = _COPILOT_QUOTA_PAUSE_SECONDS,
     ) -> tuple["CopilotCLIAPI", list[float]]:
-        """Return an API instance with injectable monotonic clock."""
-        clock = [monotonic_start]
-        now_clock = [self._FIXED_NOW]
+        """Return an API instance with injectable Clock fake."""
+        clock_times = [monotonic_start]
+        fake_clock = _FakeClock(times=clock_times, now=self._FIXED_NOW)
         api = CopilotCLIAPI(
-            monotonic=lambda: clock[0],
-            now=lambda: now_clock[0],
+            clock=fake_clock,
             pause_seconds=pause_seconds,
         )
-        return api, clock
+        return api, clock_times
 
     def test_limit_snapshot_is_unknown_by_default(self) -> None:
         api, _ = self._api()

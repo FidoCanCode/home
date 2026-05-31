@@ -9,7 +9,7 @@ import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from http.server import HTTPServer
 from pathlib import Path
 from typing import Any
@@ -3679,6 +3679,9 @@ class _FakeClock:
 
     def sleep(self, secs: float) -> None:
         self.slept.append(secs)
+
+    def now(self) -> datetime:
+        return datetime(2000, 1, 1, tzinfo=UTC)
 
 
 class _FakeOsProcess:

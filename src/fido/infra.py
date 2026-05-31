@@ -16,6 +16,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn, Protocol
 
@@ -72,8 +73,9 @@ class RealProcessRunner:
 class Clock(Protocol):
     """Time and sleep operations.
 
-    Wraps :func:`time.sleep` and :func:`time.monotonic` so callers can be
-    tested without real wall-clock delays.
+    Wraps :func:`time.sleep`, :func:`time.monotonic`, and
+    :func:`datetime.now` so callers can be tested without real wall-clock
+    delays or unpredictable timestamps.
     """
 
     def sleep(self, secs: float) -> None:
@@ -84,15 +86,22 @@ class Clock(Protocol):
         """Return a monotonic clock value in fractional seconds."""
         ...
 
+    def now(self) -> datetime:
+        """Return the current UTC wall-clock time."""
+        ...
+
 
 class RealClock:
-    """Real :class:`Clock` that delegates to :mod:`time`."""
+    """Real :class:`Clock` that delegates to :mod:`time` and :mod:`datetime`."""
 
     def sleep(self, secs: float) -> None:
         time.sleep(secs)
 
     def monotonic(self) -> float:
         return time.monotonic()
+
+    def now(self) -> datetime:
+        return datetime.now(UTC)
 
 
 # ---------------------------------------------------------------------------

@@ -353,23 +353,33 @@ class _FakeClaudeProc:
 
 
 class _FakePopen:
-    """Callable that returns a pre-built process object."""
+    """PopenRunner that returns a pre-built process object."""
 
     def __init__(self, proc: object) -> None:
         self._proc = proc
 
-    def __call__(self, *args: object, **kwargs: object) -> object:
+    def spawn(self, *args: object, **kwargs: object) -> object:
         return self._proc
 
 
 class _FakeSelector:
-    """Callable selector that always returns a fixed select result."""
+    """IOSelector that always returns a fixed select result."""
 
     def __init__(self, result: tuple) -> None:
         self._result = result
 
-    def __call__(self, *args: object, **kwargs: object) -> tuple:
+    def select(self, *args: object, **kwargs: object) -> tuple:
         return self._result
+
+
+class _FuncSelector:
+    """Wraps a raw callable as an IOSelector for test closures."""
+
+    def __init__(self, fn: Callable[..., object]) -> None:
+        self._fn = fn
+
+    def select(self, *args: object, **kwargs: object) -> object:
+        return self._fn(*args, **kwargs)
 
 
 class _FakeStreamingProcess:
@@ -2625,7 +2635,7 @@ class TestClaudeIterEventsCancelPaths:
         session = ClaudeSession(
             system_file,
             popen=_FakePopen(proc),
-            selector=selector_that_cancels,
+            selector=_FuncSelector(selector_that_cancels),
         )
         session_ref.append(session)
         # Force the FSM to AwaitingReply so iter_events sees in_turn=True.
@@ -2680,7 +2690,7 @@ class TestClaudeIterEventsCancelPaths:
         session = ClaudeSession(
             system_file,
             popen=_FakePopen(proc),
-            selector=selector_that_cancels,
+            selector=_FuncSelector(selector_that_cancels),
         )
         session_ref.append(session)
         session.recover = _FakeCallRecorder()  # type: ignore[method-assign]
@@ -3491,6 +3501,11 @@ class TestWorkerSleep:
 
             def monotonic(self) -> float:
                 return 0.0
+
+            def now(self) -> object:
+                from datetime import UTC, datetime
+
+                return datetime(2000, 1, 1, tzinfo=UTC)
 
         # Pass provider= directly so the factory is not invoked.
         worker = _Worker(

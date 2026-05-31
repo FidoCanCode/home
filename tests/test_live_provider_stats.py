@@ -31,6 +31,22 @@ _REPO = "owner/repo"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
+class _FixedPopenRunner:
+    def __init__(self, proc: object) -> None:
+        self._proc = proc
+
+    def spawn(self, *args: object, **kwargs: object) -> object:
+        return self._proc
+
+
+class _FixedSelector:
+    def __init__(self, result: tuple) -> None:
+        self._result = result
+
+    def select(self, *args: object, **kwargs: object) -> tuple:
+        return self._result
+
+
 def _make_fido_state(repo_name: str) -> FidoState:
     """Return a minimal :class:`FidoState` with one pre-initialised repo entry."""
     return FidoState(
@@ -171,8 +187,8 @@ def _make_queue_session(
     return ClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
-        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
+        popen=_FixedPopenRunner(proc),
+        selector=_FixedSelector(([proc.stdout], [], [])),
         repo_name=_REPO,
         snapshot_publisher=publisher,
     )
@@ -260,8 +276,8 @@ class TestLiveProviderStats:
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
-            popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
-            selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
+            popen=_FixedPopenRunner(proc),
+            selector=_FixedSelector(([proc.stdout], [], [])),
             repo_name=_REPO,
         )
 

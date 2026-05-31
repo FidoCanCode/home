@@ -8,14 +8,13 @@ import re
 import signal
 import subprocess
 import threading
-import time
 import uuid
 from collections.abc import Callable, Coroutine, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 import acp
 from acp.exceptions import RequestError
@@ -34,6 +33,14 @@ from acp.schema import (
 from fido import provider
 from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
+from fido.infra import (
+    Clock,
+    PopenRunner,
+    ProcessRunner,
+    RealClock,
+    RealPopenRunner,
+    RealProcessRunner,
+)
 from fido.provider import (
     OwnedSession,
     PromptOutcome,
@@ -65,6 +72,85 @@ _COPILOT_JSON_BASE_ARGS = (
     "-s",
 )
 _ACP_STREAM_LIMIT = 8 * 1024 * 1024
+
+# ── Infrastructure singletons ─────────────────────────────────────────────────
+
+_REAL_POPEN_RUNNER: PopenRunner = RealPopenRunner()
+_REAL_PROCESS_RUNNER: ProcessRunner = RealProcessRunner()
+_REAL_CLOCK: Clock = RealClock()
+
+
+# ── Callable-Protocol collaborators ───────────────────────────────────────────
+
+
+class AgentProcessFactory(Protocol):
+    """Spawns the Copilot ACP agent process.
+
+    Wraps :func:`acp.spawn_agent_process` so :class:`CopilotACPRuntime` can
+    be tested without launching a real Copilot subprocess.
+    """
+
+    def __call__(
+        self,
+        to_client: Any,  # noqa: ANN401
+        command: str,
+        /,
+        *args: str,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> AbstractAsyncContextManager[Any]:
+        """Spawn the agent with *command* and return an async context manager."""
+        ...
+
+
+class ACPClientFactory(Protocol):
+    """Creates the ACP client collaborator for a :class:`CopilotACPRuntime`.
+
+    Wraps the ``_CopilotACPClient`` constructor so runtime tests can inject
+    a fake without monkey-patching the module.
+    """
+
+    def __call__(self, runtime: "CopilotACPRuntime") -> "_CopilotACPClient":
+        """Return a new ACP client wired to *runtime*."""
+        ...
+
+
+class CopilotRuntimeFactory(Protocol):
+    """Creates a :class:`CopilotACPRuntime` for a :class:`CopilotCLISession`.
+
+    Wraps the ``CopilotACPRuntime`` constructor so session tests can inject
+    a fake runtime without patching the module.
+    """
+
+    def __call__(
+        self,
+        *,
+        work_dir: Path,
+        repo_name: str | None = None,
+    ) -> "CopilotACPRuntime":
+        """Return a new runtime for the given *work_dir*."""
+        ...
+
+
+class CopilotSessionFactory(Protocol):
+    """Creates a new :class:`CopilotCLISession`-compatible prompt session.
+
+    Default is :class:`CopilotCLISession`; tests inject fakes that return
+    pre-built sessions without launching a real ACP subprocess.
+    """
+
+    def __call__(
+        self,
+        system_file: Path,
+        *,
+        work_dir: Path | str,
+        model: ProviderModel | str,
+        repo_name: str | None = None,
+        session_id: str | None = None,
+        snapshot_publisher: provider.SnapshotPublisher | None = None,
+        talker_resolver: provider.TalkerResolver = provider.get_talker,
+    ) -> PromptSession:
+        """Create and return a new prompt session."""
+        ...
 
 
 def _is_missing_session_error(exc: RequestError) -> bool:
@@ -285,9 +371,9 @@ def _copilot(
     *args: str,
     timeout: int = 30,
     cwd: Path | str | None = None,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    runner: ProcessRunner = _REAL_PROCESS_RUNNER,
 ) -> subprocess.CompletedProcess[str]:
-    return runner(
+    return runner.run(
         ["copilot", *args],
         capture_output=True,
         text=True,
@@ -377,7 +463,7 @@ class _TerminalManager:
     def __init__(
         self,
         *,
-        popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
+        popen: PopenRunner = _REAL_POPEN_RUNNER,
     ) -> None:
         self._popen = popen
         self._terminals: dict[str, _TerminalRecord] = {}
@@ -395,7 +481,7 @@ class _TerminalManager:
         merged_env = os.environ.copy()
         for var in env or []:
             merged_env[var.name] = var.value
-        process = self._popen(
+        process = self._popen.spawn(
             [command, *(args or [])],
             cwd=cwd,
             env=merged_env,
@@ -621,11 +707,8 @@ class CopilotACPRuntime:
         work_dir: Path,
         repo_name: str | None = None,
         command: Sequence[str] = _COPILOT_COMMAND,
-        spawn_agent_process: Callable[..., AbstractAsyncContextManager[Any]] = (
-            acp.spawn_agent_process
-        ),
-        client_factory: Callable[["CopilotACPRuntime"], _CopilotACPClient]
-        | None = None,
+        spawn_agent_process: AgentProcessFactory = acp.spawn_agent_process,
+        client_factory: ACPClientFactory | None = None,
         client_capabilities: ClientCapabilities | None = None,
         client_info: Implementation | None = None,
     ) -> None:
@@ -1011,7 +1094,7 @@ class CopilotCLISession(OwnedSession):
         model: ProviderModel | str,
         repo_name: str | None = None,
         runtime: CopilotACPRuntime | None = None,
-        runtime_factory: Callable[..., CopilotACPRuntime] | None = None,
+        runtime_factory: CopilotRuntimeFactory | None = None,
         session_id: str | None = None,
         snapshot_publisher: provider.SnapshotPublisher | None = None,
         talker_resolver: provider.TalkerResolver = provider.get_talker,
@@ -1352,12 +1435,10 @@ class CopilotCLIAPI(ProviderAPI):
     def __init__(
         self,
         *,
-        monotonic: Callable[[], float] = time.monotonic,
-        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        clock: Clock = _REAL_CLOCK,
         pause_seconds: float = _COPILOT_QUOTA_PAUSE_SECONDS,
     ) -> None:
-        self._monotonic = monotonic
-        self._now = now
+        self._clock = clock
         self._pause_seconds = pause_seconds
         self._lock = threading.Lock()
         self._quota_error_at_monotonic: float | None = None
@@ -1376,8 +1457,8 @@ class CopilotCLIAPI(ProviderAPI):
         if not _is_copilot_quota_error(exc):
             return False
         with self._lock:
-            self._quota_error_at_monotonic = self._monotonic()
-            self._quota_error_at_wall = self._now()
+            self._quota_error_at_monotonic = self._clock.monotonic()
+            self._quota_error_at_wall = self._clock.now()
         log.warning(
             "copilot-cli quota error recorded — pausing for %.0fs", self._pause_seconds
         )
@@ -1389,7 +1470,7 @@ class CopilotCLIAPI(ProviderAPI):
             wall = self._quota_error_at_wall
         if recorded_at is None or wall is None:
             return ProviderLimitSnapshot(provider=self.provider_id)
-        elapsed = self._monotonic() - recorded_at
+        elapsed = self._clock.monotonic() - recorded_at
         if elapsed >= self._pause_seconds:
             return ProviderLimitSnapshot(provider=self.provider_id)
         resets_at = wall + timedelta(seconds=self._pause_seconds)
@@ -1416,10 +1497,9 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
 
     def __init__(
         self,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        runner: ProcessRunner = _REAL_PROCESS_RUNNER,
         session_fn: Callable[[], PromptSession] | None = None,
-        sleep_fn: Callable[[float], None] = time.sleep,
-        session_factory: Callable[..., PromptSession] | None = None,
+        session_factory: CopilotSessionFactory | None = None,
         session_system_file: Path | None = None,
         work_dir: Path | str | None = None,
         repo_name: str | None = None,
@@ -1428,7 +1508,6 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
         self._runner = runner
-        self._sleep_fn = sleep_fn
         self._quota_api = api
         self._session_factory = (
             CopilotCLISession if session_factory is None else session_factory

@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-import select
 import subprocess
 import threading
 import time
@@ -13,7 +12,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import requests as _requests
 
@@ -24,6 +23,16 @@ from fido.appstate import (
 )
 from fido.atomic import AtomicUpdater
 from fido.idle_timeout import IdleDeadline
+from fido.infra import (
+    Clock,
+    IOSelector,
+    PopenRunner,
+    ProcessRunner,
+    RealClock,
+    RealIOSelector,
+    RealPopenRunner,
+    RealProcessRunner,
+)
 from fido.provider import (
     GLOBAL_DISALLOWED_TOOLS,
     READ_ONLY_ALLOWED_TOOLS,
@@ -59,6 +68,75 @@ _CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_USAGE_BETA = "oauth-2025-04-20"
 _CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.110"
 _CLAUDE_USAGE_CACHE_SECONDS = 300.0
+
+# ── Infrastructure singletons ─────────────────────────────────────────────────
+
+_REAL_POPEN_RUNNER: PopenRunner = RealPopenRunner()
+_REAL_IO_SELECTOR: IOSelector = RealIOSelector()
+_REAL_CLOCK: Clock = RealClock()
+_REAL_PROCESS_RUNNER: ProcessRunner = RealProcessRunner()
+
+
+# ── Callable-Protocol collaborators ───────────────────────────────────────────
+
+
+class StreamingRunner(Protocol):
+    """Runs a streaming claude command and yields output lines.
+
+    Implemented by :class:`_RealStreamingRunner`; tests inject fakes that
+    return pre-canned iterators without spawning a real subprocess.
+    """
+
+    def __call__(
+        self,
+        cmd: list[str],
+        stdin_file: Path,
+        idle_timeout: float = 1800.0,
+        *,
+        cwd: Path | str | None = None,
+    ) -> Iterator[str]:
+        """Stream *cmd* output, yielding lines as they arrive."""
+        ...
+
+
+class ClaudeSessionFactory(Protocol):
+    """Creates a new :class:`ClaudeSession`-compatible prompt session.
+
+    Implemented by returning :class:`ClaudeSession` directly (the default)
+    or by a test fake that returns a pre-built session without spawning a
+    subprocess.
+    """
+
+    def __call__(
+        self,
+        system_file: Path,
+        *,
+        work_dir: Path | str | None = None,
+        repo_name: str | None = None,
+        model: ProviderModel | None = None,
+        session_id: str | None = None,
+        snapshot_publisher: provider.SnapshotPublisher | None = None,
+    ) -> PromptSession:
+        """Create and return a new prompt session."""
+        ...
+
+
+class _RealStreamingRunner:  # pragma: no cover
+    """Real :class:`StreamingRunner` that delegates to :func:`_run_streaming`.
+
+    Not tested directly — :func:`_run_streaming` is tested via its own suite;
+    this class is just the bridge from :class:`ClaudeClient` to it.
+    """
+
+    def __call__(
+        self,
+        cmd: list[str],
+        stdin_file: Path,
+        idle_timeout: float = 1800.0,
+        *,
+        cwd: Path | str | None = None,
+    ) -> Iterator[str]:
+        return _run_streaming(cmd, stdin_file, idle_timeout, cwd=cwd)
 
 
 class _Trunc:
@@ -153,29 +231,31 @@ def _claude(
     *args: str,
     prompt: str | None = None,
     timeout: int = 30,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
+    runner: ProcessRunner | None = None,
+    popen: PopenRunner = _REAL_POPEN_RUNNER,
 ) -> subprocess.CompletedProcess[str]:
     """Run the claude CLI with the given args, optionally piping prompt to stdin.
 
     Under the free-threaded (3.14t) runtime we observed
     ``subprocess.run(..., timeout=...)`` failing to fire on long-hung
     claude children — the worker sat on a futex for minutes past the
-    requested timeout (closes #489).  When the default runner is used,
+    requested timeout (closes #489).  When the default popen is used,
     drive the subprocess with explicit ``Popen`` + ``communicate`` so
     the child is guaranteed to be killed and reaped when the budget
-    elapses.  Test overrides via *runner* still flow through whatever
-    mock the test supplies.  Pass *popen* to inject a fake subprocess
-    factory without patching the subprocess module.  Logs entry and
-    exit so a stalled status call is localisable in the fido log.
+    elapses.  Pass *runner* to inject a simple ``ProcessRunner`` that
+    short-circuits to a single ``run()`` call (used by tests that want
+    to verify arguments without driving a real Popen lifecycle).  Pass
+    *popen* to inject a fake subprocess factory for tests that exercise
+    the Popen path.  Logs entry and exit so a stalled status call is
+    localisable in the fido log.
     """
     cmd = ["claude", *args]
     log.debug("_claude: running (timeout=%ds) %s", timeout, cmd[:3])
-    if runner is not subprocess.run:
-        return runner(
+    if runner is not None:
+        return runner.run(
             cmd, input=prompt, capture_output=True, text=True, timeout=timeout
         )
-    proc = popen(
+    proc = popen.spawn(
         cmd,
         stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -371,9 +451,9 @@ def _run_streaming(
     stdin_file: Path,
     idle_timeout: float = 1800.0,
     cwd: Path | str | None = None,
-    popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
-    selector: Callable[..., tuple[list[Any], list[Any], list[Any]]] = select.select,
-    clock: Callable[[], float] = time.monotonic,
+    popen: PopenRunner = _REAL_POPEN_RUNNER,
+    selector: IOSelector = _REAL_IO_SELECTOR,
+    clock: Clock = _REAL_CLOCK,
 ) -> Iterator[str]:
     """Run a command, streaming stdout with idle-timeout detection.
 
@@ -384,7 +464,7 @@ def _run_streaming(
     ``ClaudeStreamError(returncode)`` is raised.  ``FileNotFoundError``
     propagates naturally if the command is not found.
     """
-    proc = popen(
+    proc = popen.spawn(
         cmd,
         stdin=stdin_file.open(),
         stdout=subprocess.PIPE,
@@ -414,7 +494,7 @@ def _run_streaming(
         idle_deadline = IdleDeadline(
             idle_timeout,
             poll_interval=_SELECT_POLL_INTERVAL,
-            clock=clock,
+            clock=clock.monotonic,
         )
 
         while True:
@@ -424,7 +504,7 @@ def _run_streaming(
                 proc.kill()
                 proc.wait()
                 raise ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)
-            ready, _, _ = selector([proc.stdout], [], [], poll_timeout)
+            ready, _, _ = selector.select([proc.stdout], [], [], poll_timeout)
             if ready:
                 line = proc.stdout.readline()
                 if not line:
@@ -446,6 +526,9 @@ def _run_streaming(
         if talker_registered and repo_name is not None:
             provider.unregister_talker(repo_name, thread_id)
         _unregister_child(proc)
+
+
+_REAL_STREAMING_RUNNER = _RealStreamingRunner()
 
 
 # ── Persistent bidirectional session ─────────────────────────────────────────
@@ -475,7 +558,7 @@ class ClaudeSession(OwnedSession):
     on the first iteration.
 
     Pass *popen* and *selector* to override subprocess creation and
-    ``select.select`` in tests; these default to the real implementations.
+    I/O multiplexing in tests; these default to the real implementations.
     """
 
     def __init__(
@@ -484,8 +567,8 @@ class ClaudeSession(OwnedSession):
         work_dir: Path | str | None = None,
         model: ProviderModel | None = None,
         idle_timeout: float = 1800.0,
-        popen: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
-        selector: Callable[..., tuple[list[Any], list[Any], list[Any]]] = select.select,
+        popen: PopenRunner = _REAL_POPEN_RUNNER,
+        selector: IOSelector = _REAL_IO_SELECTOR,
         repo_name: str | None = None,
         session_id: str | None = None,
         tools: str | None = None,
@@ -727,7 +810,7 @@ class ClaudeSession(OwnedSession):
         cmd += ["--disallowedTools", GLOBAL_DISALLOWED_TOOLS]
         if self._session_id:
             cmd += ["--resume", self._session_id]
-        proc = self._popen_fn(
+        proc = self._popen_fn.spawn(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -1030,7 +1113,7 @@ class ClaudeSession(OwnedSession):
                 self._stream_state = new_state
         end_time = time.monotonic() + deadline
         while time.monotonic() < end_time:
-            ready, _, _ = self._selector(
+            ready, _, _ = self._selector.select(
                 [self._proc.stdout, self._wakeup_r], [], [], _SELECT_POLL_INTERVAL
             )
             self._drain_wakeup()
@@ -1562,7 +1645,7 @@ class ClaudeSession(OwnedSession):
                 self._proc.wait()
                 self.recover()
                 raise ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)
-            ready, _, _ = self._selector(
+            ready, _, _ = self._selector.select(
                 [self._proc.stdout, self._wakeup_r], [], [], poll_timeout
             )
             self._drain_wakeup()
@@ -1780,11 +1863,11 @@ class ClaudeAPI(ProviderAPI):
         oauth_state_fn: Callable[
             [], _ClaudeOAuthState | None
         ] = _load_claude_oauth_state,
-        monotonic: Callable[[], float] = time.monotonic,
+        clock: Clock = _REAL_CLOCK,
     ) -> None:
         self._session = session if session is not None else _requests.Session()
         self._oauth_state_fn = oauth_state_fn
-        self._monotonic = monotonic
+        self._clock = clock
         self._limit_snapshot_lock = threading.Lock()
         self._limit_snapshot_cached_at: float | None = None
         self._limit_snapshot_cache: ProviderLimitSnapshot | None = None
@@ -1798,7 +1881,7 @@ class ClaudeAPI(ProviderAPI):
             if (
                 self._limit_snapshot_cache is not None
                 and self._limit_snapshot_cached_at is not None
-                and self._monotonic() - self._limit_snapshot_cached_at
+                and self._clock.monotonic() - self._limit_snapshot_cached_at
                 < _CLAUDE_USAGE_CACHE_SECONDS
             ):
                 return self._limit_snapshot_cache
@@ -1853,7 +1936,7 @@ class ClaudeAPI(ProviderAPI):
                         unavailable_reason=f"Claude usage unavailable: {exc}",
                     )
             self._limit_snapshot_cache = snapshot
-            self._limit_snapshot_cached_at = self._monotonic()
+            self._limit_snapshot_cached_at = self._clock.monotonic()
             return snapshot
 
 
@@ -1877,20 +1960,16 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
 
     def __init__(
         self,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        streaming_runner: StreamingRunner = _REAL_STREAMING_RUNNER,
         session_fn: Callable[[], PromptSession] = provider.current_repo_session,
-        streaming_runner: Callable[..., Iterator[str]] = _run_streaming,
-        sleep_fn: Callable[[float], None] = time.sleep,
-        session_factory: Callable[..., PromptSession] | None = None,
+        session_factory: ClaudeSessionFactory | None = None,
         session_system_file: Path | None = None,
         work_dir: Path | str | None = None,
         repo_name: str | None = None,
         session: PromptSession | None = None,
         state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
-        self._runner = runner
         self._streaming_runner = streaming_runner
-        self._sleep_fn = sleep_fn
         self._session_factory = (
             ClaudeSession if session_factory is None else session_factory
         )
