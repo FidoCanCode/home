@@ -261,6 +261,8 @@ class ActivityReporter(Protocol):
 
     def tasks_for(self, repo_name: str) -> Tasks: ...
 
+    def agent_for(self, repo_name: str) -> ProviderAgent: ...
+
     def state_for(self, repo_name: str) -> State: ...
 
 
@@ -5721,6 +5723,23 @@ class WorkerThread(threading.Thread):
         if provider is None:
             return False
         return provider.agent.recover_session()
+
+    @property
+    def provider_agent(self) -> ProviderAgent | None:
+        """The hot ``ProviderAgent`` this worker is using, or ``None``.
+
+        Returned for webhook-driven LLM calls (synthesis, rescope) so they
+        can reuse the worker's loaded session instead of spawning a fresh
+        agent.  Closes the gap between preempt-always's purpose (free the
+        session for webhook use) and the implementation (which used to
+        spawn fresh agents next to the just-freed session).  Per #1962.
+
+        Safe to call from any thread — the ``_provider_lock`` covers the
+        provider field read.
+        """
+        with self._provider_lock:
+            provider = self._provider
+        return provider.agent if provider is not None else None
 
     @property
     def session_owner(self) -> str | None:

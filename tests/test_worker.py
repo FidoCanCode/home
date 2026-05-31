@@ -17612,6 +17612,36 @@ class TestWorkerThread:
         wt.current_provider().agent.attach_session(mock_session)
         assert wt.session_owner == "worker-home"
 
+    def test_provider_agent_returns_providers_agent(self, tmp_path: Path) -> None:
+        # #1962: WorkerRegistry.agent_for reaches the worker's hot
+        # session via this property.  Returns the live provider's
+        # agent when one is attached.
+        provider = MagicMock()
+        sentinel_agent = MagicMock()
+        provider.agent = sentinel_agent
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            provider=provider,
+            registry=MagicMock(spec=ActivityReporter),
+        )
+        assert wt.provider_agent is sentinel_agent
+
+    def test_provider_agent_none_when_no_provider(self, tmp_path: Path) -> None:
+        # #1962: with no provider attached, the property returns None
+        # so WorkerRegistry.agent_for can raise rather than silently
+        # spawn a fresh agent.
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+        )
+        # Force-clear the provider so the None branch is observable.
+        wt._provider = None  # noqa: SLF001
+        assert wt.provider_agent is None
+
     def test_session_alive_false_when_no_session(self, tmp_path: Path) -> None:
         wt = self._make_thread(tmp_path)
         assert wt.current_provider().agent.session is None

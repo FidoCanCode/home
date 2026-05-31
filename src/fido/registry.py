@@ -28,7 +28,7 @@ from fido.atomic import AtomicUpdater
 from fido.config import Config, RepoConfig, default_sub_dir
 from fido.github import GitHub
 from fido.issue_cache import CacheMetrics, IssueCache
-from fido.provider import PromptSession, Provider
+from fido.provider import PromptSession, Provider, ProviderAgent
 from fido.provider_factory import DefaultProviderFactory
 from fido.repo import Repo
 from fido.rocq import handler_preemption as preemption_fsm
@@ -621,6 +621,23 @@ class WorkerRegistry:
     def tasks_for(self, repo_name: str) -> Tasks:
         """Convenience accessor for ``self.repo_for(name).tasks``."""
         return self._repos[repo_name].tasks
+
+    def agent_for(self, repo_name: str) -> ProviderAgent:
+        """Return the worker thread's hot ``ProviderAgent`` for *repo_name*.
+
+        Used by webhook-driven LLM call sites (synthesis, rescope) so
+        they reuse the worker's loaded session — the entire reason
+        preempt-always exists (#1230, #1962).  Raises ``RuntimeError``
+        when no agent is available (no worker, or session not yet
+        bootstrapped); callers MUST have a live worker for the repo.
+        """
+        agent = self._threads[repo_name].provider_agent
+        if agent is None:
+            raise RuntimeError(
+                f"no provider agent available for {repo_name} — "
+                f"webhook-driven LLM calls require a live worker session"
+            )
+        return agent
 
     def state_for(self, repo_name: str) -> State:
         """Convenience accessor for ``self.repo_for(name).state``."""
