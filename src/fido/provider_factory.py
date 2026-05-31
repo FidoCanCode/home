@@ -1,13 +1,11 @@
 """Provider construction."""
 
 import threading
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
-from fido.claude import ClaudeAPI, ClaudeClient, ClaudeCode
+from fido.claude import ClaudeAPI, ClaudeClient, ClaudeCode, ClaudeSessionFactory
 from fido.codex import Codex, CodexAPI, CodexClient
 from fido.config import RepoConfig
 from fido.copilotcli import CopilotCLI, CopilotCLIAPI, CopilotCLIClient
@@ -27,7 +25,7 @@ class DefaultProviderFactory:
         self,
         *,
         session_system_file: Path,
-        claude_session_factory: Callable[..., Any] | None = None,
+        claude_session_factory: ClaudeSessionFactory | None = None,
     ) -> None:
         self._session_system_file = session_system_file
         self._claude_session_factory = claude_session_factory

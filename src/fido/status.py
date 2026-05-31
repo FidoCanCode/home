@@ -7,7 +7,6 @@ import re
 import shutil
 import subprocess
 import urllib.request
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,6 +48,30 @@ class UrlOpener(Protocol):
 
     def __call__(self, url: str, *, timeout: float) -> Any:  # noqa: ANN401
         """Open *url* and return an HTTP response context manager."""
+        ...
+
+
+class DiskUsageFn(Protocol):
+    """Returns disk usage statistics for a path — wraps :func:`shutil.disk_usage`."""
+
+    def __call__(self, path: Path) -> Any:  # noqa: ANN401
+        """Return a named tuple with ``total`` and ``free`` byte counts."""
+        ...
+
+
+class CpuCountFn(Protocol):
+    """Returns the number of logical CPUs — wraps :func:`os.cpu_count`."""
+
+    def __call__(self) -> int | None:
+        """Return the CPU count, or ``None`` if the value cannot be determined."""
+        ...
+
+
+class PaletteLookup(Protocol):
+    """Resolves a :class:`~fido.provider.ProviderPalette` for a provider ID."""
+
+    def __call__(self, provider: ProviderID) -> ProviderPalette | None:
+        """Return the palette for *provider*, or ``None`` if not defined."""
         ...
 
 
@@ -374,8 +397,8 @@ def _system_resources(
     meminfo_path: Path = Path("/proc/meminfo"),
     loadavg_path: Path = Path("/proc/loadavg"),
     disk_path: Path = Path("/"),
-    disk_usage: Callable[[Path], Any] = shutil.disk_usage,
-    cpu_count_fn: Callable[[], int | None] = os.cpu_count,
+    disk_usage: DiskUsageFn = shutil.disk_usage,
+    cpu_count_fn: CpuCountFn = os.cpu_count,
 ) -> SystemResourceInfo | None:
     """Return a best-effort host resource snapshot for status display."""
     try:
@@ -1163,7 +1186,7 @@ def _styled_provider_status(
     status: ProviderPressureStatus,
     *,
     c: Color,
-    palette_fn: Callable[[ProviderID], ProviderPalette | None] | None = None,
+    palette_fn: PaletteLookup | None = None,
 ) -> str:
     base_style = _provider_status_style(status)
     summary = _provider_status_summary(status)
@@ -1186,7 +1209,7 @@ def _styled_repo_provider(
     repo: RepoStatus,
     *,
     c: Color,
-    palette_fn: Callable[[ProviderID], ProviderPalette | None] | None = None,
+    palette_fn: PaletteLookup | None = None,
 ) -> str:
     """Render the repo's provider label without repeating global limits details."""
     provider_str = str(repo.provider)

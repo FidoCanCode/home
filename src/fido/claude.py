@@ -490,7 +490,7 @@ def _run_streaming(
         idle_deadline = IdleDeadline(
             idle_timeout,
             poll_interval=_SELECT_POLL_INTERVAL,
-            clock=_clock.monotonic,
+            clock=_clock,
         )
 
         while True:

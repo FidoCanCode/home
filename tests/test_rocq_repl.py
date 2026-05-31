@@ -1,12 +1,12 @@
 # pyright: reportPrivateUsage=false
 
-from collections.abc import Callable
+import subprocess
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import IO, cast
-from unittest.mock import Mock
+from typing import IO, Any, cast
 
 import pytest
 
@@ -23,6 +23,36 @@ from fido.rocq_repl import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+class _FakeRunner:
+    """Typed :class:`~fido.infra.ProcessRunner` fake for ``OcamlReference`` tests.
+
+    Either wraps a callable (*fn*) whose signature matches
+    ``(cmd, **kwargs) -> SimpleNamespace``, or returns a fixed *return_value*
+    from every call.  Recorded calls are available via :attr:`calls`.
+    """
+
+    def __init__(
+        self,
+        fn: Callable[..., Any] | None = None,
+        return_value: object = None,
+    ) -> None:
+        self._fn = fn
+        self._return_value = return_value
+        self.calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def run(
+        self,
+        cmd: Sequence[str],
+        *,
+        check: bool = True,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append((list(cmd), {"check": check, **kwargs}))
+        if self._fn is not None:
+            return self._fn(list(cmd), **kwargs)  # type: ignore[return-value]
+        return self._return_value
 
 
 def fake_module(**values: object) -> ModuleType:
@@ -268,14 +298,16 @@ def test_ocaml_reference_evaluate_runs_reference_toolchain(tmp_path: Path) -> No
 def test_ocaml_reference_prepares_reference_project(tmp_path: Path) -> None:
     model = load_session_model()
 
-    def fake_run(argv: list[str], cwd: Path, **_kwargs: object) -> SimpleNamespace:
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
         assert argv == ["dune", "build", "models/session_lock_ocaml_ref.vo"]
+        cwd = kwargs.get("cwd")
+        assert isinstance(cwd, Path)
         generated = cwd / "_build" / "default" / "session_lock_ocaml_ref.ml"
         generated.parent.mkdir(parents=True)
         generated.write_text("let x = 1\n")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    ref = OcamlReference(REPO, model, StringIO(), run=fake_run)
+    ref = OcamlReference(REPO, model, StringIO(), runner=_FakeRunner(fn=fake_run))
 
     assert ref._prepare_reference(tmp_path) == (
         "session_lock_ocaml_ref",
@@ -289,8 +321,10 @@ def test_ocaml_reference_prepares_reference_project(tmp_path: Path) -> None:
 
 def test_ocaml_reference_errors_when_reference_output_missing(tmp_path: Path) -> None:
     model = load_session_model()
-    runner = Mock(return_value=SimpleNamespace(returncode=0, stdout="", stderr=""))
-    ref = OcamlReference(REPO, model, StringIO(), run=runner)
+    runner = _FakeRunner(
+        return_value=SimpleNamespace(returncode=0, stdout="", stderr="")
+    )
+    ref = OcamlReference(REPO, model, StringIO(), runner=runner)
 
     with pytest.raises(RocqReplError, match="did not produce"):
         ref._prepare_reference(tmp_path)
@@ -317,9 +351,9 @@ def test_ocaml_reference_raises_for_empty_state_constructors() -> None:
 
 def test_ocaml_reference_raises_when_command_fails(tmp_path: Path) -> None:
     failed = SimpleNamespace(returncode=1, stdout="", stderr="boom")
-    runner = Mock(return_value=failed)
+    runner = _FakeRunner(return_value=failed)
     err = StringIO()
-    ref = OcamlReference(REPO, load_session_model(), err, run=runner)
+    ref = OcamlReference(REPO, load_session_model(), err, runner=runner)
 
     with pytest.raises(RocqReplError, match="command failed"):
         ref._run_checked(["false"], tmp_path)
@@ -328,8 +362,8 @@ def test_ocaml_reference_raises_when_command_fails(tmp_path: Path) -> None:
 
 def test_ocaml_reference_returns_successful_command_output(tmp_path: Path) -> None:
     ok = SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
-    runner = Mock(return_value=ok)
-    ref = OcamlReference(REPO, load_session_model(), StringIO(), run=runner)
+    runner = _FakeRunner(return_value=ok)
+    ref = OcamlReference(REPO, load_session_model(), StringIO(), runner=runner)
 
     assert ref._run_checked(["true"], tmp_path).stdout == "ok\n"
 

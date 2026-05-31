@@ -10,12 +10,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import IO, Any
+from typing import IO, Any, Protocol
 
+from fido.infra import ProcessRunner, RealProcessRunner
 from fido.rocq_pymap import PyMap, PyMapError
 
 _IMPORT_MODULES = {
@@ -38,6 +38,30 @@ _IMPORT_NAMES = {
     "dataclass",
     "islice",
 }
+
+
+class ModuleImporter(Protocol):
+    """Imports a Python module from a generated Rocq extraction path."""
+
+    def __call__(self, path: Path) -> ModuleType:
+        """Import and return the module at *path*."""
+        ...
+
+
+class ReferenceFactory(Protocol):
+    """Creates an :class:`OcamlReference` (or compatible object) for comparison."""
+
+    def __call__(self, repo_root: Path, model: "LoadedModel", stderr: IO[str]) -> Any:  # noqa: ANN401
+        """Construct and return a reference evaluator."""
+        ...
+
+
+class ConsoleFactory(Protocol):
+    """Creates an interactive console over a namespace."""
+
+    def __call__(self, namespace: dict[str, object]) -> Any:  # noqa: ANN401
+        """Construct and return an interactive console."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -184,7 +208,7 @@ class ModelLoader:
         self,
         repo_root: Path,
         stderr: IO[str],
-        importer: Callable[[Path], ModuleType] | None = None,
+        importer: ModuleImporter | None = None,
     ) -> None:
         self._repo_root = repo_root
         self._stderr = stderr
@@ -323,12 +347,12 @@ class OcamlReference:
         repo_root: Path,
         model: LoadedModel,
         stderr: IO[str],
-        run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        runner: ProcessRunner | None = None,
     ) -> None:
         self._repo_root = repo_root
         self._model = model
         self._stderr = stderr
-        self._run = run
+        self._runner = runner if runner is not None else RealProcessRunner()
 
     def evaluate(self, invocation: ReferenceInvocation) -> str:
         with tempfile.TemporaryDirectory(prefix="rocq-repl-") as raw:
@@ -449,7 +473,7 @@ class OcamlReference:
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["PATH"] = f"/home/opam/.opam/5.3/bin:{env.get('PATH', '')}"
-        result = self._run(
+        result = self._runner.run(
             argv,
             cwd=cwd,
             env=env,
@@ -471,21 +495,21 @@ class RocqRepl:
         stdout: IO[str],
         stderr: IO[str],
         *,
-        reference_factory: Callable[[Path, LoadedModel, IO[str]], Any] | None = None,
-        console_factory: Callable[[dict[str, object]], Any] | None = None,
+        reference_factory: ReferenceFactory | None = None,
+        console_factory: ConsoleFactory | None = None,
     ) -> None:
         self._repo_root = repo_root
         self._stdin = stdin
         self._stdout = stdout
         self._stderr = stderr
         self._normalizer = ValueNormalizer()
-        self._reference_factory: Callable[[Path, LoadedModel, IO[str]], Any] = (
+        self._reference_factory: ReferenceFactory = (
             reference_factory if reference_factory is not None else OcamlReference
         )
-        self._console_factory: Callable[[dict[str, object]], Any] = (
+        self._console_factory: ConsoleFactory = (
             console_factory
             if console_factory is not None
-            else lambda ns: code.InteractiveConsole(locals=ns)
+            else lambda namespace: code.InteractiveConsole(locals=namespace)
         )
 
     def run(self, argv: list[str]) -> int:

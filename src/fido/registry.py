@@ -938,6 +938,28 @@ class WorkerRegistry:
             return list(self._issue_caches.values())
 
 
+class MakeThreadFn(Protocol):
+    """Creates a :class:`WorkerThread` given full registry context.
+
+    Used exclusively by :func:`make_registry` to build the per-thread
+    closure that captures ``gh``, ``config``, ``dispatchers``, and
+    ``state_updater`` from the composition root.
+    """
+
+    def __call__(
+        self,
+        repo_cfg: RepoConfig,
+        registry: "WorkerRegistry",
+        *,
+        gh: GitHub,
+        provider: Provider | None = None,
+        session_issue: int | None = None,
+        config: Config | None = None,
+        dispatchers: "dict[str, Dispatcher]",
+        state_updater: AtomicUpdater[FidoState] | None = None,
+    ) -> WorkerThread: ...
+
+
 def _make_thread(
     repo_cfg: RepoConfig,
     registry: WorkerRegistry,
@@ -983,7 +1005,7 @@ def make_registry(
     dispatchers: "dict[str, Dispatcher]",
     state_updater: "AtomicUpdater[FidoState]",
     runner: ProcessRunner | None = None,
-    _thread_factory: Callable[..., WorkerThread] = _make_thread,
+    _thread_factory: MakeThreadFn = _make_thread,
 ) -> WorkerRegistry:
     """Create a :class:`WorkerRegistry` and start threads for all repos.
 
