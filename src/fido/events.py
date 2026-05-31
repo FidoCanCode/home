@@ -857,24 +857,6 @@ class WebhookIngressOracle:
         return new_state
 
 
-def _configured_agent(
-    config: Config,
-    repo_cfg: RepoConfig,
-    *,
-    _factory: DefaultProviderFactory | None = None,
-) -> ProviderAgent:
-    factory = (
-        _factory
-        if _factory is not None
-        else DefaultProviderFactory(session_system_file=config.sub_dir / "persona.md")
-    )
-    return factory.create_agent(
-        repo_cfg,
-        work_dir=repo_cfg.work_dir,
-        repo_name=repo_cfg.name,
-    )
-
-
 @dataclass
 class Action:
     prompt: str
@@ -2294,7 +2276,7 @@ class Dispatcher:
         repo_cfg = self._repo_cfg
         gh = self._gh
         if agent is None:
-            agent = _configured_agent(config, repo_cfg, _factory=self._provider_factory)
+            agent = registry.agent_for(repo_cfg.name)
         if prompts is None:
             prompts = Prompts(_load_persona(config))
         _synthesis_fn = self._call_synthesis_fn
@@ -2641,7 +2623,7 @@ class Dispatcher:
         repo_cfg = self._repo_cfg
         gh = self._gh
         if agent is None:
-            agent = _configured_agent(config, repo_cfg, _factory=self._provider_factory)
+            agent = registry.agent_for(repo_cfg.name)
         if prompts is None:
             prompts = Prompts(_load_persona(config))
         _synthesis_fn = self._call_synthesis_fn
@@ -2892,8 +2874,8 @@ class Dispatcher:
         batch_intents: list[RescopeIntent],
         affected_task_ids: list[str],
         result: list[dict[str, Any]],
-        agent: ProviderAgent | None = None,
-        prompts: Prompts | None = None,
+        agent: ProviderAgent,
+        prompts: Prompts,
         verdict: IntentVerdict | None = None,
     ) -> None:
         """Post a per-intent reply per the INV-F reply-back rule.
@@ -2915,7 +2897,6 @@ class Dispatcher:
         convention) and instructed never to imply the work is done — the
         rescope only replanned.
         """
-        config = self._config
         repo_cfg = self._repo_cfg
         repo = repo_cfg.name
         gh = self._gh
@@ -2930,11 +2911,6 @@ class Dispatcher:
                 intent.comment_id,
             )
             return
-
-        if agent is None:
-            agent = _configured_agent(config, repo_cfg, _factory=self._provider_factory)
-        if prompts is None:
-            prompts = Prompts(_load_persona(config))
 
         intents_by_cid = {i.comment_id: i for i in batch_intents}
         tasks_by_id = {t["id"]: t for t in result}
@@ -3253,8 +3229,8 @@ class Dispatcher:
         self,
         intents: list[RescopeIntent],
         pr_ctx: "ActivePR | None",
-        agent: "ProviderAgent | None",
-        prompts: "Prompts | None",
+        agent: ProviderAgent,
+        prompts: Prompts,
     ) -> Callable[
         [
             list[dict[str, Any]],
@@ -3440,7 +3416,7 @@ class Dispatcher:
             else _reorder_coalesce
         )
         if agent is None:
-            agent = _configured_agent(config, repo_cfg, _factory=self._provider_factory)
+            agent = registry.agent_for(repo_cfg.name)
         if prompts is None:
             prompts = Prompts(_load_persona(config))
 
@@ -3542,11 +3518,19 @@ class Dispatcher:
                     # current_intents (coalesced batches accumulate).
                     # pr_ctx and other context are immutable across
                     # iterations so re-extracting from kw is safe.
+                    # ``kw["agent"]`` is the hot worker session agent
+                    # plumbed in via ``_make_reorder_kwargs`` (#1962);
+                    # it is required for the per-intent reply-back
+                    # generation in ``_notify_intent_outcome``.
+                    iter_agent = kw["agent"]
+                    iter_prompts = kw["prompts"]
+                    assert iter_agent is not None
+                    assert iter_prompts is not None
                     kw["_on_rescope_apply"] = self._build_on_rescope_apply(
                         intents=current_intents,
                         pr_ctx=kw.get("pr"),
-                        agent=kw.get("agent"),
-                        prompts=kw.get("prompts"),
+                        agent=iter_agent,
+                        prompts=iter_prompts,
                     )
                     reorder(
                         registry.tasks_for(repo_cfg.name),
