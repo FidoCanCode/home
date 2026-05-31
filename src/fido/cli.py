@@ -3,9 +3,8 @@
 import argparse
 import json
 import logging
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from fido.github import (
     GitHub,
@@ -72,6 +71,12 @@ class Cmd:
         print(json.dumps(result, indent=2))
 
 
+class ParserFactory(Protocol):
+    """Typed collaborator for building the argument parser."""
+
+    def __call__(self) -> argparse.ArgumentParser: ...
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fido task",
@@ -110,9 +115,9 @@ def main(
     argv: list[str] | None = None,
     *,
     _GitHub: type[GitHub] = GitHub,
-    _build_parser: Callable[[], argparse.ArgumentParser] = build_parser,
+    parser_factory: ParserFactory | None = None,
 ) -> None:
-    parser = _build_parser()
+    parser = (parser_factory if parser_factory is not None else build_parser)()
     args = parser.parse_args(argv)
     runner = RealProcessRunner()
     cmd = Cmd(

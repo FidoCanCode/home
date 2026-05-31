@@ -31,7 +31,6 @@ from fido.infra import (
     RealClock,
     RealIOSelector,
     RealPopenRunner,
-    RealProcessRunner,
 )
 from fido.provider import (
     GLOBAL_DISALLOWED_TOOLS,
@@ -68,13 +67,6 @@ _CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_USAGE_BETA = "oauth-2025-04-20"
 _CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.110"
 _CLAUDE_USAGE_CACHE_SECONDS = 300.0
-
-# ── Infrastructure singletons ─────────────────────────────────────────────────
-
-_REAL_POPEN_RUNNER: PopenRunner = RealPopenRunner()
-_REAL_IO_SELECTOR: IOSelector = RealIOSelector()
-_REAL_CLOCK: Clock = RealClock()
-_REAL_PROCESS_RUNNER: ProcessRunner = RealProcessRunner()
 
 
 # ── Callable-Protocol collaborators ───────────────────────────────────────────
@@ -232,7 +224,7 @@ def _claude(
     prompt: str | None = None,
     timeout: int = 30,
     runner: ProcessRunner | None = None,
-    popen: PopenRunner = _REAL_POPEN_RUNNER,
+    popen: PopenRunner | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the claude CLI with the given args, optionally piping prompt to stdin.
 
@@ -255,7 +247,8 @@ def _claude(
         return runner.run(
             cmd, input=prompt, capture_output=True, text=True, timeout=timeout
         )
-    proc = popen.spawn(
+    _popen = popen if popen is not None else RealPopenRunner()
+    proc = _popen.spawn(
         cmd,
         stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -451,9 +444,9 @@ def _run_streaming(
     stdin_file: Path,
     idle_timeout: float = 1800.0,
     cwd: Path | str | None = None,
-    popen: PopenRunner = _REAL_POPEN_RUNNER,
-    selector: IOSelector = _REAL_IO_SELECTOR,
-    clock: Clock = _REAL_CLOCK,
+    popen: PopenRunner | None = None,
+    selector: IOSelector | None = None,
+    clock: Clock | None = None,
 ) -> Iterator[str]:
     """Run a command, streaming stdout with idle-timeout detection.
 
@@ -464,7 +457,10 @@ def _run_streaming(
     ``ClaudeStreamError(returncode)`` is raised.  ``FileNotFoundError``
     propagates naturally if the command is not found.
     """
-    proc = popen.spawn(
+    _popen = popen if popen is not None else RealPopenRunner()
+    _selector = selector if selector is not None else RealIOSelector()
+    _clock = clock if clock is not None else RealClock()
+    proc = _popen.spawn(
         cmd,
         stdin=stdin_file.open(),
         stdout=subprocess.PIPE,
@@ -494,7 +490,7 @@ def _run_streaming(
         idle_deadline = IdleDeadline(
             idle_timeout,
             poll_interval=_SELECT_POLL_INTERVAL,
-            clock=clock.monotonic,
+            clock=_clock.monotonic,
         )
 
         while True:
@@ -504,7 +500,7 @@ def _run_streaming(
                 proc.kill()
                 proc.wait()
                 raise ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT)
-            ready, _, _ = selector.select([proc.stdout], [], [], poll_timeout)
+            ready, _, _ = _selector.select([proc.stdout], [], [], poll_timeout)
             if ready:
                 line = proc.stdout.readline()
                 if not line:
@@ -526,9 +522,6 @@ def _run_streaming(
         if talker_registered and repo_name is not None:
             provider.unregister_talker(repo_name, thread_id)
         _unregister_child(proc)
-
-
-_REAL_STREAMING_RUNNER = _RealStreamingRunner()
 
 
 # ── Persistent bidirectional session ─────────────────────────────────────────
@@ -567,8 +560,8 @@ class ClaudeSession(OwnedSession):
         work_dir: Path | str | None = None,
         model: ProviderModel | None = None,
         idle_timeout: float = 1800.0,
-        popen: PopenRunner = _REAL_POPEN_RUNNER,
-        selector: IOSelector = _REAL_IO_SELECTOR,
+        popen: PopenRunner | None = None,
+        selector: IOSelector | None = None,
         repo_name: str | None = None,
         session_id: str | None = None,
         tools: str | None = None,
@@ -577,10 +570,12 @@ class ClaudeSession(OwnedSession):
         register_talker: Callable[[provider.SessionTalker], None] | None = None,
     ) -> None:
         self._idle_timeout = idle_timeout
-        self._selector = selector
+        self._selector: IOSelector = (
+            selector if selector is not None else RealIOSelector()
+        )
         self._system_file = system_file
         self._work_dir = work_dir
-        self._popen_fn = popen
+        self._popen_fn: PopenRunner = popen if popen is not None else RealPopenRunner()
         self._cancel = threading.Event()
         # Sticky cancel-observed bit for :attr:`last_turn_cancelled` — set
         # the moment ``CancelFire`` fires inside :meth:`iter_events`,
@@ -1863,11 +1858,11 @@ class ClaudeAPI(ProviderAPI):
         oauth_state_fn: Callable[
             [], _ClaudeOAuthState | None
         ] = _load_claude_oauth_state,
-        clock: Clock = _REAL_CLOCK,
+        clock: Clock | None = None,
     ) -> None:
         self._session = session if session is not None else _requests.Session()
         self._oauth_state_fn = oauth_state_fn
-        self._clock = clock
+        self._clock: Clock = clock if clock is not None else RealClock()
         self._limit_snapshot_lock = threading.Lock()
         self._limit_snapshot_cached_at: float | None = None
         self._limit_snapshot_cache: ProviderLimitSnapshot | None = None
@@ -1960,7 +1955,7 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
 
     def __init__(
         self,
-        streaming_runner: StreamingRunner = _REAL_STREAMING_RUNNER,
+        streaming_runner: StreamingRunner | None = None,
         session_fn: Callable[[], PromptSession] = provider.current_repo_session,
         session_factory: ClaudeSessionFactory | None = None,
         session_system_file: Path | None = None,
@@ -1969,7 +1964,9 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
         session: PromptSession | None = None,
         state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
-        self._streaming_runner = streaming_runner
+        self._streaming_runner: StreamingRunner = (
+            streaming_runner if streaming_runner is not None else _RealStreamingRunner()
+        )
         self._session_factory = (
             ClaudeSession if session_factory is None else session_factory
         )

@@ -582,4 +582,4 @@ class TestMain:
         fake_parser = _FakeParser(fake_args)
 
         with pytest.raises(AssertionError, match="unreachable"):
-            main([], _GitHub=_FakeGitHub, _build_parser=lambda: fake_parser)  # type: ignore[arg-type]
+            main([], _GitHub=_FakeGitHub, parser_factory=lambda: fake_parser)  # type: ignore[arg-type]

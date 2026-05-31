@@ -45,6 +45,7 @@ from fido.provider import ProviderID
 from fido.server import (
     FidoHTTPServer,
     PreflightError,
+    ServerRunner,
     WebhookHandler,
     _runner_dir,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
@@ -2962,6 +2963,43 @@ class TestBootstrapIssueCaches:
         mock_registry.wake.assert_called_once_with("b/r2")
 
 
+class _FakeHTTPServer:
+    """Minimal HTTPServer fake for ServerRunner lifecycle tests."""
+
+    def __init__(self, *, raise_on_serve_forever: BaseException | None = None) -> None:
+        self.serve_forever_called = False
+        self.server_close_called = False
+        self._raise = raise_on_serve_forever
+
+    def serve_forever(self) -> None:
+        self.serve_forever_called = True
+        if self._raise is not None:
+            raise self._raise
+
+    def server_close(self) -> None:
+        self.server_close_called = True
+
+
+class _FakeChildKiller:
+    """Typed fake for :class:`~fido.server.ChildKiller`."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> None:
+        self.calls += 1
+
+
+class _FakeSignalInstaller:
+    """Typed fake for :class:`~fido.server.SignalInstaller` — records installed handlers."""
+
+    def __init__(self) -> None:
+        self.installed: dict[int, Any] = {}
+
+    def __call__(self, signum: int, handler: Any) -> None:  # noqa: ANN401
+        self.installed[signum] = handler
+
+
 class TestRun:
     """Tests for the run() entry point."""
 
@@ -2975,31 +3013,11 @@ class TestRun:
             sub_dir=tmp_path / "sub",
         )
 
-    def test_run_starts_server(self, tmp_path: Path) -> None:
-        from fido.server import run
-
-        fake_cfg = self._fake_cfg(tmp_path)
-        mock_server = MagicMock()
-        mock_server.serve_forever.side_effect = KeyboardInterrupt
-
-        run(
-            _from_args=lambda: fake_cfg,
-            _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
-            _basic_config=MagicMock(),
-            _populate_memberships=MagicMock(),
-            _preflight_repo_identity=MagicMock(),
-            _preflight_tools=MagicMock(),
-            _preflight_sub_dir=MagicMock(),
-            _preflight_gh_auth=MagicMock(),
-            _GitHub=MagicMock,
-            _ProviderPressureMonitor=MagicMock(),
-            _RateLimitMonitor=MagicMock(),
-        )
-
-        mock_server.serve_forever.assert_called_once()
-        mock_server.server_close.assert_called_once()
+    def test_run_starts_server(self) -> None:
+        server = _FakeHTTPServer(raise_on_serve_forever=KeyboardInterrupt())
+        ServerRunner(server).run()
+        assert server.serve_forever_called
+        assert server.server_close_called
 
     def test_default_server_does_not_block_behind_slow_client(self) -> None:
         srv = FidoHTTPServer(("127.0.0.1", 0), WebhookHandler)
@@ -3021,107 +3039,38 @@ class TestRun:
             srv.server_close()
             thread.join(timeout=1)
 
-    def test_run_keyboard_interrupt_kills_children(self, tmp_path: Path) -> None:
-        from fido.server import run
+    def test_run_keyboard_interrupt_kills_children(self) -> None:
+        server = _FakeHTTPServer(raise_on_serve_forever=KeyboardInterrupt())
+        kill_fn = _FakeChildKiller()
+        ServerRunner(server, kill_fn=kill_fn).run()
+        assert kill_fn.calls == 1
 
-        fake_cfg = self._fake_cfg(tmp_path)
-        mock_server = MagicMock()
-        mock_server.serve_forever.side_effect = KeyboardInterrupt
-        mock_kill = MagicMock()
-
-        run(
-            _from_args=lambda: fake_cfg,
-            _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
-            _basic_config=MagicMock(),
-            _populate_memberships=MagicMock(),
-            _preflight_repo_identity=MagicMock(),
-            _preflight_tools=MagicMock(),
-            _preflight_sub_dir=MagicMock(),
-            _preflight_gh_auth=MagicMock(),
-            _GitHub=MagicMock,
-            _signal=MagicMock(),
-            _kill_active_children=mock_kill,
-            _ProviderPressureMonitor=MagicMock(),
-            _RateLimitMonitor=MagicMock(),
-        )
-        mock_kill.assert_called_once()
-
-    def test_run_installs_sigterm_and_sigint_handlers(self, tmp_path: Path) -> None:
+    def test_run_installs_sigterm_and_sigint_handlers(self) -> None:
         import signal as _sig
 
-        from fido.server import run
+        server = _FakeHTTPServer(raise_on_serve_forever=KeyboardInterrupt())
+        signal_fn = _FakeSignalInstaller()
+        ServerRunner(server, signal_fn=signal_fn).run()
+        assert _sig.SIGTERM in signal_fn.installed
+        assert _sig.SIGINT in signal_fn.installed
 
-        fake_cfg = self._fake_cfg(tmp_path)
-        mock_server = MagicMock()
-        mock_server.serve_forever.side_effect = KeyboardInterrupt
-        installed: dict[int, object] = {}
+    def test_shutdown_handler_kills_children_and_exits(self) -> None:
+        import signal as _sig
 
-        def fake_signal(signum: int, handler: object) -> None:
-            installed[signum] = handler
-
-        run(
-            _from_args=lambda: fake_cfg,
-            _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
-            _basic_config=MagicMock(),
-            _populate_memberships=MagicMock(),
-            _preflight_repo_identity=MagicMock(),
-            _preflight_tools=MagicMock(),
-            _preflight_sub_dir=MagicMock(),
-            _preflight_gh_auth=MagicMock(),
-            _GitHub=MagicMock,
-            _signal=fake_signal,
-            _kill_active_children=MagicMock(),
-            _ProviderPressureMonitor=MagicMock(),
-            _RateLimitMonitor=MagicMock(),
-        )
-        assert _sig.SIGTERM in installed
-        assert _sig.SIGINT in installed
-
-    def test_shutdown_handler_kills_children_and_exits(self, tmp_path: Path) -> None:
-        from fido.server import run
-
-        fake_cfg = self._fake_cfg(tmp_path)
-        mock_server = MagicMock()
-        mock_server.serve_forever.side_effect = KeyboardInterrupt
-        mock_kill = MagicMock()
-        captured: dict[int, object] = {}
-
-        def fake_signal(signum: int, handler: object) -> None:
-            captured[signum] = handler
-
-        run(
-            _from_args=lambda: fake_cfg,
-            _HTTPServer=lambda *a, **kw: mock_server,
-            _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
-            _basic_config=MagicMock(),
-            _populate_memberships=MagicMock(),
-            _preflight_repo_identity=MagicMock(),
-            _preflight_tools=MagicMock(),
-            _preflight_sub_dir=MagicMock(),
-            _preflight_gh_auth=MagicMock(),
-            _GitHub=MagicMock,
-            _signal=fake_signal,
-            _kill_active_children=mock_kill,
-            _ProviderPressureMonitor=MagicMock(),
-            _RateLimitMonitor=MagicMock(),
-        )
+        server = _FakeHTTPServer(raise_on_serve_forever=KeyboardInterrupt())
+        kill_fn = _FakeChildKiller()
+        signal_fn = _FakeSignalInstaller()
+        ServerRunner(server, kill_fn=kill_fn, signal_fn=signal_fn).run()
         # Reset call counts from the KeyboardInterrupt path so we can verify
         # the signal handler invokes the same teardown.
-        mock_kill.reset_mock()
-        mock_server.server_close.reset_mock()
+        kill_fn.calls = 0
+        server.server_close_called = False
 
-        import signal as _sig
-
-        handler = captured[_sig.SIGTERM]
+        handler = signal_fn.installed[_sig.SIGTERM]
         with pytest.raises(SystemExit):
             handler(_sig.SIGTERM, None)
-        mock_kill.assert_called_once()
-        mock_server.server_close.assert_called_once()
+        assert kill_fn.calls == 1
+        assert server.server_close_called
 
     def test_run_format_includes_repo_name(self, tmp_path: Path) -> None:
         from fido.server import run
@@ -3139,7 +3088,6 @@ class TestRun:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
             _preflight_repo_identity=MagicMock(),
@@ -3171,7 +3119,6 @@ class TestRun:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
             _preflight_repo_identity=MagicMock(),
@@ -3200,7 +3147,6 @@ class TestRun:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _stderr=mock_stderr,
             _populate_memberships=MagicMock(),
@@ -3244,7 +3190,6 @@ class TestRun:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
             _preflight_repo_identity=MagicMock(),
@@ -3290,7 +3235,6 @@ class TestRun:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
             _basic_config=fake_basic_config,
             _populate_memberships=MagicMock(),
             _preflight_repo_identity=MagicMock(),
@@ -3320,7 +3264,6 @@ class TestRun:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=mock_make_registry,
-            _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _preflight_repo_identity=MagicMock(),
@@ -3351,7 +3294,6 @@ class TestRun:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=mock_make_registry,
-            _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _preflight_repo_identity=MagicMock(),
@@ -3393,7 +3335,6 @@ class TestRun:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=mock_make_registry,
-            _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _preflight_repo_identity=MagicMock(),
@@ -3434,7 +3375,6 @@ class TestRun:
                 _from_args=lambda: fake_cfg,
                 _HTTPServer=lambda *a, **kw: mock_server,
                 _make_registry=MagicMock(),
-                _path_home=lambda: tmp_path,
                 _basic_config=MagicMock(),
                 _populate_memberships=MagicMock(),
                 _preflight_repo_identity=MagicMock(),
@@ -3498,7 +3438,6 @@ class TestRun:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=mock_make_registry,
-            _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _preflight_repo_identity=MagicMock(),
@@ -3798,7 +3737,6 @@ class TestPreflightRepoIdentity:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _preflight_repo_identity=mock_preflight,
@@ -3831,7 +3769,6 @@ class TestPreflightRepoIdentity:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _preflight_repo_identity=MagicMock(),
@@ -3864,7 +3801,6 @@ class TestPreflightRepoIdentity:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _preflight_repo_identity=MagicMock(),
@@ -3897,7 +3833,6 @@ class TestPreflightRepoIdentity:
             _from_args=lambda: fake_cfg,
             _HTTPServer=lambda *a, **kw: mock_server,
             _make_registry=MagicMock(),
-            _path_home=lambda: tmp_path,
             _basic_config=MagicMock(),
             _populate_memberships=MagicMock(),
             _preflight_repo_identity=MagicMock(),
@@ -3929,7 +3864,6 @@ class TestPreflightRepoIdentity:
                 _from_args=lambda: fake_cfg,
                 _HTTPServer=lambda *a, **kw: mock_server,
                 _make_registry=MagicMock(),
-                _path_home=lambda: tmp_path,
                 _basic_config=MagicMock(),
                 _populate_memberships=MagicMock(),
                 _preflight_tools=MagicMock(

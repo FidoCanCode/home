@@ -73,13 +73,6 @@ _COPILOT_JSON_BASE_ARGS = (
 )
 _ACP_STREAM_LIMIT = 8 * 1024 * 1024
 
-# ── Infrastructure singletons ─────────────────────────────────────────────────
-
-_REAL_POPEN_RUNNER: PopenRunner = RealPopenRunner()
-_REAL_PROCESS_RUNNER: ProcessRunner = RealProcessRunner()
-_REAL_CLOCK: Clock = RealClock()
-
-
 # ── Callable-Protocol collaborators ───────────────────────────────────────────
 
 
@@ -371,9 +364,10 @@ def _copilot(
     *args: str,
     timeout: int = 30,
     cwd: Path | str | None = None,
-    runner: ProcessRunner = _REAL_PROCESS_RUNNER,
+    runner: ProcessRunner | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return runner.run(
+    _runner = runner if runner is not None else RealProcessRunner()
+    return _runner.run(
         ["copilot", *args],
         capture_output=True,
         text=True,
@@ -463,9 +457,9 @@ class _TerminalManager:
     def __init__(
         self,
         *,
-        popen: PopenRunner = _REAL_POPEN_RUNNER,
+        popen: PopenRunner | None = None,
     ) -> None:
-        self._popen = popen
+        self._popen: PopenRunner = popen if popen is not None else RealPopenRunner()
         self._terminals: dict[str, _TerminalRecord] = {}
         self._lock = threading.Lock()
 
@@ -1435,10 +1429,10 @@ class CopilotCLIAPI(ProviderAPI):
     def __init__(
         self,
         *,
-        clock: Clock = _REAL_CLOCK,
+        clock: Clock | None = None,
         pause_seconds: float = _COPILOT_QUOTA_PAUSE_SECONDS,
     ) -> None:
-        self._clock = clock
+        self._clock: Clock = clock if clock is not None else RealClock()
         self._pause_seconds = pause_seconds
         self._lock = threading.Lock()
         self._quota_error_at_monotonic: float | None = None
@@ -1497,7 +1491,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
 
     def __init__(
         self,
-        runner: ProcessRunner = _REAL_PROCESS_RUNNER,
+        runner: ProcessRunner | None = None,
         session_fn: Callable[[], PromptSession] | None = None,
         session_factory: CopilotSessionFactory | None = None,
         session_system_file: Path | None = None,
@@ -1507,7 +1501,9 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         api: CopilotCLIAPI | None = None,
         state_updater: AtomicUpdater[FidoState] | None = None,
     ) -> None:
-        self._runner = runner
+        self._runner: ProcessRunner = (
+            runner if runner is not None else RealProcessRunner()
+        )
         self._quota_api = api
         self._session_factory = (
             CopilotCLISession if session_factory is None else session_factory

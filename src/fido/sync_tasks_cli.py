@@ -1,8 +1,8 @@
 """CLI wrapper for syncing repo tasks to GitHub."""
 
 import sys
-from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
 from fido.github import (
     GitHub,
@@ -10,19 +10,34 @@ from fido.github import (
 )
 from fido.infra import RealClock, RealProcessRunner
 from fido.tasks import (
+    AutoCompleter,
+    GitDirResolver,
     RealGitDirResolver,
     _auto_complete_ask_tasks,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
+
+
+class SyncTasksFn(Protocol):
+    """Typed collaborator: sync tasks.json → PR body work queue."""
+
+    def __call__(
+        self,
+        work_dir: Path,
+        gh: GitHub,
+        *,
+        git_dir_resolver: GitDirResolver,
+        auto_completer: AutoCompleter,
+    ) -> None: ...
 
 
 def main(
     argv: list[str] | None = None,
     *,
     _GitHub: type[GitHub] = GitHub,
-    _sync_tasks: Callable[..., None] | None = None,
+    sync_tasks_fn: SyncTasksFn | None = None,
 ) -> None:
-    if _sync_tasks is None:
-        from fido.tasks import sync_tasks as _sync_tasks  # pragma: no cover
+    if sync_tasks_fn is None:
+        from fido.tasks import sync_tasks as sync_tasks_fn  # pragma: no cover
 
     args = sys.argv[1:] if argv is None else argv
     work_dir = Path(args[0]) if args else Path.cwd()
@@ -32,7 +47,7 @@ def main(
         clock=RealClock(),
         token_fetcher=lambda: _gh_token(runner=runner),
     )
-    _sync_tasks(
+    sync_tasks_fn(
         work_dir,
         gh,
         git_dir_resolver=RealGitDirResolver(runner),
