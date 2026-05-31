@@ -1656,18 +1656,17 @@ class _RealPrDescriptionRewriter:
 
 
 class BackgroundTaskSyncer(Protocol):
-    """Syncs tasks.json to the PR body (may be blocking or non-blocking).
+    """Syncs tasks.json to the PR body in a background daemon thread.
 
-    Wraps both :func:`~fido.tasks.sync_tasks_background` (for
-    :meth:`Dispatcher.launch_sync`) and :func:`~fido.tasks.sync_tasks` (for
-    post-rescope ``on_done`` closures) so both paths can be stubbed in tests
-    with a single no-op instance.
+    Used exclusively for fire-and-forget paths (e.g. :meth:`Dispatcher.launch_sync`).
+    For paths that must complete before subsequent work (e.g. post-rescope
+    ``on_done`` closures), use :class:`ForegroundTaskSyncer` instead.
     """
 
     def __call__(self, work_dir: Path, gh: GitHub) -> None: ...
 
 
-class _RealBackgroundTaskSyncer:
+class _RealBackgroundTaskSyncer:  # pragma: no cover
     """Real :class:`BackgroundTaskSyncer` — delegates to :class:`~fido.tasks.RealBackgroundSyncer`."""
 
     def __init__(self, runner: ProcessRunner) -> None:
@@ -1685,6 +1684,39 @@ class _RealBackgroundTaskSyncer:
             auto_completer=_auto_complete_ask_tasks,
             starter=RealThreadStarter(),
         )(work_dir, gh)
+
+
+class ForegroundTaskSyncer(Protocol):
+    """Syncs tasks.json to the PR body synchronously before returning.
+
+    Used for paths that must complete before subsequent work — specifically
+    the post-rescope ``on_done`` closure, which must sync task state before
+    :meth:`PrDescriptionRewriter.rewrite_pr_description` runs so the rewrite
+    sees up-to-date task data (e.g. auto-completed ``ASK:`` tasks).
+    """
+
+    def __call__(self, work_dir: Path, gh: GitHub) -> None: ...
+
+
+class _RealForegroundTaskSyncer:  # pragma: no cover
+    """Real :class:`ForegroundTaskSyncer` — calls :func:`~fido.tasks.sync_tasks` directly."""
+
+    def __init__(self, runner: ProcessRunner) -> None:
+        self._runner = runner
+
+    def __call__(self, work_dir: Path, gh: GitHub) -> None:
+        from fido.tasks import (  # noqa: PLC0415
+            RealGitDirResolver,
+            _auto_complete_ask_tasks,  # pyright: ignore[reportPrivateUsage]
+            sync_tasks,
+        )
+
+        sync_tasks(
+            work_dir,
+            gh,
+            git_dir_resolver=RealGitDirResolver(self._runner),
+            auto_completer=_auto_complete_ask_tasks,
+        )
 
 
 class CommitSummarizer(Protocol):
@@ -1787,6 +1819,9 @@ _DEFAULT_PR_REWRITER: PrDescriptionRewriter = _RealPrDescriptionRewriter()
 _DEFAULT_BACKGROUND_SYNCER: BackgroundTaskSyncer = _RealBackgroundTaskSyncer(
     runner=RealProcessRunner()
 )
+_DEFAULT_FOREGROUND_SYNCER: ForegroundTaskSyncer = _RealForegroundTaskSyncer(
+    runner=RealProcessRunner()
+)
 _DEFAULT_COMMIT_SUMMARIZER: CommitSummarizer = _RealCommitSummarizer()
 _DEFAULT_STORE_FACTORY: StoreFactory = _RealStoreFactory()
 _DEFAULT_PR_DESCRIPTION_WRITER: PrDescriptionWriter = _RealPrDescriptionWriter(
@@ -1824,6 +1859,7 @@ class Dispatcher:
         task_reorderer: TaskReorderer = _DEFAULT_TASK_REORDERER,
         pr_rewriter: PrDescriptionRewriter = _DEFAULT_PR_REWRITER,
         background_syncer: BackgroundTaskSyncer = _DEFAULT_BACKGROUND_SYNCER,
+        foreground_syncer: ForegroundTaskSyncer = _DEFAULT_FOREGROUND_SYNCER,
         commit_summarizer: CommitSummarizer = _DEFAULT_COMMIT_SUMMARIZER,
         store_factory: StoreFactory = _DEFAULT_STORE_FACTORY,
         reorder_coalesce_state: "dict[str, Any] | None" = None,
@@ -1840,6 +1876,7 @@ class Dispatcher:
         self._task_reorderer = task_reorderer
         self._pr_rewriter = pr_rewriter
         self._background_syncer = background_syncer
+        self._foreground_syncer = foreground_syncer
         self._commit_summarizer = commit_summarizer
         self._store_factory = store_factory
         self._reorder_coalesce_state = reorder_coalesce_state
@@ -3475,7 +3512,7 @@ class Dispatcher:
             after_applies.append(after_apply)
 
         def on_done() -> None:
-            self._background_syncer(work_dir, gh)
+            self._foreground_syncer(work_dir, gh)
             self._pr_rewriter.rewrite_pr_description(
                 work_dir,
                 gh,

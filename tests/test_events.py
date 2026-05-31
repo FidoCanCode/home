@@ -4111,7 +4111,7 @@ class TestReorderTasksBackground:
             thread_starter=_FakeThreadStarter(started.append),
             pr_rewriter=_FakePrDescriptionRewriter(mock_rewrite),
             task_reorderer=_FakeTaskReorderer(mock_reorder),
-            background_syncer=_FakeBackgroundSyncer(mock_sync),
+            foreground_syncer=_FakeBackgroundSyncer(mock_sync),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "commits",
@@ -4140,7 +4140,7 @@ class TestReorderTasksBackground:
             gh,
             thread_starter=_FakeThreadStarter(started.append),
             pr_rewriter=_FakePrDescriptionRewriter(mock_rewrite),
-            background_syncer=_FakeBackgroundSyncer(),
+            foreground_syncer=_FakeBackgroundSyncer(),
             task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
@@ -4171,7 +4171,7 @@ class TestReorderTasksBackground:
             thread_starter=_FakeThreadStarter(started.append),
             pr_rewriter=_FakePrDescriptionRewriter(mock_rewrite),
             task_reorderer=_FakeTaskReorderer(mock_reorder),
-            background_syncer=_FakeBackgroundSyncer(mock_sync),
+            foreground_syncer=_FakeBackgroundSyncer(mock_sync),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "commits",
@@ -4198,7 +4198,7 @@ class TestReorderTasksBackground:
             pr_rewriter=_FakePrDescriptionRewriter(),
             task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
-            background_syncer=_FakeBackgroundSyncer(fake_sync),
+            foreground_syncer=_FakeBackgroundSyncer(fake_sync),
         ).reorder_tasks_background(
             "commits",
             registry=MagicMock(spec=ActivityReporter),
@@ -7515,7 +7515,7 @@ class TestMakeReorderKwargsAfterApply:
             self._cfg(tmp_path).repos["owner/repo"],
             gh,
             pr_rewriter=_FakePrDescriptionRewriter(rewrite_fn),
-            background_syncer=_FakeBackgroundSyncer(sync_fn),
+            foreground_syncer=_FakeBackgroundSyncer(sync_fn),
         )._make_reorder_kwargs(
             MagicMock(),
             MagicMock(),
