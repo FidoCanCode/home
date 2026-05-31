@@ -17615,9 +17615,10 @@ class TestWorkerThread:
     def test_provider_agent_returns_providers_agent(self, tmp_path: Path) -> None:
         # #1962: WorkerRegistry.agent_for reaches the worker's hot
         # session via this property.  Returns the live provider's
-        # agent when one is attached.
+        # agent when one is attached AND has a live session.
         provider = MagicMock()
         sentinel_agent = MagicMock()
+        sentinel_agent.session = MagicMock()  # bootstrapped session
         provider.agent = sentinel_agent
         wt = WorkerThread(
             tmp_path,
@@ -17640,6 +17641,25 @@ class TestWorkerThread:
         )
         # Force-clear the provider so the None branch is observable.
         wt._provider = None  # noqa: SLF001
+        assert wt.provider_agent is None
+
+    def test_provider_agent_none_when_session_not_bootstrapped(
+        self, tmp_path: Path
+    ) -> None:
+        # Codex P1 on #1963: a webhook landing during startup, before
+        # ``WorkerThread.run`` has called ``_create_session``, must NOT
+        # get the shared agent back — otherwise the webhook path can
+        # race the worker's bootstrap and create duplicate sessions
+        # outside the modeled session lock.
+        provider = MagicMock()
+        provider.agent.session = None  # provider exists, session does not
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            provider=provider,
+            registry=MagicMock(spec=ActivityReporter),
+        )
         assert wt.provider_agent is None
 
     def test_session_alive_false_when_no_session(self, tmp_path: Path) -> None:

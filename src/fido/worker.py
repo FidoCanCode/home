@@ -5734,12 +5734,23 @@ class WorkerThread(threading.Thread):
         session for webhook use) and the implementation (which used to
         spawn fresh agents next to the just-freed session).  Per #1962.
 
-        Safe to call from any thread — the ``_provider_lock`` covers the
-        provider field read.
+        Returns ``None`` until the worker has bootstrapped a live
+        session (``agent.session is not None``).  Codex P1 on #1963:
+        without this gate, a webhook landing during startup before
+        ``WorkerThread.run`` has called ``_create_session`` would get
+        the shared agent back with no session, then race the worker's
+        bootstrap to create one — reintroducing the duplicate-session
+        leak the modeled session lock is meant to prevent.
+
+        Safe to call from any thread — the ``_provider_lock`` covers
+        the provider field read; the agent's ``session`` attribute
+        read is a single pointer load.
         """
         with self._provider_lock:
             provider = self._provider
-        return provider.agent if provider is not None else None
+        if provider is None or provider.agent.session is None:
+            return None
+        return provider.agent
 
     @property
     def session_owner(self) -> str | None:
