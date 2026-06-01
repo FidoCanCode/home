@@ -469,6 +469,10 @@ def _fido_pid(*, runner: ProcessRunner) -> int | None:
     return pids[0] if pids else None
 
 
+_REAL_RUNNER: ProcessRunner = RealProcessRunner()
+_REAL_URLOPEN: UrlOpener = urllib.request.urlopen  # type: ignore[assignment]
+
+
 class StatusCollector:
     """Groups system-introspection methods used by :func:`repo_status`,
     :func:`collect`, and :func:`running_repo_configs`.
@@ -482,15 +486,11 @@ class StatusCollector:
     def __init__(
         self,
         *,
-        runner: ProcessRunner | None = None,
-        urlopen: UrlOpener | None = None,
+        runner: ProcessRunner = _REAL_RUNNER,
+        urlopen: UrlOpener = _REAL_URLOPEN,
     ) -> None:
-        self._runner: ProcessRunner = (
-            runner if runner is not None else RealProcessRunner()
-        )
-        self._urlopen: UrlOpener = (
-            urlopen if urlopen is not None else urllib.request.urlopen  # type: ignore[assignment]
-        )
+        self._runner = runner
+        self._urlopen = urlopen
 
     def git_dir(self, path: Path) -> Path | None:
         return _git_dir(path, runner=self._runner)

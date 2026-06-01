@@ -25,6 +25,7 @@ from fido.appstate import (
 )
 from fido.atomic import create_atomic
 from fido.color import Color
+from fido.infra import RealClock, RealProcessRunner
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.tasks import (
@@ -489,7 +490,9 @@ class TestWorkerRegistryPreemptionHelpers:
                 process_started_at=_EPOCH,
             )
         )
-        return WorkerRegistry(_FakeNoOpThreadFactory(), updater)
+        return WorkerRegistry(
+            _FakeNoOpThreadFactory(), updater, RealProcessRunner(), RealClock()
+        )
 
     def test_note_provider_interrupt_requested(self) -> None:
         registry = self._registry()

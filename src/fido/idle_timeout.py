@@ -1,6 +1,6 @@
 """Shared idle-timeout bookkeeping for streaming provider turns."""
 
-from fido.infra import Clock, RealClock
+from fido.infra import Clock
 
 
 class IdleDeadline:
@@ -17,11 +17,11 @@ class IdleDeadline:
         timeout: float,
         *,
         poll_interval: float,
-        clock: Clock | None = None,
+        clock: Clock,
     ) -> None:
         self._timeout = timeout
         self._poll_interval = poll_interval
-        self._clock = clock if clock is not None else RealClock()
+        self._clock = clock
         self._last_activity = self._clock.monotonic()
 
     def reset(self) -> None:

@@ -23,7 +23,7 @@ from fido.appstate import (
 )
 from fido.claude import ClaudeClient
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
-from fido.infra import RealProcessRunner
+from fido.infra import RealClock, RealOsProcess, RealProcessRunner
 from fido.issue_cache import IssueCache, IssueNode
 from fido.nudges import Nudges
 from fido.prompts import Prompts
@@ -370,6 +370,10 @@ class WorkerThread(_WorkerThreadBase):
             kwargs["issue_cache"] = IssueCache(repo_name)
         if "dispatcher" not in kwargs:
             kwargs["dispatcher"] = _FakeDispatcher()
+        if "os_proc" not in kwargs:
+            kwargs["os_proc"] = RealOsProcess()
+        if "runner" not in kwargs:
+            kwargs["runner"] = RealProcessRunner()
         super().__init__(work_dir, repo_name, gh, *args, **kwargs)
 
 
@@ -1105,7 +1109,9 @@ class TestWorker:
                 process_started_at=_EPOCH,
             )
         )
-        registry = WorkerRegistry(MagicMock(), updater)
+        registry = WorkerRegistry(
+            MagicMock(), updater, RealProcessRunner(), RealClock()
+        )
         # registry.start now resolves git_dir via git rev-parse, so
         # the work_dir must be a real git repo (#1696 codex P1
         # round 5).  ``git init`` is idempotent.

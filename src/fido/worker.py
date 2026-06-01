@@ -41,7 +41,6 @@ from fido.infra import (
     OsProcess,
     ProcessRunner,
     RealClock,
-    RealOsProcess,
     RealProcessRunner,
 )
 from fido.issue_cache import IssueCache, IssueNode
@@ -5686,8 +5685,8 @@ class WorkerThread(threading.Thread):
         provider_factory: DefaultProviderFactory,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
-        os_proc: OsProcess | None = None,
-        runner: ProcessRunner | None = None,
+        os_proc: OsProcess,
+        runner: ProcessRunner,
         _state: State | None = None,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
@@ -5695,10 +5694,8 @@ class WorkerThread(threading.Thread):
         self._repo_name = repo_name
         self._gh = gh
         self._registry = registry
-        self._os_proc: OsProcess = os_proc if os_proc is not None else RealOsProcess()
-        self._runner_proc: ProcessRunner = (
-            runner if runner is not None else RealProcessRunner()
-        )
+        self._os_proc = os_proc
+        self._runner_proc = runner
         self._membership = membership
         self._wake = threading.Event()
         self._abort_task = AbortHandle()

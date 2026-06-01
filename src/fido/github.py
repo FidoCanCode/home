@@ -100,7 +100,7 @@ _CACHEABLE_URL_RE: re.Pattern[str] = re.compile(
 )
 
 
-class _TimeoutSession(_requests.Session):
+class GitHubSession(_requests.Session):
     """``requests.Session`` with a uniform 30s timeout AND a per-repo
     ETag-validating GET cache.
 
@@ -166,7 +166,7 @@ class _TimeoutSession(_requests.Session):
     ) -> _requests.Response:
         """Single choke-point to :meth:`requests.Session.request`.
 
-        All network calls within :class:`_TimeoutSession` route through here
+        All network calls within :class:`GitHubSession` route through here
         so tests can override this one method (via subclassing) to intercept
         every outbound request without patching the ``requests`` module.
         """
@@ -346,13 +346,13 @@ class GitHub:
     def __init__(
         self,
         token: str | None = None,
-        session: _requests.Session | None = None,
         *,
+        session: _requests.Session,
         runner: ProcessRunner,
         clock: Clock,
         token_fetcher: TokenFetcher,
     ) -> None:
-        self._s = session if session is not None else _TimeoutSession()
+        self._s = session
         self._runner = runner
         self._clock = clock
         self._token_fetcher = token_fetcher
@@ -377,7 +377,7 @@ class GitHub:
         Returns the number of entries dropped, or ``0`` if the session
         does not expose a cache (e.g. an injected test session).
         """
-        if isinstance(self._s, _TimeoutSession):
+        if isinstance(self._s, GitHubSession):
             return self._s.clear_repo_cache(repo)
         return 0
 
@@ -407,7 +407,7 @@ class GitHub:
         # token on a 304 — bypassing the #1207 identity guard that
         # ``Worker.assert_git_identity`` relies on (it calls
         # ``refresh_token`` then ``get_authenticated_identity``).
-        if isinstance(self._s, _TimeoutSession):
+        if isinstance(self._s, GitHubSession):
             self._s.clear_all()
         return True
 

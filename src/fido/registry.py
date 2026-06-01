@@ -26,7 +26,7 @@ from fido.appstate import (
 from fido.atomic import AtomicUpdater
 from fido.config import Config, RepoConfig, default_sub_dir
 from fido.github import GitHub
-from fido.infra import Clock, ProcessRunner, RealClock, RealProcessRunner
+from fido.infra import Clock, ProcessRunner, RealClock, RealOsProcess, RealProcessRunner
 from fido.issue_cache import CacheMetrics, IssueCache
 from fido.provider import PromptSession, Provider, ProviderAgent
 from fido.provider_factory import DefaultProviderFactory
@@ -79,6 +79,10 @@ class WebhookActivityHandle:
         )
 
 
+_REAL_RUNNER: ProcessRunner = RealProcessRunner()
+_REAL_CLOCK: Clock = RealClock()
+
+
 class WorkerRegistry:
     """Owns and manages one :class:`~fido.worker.WorkerThread` per repo.
 
@@ -104,8 +108,8 @@ class WorkerRegistry:
         self,
         thread_factory: ThreadFactory,
         state_updater: "AtomicUpdater[FidoState]",
-        runner: ProcessRunner | None = None,
-        clock: Clock | None = None,
+        runner: ProcessRunner = _REAL_RUNNER,
+        clock: Clock = _REAL_CLOCK,
     ) -> None:
         # _threads is single-writer: only start() (called from the watchdog
         # daemon thread or from the startup sequence) ever writes to it.
@@ -122,10 +126,8 @@ class WorkerRegistry:
         # value at a Lens path.  The read face (AtomicReader) lives in the
         # composition root; this class never reads the snapshot.
         self._state_updater: AtomicUpdater[FidoState] = state_updater
-        self._runner: ProcessRunner = (
-            runner if runner is not None else RealProcessRunner()
-        )
-        self._clock: Clock = clock if clock is not None else RealClock()
+        self._runner = runner
+        self._clock = clock
         # Owner-side crash records: the watchdog increments death_count here,
         # then publishes the result into FidoState via a pure lens write.
         # Only the watchdog thread writes; start() reads during crash recovery
@@ -1011,6 +1013,8 @@ def _make_thread(
         ),
         dispatcher=dispatchers[repo_cfg.name],
         issue_cache=registry.get_issue_cache(repo_cfg.name),
+        os_proc=RealOsProcess(),
+        runner=RealProcessRunner(),
     )
 
 
@@ -1021,7 +1025,8 @@ def make_registry(
     *,
     dispatchers: "dict[str, Dispatcher]",
     state_updater: "AtomicUpdater[FidoState]",
-    runner: ProcessRunner | None = None,
+    runner: ProcessRunner = _REAL_RUNNER,
+    clock: Clock = _REAL_CLOCK,
     _thread_factory: MakeThreadFn = _make_thread,
 ) -> WorkerRegistry:
     """Create a :class:`WorkerRegistry` and start threads for all repos.
@@ -1048,7 +1053,7 @@ def make_registry(
             state_updater=state_updater,
         )
 
-    registry = WorkerRegistry(factory, state_updater, runner=runner)
+    registry = WorkerRegistry(factory, state_updater, runner, clock)
     for repo_cfg in repos.values():
         registry.start(repo_cfg)
     return registry

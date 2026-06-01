@@ -7,12 +7,12 @@ import pytest
 from fido.github import (
     _HTTP_TIMEOUT,  # noqa: PLC2701
     GitHub,
+    GitHubSession,
     GraphQLError,
     TokenFetcher,
     _gh_token,
     _has_closing_keyword,  # noqa: PLC2701
     _pr_state_str,  # noqa: PLC2701
-    _TimeoutSession,  # noqa: PLC2701
 )
 
 
@@ -252,6 +252,11 @@ def _noop_token_fetcher() -> TokenFetcher:
     return _fetch
 
 
+def _noop_session() -> GitHubSession:
+    """Return a fresh GitHubSession for tests that don't inspect session calls."""
+    return GitHubSession()
+
+
 class _RawCall:
     """One recorded call to :meth:`_FakeTimeoutSession._raw_request`."""
 
@@ -266,8 +271,8 @@ class _RawCall:
         self.kwargs = kwargs
 
 
-class _FakeTimeoutSession(_TimeoutSession):
-    """Test double for :class:`_TimeoutSession`: replaces network calls.
+class _FakeTimeoutSession(GitHubSession):
+    """Test double for :class:`GitHubSession`: replaces network calls.
 
     Pass a single response object to return the same response on every call,
     or a list to dequeue one response per call.
@@ -458,14 +463,17 @@ class TestTimeoutSession:
         assert s.call_args is not None
         assert s.call_args.kwargs.get("timeout") == 5
 
-    def test_uses_timeout_session_when_no_session_injected(self) -> None:
+    def test_injected_session_is_stored(self) -> None:
+        """The session passed at construction is the one stored on the instance."""
+        session = GitHubSession()
         gh = GitHub(
             "tok",
+            session=session,
             runner=_noop_runner(),
             clock=_FakeClock(),
             token_fetcher=_noop_token_fetcher(),
         )
-        assert isinstance(gh._s, _TimeoutSession)
+        assert gh._s is session
 
     def test_get_caches_response_then_replays_on_304(self) -> None:
         """GET response with ETag is cached; second GET that gets a 304
@@ -563,6 +571,7 @@ class TestTimeoutSession:
     def test_github_clear_repo_cache_delegates_to_session(self) -> None:
         gh = GitHub(
             "tok",
+            session=GitHubSession(),
             runner=_noop_runner(),
             clock=_FakeClock(),
             token_fetcher=_noop_token_fetcher(),
@@ -688,6 +697,7 @@ class TestGitHubClass:
     def test_sets_auth_header(self) -> None:
         gh = GitHub(
             "test-token",
+            session=GitHubSession(),
             runner=_noop_runner(),
             clock=_FakeClock(),
             token_fetcher=_noop_token_fetcher(),
@@ -704,6 +714,7 @@ class TestGitHubClass:
         tokens = iter(["old-token", "new-token"])
         gh = GitHub(
             token=None,
+            session=GitHubSession(),
             runner=_noop_runner(),
             clock=_FakeClock(),
             token_fetcher=lambda: next(tokens),
@@ -718,6 +729,7 @@ class TestGitHubClass:
         returns False so callers can skip downstream work."""
         gh = GitHub(
             token=None,
+            session=GitHubSession(),
             runner=_noop_runner(),
             clock=_FakeClock(),
             token_fetcher=lambda: "same-token",
@@ -729,6 +741,7 @@ class TestGitHubClass:
     def test_sets_accept_header(self) -> None:
         gh = GitHub(
             "test-token",
+            session=GitHubSession(),
             runner=_noop_runner(),
             clock=_FakeClock(),
             token_fetcher=_noop_token_fetcher(),
@@ -2656,6 +2669,7 @@ class TestGitHubClass:
         )
         gh = GitHub(
             "test-token",
+            session=_noop_session(),
             runner=_FakeProcessRunner(mock_run),
             clock=_FakeClock(),
             token_fetcher=_noop_token_fetcher(),
@@ -2668,6 +2682,7 @@ class TestGitHubClass:
         )
         gh = GitHub(
             "test-token",
+            session=_noop_session(),
             runner=_FakeProcessRunner(mock_run),
             clock=_FakeClock(),
             token_fetcher=_noop_token_fetcher(),
@@ -2678,6 +2693,7 @@ class TestGitHubClass:
         mock_run = _FakeCallable(return_value=_completed("https://github.com/o/r.git"))
         gh = GitHub(
             "test-token",
+            session=_noop_session(),
             runner=_FakeProcessRunner(mock_run),
             clock=_FakeClock(),
             token_fetcher=_noop_token_fetcher(),
@@ -2691,6 +2707,7 @@ class TestGitHubClass:
         )
         gh = GitHub(
             "test-token",
+            session=_noop_session(),
             runner=_FakeProcessRunner(mock_run),
             clock=_FakeClock(),
             token_fetcher=_noop_token_fetcher(),
@@ -2702,6 +2719,7 @@ class TestGitHubClass:
         mock_run = _FakeCallable(side_effect=subprocess.CalledProcessError(128, "git"))
         gh = GitHub(
             "test-token",
+            session=_noop_session(),
             runner=_FakeProcessRunner(mock_run),
             clock=_FakeClock(),
             token_fetcher=_noop_token_fetcher(),
@@ -2713,6 +2731,7 @@ class TestGitHubClass:
         mock_run = _FakeCallable(side_effect=FileNotFoundError("git not found"))
         gh = GitHub(
             "test-token",
+            session=_noop_session(),
             runner=_FakeProcessRunner(mock_run),
             clock=_FakeClock(),
             token_fetcher=_noop_token_fetcher(),

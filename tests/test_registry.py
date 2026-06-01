@@ -281,7 +281,9 @@ class TestWorkerRegistry:
                 process_started_at=_EPOCH,
             )
         )
-        reg = WorkerRegistry(factory, updater, clock=clock)
+        reg = WorkerRegistry(
+            factory, updater, **({} if clock is None else {"clock": clock})
+        )
         if repos:
             # Pre-populated registries need a real git work_dir
             # because registry.start resolves git_dir at construction

@@ -38,6 +38,7 @@ from fido.events import (
 )
 from fido.github import (
     GitHub,
+    GitHubSession,
     GraphQLError,
     _gh_token,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
@@ -1265,7 +1266,8 @@ class RegistryFactory(Protocol):
         *,
         dispatchers: dict[str, Dispatcher],
         state_updater: AtomicUpdater[FidoState],
-        runner: ProcessRunner | None,
+        runner: ProcessRunner,
+        clock: Clock,
     ) -> WorkerRegistry: ...
 
 
@@ -1423,6 +1425,7 @@ def run(
     WebhookHandler.infra = infra
 
     gh = _GitHub(
+        session=GitHubSession(),
         runner=infra.proc,
         clock=infra.clock,
         token_fetcher=lambda: _gh_token(runner=infra.proc),
@@ -1487,6 +1490,7 @@ def run(
         dispatchers=dispatchers,
         state_updater=state_updater,
         runner=infra.proc,
+        clock=infra.clock,
     )
     WebhookHandler.registry = registry
     WebhookHandler.state_reader = state_reader
@@ -1507,7 +1511,7 @@ def run(
     # the deadline — without it, a holder wedged inside
     # ``consume_until_result`` on a streaming-forever subprocess holds
     # the lock indefinitely (closes #1377).
-    _SessionLockWatchdog(registry, config.repos).start_thread()
+    _SessionLockWatchdog(registry, config.repos, clock=infra.clock).start_thread()
     _RateLimitMonitor(gh, state_updater).start_thread()
     _ProviderPressureMonitor(
         config.repos, state_updater, WebhookHandler.provider_factory

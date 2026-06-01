@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from fido.config import RepoMembership, default_sub_dir
+from fido.infra import RealOsProcess, RealProcessRunner
 from fido.issue_cache import IssueCache
 from fido.provider_factory import DefaultProviderFactory
 from fido.state import State
@@ -67,6 +68,8 @@ def _make_thread(tmp_path: Path, **kwargs: object) -> WorkerThread:
     )
     kwargs.setdefault("issue_cache", IssueCache("owner/repo"))
     kwargs.setdefault("dispatcher", _FakeDispatcher())
+    kwargs.setdefault("os_proc", RealOsProcess())
+    kwargs.setdefault("runner", RealProcessRunner())
     return WorkerThread(
         tmp_path,
         "owner/repo",

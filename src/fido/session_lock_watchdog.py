@@ -72,6 +72,9 @@ _WATCHDOG_INTERVAL: float = 30.0
 _DEFAULT_NO_REPLY_SECONDS: float = 3600.0
 
 
+_REAL_CLOCK: Clock = RealClock()
+
+
 class SessionLockWatchdog:
     """Per-repo poller that evicts FSM lock holders past a no-reply
     deadline.
@@ -89,12 +92,12 @@ class SessionLockWatchdog:
         repos: dict[str, RepoConfig],
         *,
         no_reply_seconds: float = _DEFAULT_NO_REPLY_SECONDS,
-        clock: Clock | None = None,
+        clock: Clock = _REAL_CLOCK,
     ) -> None:
         self.registry = registry
         self.repos = repos
         self.no_reply_seconds = no_reply_seconds
-        self._clock = clock if clock is not None else RealClock()
+        self._clock = clock
 
     def run(self) -> int:
         """Run one watchdog iteration. Returns 0.
@@ -185,7 +188,7 @@ def run(
     repos: dict[str, RepoConfig],
     *,
     no_reply_seconds: float = _DEFAULT_NO_REPLY_SECONDS,
-    clock: Clock | None = None,
+    clock: Clock,
 ) -> int:
     """Module-level entry point — create a watchdog and run one tick."""
     return SessionLockWatchdog(

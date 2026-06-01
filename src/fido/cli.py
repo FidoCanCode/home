@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from fido.github import (
     GitHub,
+    GitHubSession,
     _gh_token,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
 from fido.infra import ProcessRunner, RealClock, RealProcessRunner
@@ -122,6 +123,7 @@ def main(
     runner = RealProcessRunner()
     cmd = Cmd(
         github=_GitHub(
+            session=GitHubSession(),
             runner=runner,
             clock=RealClock(),
             token_fetcher=lambda: _gh_token(runner=runner),

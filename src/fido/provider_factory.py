@@ -3,12 +3,21 @@
 import threading
 from pathlib import Path
 
+import requests as _requests
+
 from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
-from fido.claude import ClaudeAPI, ClaudeClient, ClaudeCode, ClaudeSessionFactory
+from fido.claude import (
+    _REAL_SESSION_FACTORY,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    ClaudeAPI,
+    ClaudeClient,
+    ClaudeCode,
+    ClaudeSessionFactory,
+)
 from fido.codex import Codex, CodexAPI, CodexClient
 from fido.config import RepoConfig
 from fido.copilotcli import CopilotCLI, CopilotCLIAPI, CopilotCLIClient
+from fido.infra import RealClock
 from fido.provider import (
     PromptSession,
     Provider,
@@ -25,7 +34,7 @@ class DefaultProviderFactory:
         self,
         *,
         session_system_file: Path,
-        claude_session_factory: ClaudeSessionFactory | None = None,
+        claude_session_factory: ClaudeSessionFactory = _REAL_SESSION_FACTORY,
     ) -> None:
         self._session_system_file = session_system_file
         self._claude_session_factory = claude_session_factory
@@ -39,9 +48,9 @@ class DefaultProviderFactory:
                 return api
             match repo_cfg.provider:
                 case ProviderID.CLAUDE_CODE:
-                    api = ClaudeAPI()
+                    api = ClaudeAPI(session=_requests.Session(), clock=RealClock())
                 case ProviderID.COPILOT_CLI:
-                    api = CopilotCLIAPI()
+                    api = CopilotCLIAPI(clock=RealClock())
                 case ProviderID.CODEX:
                     api = CodexAPI()
                 case _:

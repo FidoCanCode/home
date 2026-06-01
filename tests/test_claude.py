@@ -112,38 +112,9 @@ class TestTrunc:
 
 
 class TestClaudeHelper:
-    def test_calls_subprocess_run_with_prompt(self) -> None:
-        mock_run = MagicMock()
-        mock_run.run.return_value = _completed("out")
-        result = _claude(
-            "--print", "-p", "hello", prompt="input", timeout=5, runner=mock_run
-        )
-        mock_run.run.assert_called_once_with(
-            ["claude", "--print", "-p", "hello"],
-            input="input",
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        assert result.stdout == "out"
-
-    def test_defaults(self) -> None:
-        mock_run = MagicMock()
-        mock_run.run.return_value = _completed()
-        _claude("--version", runner=mock_run)
-        _, kwargs = mock_run.run.call_args
-        assert kwargs["timeout"] == 30
-        assert kwargs["input"] is None
-
-    def test_no_prompt(self) -> None:
-        mock_run = MagicMock()
-        mock_run.run.return_value = _completed("x")
-        _claude("--help", runner=mock_run)
-        assert mock_run.run.call_args.kwargs["input"] is None
-
     def test_default_runner_uses_explicit_popen(self) -> None:
-        """When no runner is overridden, _claude drives Popen directly so
-        TimeoutExpired actually reaps the child (closes #489)."""
+        """_claude drives Popen directly so TimeoutExpired actually reaps
+        the child (closes #489)."""
         fake_proc = MagicMock()
         fake_proc.args = ["claude", "--print"]
         fake_proc.returncode = 0

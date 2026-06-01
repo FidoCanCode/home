@@ -20,6 +20,7 @@ from fido.copilotcli import (
     _ACP_STREAM_LIMIT,
     _COPILOT_CANCEL_SENTINEL,
     _COPILOT_QUOTA_PAUSE_SECONDS,
+    _REAL_POPEN_RUNNER,
     CopilotACPRuntime,
     CopilotCLI,
     CopilotCLIAPI,
@@ -39,6 +40,7 @@ from fido.copilotcli import (
     extract_result_text,
     extract_session_id,
 )
+from fido.infra import RealClock
 from fido.provider import (
     ProviderID,
     ProviderLimitSnapshot,
@@ -694,7 +696,7 @@ class TestChunkLevelChatterFiltering:
 
 class TestTerminalManager:
     def test_read_stream_stops_on_empty_chunk(self) -> None:
-        manager = _TerminalManager()
+        manager = _TerminalManager(popen=_REAL_POPEN_RUNNER)
 
         class EmptyStream:
             def __init__(self) -> None:
@@ -873,7 +875,10 @@ class TestCopilotACPClient:
 
     def test_on_connect_is_noop(self) -> None:
         runtime = _FakeACPRuntime()
-        client = _CopilotACPClient(runtime)  # type: ignore[arg-type]
+        client = _CopilotACPClient(  # type: ignore[arg-type]
+            runtime,
+            terminals=_TerminalManager(popen=_REAL_POPEN_RUNNER),
+        )
         assert client.on_connect(object()) is None
         runtime.log_info.assert_called_once_with("copilot system: connected")
 
@@ -1841,7 +1846,7 @@ class TestCopilotCLIAPI:
         )
 
     def test_provider_id(self) -> None:
-        api = CopilotCLIAPI()
+        api = CopilotCLIAPI(clock=RealClock())
         assert api.provider_id == ProviderID.COPILOT_CLI
 
 
@@ -2075,7 +2080,7 @@ class TestCopilotCLIClient:
     def test_quota_error_records_on_api_and_is_not_retried(self) -> None:
         session = _FakeSession()
         session.prompt.side_effect = RuntimeError("rate limit exceeded")
-        api = CopilotCLIAPI()
+        api = CopilotCLIAPI(clock=RealClock())
         client = CopilotCLIClient(session=session, api=api)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="rate limit exceeded"):
             client.run_turn("fetch", model=client.voice_model)
@@ -2101,7 +2106,7 @@ class TestCopilotCLIClient:
             ValueError("Separator is found, but chunk is longer than limit"),
             "done",
         ]
-        api = CopilotCLIAPI()
+        api = CopilotCLIAPI(clock=RealClock())
         client = CopilotCLIClient(session=session, api=api)  # type: ignore[arg-type]
         assert client.run_turn("fetch", model=client.voice_model) == "done"
         session.recover.assert_called_once_with()
