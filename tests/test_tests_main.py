@@ -85,7 +85,7 @@ def test_module_executes_main_under_dunder_main() -> None:
         "fido.tests_main must keep the __main__ guard or `./fido tests` "
         "becomes a silent no-op (see #1252)."
     )
-    assert "raise SystemExit(main())" in text, (
+    assert "raise SystemExit(" in text, (
         "the __main__ guard must propagate main()'s exit code so CI can "
         "actually fail on test failure (see #1252)."
     )

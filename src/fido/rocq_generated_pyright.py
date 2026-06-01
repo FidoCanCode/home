@@ -11,7 +11,7 @@ from fido.infra import OsProcess, RealOsProcess
 def main(
     argv: list[str] | None = None,
     *,
-    os_proc: OsProcess | None = None,
+    os_proc: OsProcess,
 ) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("generated_dir", type=Path)
@@ -38,11 +38,9 @@ def main(
     config_path = generated_dir / "pyrightconfig.json"
     config_path.write_text(json.dumps(config, indent=2) + "\n")
 
-    if os_proc is None:  # pragma: no cover
-        os_proc = RealOsProcess()
     os_proc.execvp("pyright", ["pyright", "-p", str(config_path)])
     raise RuntimeError("pyright exec failed")
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    main(os_proc=RealOsProcess())

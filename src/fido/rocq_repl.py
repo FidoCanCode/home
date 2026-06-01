@@ -203,12 +203,18 @@ class ReferenceInvocation:
         return f"{module_name}.{constructor}"
 
 
+def _default_module_importer(path: Path) -> ModuleType:
+    """Import the Rocq-extracted Python module at *path* via :mod:`importlib`."""
+    module_name = f"fido.rocq.{path.stem}"
+    return importlib.import_module(module_name)
+
+
 class ModelLoader:
     def __init__(
         self,
         repo_root: Path,
         stderr: IO[str],
-        importer: ModuleImporter | None = None,
+        importer: ModuleImporter = _default_module_importer,
     ) -> None:
         self._repo_root = repo_root
         self._stderr = stderr
@@ -268,10 +274,7 @@ class ModelLoader:
         return marker in path.read_text()
 
     def _import_module(self, path: Path) -> ModuleType:
-        if self._importer is not None:
-            return self._importer(path)
-        module_name = f"fido.rocq.{path.stem}"
-        return importlib.import_module(module_name)
+        return self._importer(path)
 
     def _public_symbols(self, module: ModuleType) -> dict[str, object]:
         public: dict[str, object] = {}
@@ -341,18 +344,21 @@ class ValueNormalizer:
         return repr(value)
 
 
+_REAL_RUNNER: ProcessRunner = RealProcessRunner()
+
+
 class OcamlReference:
     def __init__(
         self,
         repo_root: Path,
         model: LoadedModel,
         stderr: IO[str],
-        runner: ProcessRunner | None = None,
+        runner: ProcessRunner = _REAL_RUNNER,
     ) -> None:
         self._repo_root = repo_root
         self._model = model
         self._stderr = stderr
-        self._runner = runner if runner is not None else RealProcessRunner()
+        self._runner = runner
 
     def evaluate(self, invocation: ReferenceInvocation) -> str:
         with tempfile.TemporaryDirectory(prefix="rocq-repl-") as raw:
@@ -487,6 +493,13 @@ class OcamlReference:
         return result
 
 
+def _default_console_factory(
+    namespace: dict[str, object],
+) -> code.InteractiveConsole:  # pragma: no cover
+    """Create an :class:`code.InteractiveConsole` over *namespace*."""
+    return code.InteractiveConsole(locals=namespace)
+
+
 class RocqRepl:
     def __init__(
         self,
@@ -495,22 +508,16 @@ class RocqRepl:
         stdout: IO[str],
         stderr: IO[str],
         *,
-        reference_factory: ReferenceFactory | None = None,
-        console_factory: ConsoleFactory | None = None,
+        reference_factory: ReferenceFactory = OcamlReference,
+        console_factory: ConsoleFactory = _default_console_factory,
     ) -> None:
         self._repo_root = repo_root
         self._stdin = stdin
         self._stdout = stdout
         self._stderr = stderr
         self._normalizer = ValueNormalizer()
-        self._reference_factory: ReferenceFactory = (
-            reference_factory if reference_factory is not None else OcamlReference
-        )
-        self._console_factory: ConsoleFactory = (
-            console_factory
-            if console_factory is not None
-            else lambda namespace: code.InteractiveConsole(locals=namespace)
-        )
+        self._reference_factory = reference_factory
+        self._console_factory = console_factory
 
     def run(self, argv: list[str]) -> int:
         parser = argparse.ArgumentParser(

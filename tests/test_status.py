@@ -717,21 +717,30 @@ class TestTaskPosition:
 
 class TestElapsedSinceIso:
     def test_none_on_empty(self) -> None:
+        from datetime import datetime, timezone
+
         from fido.status import _elapsed_since_iso
 
-        assert _elapsed_since_iso(None) is None
-        assert _elapsed_since_iso("") is None
+        _clock = _FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        assert _elapsed_since_iso(None, clock=_clock) is None
+        assert _elapsed_since_iso("", clock=_clock) is None
 
     def test_none_on_bad_format(self) -> None:
+        from datetime import datetime, timezone
+
         from fido.status import _elapsed_since_iso
 
-        assert _elapsed_since_iso("not a date") is None
+        _clock = _FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        assert _elapsed_since_iso("not a date", clock=_clock) is None
 
     def test_none_on_wrong_type(self) -> None:
+        from datetime import datetime, timezone
+
         from fido.status import _elapsed_since_iso
 
+        _clock = _FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
         # datetime.fromisoformat raises TypeError for non-str input.
-        assert _elapsed_since_iso(12345) is None  # type: ignore[arg-type]
+        assert _elapsed_since_iso(12345, clock=_clock) is None  # type: ignore[arg-type]
 
     def test_returns_seconds_since(self) -> None:
         from datetime import datetime, timedelta, timezone

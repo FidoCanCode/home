@@ -27,7 +27,7 @@ from fido.color import (
     Color,
 )
 from fido.config import RepoConfig, default_sub_dir
-from fido.infra import Clock, ProcessRunner, RealProcessRunner
+from fido.infra import Clock, ProcessRunner, RealClock, RealProcessRunner
 from fido.provider import (
     ProviderID,
     ProviderPalette,
@@ -782,7 +782,7 @@ def _task_position(task_list: list[dict[str, Any]]) -> tuple[int | None, int | N
     return (1, total)
 
 
-def _elapsed_since_iso(iso: str | None, *, clock: Clock | None = None) -> int | None:
+def _elapsed_since_iso(iso: str | None, *, clock: Clock) -> int | None:
     """Return integer seconds since *iso* (an ISO-8601 timestamp), or None."""
     if not iso:
         return None
@@ -790,8 +790,7 @@ def _elapsed_since_iso(iso: str | None, *, clock: Clock | None = None) -> int | 
         started = datetime.fromisoformat(iso)
     except TypeError, ValueError:
         return None
-    now = clock.now() if clock is not None else datetime.now(tz=timezone.utc)
-    return max(0, int((now - started).total_seconds()))
+    return max(0, int((clock.now() - started).total_seconds()))
 
 
 def repo_status(
@@ -858,7 +857,7 @@ def repo_status(
     state = State(fido_dir).load()
     issue = state.get("issue")
     issue_title = state.get("issue_title")
-    issue_elapsed = _elapsed_since_iso(state.get("issue_started_at"))
+    issue_elapsed = _elapsed_since_iso(state.get("issue_started_at"), clock=RealClock())
     pr_number = state.get("pr_number")
     pr_title = state.get("pr_title")
 
@@ -1186,7 +1185,7 @@ def _styled_provider_status(
     status: ProviderPressureStatus,
     *,
     c: Color,
-    palette_fn: PaletteLookup | None = None,
+    palette_fn: PaletteLookup = palette_for,
 ) -> str:
     base_style = _provider_status_style(status)
     summary = _provider_status_summary(status)
@@ -1197,7 +1196,7 @@ def _styled_provider_status(
         return c.color(base_style, summary)
     # Highlight the provider name (prefix of the summary) with the provider's
     # bright fg so each provider is visually identifiable in the limits line.
-    palette = (palette_fn if palette_fn is not None else palette_for)(status.provider)
+    palette = palette_fn(status.provider)
     provider_token = str(status.provider)
     if palette is not None and summary.startswith(provider_token):
         tail = summary[len(provider_token) :]
@@ -1209,7 +1208,7 @@ def _styled_repo_provider(
     repo: RepoStatus,
     *,
     c: Color,
-    palette_fn: PaletteLookup | None = None,
+    palette_fn: PaletteLookup = palette_for,
 ) -> str:
     """Render the repo's provider label without repeating global limits details."""
     provider_str = str(repo.provider)
@@ -1220,7 +1219,7 @@ def _styled_repo_provider(
             # Warning/paused state wins over identity color — same precedence
             # as the global limits line in _styled_provider_status.
             return c.color(base_style, provider_str)
-    palette = (palette_fn if palette_fn is not None else palette_for)(repo.provider)
+    palette = palette_fn(repo.provider)
     if palette is not None:
         return c.wrap_raw(c.rgb_fg(*palette.bright_fg), provider_str)
     return provider_str

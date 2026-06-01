@@ -694,8 +694,13 @@ def test_helpers_cover_comments_strings_uris_and_main(tmp_path: Path) -> None:
     assert rocq_lsp.main_cli(["diagnostics"], cli_factory=FakeCli) == 7
     assert "diagnostics" in called
     assert rocq_lsp.main_lsp(server_factory=FakeServer) == 8
-    assert rocq_lsp.main(["--stdio"], server_factory=FakeServer) == 8
-    assert rocq_lsp.main(["diagnostics"], cli_factory=FakeCli) == 7
+    assert (
+        rocq_lsp.main(["--stdio"], cli_factory=FakeCli, server_factory=FakeServer) == 8
+    )
+    assert (
+        rocq_lsp.main(["diagnostics"], cli_factory=FakeCli, server_factory=FakeServer)
+        == 7
+    )
 
 
 def test_index_symbol_at_falls_back_to_source_token_lookup(tmp_path: Path) -> None:

@@ -116,9 +116,9 @@ def main(
     argv: list[str] | None = None,
     *,
     _GitHub: type[GitHub] = GitHub,
-    parser_factory: ParserFactory | None = None,
+    parser_factory: ParserFactory,
 ) -> None:
-    parser = (parser_factory if parser_factory is not None else build_parser)()
+    parser = parser_factory()
     args = parser.parse_args(argv)
     runner = RealProcessRunner()
     cmd = Cmd(
@@ -151,4 +151,4 @@ def main(
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    main(parser_factory=build_parser)

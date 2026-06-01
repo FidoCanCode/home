@@ -1330,27 +1330,25 @@ def repo_root() -> Path:
 def main_cli(
     argv: list[str] | None = None,
     *,
-    cli_factory: RocqLspCliFactory | None = None,
+    cli_factory: RocqLspCliFactory,
 ) -> int:
-    factory = cli_factory if cli_factory is not None else RocqLspCli
-    return factory(repo_root(), sys.stdout, sys.stderr).run(
+    return cli_factory(repo_root(), sys.stdout, sys.stderr).run(
         argv if argv is not None else sys.argv[1:]
     )
 
 
 def main_lsp(
     *,
-    server_factory: RocqLspServerFactory | None = None,
+    server_factory: RocqLspServerFactory,
 ) -> int:
-    factory = server_factory if server_factory is not None else RocqLspServer
-    return factory(RocqLanguageService(repo_root()), sys.stdin, sys.stdout).run()
+    return server_factory(RocqLanguageService(repo_root()), sys.stdin, sys.stdout).run()
 
 
 def main(
     argv: list[str] | None = None,
     *,
-    cli_factory: RocqLspCliFactory | None = None,
-    server_factory: RocqLspServerFactory | None = None,
+    cli_factory: RocqLspCliFactory,
+    server_factory: RocqLspServerFactory,
 ) -> int:
     actual_argv = argv if argv is not None else sys.argv[1:]
     if len(actual_argv) > 0 and actual_argv[0] == "--stdio":
@@ -1359,4 +1357,4 @@ def main(
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(cli_factory=RocqLspCli, server_factory=RocqLspServer))

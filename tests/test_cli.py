@@ -520,7 +520,11 @@ class TestMain:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "spec", "task title"], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
+        main(
+            [str(tmp_path), "add", "spec", "task title"],
+            _GitHub=_FakeGitHub,
+            parser_factory=build_parser,
+        )  # type: ignore[arg-type]
         capsys.readouterr()
 
         tasks = Tasks(tmp_path).list()
@@ -544,6 +548,7 @@ class TestMain:
                 "3",
             ],
             _GitHub=_FakeGitHub,  # type: ignore[arg-type]
+            parser_factory=build_parser,
         )
         capsys.readouterr()
 
@@ -554,10 +559,18 @@ class TestMain:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "spec", "finish me"], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
+        main(
+            [str(tmp_path), "add", "spec", "finish me"],
+            _GitHub=_FakeGitHub,
+            parser_factory=build_parser,
+        )  # type: ignore[arg-type]
         out = capsys.readouterr().out
         task_id = json.loads(out)["id"]
-        main([str(tmp_path), "complete", task_id], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
+        main(
+            [str(tmp_path), "complete", task_id],
+            _GitHub=_FakeGitHub,
+            parser_factory=build_parser,
+        )  # type: ignore[arg-type]
 
         assert Tasks(tmp_path).list()[0]["status"] == "completed"
 
@@ -565,16 +578,20 @@ class TestMain:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "spec", "one"], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
+        main(
+            [str(tmp_path), "add", "spec", "one"],
+            _GitHub=_FakeGitHub,
+            parser_factory=build_parser,
+        )  # type: ignore[arg-type]
         capsys.readouterr()
-        main([str(tmp_path), "list"], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
+        main([str(tmp_path), "list"], _GitHub=_FakeGitHub, parser_factory=build_parser)  # type: ignore[arg-type]
         out = capsys.readouterr().out
         data = json.loads(out)
         assert data[0]["title"] == "one"
 
     def test_no_args_exits(self) -> None:
         with pytest.raises(SystemExit):
-            main([])
+            main([], parser_factory=build_parser)
 
     def test_unknown_command_raises(self, tmp_path: Path) -> None:
         """Fallback case in match statement raises AssertionError."""

@@ -35,11 +35,8 @@ def main(
     argv: list[str] | None = None,
     *,
     _GitHub: type[GitHub] = GitHub,
-    sync_tasks_fn: SyncTasksFn | None = None,
+    sync_tasks_fn: SyncTasksFn,
 ) -> None:
-    if sync_tasks_fn is None:
-        from fido.tasks import sync_tasks as sync_tasks_fn  # pragma: no cover
-
     args = sys.argv[1:] if argv is None else argv
     work_dir = Path(args[0]) if args else Path.cwd()
     runner = RealProcessRunner()
@@ -58,4 +55,6 @@ def main(
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    from fido.tasks import sync_tasks
+
+    main(sync_tasks_fn=sync_tasks)

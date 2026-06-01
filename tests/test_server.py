@@ -3097,6 +3097,7 @@ class TestRun:
             _GitHub=MagicMock,
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
+            _bootstrap_issue_caches=MagicMock(),
         )
 
         assert len(captured_kwargs) == 1
@@ -3128,6 +3129,7 @@ class TestRun:
             _GitHub=MagicMock,
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
+            _bootstrap_issue_caches=MagicMock(),
         )
 
         assert len(captured_handlers) >= 1
@@ -3157,6 +3159,7 @@ class TestRun:
             _GitHub=MagicMock,
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
+            _bootstrap_issue_caches=MagicMock(),
         )
 
         mock_server.serve_forever.assert_called_once()
@@ -3200,6 +3203,7 @@ class TestRun:
             _stderr=fake_stderr,
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
+            _bootstrap_issue_caches=MagicMock(),
         )
 
         import logging
@@ -3244,6 +3248,7 @@ class TestRun:
             _GitHub=MagicMock,
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
+            _bootstrap_issue_caches=MagicMock(),
         )
 
         import logging
@@ -3275,6 +3280,7 @@ class TestRun:
             _IssueReconcileWatchdog=MagicMock(),
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
+            _bootstrap_issue_caches=MagicMock(),
         )
 
         mock_watchdog_cls.assert_called_once_with(mock_registry, fake_cfg.repos)
@@ -3305,6 +3311,7 @@ class TestRun:
             _IssueReconcileWatchdog=MagicMock(),
             _RateLimitMonitor=mock_rl_cls,
             _ProviderPressureMonitor=MagicMock(),
+            _bootstrap_issue_caches=MagicMock(),
         )
 
         # The state_updater is the second element returned by create_atomic(...).
@@ -3346,6 +3353,7 @@ class TestRun:
             _IssueReconcileWatchdog=mock_reconcile_cls,
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
+            _bootstrap_issue_caches=MagicMock(),
         )
 
         mock_reconcile_cls.assert_called_once_with(
@@ -3385,6 +3393,7 @@ class TestRun:
                 _Watchdog=MagicMock(),
                 _ProviderPressureMonitor=MagicMock(),
                 _RateLimitMonitor=MagicMock(),
+                _bootstrap_issue_caches=MagicMock(),
             )
             assert _sys.excepthook is not saved_sys
             assert _threading.excepthook is not saved_thr
@@ -3746,6 +3755,7 @@ class TestPreflightRepoIdentity:
             _GitHub=MagicMock,
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
+            _bootstrap_issue_caches=MagicMock(),
         )
 
         mock_preflight.assert_called_once_with(fake_cfg.repos, ANY)
@@ -3778,6 +3788,7 @@ class TestPreflightRepoIdentity:
             _GitHub=MagicMock,
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
+            _bootstrap_issue_caches=MagicMock(),
         )
 
         mock_preflight.assert_called_once_with(ANY)
@@ -3810,6 +3821,7 @@ class TestPreflightRepoIdentity:
             _GitHub=MagicMock,
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
+            _bootstrap_issue_caches=MagicMock(),
         )
 
         mock_preflight.assert_called_once()
@@ -3842,6 +3854,7 @@ class TestPreflightRepoIdentity:
             _GitHub=MagicMock,
             _ProviderPressureMonitor=MagicMock(),
             _RateLimitMonitor=MagicMock(),
+            _bootstrap_issue_caches=MagicMock(),
         )
 
         mock_preflight.assert_called_once_with(fake_cfg, ANY)
@@ -3875,6 +3888,7 @@ class TestPreflightRepoIdentity:
                 _preflight_repo_identity=MagicMock(),
                 _ProviderPressureMonitor=MagicMock(),
                 _RateLimitMonitor=MagicMock(),
+                _bootstrap_issue_caches=MagicMock(),
             )
 
 
