@@ -8,11 +8,11 @@ import requests as _requests
 from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
 from fido.claude import (
-    _REAL_SESSION_FACTORY,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    _REAL_SESSION_FACTORY_MAKER,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     ClaudeAPI,
     ClaudeClient,
     ClaudeCode,
-    ClaudeSessionFactory,
+    ClaudeSessionFactoryMaker,
 )
 from fido.codex import Codex, CodexAPI, CodexClient
 from fido.config import RepoConfig
@@ -34,10 +34,10 @@ class DefaultProviderFactory:
         self,
         *,
         session_system_file: Path,
-        claude_session_factory: ClaudeSessionFactory = _REAL_SESSION_FACTORY,
+        claude_session_factory_maker: ClaudeSessionFactoryMaker = _REAL_SESSION_FACTORY_MAKER,
     ) -> None:
         self._session_system_file = session_system_file
-        self._claude_session_factory = claude_session_factory
+        self._claude_session_factory_maker = claude_session_factory_maker
         self._api_lock = threading.Lock()
         self._apis: dict[ProviderID, ProviderAPI] = {}
 
@@ -69,6 +69,9 @@ class DefaultProviderFactory:
     ) -> Provider:
         match repo_cfg.provider:
             case ProviderID.CLAUDE_CODE:
+                factory = self._claude_session_factory_maker(
+                    work_dir=work_dir, repo_name=repo_name
+                )
                 return ClaudeCode(
                     agent=ClaudeClient(
                         session_system_file=self._session_system_file,
@@ -76,7 +79,7 @@ class DefaultProviderFactory:
                         repo_name=repo_name,
                         session=session,
                         state_updater=state_updater,
-                        session_factory=self._claude_session_factory,
+                        session_factory=factory,
                     )
                 )
             case ProviderID.COPILOT_CLI:

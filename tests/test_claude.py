@@ -3177,8 +3177,6 @@ class TestClaudeClientSessionAttachment:
         )
         session_factory.assert_called_once_with(
             tmp_path / "persona.md",
-            work_dir=tmp_path,
-            repo_name=None,
             model="claude-opus-4-6",
             session_id=None,
             snapshot_publisher=client,

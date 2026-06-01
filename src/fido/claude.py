@@ -101,22 +101,40 @@ class StreamingRunner(Protocol):
 class ClaudeSessionFactory(Protocol):
     """Creates a new :class:`ClaudeSession`-compatible prompt session.
 
-    Implemented by returning :class:`ClaudeSession` directly (the default)
-    or by a test fake that returns a pre-built session without spawning a
-    subprocess.
+    Instances are configured with a specific ``work_dir`` and ``repo_name``
+    at construction time (via :class:`ClaudeSessionFactoryMaker`), so
+    per-call parameters are limited to the values that genuinely vary per
+    session: ``system_file``, ``model``, ``session_id``, and
+    ``snapshot_publisher``.
     """
 
     def __call__(
         self,
         system_file: Path,
         *,
-        work_dir: Path | str | None = None,
-        repo_name: str | None = None,
-        model: ProviderModel | None = None,
-        session_id: str | None = None,
-        snapshot_publisher: provider.SnapshotPublisher | None = None,
+        model: ProviderModel,
+        session_id: str | None,
+        snapshot_publisher: provider.SnapshotPublisher,
     ) -> PromptSession:
         """Create and return a new prompt session."""
+        ...
+
+
+class ClaudeSessionFactoryMaker(Protocol):
+    """Constructs a :class:`ClaudeSessionFactory` bound to a specific repo.
+
+    Called once per :class:`~fido.claude.ClaudeClient` instance with the
+    ``work_dir`` and ``repo_name`` for that client's repository, returning a
+    factory that always spawns sessions in that directory.
+    """
+
+    def __call__(
+        self,
+        *,
+        work_dir: Path | str | None,
+        repo_name: str | None,
+    ) -> ClaudeSessionFactory:
+        """Return a factory configured for *work_dir* / *repo_name*."""
         ...
 
 
@@ -1954,6 +1972,54 @@ class _RealClaudeSessionFactory:  # pragma: no cover
 
     Not tested directly — :class:`ClaudeSession` is tested via its own suite;
     this class is just the bridge from :class:`ClaudeClient` to it.
+
+    ``work_dir`` and ``repo_name`` are fixed at construction time via
+    :class:`_RealClaudeSessionFactoryMaker`; they do not change for the
+    lifetime of the factory object.
+    """
+
+    def __init__(
+        self,
+        *,
+        work_dir: Path | str | None,
+        repo_name: str | None,
+        popen: PopenRunner,
+        selector: IOSelector,
+        clock: Clock,
+    ) -> None:
+        self._work_dir = work_dir
+        self._repo_name = repo_name
+        self._popen = popen
+        self._selector = selector
+        self._clock = clock
+
+    def __call__(
+        self,
+        system_file: Path,
+        *,
+        model: ProviderModel,
+        session_id: str | None,
+        snapshot_publisher: provider.SnapshotPublisher,
+    ) -> PromptSession:
+        return ClaudeSession(
+            system_file,
+            work_dir=self._work_dir,
+            repo_name=self._repo_name,
+            model=model,
+            session_id=session_id,
+            snapshot_publisher=snapshot_publisher,
+            popen=self._popen,
+            selector=self._selector,
+            clock=self._clock,
+        )
+
+
+class _RealClaudeSessionFactoryMaker:  # pragma: no cover
+    """Real :class:`ClaudeSessionFactoryMaker` that constructs per-repo factories.
+
+    Holds the infra collaborators (popen / selector / clock) shared across all
+    repos; the per-call ``work_dir`` / ``repo_name`` are baked into each
+    returned factory instance.
     """
 
     def __init__(
@@ -1969,21 +2035,13 @@ class _RealClaudeSessionFactory:  # pragma: no cover
 
     def __call__(
         self,
-        system_file: Path,
         *,
-        work_dir: Path | str | None = None,
-        repo_name: str | None = None,
-        model: ProviderModel | None = None,
-        session_id: str | None = None,
-        snapshot_publisher: provider.SnapshotPublisher | None = None,
-    ) -> PromptSession:
-        return ClaudeSession(
-            system_file,
+        work_dir: Path | str | None,
+        repo_name: str | None,
+    ) -> ClaudeSessionFactory:
+        return _RealClaudeSessionFactory(
             work_dir=work_dir,
             repo_name=repo_name,
-            model=model,
-            session_id=session_id,
-            snapshot_publisher=snapshot_publisher,
             popen=self._popen,
             selector=self._selector,
             clock=self._clock,
@@ -1997,7 +2055,17 @@ _REAL_STREAMING_RUNNER: StreamingRunner = _RealStreamingRunner(
     selector=_REAL_IO_SELECTOR,
     clock=_REAL_CLOCK,
 )
+_REAL_SESSION_FACTORY_MAKER: ClaudeSessionFactoryMaker = _RealClaudeSessionFactoryMaker(
+    popen=_REAL_POPEN_RUNNER,
+    selector=_REAL_IO_SELECTOR,
+    clock=_REAL_CLOCK,
+)
+# Convenience singleton with work_dir=None / repo_name=None; used as the default
+# ClaudeSessionFactory in ClaudeClient when no factory-maker is available
+# (e.g. unit tests that inject a session directly and never spawn one).
 _REAL_SESSION_FACTORY: ClaudeSessionFactory = _RealClaudeSessionFactory(
+    work_dir=None,
+    repo_name=None,
     popen=_REAL_POPEN_RUNNER,
     selector=_REAL_IO_SELECTOR,
     clock=_REAL_CLOCK,
@@ -2058,18 +2126,15 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
 
     def _spawn_owned_session(
         self,
-        model: ProviderModel | None = None,
+        model: ProviderModel,
         *,
         session_id: str | None = None,
     ) -> PromptSession:
         system_file = self._session_system_file
-        work_dir = self._work_dir
         assert system_file is not None
-        assert work_dir is not None
+        assert self._work_dir is not None
         return self._session_factory(
             system_file,
-            work_dir=work_dir,
-            repo_name=self._repo_name,
             model=model,
             session_id=session_id,
             snapshot_publisher=self,
