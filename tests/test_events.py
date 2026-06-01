@@ -16,7 +16,6 @@ from fido.events import (
     WebhookIngressOracle,
     _BackgroundRescopeTrigger,
     _build_issue_comment_action,
-    _configured_agent,
     _existing_reply_artifact,
     _get_commit_summary,
     _GitHubInsightFiler,
@@ -327,22 +326,11 @@ class TestNeedsMoreContext:
         with pytest.raises(ValueError, match="needs_more_context requires agent"):
             needs_more_context("some comment")
 
-    def test_configured_agent_uses_provider_factory(self, tmp_path: Path) -> None:
-        from fido.provider_factory import DefaultProviderFactory
-
-        cfg = _config(tmp_path)
-        cfg.repos["owner/repo"] = RepoConfig(
-            name="owner/repo",
-            work_dir=tmp_path,
-            provider=ProviderID.COPILOT_CLI,
-        )
-        sentinel = MagicMock()
-        factory = MagicMock(spec=DefaultProviderFactory)
-        factory.create_agent.return_value = sentinel
-        assert (
-            _configured_agent(cfg, cfg.repos["owner/repo"], _factory=factory)
-            is sentinel
-        )
+    # ``_configured_agent`` was deleted in #1962: webhook-driven LLM
+    # calls now require the worker's hot session via
+    # ``registry.agent_for(repo)`` instead of spawning a fresh agent
+    # from the provider factory.  The dedicated test for the deleted
+    # helper went with it.
 
 
 class TestRecoverReplyPromises:
@@ -3526,34 +3514,39 @@ class TestReplyToIssueComment:
         assert cat == "ACT"
         mock_gh.add_reaction.assert_not_called()
 
-    def test_defaults_to_repo_configured_agent(self, tmp_path: Path) -> None:
+    def test_pulls_agent_from_registry_when_not_supplied(self, tmp_path: Path) -> None:
+        # #1962: when the caller doesn't pass agent= explicitly,
+        # the dispatcher pulls the worker's hot session agent
+        # via ``registry.agent_for(repo)`` — NOT a freshly-spawned
+        # factory agent.
         cfg = self._cfg(tmp_path)
         action = self._action()
+        sentinel_agent = _client()
+        agent_for_calls: list[str] = []
 
-        create_agent_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        registry = MagicMock(spec=ActivityReporter)
 
-        class _FakeFactory:
-            def create_agent(self, *args: object, **kwargs: object) -> object:
-                create_agent_calls.append((args, kwargs))
-                return _client()
+        def _agent_for(repo: str) -> object:
+            agent_for_calls.append(repo)
+            return sentinel_agent
+
+        registry.agent_for.side_effect = _agent_for
 
         gh = self._mock_gh()
-        cat, titles = Dispatcher(
+        captured_agent: list[object] = []
+
+        def _capture_synthesis(*_args: object, **kwargs: object) -> object:
+            captured_agent.append(kwargs.get("agent"))
+            return _synthesis_response("ok", change_request="Do it")
+
+        cat, _titles = Dispatcher(
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            provider_factory=_FakeFactory(),  # type: ignore[arg-type]
-            synthesis_caller=_FakeSynthesisCaller(
-                lambda *a, **kw: _synthesis_response("ok", change_request="Do it")
-            ),
-        ).reply_to_issue_comment(
-            action,
-            registry=MagicMock(spec=ActivityReporter),
-        )
-        assert len(create_agent_calls) == 1
-        args, kwargs = create_agent_calls[0]
-        assert args == (self._repo_cfg(tmp_path),)
-        assert kwargs == {"work_dir": tmp_path, "repo_name": "owner/repo"}
+            synthesis_caller=_FakeSynthesisCaller(_capture_synthesis),
+        ).reply_to_issue_comment(action, registry=registry)
+        assert agent_for_calls == ["owner/repo"]
+        assert captured_agent == [sentinel_agent]
         assert cat == "ACT"
 
     def test_includes_conversation_context_in_synthesis(self, tmp_path: Path) -> None:
@@ -3830,6 +3823,14 @@ class _FakeRescopeRegistry:
 
     def exit_untriaged(self, repo_name: str) -> None:
         self.calls.append(("exit_untriaged", repo_name))
+
+    def agent_for(self, _repo_name: str) -> object:
+        # The reorder code path requests the worker's hot agent here
+        # (#1962).  These tests assert ordering of inbox/rescoping
+        # bookkeeping — keep agent_for OUT of the calls list so the
+        # existing exact-list assertions stay tight.  Return a
+        # stand-in MagicMock; no LLM call is exercised.
+        return MagicMock()
 
     def abort_task(self, repo_name: str, *, task_id: str | None = None) -> None:
         self.calls.append(("abort_task", repo_name, task_id))
@@ -5605,33 +5606,10 @@ class TestNotifyIntentOutcome:
         joined = "\n".join(captured)
         assert "comment #999" not in joined
 
-    def test_default_agent_and_prompts_constructed_when_none(
-        self, tmp_path: Path
-    ) -> None:
-        intent = self._intent()
-        kwargs = self._kwargs(_client("Auto reply"))
-        del kwargs["agent"]
-        del kwargs["prompts"]
-
-        create_agent_calls: list[tuple[object, ...]] = []
-
-        class _FakeFactory:
-            def create_agent(self, *args: object, **kwargs: object) -> object:
-                create_agent_calls.append(args)
-                return _client("Auto reply")
-
-        cfg = self._cfg(tmp_path)
-        Dispatcher(
-            cfg,
-            cfg.repos["owner/repo"],
-            MagicMock(),
-            provider_factory=_FakeFactory(),  # type: ignore[arg-type]
-        )._notify_intent_outcome(
-            intent,
-            task_queue_rescope.NotifyChanged(),
-            **kwargs,
-        )
-        assert len(create_agent_calls) == 1
+    # The fresh-agent fallback was deleted in #1962 — ``_notify_intent_outcome``
+    # now requires the caller to pass the worker's hot session
+    # agent.  The matching test (default_agent_and_prompts_constructed_when_none)
+    # went with it.
 
 
 class TestBuildOpInputsAuthors:

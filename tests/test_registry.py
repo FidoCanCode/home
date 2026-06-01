@@ -112,6 +112,10 @@ class _FakeThread:
         self.was_stopped: bool = False
         self._session_issue: int | None = None
         self.crash_error: str | None = None
+        # #1962: WorkerRegistry.agent_for reads this; default None
+        # means "no live session" → registry raises.  Tests set this
+        # to an object sentinel to simulate a live worker session.
+        self.provider_agent: object | None = None
         self.session_owner: str | None = None
         self.session_alive: bool = False
         self.session_pid: int | None = None
@@ -554,6 +558,44 @@ class TestWorkerRegistry:
         assert provider.session_alive is True
         assert provider.session_sent_count == 5
         assert provider.session_received_count == 3
+
+    def test_agent_for_returns_workers_provider_agent(self, tmp_path: Path) -> None:
+        # #1962: webhook-driven LLM calls reuse the worker's hot session
+        # via ``agent_for``.  When the worker has a live provider, this
+        # returns its agent.
+        sentinel_agent = object()
+        thread = _FakeThread()
+        thread.provider_agent = sentinel_agent
+        factory = _FakeThreadFactory(return_value=thread)
+        reader, updater = create_atomic(
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
+        )
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        assert reg.agent_for("foo/bar") is sentinel_agent
+
+    def test_agent_for_raises_when_no_session(self, tmp_path: Path) -> None:
+        # #1962: when no provider/session is alive yet, ``agent_for``
+        # raises rather than silently spawning a fresh agent — that
+        # silent-spawn was the original bug.
+        thread = _FakeThread()
+        assert thread.provider_agent is None  # default
+        factory = _FakeThreadFactory(return_value=thread)
+        reader, updater = create_atomic(
+            FidoState(
+                repos=frozendict(),
+                github_limits=_ZERO_GITHUB_LIMITS,
+                process_started_at=_EPOCH,
+            )
+        )
+        reg = WorkerRegistry(factory, updater)
+        reg.start(_repo("foo/bar", tmp_path))
+        with pytest.raises(RuntimeError, match="no provider agent available"):
+            reg.agent_for("foo/bar")
 
     def test_repo_for_returns_publishing_repo_after_start(self, tmp_path: Path) -> None:
         """``repo_for`` returns the registry-owned :class:`Repo` whose

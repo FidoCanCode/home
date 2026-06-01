@@ -234,6 +234,11 @@ class _FakeEventRegistry:
         self.enter_untriaged = _FakeCallRecorder()
         self.exit_untriaged = _FakeCallRecorder()
         self.set_rescoping = _FakeCallRecorder()
+        # #1962: webhook-driven rescope pulls the worker's agent here.
+        # An opaque sentinel object is fine — no LLM call is exercised
+        # in this test class and this file avoids MagicMock by
+        # convention.
+        self.agent_for = _FakeCallRecorder(return_value=object())
 
 
 class _FakeTasksForDispatcher:
