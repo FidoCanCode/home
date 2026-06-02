@@ -10,9 +10,9 @@ from fido.github import (
     GitHubSession,
     GraphQLError,
     TokenFetcher,
-    _gh_token,
     _has_closing_keyword,  # noqa: PLC2701
     _pr_state_str,  # noqa: PLC2701
+    gh_token,
 )
 
 
@@ -205,7 +205,7 @@ class _FakeProcessRunner:
 
     Wraps a :class:`_FakeCallable` so tests can assert on the subprocess
     commands issued via :meth:`GitHub.get_repo_info`,
-    :meth:`GitHub.get_default_branch`, and :func:`_gh_token`.
+    :meth:`GitHub.get_default_branch`, and :func:`gh_token`.
     """
 
     def __init__(self, fn: _FakeCallable | None = None) -> None:
@@ -324,26 +324,26 @@ def _completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedPro
 class TestGhToken:
     def test_uses_env_var(self) -> None:
         assert (
-            _gh_token(_noop_runner(), environ={"GITHUB_TOKEN": "mytoken"}) == "mytoken"
+            gh_token(_noop_runner(), environ={"GITHUB_TOKEN": "mytoken"}) == "mytoken"
         )
 
     def test_falls_back_to_gh_cli(self) -> None:
         mock_run = _FakeCallable(return_value=_completed("ghp_abc\n"))
-        assert _gh_token(_FakeProcessRunner(mock_run), environ={}) == "ghp_abc"
+        assert gh_token(_FakeProcessRunner(mock_run), environ={}) == "ghp_abc"
 
     def test_gh_cli_strips_whitespace(self) -> None:
         mock_run = _FakeCallable(return_value=_completed("  tok  \n"))
-        assert _gh_token(_FakeProcessRunner(mock_run), environ={}) == "tok"
+        assert gh_token(_FakeProcessRunner(mock_run), environ={}) == "tok"
 
     def test_raises_on_nonzero_exit(self) -> None:
         mock_run = _FakeCallable(return_value=_completed("", returncode=1))
         with pytest.raises(RuntimeError, match="gh auth token failed"):
-            _gh_token(_FakeProcessRunner(mock_run), environ={})
+            gh_token(_FakeProcessRunner(mock_run), environ={})
 
     def test_error_message_includes_exit_code(self) -> None:
         mock_run = _FakeCallable(return_value=_completed("", returncode=4))
         with pytest.raises(RuntimeError, match=r"exit 4"):
-            _gh_token(_FakeProcessRunner(mock_run), environ={})
+            gh_token(_FakeProcessRunner(mock_run), environ={})
 
 
 class TestHasClosingKeyword:

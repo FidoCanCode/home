@@ -1658,12 +1658,12 @@ class _RealBackgroundTaskSyncer:  # pragma: no cover
         from fido.tasks import (  # noqa: PLC0415
             RealBackgroundSyncer,
             RealThreadStarter,
-            _auto_complete_ask_tasks,  # pyright: ignore[reportPrivateUsage]
+            auto_complete_ask_tasks,
         )
 
         RealBackgroundSyncer(
             runner=self._runner,
-            auto_completer=_auto_complete_ask_tasks,
+            auto_completer=auto_complete_ask_tasks,
             starter=RealThreadStarter(),
         )(work_dir, gh)
 
@@ -1689,7 +1689,7 @@ class _RealForegroundTaskSyncer:  # pragma: no cover
     def __call__(self, work_dir: Path, gh: GitHub) -> None:
         from fido.tasks import (  # noqa: PLC0415
             RealGitDirResolver,
-            _auto_complete_ask_tasks,  # pyright: ignore[reportPrivateUsage]
+            auto_complete_ask_tasks,
             sync_tasks,
         )
 
@@ -1697,7 +1697,7 @@ class _RealForegroundTaskSyncer:  # pragma: no cover
             work_dir,
             gh,
             git_dir_resolver=RealGitDirResolver(self._runner),
-            auto_completer=_auto_complete_ask_tasks,
+            auto_completer=auto_complete_ask_tasks,
         )
 
 

@@ -1243,7 +1243,7 @@ def _apply_queue_to_body(body: str, queue: str) -> str:
     return body[:start] + "\n" + queue + "\n" + body[end:]
 
 
-def _auto_complete_ask_tasks(  # pyright: ignore[reportUnusedFunction]  # imported by worker/cli
+def auto_complete_ask_tasks(
     work_dir: Path,
     gh: GitHub,
     repo: str,

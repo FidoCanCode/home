@@ -40,7 +40,7 @@ from fido.github import (
     GitHub,
     GitHubSession,
     GraphQLError,
-    _gh_token,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    gh_token,
 )
 from fido.infra import (
     Clock,
@@ -1426,7 +1426,7 @@ def run(
         session=GitHubSession(),
         runner=infra.proc,
         clock=infra.clock,
-        token_fetcher=lambda: _gh_token(runner=infra.proc),
+        token_fetcher=lambda: gh_token(runner=infra.proc),
     )
     try:
         _preflight_tools(infra.fs)

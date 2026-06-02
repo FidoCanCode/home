@@ -311,7 +311,7 @@ def _auto_merge_unavailable(exc: GraphQLError) -> bool:
     return False
 
 
-def _gh_token(  # pyright: ignore[reportUnusedFunction]  # imported by cli/server
+def gh_token(
     runner: ProcessRunner,
     environ: Mapping[str, str] = os.environ,
 ) -> str:

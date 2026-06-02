@@ -1521,7 +1521,7 @@ class _RealTaskSyncer:  # pragma: no cover
             gh,
             blocking=blocking,
             git_dir_resolver=tasks.RealGitDirResolver(self._runner),
-            auto_completer=tasks._auto_complete_ask_tasks,  # pyright: ignore[reportPrivateUsage]
+            auto_completer=tasks.auto_complete_ask_tasks,
         )
 
 
@@ -3831,7 +3831,7 @@ class Worker:
             self.gh,
             syncer=tasks.RealBackgroundSyncer(
                 runner=self._runner,
-                auto_completer=tasks._auto_complete_ask_tasks,  # pyright: ignore[reportPrivateUsage]
+                auto_completer=tasks.auto_complete_ask_tasks,
                 starter=tasks.RealThreadStarter(),
             ),
             collaborators=repo_ctx.collaborators,
@@ -5987,7 +5987,7 @@ class WorkerThread(threading.Thread):
             issue_cache=self._issue_cache,
             background_syncer=tasks.RealBackgroundSyncer(
                 runner=_DEFAULT_RUNNER,
-                auto_completer=tasks._auto_complete_ask_tasks,  # pyright: ignore[reportPrivateUsage]
+                auto_completer=tasks.auto_complete_ask_tasks,
                 starter=tasks.RealThreadStarter(),
             ),
             task_reorderer=tasks.reorder_tasks,  # pyright: ignore[reportArgumentType]

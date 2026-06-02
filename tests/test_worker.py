@@ -51,8 +51,8 @@ from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
 from fido.tasks import (
     Tasks,
     _apply_queue_to_body,
-    _auto_complete_ask_tasks,
     _format_work_queue,
+    auto_complete_ask_tasks,
     pr_body_lock,
     sync_tasks,
     sync_tasks_background,
@@ -16598,7 +16598,7 @@ class TestAutoCompleteAskTasks:
     def test_no_ask_tasks_does_nothing(self, tmp_path: Path) -> None:
         gh = MagicMock()
         self._fido_dir(tmp_path, tasks=[])
-        _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         gh.get_review_threads.assert_not_called()
 
     def test_completes_ask_task_when_thread_resolved(self, tmp_path: Path) -> None:
@@ -16606,7 +16606,7 @@ class TestAutoCompleteAskTasks:
         task = self._ask_task(42)
         self._fido_dir(tmp_path, tasks=[task])
         gh.get_review_threads.return_value = [self._resolved_node(42)]
-        _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         assert self._task_status(tmp_path, "ask-1") == "completed"
 
     def test_does_not_complete_ask_task_when_thread_not_resolved(
@@ -16618,7 +16618,7 @@ class TestAutoCompleteAskTasks:
         gh.get_review_threads.return_value = [
             {"isResolved": False, "comments": {"nodes": [{"databaseId": 42}]}}
         ]
-        _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         assert self._task_status(tmp_path, "ask-1") == "pending"
 
     def test_get_review_threads_exception_propagates(self, tmp_path: Path) -> None:
@@ -16627,7 +16627,7 @@ class TestAutoCompleteAskTasks:
         self._fido_dir(tmp_path, tasks=[task])
         gh.get_review_threads.side_effect = RuntimeError("api fail")
         with pytest.raises(RuntimeError, match="api fail"):
-            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+            auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         assert self._task_status(tmp_path, "ask-1") == "pending"
 
     def test_non_ask_tasks_ignored(self, tmp_path: Path) -> None:
@@ -16640,7 +16640,7 @@ class TestAutoCompleteAskTasks:
         }
         self._fido_dir(tmp_path, tasks=[task])
         gh.get_review_threads.return_value = [self._resolved_node(1)]
-        _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         # No ASK-prefixed title => get_review_threads not called, no completion
         gh.get_review_threads.assert_not_called()
 
@@ -16648,7 +16648,7 @@ class TestAutoCompleteAskTasks:
         gh = MagicMock()
         task = {"title": "ASK: question", "status": "pending", "type": "thread"}
         self._fido_dir(tmp_path, tasks=[task])
-        _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         gh.get_review_threads.assert_not_called()
 
     def test_resolved_node_without_database_id_skipped(self, tmp_path: Path) -> None:
@@ -16658,7 +16658,7 @@ class TestAutoCompleteAskTasks:
         gh.get_review_threads.return_value = [
             {"isResolved": True, "comments": {"nodes": [{}]}}
         ]
-        _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         assert self._task_status(tmp_path, "ask-1") == "pending"
 
 

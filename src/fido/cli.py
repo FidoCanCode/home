@@ -6,17 +6,13 @@ import logging
 from pathlib import Path
 from typing import Any, Protocol
 
-from fido.github import (
-    GitHub,
-    GitHubSession,
-    _gh_token,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
-)
+from fido.github import GitHub, GitHubSession, gh_token
 from fido.infra import ProcessRunner, RealClock, RealProcessRunner
 from fido.tasks import (
     RealBackgroundSyncer,
     RealThreadStarter,
     Tasks,
-    _auto_complete_ask_tasks,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    auto_complete_ask_tasks,
 )
 from fido.types import TaskType
 
@@ -62,7 +58,7 @@ class Cmd:
             self._github,
             syncer=RealBackgroundSyncer(
                 runner=self._runner,
-                auto_completer=_auto_complete_ask_tasks,
+                auto_completer=auto_complete_ask_tasks,
                 starter=RealThreadStarter(),
             ),
         )
@@ -126,7 +122,7 @@ def main(
             session=GitHubSession(),
             runner=runner,
             clock=RealClock(),
-            token_fetcher=lambda: _gh_token(runner=runner),
+            token_fetcher=lambda: gh_token(runner=runner),
         ),
         runner=runner,
     )
