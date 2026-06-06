@@ -366,6 +366,14 @@ def test_stream_transition_crashes_on_invalid_event(tmp_path: Path) -> None:
         popen=_FixedPopenRunner(proc),
         selector=_FixedSelector(([], [], [])),
         clock=RealClock(),
+        model=None,
+        idle_timeout=1800.0,
+        repo_name=None,
+        session_id=None,
+        tools=None,
+        snapshot_publisher=None,
+        talker_resolver=None,
+        register_talker=None,
     )
     assert isinstance(session._stream_state, Idle)  # pyright: ignore[reportPrivateUsage]
 

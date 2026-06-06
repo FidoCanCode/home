@@ -5,6 +5,7 @@ from pathlib import Path
 
 import requests as _requests
 
+from fido import provider as _provider
 from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
 from fido.claude import (
@@ -14,6 +15,7 @@ from fido.claude import (
     ClaudeSessionFactory,
     ClaudeSessionFactoryMaker,
     StreamingRunner,
+    _load_claude_oauth_state,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     _RealClaudeSessionFactoryMaker,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     _RealStreamingRunner,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
@@ -90,6 +92,7 @@ class DefaultProviderFactory:
                 case ProviderID.CLAUDE_CODE:
                     api = ClaudeAPI(
                         session=_requests.Session(),
+                        oauth_state_fn=_load_claude_oauth_state,
                         clock=RealClock(),
                     )
                 case ProviderID.COPILOT_CLI:
@@ -122,12 +125,14 @@ class DefaultProviderFactory:
                     agent=ClaudeClient(
                         streaming_runner=self._claude_streaming_runner,
                         session_factory=factory,
+                        session_fn=_provider.current_repo_session,
                         session_system_file=self._session_system_file,
                         work_dir=work_dir,
                         repo_name=repo_name,
                         session=session,
                         state_updater=state_updater,
                     ),
+                    session=None,
                 )
             case ProviderID.COPILOT_CLI:
                 shared_api = self.create_api(repo_cfg)
@@ -137,6 +142,8 @@ class DefaultProviderFactory:
                     agent=CopilotCLIClient(
                         runner=self._copilot_process_runner,
                         popen=self._copilot_popen_runner,
+                        session_fn=_provider.current_repo_session,
+                        session_factory=None,
                         api=shared_api,
                         session_system_file=self._session_system_file,
                         work_dir=work_dir,
@@ -144,6 +151,7 @@ class DefaultProviderFactory:
                         session=session,
                         state_updater=state_updater,
                     ),
+                    session=None,
                 )
             case ProviderID.CODEX:
                 return Codex(

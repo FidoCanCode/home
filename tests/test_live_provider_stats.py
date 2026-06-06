@@ -193,6 +193,12 @@ def _make_queue_session(
         repo_name=_REPO,
         snapshot_publisher=publisher,
         clock=RealClock(),
+        model=None,
+        idle_timeout=1800.0,
+        session_id=None,
+        tools=None,
+        talker_resolver=None,
+        register_talker=None,
     )
 
 
@@ -282,6 +288,13 @@ class TestLiveProviderStats:
             selector=_FixedSelector(([proc.stdout], [], [])),
             repo_name=_REPO,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
 
         errors: list[BaseException] = []

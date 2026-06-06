@@ -136,6 +136,12 @@ def _cc(**kwargs: object) -> ClaudeClient:
     """Build a ClaudeClient with noop infra defaults — for tests that don't use streaming."""
     kwargs.setdefault("streaming_runner", _NOOP_SR)
     kwargs.setdefault("session_factory", _NOOP_SF)
+    kwargs.setdefault("session_fn", provider.current_repo_session)
+    kwargs.setdefault("session_system_file", None)
+    kwargs.setdefault("work_dir", None)
+    kwargs.setdefault("repo_name", None)
+    kwargs.setdefault("session", None)
+    kwargs.setdefault("state_updater", None)
     return ClaudeClient(**kwargs)  # type: ignore[arg-type]
 
 
@@ -823,6 +829,12 @@ def _make_session(
         selector=_make_selector(([proc.stdout], [], [])),
         repo_name="owner/repo",
         clock=RealClock(),
+        model=None,
+        session_id=None,
+        tools=None,
+        snapshot_publisher=None,
+        talker_resolver=None,
+        register_talker=None,
     )
 
 
@@ -839,6 +851,14 @@ class TestClaudeSessionInit:
             popen=fake_popen,
             selector=fake_selector,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         cmd = fake_popen.spawn.call_args.args[0]
         assert cmd[0] == "claude"
@@ -879,6 +899,13 @@ class TestClaudeSessionInit:
             selector=fake_selector,
             tools=READ_ONLY_ALLOWED_TOOLS,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         cmd = fake_popen.spawn.call_args.args[0]
         assert "--permission-mode" in cmd
@@ -895,7 +922,19 @@ class TestClaudeSessionInit:
         fake_popen = _make_popen(proc)
         fake_selector = _make_selector(([], [], []))
         ClaudeSession(
-            system_file, popen=fake_popen, selector=fake_selector, clock=RealClock()
+            system_file,
+            work_dir=None,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         kwargs = fake_popen.spawn.call_args.kwargs
         assert kwargs["stdin"] == subprocess.PIPE
@@ -914,6 +953,14 @@ class TestClaudeSessionInit:
             popen=fake_popen,
             selector=fake_selector,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         assert fake_popen.spawn.call_args.kwargs["cwd"] == tmp_path
 
@@ -924,7 +971,19 @@ class TestClaudeSessionInit:
         fake_popen = _make_popen(proc)
         fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
-            system_file, popen=fake_popen, selector=fake_selector, clock=RealClock()
+            system_file,
+            work_dir=None,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         assert proc in _active_children
         # cleanup
@@ -1083,6 +1142,14 @@ class TestClaudeSessionMessageCounts:
             popen=fake_popen,
             selector=fake_selector,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session.send("hello")
         list(session.iter_events())
@@ -1114,6 +1181,13 @@ class TestClaudeSessionMessageCounts:
             selector=_make_selector(([proc.stdout], [], [])),
             snapshot_publisher=Recorder(),
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session.send("hello")
         assert len(published) == 1
@@ -1142,6 +1216,13 @@ class TestClaudeSessionMessageCounts:
             selector=_make_selector(([proc.stdout], [], [])),
             snapshot_publisher=Recorder(),
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session.send("hello")
         published.clear()  # ignore the send publication
@@ -1310,9 +1391,18 @@ class TestClaudeSessionDrainToBoundary:
         system_file.write_text("sys")
         session = ClaudeSession(
             system_file,
+            work_dir=None,
             popen=_make_popen(proc),
             selector=_FuncSelector(tracking_selector),
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session._stream_state = stream_fsm.Sending()
         session._drain_to_boundary()
@@ -1524,7 +1614,19 @@ class TestClaudeSessionIterEvents:
         # selector never returns ready — forces poll() branch
         fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
-            system_file, popen=fake_popen, selector=fake_selector, clock=RealClock()
+            system_file,
+            work_dir=None,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         events = list(session.iter_events())
         assert events == []
@@ -1562,10 +1664,18 @@ class TestClaudeSessionIterEvents:
         fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
             system_file,
+            work_dir=None,
             idle_timeout=0.0,
             popen=fake_popen,
             selector=fake_selector,
             clock=RealClock(),
+            model=None,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         with pytest.raises(ClaudeStreamError) as exc_info:
             list(session.iter_events())
@@ -1721,9 +1831,18 @@ class TestClaudeSessionIterEvents:
             _claude_mod._CANCEL_DRAIN_TIMEOUT = 0.05
             session = ClaudeSession(
                 system_file,
+                work_dir=None,
                 popen=fake_popen,
                 selector=_FuncSelector(selector_that_cancels),
                 clock=RealClock(),
+                model=None,
+                idle_timeout=1800.0,
+                repo_name=None,
+                session_id=None,
+                tools=None,
+                snapshot_publisher=None,
+                talker_resolver=None,
+                register_talker=None,
             )
             session_ref.append(session)
             session._recover = MagicMock()  # type: ignore[method-assign]
@@ -1756,9 +1875,18 @@ class TestClaudeSessionIterEvents:
         system_file.write_text("sys")
         session = ClaudeSession(
             system_file,
+            work_dir=None,
             popen=_make_popen(proc),
             selector=_FuncSelector(tracking_selector),
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         list(session.iter_events())
         # Every select call must include the wakeup fd alongside stdout
@@ -1798,9 +1926,18 @@ class TestClaudeSessionIterEvents:
             _claude_mod._CANCEL_DRAIN_TIMEOUT = 0.05
             session = ClaudeSession(
                 system_file,
+                work_dir=None,
                 popen=fake_popen,
                 selector=_FuncSelector(staged_selector),
                 clock=RealClock(),
+                model=None,
+                idle_timeout=1800.0,
+                repo_name=None,
+                session_id=None,
+                tools=None,
+                snapshot_publisher=None,
+                talker_resolver=None,
+                register_talker=None,
             )
             session_ref.append(session)
             # Put the FSM in an active turn state so the cancel triggers
@@ -2014,7 +2151,19 @@ class TestClaudeSessionSpawnTools:
         fake_popen = _make_popen(proc)
         fake_selector = _make_selector(([], [], []))
         ClaudeSession(
-            system_file, popen=fake_popen, selector=fake_selector, clock=RealClock()
+            system_file,
+            work_dir=None,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         cmd = fake_popen.spawn.call_args.args[0]
         assert "--allowedTools" not in cmd
@@ -2029,10 +2178,18 @@ class TestClaudeSessionSpawnTools:
         fake_selector = _make_selector(([], [], []))
         ClaudeSession(
             system_file,
+            work_dir=None,
             popen=fake_popen,
             selector=fake_selector,
             tools=READ_ONLY_ALLOWED_TOOLS,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         cmd = fake_popen.spawn.call_args.args[0]
         assert "--allowedTools" in cmd
@@ -2047,11 +2204,18 @@ class TestClaudeSessionSpawnTools:
         fake_selector = _make_selector(([], [], []))
         ClaudeSession(
             system_file,
+            work_dir=None,
             popen=fake_popen,
             selector=fake_selector,
             tools=READ_ONLY_ALLOWED_TOOLS,
             session_id="sess-123",
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         cmd = fake_popen.spawn.call_args.args[0]
         assert "--allowedTools" in cmd
@@ -2157,6 +2321,14 @@ class TestClaudeSessionIsAliveAndReset:
             popen=fake_popen,
             selector=fake_selector,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session.reset("claude-sonnet-4-6")
         assert session._proc is new_proc
@@ -2178,6 +2350,14 @@ class TestClaudeSessionIsAliveAndReset:
             popen=fake_popen,
             selector=fake_selector,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session.reset()
         assert new_proc in _active_children
@@ -2199,6 +2379,14 @@ class TestClaudeSessionIsAliveAndReset:
             popen=fake_popen,
             selector=fake_selector,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session.reset()
         assert old_proc not in _active_children
@@ -2223,6 +2411,14 @@ class TestClaudeSessionIsAliveAndReset:
             popen=fake_popen,
             selector=fake_selector,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         with caplog.at_level(_logging.INFO, logger="fido.claude"):
             session.reset()
@@ -2244,6 +2440,14 @@ class TestClaudeSessionIsAliveAndReset:
             popen=fake_popen,
             selector=_make_selector(([], [], [])),
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session._session_id = "sid-123"
         session.reset()
@@ -2266,6 +2470,14 @@ class TestClaudeSessionIsAliveAndReset:
             popen=fake_popen,
             selector=fake_selector,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session.reset()
         old_proc.kill.assert_not_called()
@@ -2289,6 +2501,14 @@ class TestClaudeSessionIsAliveAndReset:
             popen=fake_popen,
             selector=fake_selector,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         with caplog.at_level(logging.WARNING, logger="fido.claude"):
             with pytest.raises(OSError):
@@ -2314,6 +2534,14 @@ class TestClaudeSessionIsAliveAndReset:
             popen=fake_popen,
             selector=fake_selector,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         with caplog.at_level(logging.WARNING, logger="fido.claude"):
             with pytest.raises(_subprocess.TimeoutExpired):
@@ -2334,6 +2562,14 @@ class TestClaudeSessionIsAliveAndReset:
             popen=fake_popen,
             selector=fake_selector,
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session.reset()
         session.stop()
@@ -2628,6 +2864,12 @@ class TestClaudeSessionLock:
             repo_name="owner/repo",
             model="claude-opus-4-6",
             clock=RealClock(),
+            idle_timeout=1800.0,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         try:
             # send() raises and a concurrent cancel set the sticky bit
@@ -2667,6 +2909,12 @@ class TestClaudeSessionLock:
             repo_name="owner/repo",
             model="claude-opus-4-6",
             clock=RealClock(),
+            idle_timeout=1800.0,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         try:
             result = session.prompt("hi there", model="claude-opus-4-6")
@@ -2704,6 +2952,12 @@ class TestClaudeSessionLock:
             repo_name="owner/repo",
             model="claude-opus-4-6",
             clock=RealClock(),
+            idle_timeout=1800.0,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         try:
             with session._stream_lock:
@@ -2743,6 +2997,12 @@ class TestClaudeSessionLock:
             repo_name="owner/repo",
             model="claude-opus-4-6",
             clock=RealClock(),
+            idle_timeout=1800.0,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         try:
             with session._stream_lock:
@@ -2780,6 +3040,13 @@ class TestClaudeSessionLock:
             selector=fake_selector,
             repo_name="owner/repo",
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         try:
             session.prompt("the question", system_prompt="extra instructions")
@@ -2814,6 +3081,14 @@ class TestClaudeSessionLock:
             popen=fake_popen,
             selector=_make_selector(([proc.stdout], [], [])),
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         with session:
             assert session.owner is None
@@ -2922,6 +3197,12 @@ class TestClaudeSessionPreemptLatency:
             repo_name="test/latency",
             idle_timeout=30.0,
             clock=RealClock(),
+            model=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
 
         worker_in_select = threading.Event()
@@ -3631,14 +3912,18 @@ class TestClaudeAPI:
 class TestClaudeCode:
     def test_provider_id_is_claude_code(self) -> None:
         assert (
-            ClaudeCode(api=MagicMock(), agent=MagicMock()).provider_id
+            ClaudeCode(
+                api=MagicMock(),
+                agent=MagicMock(),
+                session=None,
+            ).provider_id
             == ProviderID.CLAUDE_CODE
         )
 
     def test_exposes_injected_api_and_agent(self) -> None:
         api = MagicMock()
         agent = MagicMock()
-        provider = ClaudeCode(api=api, agent=agent)
+        provider = ClaudeCode(api=api, agent=agent, session=None)
         assert provider.api is api
         assert provider.agent is agent
 

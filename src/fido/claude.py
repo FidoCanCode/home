@@ -577,19 +577,19 @@ class ClaudeSession(OwnedSession):
     def __init__(
         self,
         system_file: Path,
-        work_dir: Path | str | None = None,
-        model: ProviderModel | None = None,
-        idle_timeout: float = 1800.0,
+        work_dir: Path | str | None,
+        model: ProviderModel | None,
+        idle_timeout: float,
         *,
         popen: PopenRunner,
         selector: IOSelector,
         clock: Clock,
-        repo_name: str | None = None,
-        session_id: str | None = None,
-        tools: str | None = None,
-        snapshot_publisher: provider.SnapshotPublisher | None = None,
-        talker_resolver: provider.TalkerResolver | None = None,
-        register_talker: Callable[[provider.SessionTalker], None] | None = None,
+        repo_name: str | None,
+        session_id: str | None,
+        tools: str | None,
+        snapshot_publisher: provider.SnapshotPublisher | None,
+        talker_resolver: provider.TalkerResolver | None,
+        register_talker: Callable[[provider.SessionTalker], None] | None,
     ) -> None:
         self._idle_timeout = idle_timeout
         self._selector: IOSelector = selector
@@ -1816,7 +1816,7 @@ def _default_claude_credentials_path() -> Path:
     return Path.home() / ".claude" / ".credentials.json"
 
 
-def _load_claude_oauth_state(
+def _load_claude_oauth_state(  # pyright: ignore[reportUnusedFunction]
     credentials_path: Path | None = None,
 ) -> _ClaudeOAuthState | None:
     path = (
@@ -1877,9 +1877,7 @@ class ClaudeAPI(ProviderAPI):
         self,
         *,
         session: "_requests.Session",
-        oauth_state_fn: Callable[
-            [], _ClaudeOAuthState | None
-        ] = _load_claude_oauth_state,
+        oauth_state_fn: Callable[[], _ClaudeOAuthState | None],
         clock: Clock,
     ) -> None:
         self._session = session
@@ -1993,14 +1991,18 @@ class _RealClaudeSessionFactory:  # pragma: no cover
     ) -> PromptSession:
         return ClaudeSession(
             system_file,
-            work_dir=self._work_dir,
-            repo_name=self._repo_name,
-            model=model,
-            session_id=session_id,
-            snapshot_publisher=snapshot_publisher,
+            self._work_dir,
+            model,
+            1800.0,
             popen=self._popen,
             selector=self._selector,
             clock=self._clock,
+            repo_name=self._repo_name,
+            session_id=session_id,
+            tools=None,
+            snapshot_publisher=snapshot_publisher,
+            talker_resolver=None,
+            register_talker=None,
         )
 
 
@@ -2060,12 +2062,12 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
         self,
         streaming_runner: StreamingRunner,
         session_factory: ClaudeSessionFactory,
-        session_fn: Callable[[], PromptSession] = provider.current_repo_session,
-        session_system_file: Path | None = None,
-        work_dir: Path | str | None = None,
-        repo_name: str | None = None,
-        session: PromptSession | None = None,
-        state_updater: AtomicUpdater[FidoState] | None = None,
+        session_fn: Callable[[], PromptSession],
+        session_system_file: Path | None,
+        work_dir: Path | str | None,
+        repo_name: str | None,
+        session: PromptSession | None,
+        state_updater: AtomicUpdater[FidoState] | None,
     ) -> None:
         self._streaming_runner: StreamingRunner = streaming_runner
         self._session_factory = session_factory
@@ -2278,7 +2280,7 @@ class ClaudeCode(Provider):
         *,
         api: ProviderAPI,
         agent: ProviderAgent,
-        session: PromptSession | None = None,
+        session: PromptSession | None,
     ) -> None:
         if session is not None:
             agent.attach_session(session)

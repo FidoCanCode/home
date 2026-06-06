@@ -134,10 +134,10 @@ class CopilotSessionFactory(Protocol):
         *,
         work_dir: Path | str,
         model: ProviderModel | str,
-        repo_name: str | None = None,
-        session_id: str | None = None,
-        snapshot_publisher: provider.SnapshotPublisher | None = None,
-        talker_resolver: provider.TalkerResolver = provider.get_talker,
+        repo_name: str | None,
+        session_id: str | None,
+        snapshot_publisher: provider.SnapshotPublisher | None,
+        talker_resolver: provider.TalkerResolver,
     ) -> PromptSession:
         """Create and return a new prompt session."""
         ...
@@ -695,13 +695,13 @@ class CopilotACPRuntime:
         self,
         *,
         work_dir: Path,
-        repo_name: str | None = None,
+        repo_name: str | None,
         command: Sequence[str] = _COPILOT_COMMAND,
         spawn_agent_process: AgentProcessFactory = acp.spawn_agent_process,
-        client_factory: ACPClientFactory | None = None,
+        client_factory: ACPClientFactory | None,
         popen: PopenRunner,
-        client_capabilities: ClientCapabilities | None = None,
-        client_info: Implementation | None = None,
+        client_capabilities: ClientCapabilities | None,
+        client_info: Implementation | None,
     ) -> None:
         self._work_dir = work_dir
         self._repo_name = repo_name
@@ -1084,13 +1084,13 @@ class CopilotCLISession(OwnedSession):
         *,
         work_dir: Path | str,
         model: ProviderModel | str,
-        repo_name: str | None = None,
-        runtime: CopilotACPRuntime | None = None,
-        runtime_factory: CopilotRuntimeFactory | None = None,
-        popen: PopenRunner | None = None,
-        session_id: str | None = None,
-        snapshot_publisher: provider.SnapshotPublisher | None = None,
-        talker_resolver: provider.TalkerResolver = provider.get_talker,
+        repo_name: str | None,
+        runtime: CopilotACPRuntime | None,
+        runtime_factory: CopilotRuntimeFactory | None,
+        popen: PopenRunner | None,
+        session_id: str | None,
+        snapshot_publisher: provider.SnapshotPublisher | None,
+        talker_resolver: provider.TalkerResolver,
     ) -> None:
         self._work_dir = Path(work_dir)
         self._repo_name = repo_name
@@ -1112,7 +1112,12 @@ class CopilotCLISession(OwnedSession):
                     " runtime_factory are both None"
                 )
             self._runtime = CopilotACPRuntime(
-                work_dir=self._work_dir, repo_name=repo_name, popen=popen
+                work_dir=self._work_dir,
+                repo_name=repo_name,
+                client_factory=None,
+                popen=popen,
+                client_capabilities=None,
+                client_info=None,
             )
         self._init_handler_reentry()
         self._pending_content: str | None = None
@@ -1501,15 +1506,15 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
     def __init__(
         self,
         runner: ProcessRunner,
-        popen: PopenRunner | None = None,
-        session_fn: Callable[[], PromptSession] = provider.current_repo_session,
-        session_factory: CopilotSessionFactory | None = None,
-        session_system_file: Path | None = None,
-        work_dir: Path | str | None = None,
-        repo_name: str | None = None,
-        session: PromptSession | None = None,
-        api: CopilotCLIAPI | None = None,
-        state_updater: AtomicUpdater[FidoState] | None = None,
+        popen: PopenRunner | None,
+        session_fn: Callable[[], PromptSession],
+        session_factory: CopilotSessionFactory | None,
+        session_system_file: Path | None,
+        work_dir: Path | str | None,
+        repo_name: str | None,
+        session: PromptSession | None,
+        api: CopilotCLIAPI | None,
+        state_updater: AtomicUpdater[FidoState] | None,
     ) -> None:
         self._runner = runner
         self._quota_api = api
@@ -1523,16 +1528,18 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
                 *,
                 work_dir: Path | str,
                 model: ProviderModel | str,
-                repo_name: str | None = None,
-                session_id: str | None = None,
-                snapshot_publisher: provider.SnapshotPublisher | None = None,
-                talker_resolver: provider.TalkerResolver = provider.get_talker,
+                repo_name: str | None,
+                session_id: str | None,
+                snapshot_publisher: provider.SnapshotPublisher | None,
+                talker_resolver: provider.TalkerResolver,
             ) -> PromptSession:
                 return CopilotCLISession(
                     system_file,
                     work_dir=work_dir,
                     model=model,
                     repo_name=repo_name,
+                    runtime=None,
+                    runtime_factory=None,
                     popen=_popen,
                     session_id=session_id,
                     snapshot_publisher=snapshot_publisher,
@@ -1689,7 +1696,7 @@ class CopilotCLI(Provider):
         *,
         api: CopilotCLIAPI,
         agent: ProviderAgent,
-        session: PromptSession | None = None,
+        session: PromptSession | None,
     ) -> None:
         if session is not None:
             agent.attach_session(session)

@@ -1540,6 +1540,12 @@ class TestClaudeDefensivePaths:
             repo_name="owner/repo",
             model="claude-opus-4-6",
             clock=RealClock(),
+            idle_timeout=1800.0,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
 
     def test_send_acknowledges_prior_cancelled_turn(self, tmp_path: Path) -> None:
@@ -1577,6 +1583,12 @@ class TestClaudeDefensivePaths:
             repo_name="owner/repo",
             model="claude-opus-4-6",
             clock=RealClock(),
+            idle_timeout=1800.0,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         # The stderr pump runs as a daemon thread; let it exit.
         import time
@@ -1699,6 +1711,11 @@ class TestCopilotCLIOwnerMore:
             model="gpt-5",
             runtime=_FakeRuntime(),
             repo_name=repo_name,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
 
     def test_owner_returns_none_when_no_talker_registered(self, tmp_path: Path) -> None:
@@ -1718,6 +1735,10 @@ class TestCopilotCLIOwnerMore:
             runtime=_FakeRuntime(),
             repo_name="test/repo",
             talker_resolver=lambda r: fake_talker,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
         )
         assert session.owner is None
 
@@ -1738,6 +1759,10 @@ class TestCopilotCLIOwnerMore:
             runtime=_FakeRuntime(),
             repo_name="test/repo",
             talker_resolver=lambda r: fake_talker,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
         )
         assert session.owner == current.name
 
@@ -1757,6 +1782,11 @@ class TestCopilotCLIOwner:
             model="gpt-5",
             runtime=_FakeRuntime(),
             repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         assert session.owner is None
         del ProviderID  # quiet pyright
@@ -2644,9 +2674,18 @@ class TestClaudeIterEventsCancelPaths:
 
         session = ClaudeSession(
             system_file,
+            work_dir=None,
             popen=_FakePopen(proc),
             selector=_FuncSelector(selector_that_cancels),
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session_ref.append(session)
         # Force the FSM to AwaitingReply so iter_events sees in_turn=True.
@@ -2700,9 +2739,18 @@ class TestClaudeIterEventsCancelPaths:
 
         session = ClaudeSession(
             system_file,
+            work_dir=None,
             popen=_FakePopen(proc),
             selector=_FuncSelector(selector_that_cancels),
             clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session_ref.append(session)
         session.recover = _FakeCallRecorder()  # type: ignore[method-assign]
