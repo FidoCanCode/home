@@ -463,13 +463,13 @@ class TestProviderFactoryUnsupported:
 
     def test_create_api_raises_for_unsupported_provider(self, tmp_path: Path) -> None:
         repo_cfg = _FakeRepoConfigForProvider()
-        factory = DefaultProviderFactory(session_system_file=tmp_path / "sys.md")
+        factory = DefaultProviderFactory.real(session_system_file=tmp_path / "sys.md")
         with pytest.raises(ValueError, match="unsupported provider"):
             factory.create_api(repo_cfg)  # type: ignore[arg-type]
 
     def test_create_agent_raises_for_unsupported_provider(self, tmp_path: Path) -> None:
         repo_cfg = _FakeRepoConfigForProvider()
-        factory = DefaultProviderFactory(session_system_file=tmp_path / "sys.md")
+        factory = DefaultProviderFactory.real(session_system_file=tmp_path / "sys.md")
         with pytest.raises(ValueError, match="unsupported provider"):
             factory.create_agent(repo_cfg, work_dir=tmp_path, repo_name="owner/repo")  # type: ignore[arg-type]
 
@@ -1539,6 +1539,7 @@ class TestClaudeDefensivePaths:
             selector=_FakeSelector(([proc.stdout], [], [])),
             repo_name="owner/repo",
             model="claude-opus-4-6",
+            clock=RealClock(),
         )
 
     def test_send_acknowledges_prior_cancelled_turn(self, tmp_path: Path) -> None:
@@ -1575,6 +1576,7 @@ class TestClaudeDefensivePaths:
             selector=_FakeSelector(([], [], [])),
             repo_name="owner/repo",
             model="claude-opus-4-6",
+            clock=RealClock(),
         )
         # The stderr pump runs as a daemon thread; let it exit.
         import time
@@ -2644,6 +2646,7 @@ class TestClaudeIterEventsCancelPaths:
             system_file,
             popen=_FakePopen(proc),
             selector=_FuncSelector(selector_that_cancels),
+            clock=RealClock(),
         )
         session_ref.append(session)
         # Force the FSM to AwaitingReply so iter_events sees in_turn=True.
@@ -2699,6 +2702,7 @@ class TestClaudeIterEventsCancelPaths:
             system_file,
             popen=_FakePopen(proc),
             selector=_FuncSelector(selector_that_cancels),
+            clock=RealClock(),
         )
         session_ref.append(session)
         session.recover = _FakeCallRecorder()  # type: ignore[method-assign]

@@ -21,15 +21,16 @@ from fido import provider
 from fido.appstate import (
     _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
-from fido.claude import ClaudeClient
+from fido.claude import ClaudeClient, StreamingRunner
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
-from fido.infra import RealClock, RealOsProcess, RealProcessRunner
+from fido.infra import RealClock, RealOsProcess, RealPopenRunner, RealProcessRunner
 from fido.issue_cache import IssueCache, IssueNode
 from fido.nudges import Nudges
 from fido.prompts import Prompts
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
     ContextOverflowError,
+    ProviderAgent,
     ProviderID,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
@@ -69,6 +70,7 @@ from fido.worker import (
     RepoContextFilter,
     RepoNameFilter,
     WorkerContext,
+    _AgentOnlyProvider,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     _assert_ci_failure_matches_oracle,
     _is_leaked_task_comment,
     _node_to_dict,
@@ -307,9 +309,8 @@ class Worker(_WorkerBase):
         if "nudges" not in kwargs:
             kwargs["nudges"] = Nudges()
         if "provider_factory" not in kwargs:
-            kwargs["provider_factory"] = DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md",
-                claude_session_factory_maker=_no_spawn_session_factory,
+            kwargs["provider_factory"] = _factory_with_claude_spy(
+                _no_spawn_session_factory
             )
         if "prompt_builder" not in kwargs:
             kwargs["prompt_builder"] = worker_module._DEFAULT_PROMPT_BUILDER  # pyright: ignore[reportPrivateUsage]
@@ -362,9 +363,8 @@ class WorkerThread(_WorkerThreadBase):
                 membership=kwargs.get("membership"),
             )
         if "provider_factory" not in kwargs:
-            kwargs["provider_factory"] = DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md",
-                claude_session_factory_maker=_no_spawn_session_factory,
+            kwargs["provider_factory"] = _factory_with_claude_spy(
+                _no_spawn_session_factory
             )
         if "issue_cache" not in kwargs:
             kwargs["issue_cache"] = IssueCache(repo_name)
@@ -383,6 +383,37 @@ def _no_spawn_session_factory(*_args: object, **_kwargs: object) -> MagicMock:
     tests call ``Worker.run()`` or run the ``WorkerThread`` loop.  Replaces
     the old autouse ``_no_claude_session_spawn`` monkeypatch.setattr fixture."""
     return MagicMock()
+
+
+class _NoopStreamingRunner:
+    """StreamingRunner stub that yields nothing — for test factories that won't stream."""
+
+    def __call__(
+        self,
+        cmd: list[str],
+        stdin_file: object,
+        idle_timeout: float = 1800.0,
+        *,
+        cwd: object = None,
+    ) -> "Iterator[str]":
+        return iter([])
+
+
+_NOOP_SR: StreamingRunner = _NoopStreamingRunner()  # type: ignore[assignment]
+
+
+def _factory_with_claude_spy(
+    spy: object,
+    session_system_file: Path | None = None,
+) -> DefaultProviderFactory:
+    """DefaultProviderFactory with injected ClaudeSessionFactory maker and noop copilot infra."""
+    return DefaultProviderFactory(
+        session_system_file=session_system_file or default_sub_dir() / "persona.md",
+        claude_session_factory_maker=spy,
+        claude_streaming_runner=_NOOP_SR,
+        copilot_process_runner=RealProcessRunner(),
+        copilot_popen_runner=RealPopenRunner(),
+    )
 
 
 class _SpySessionFactory:
@@ -722,6 +753,28 @@ class TestRepoContext:
             default_branch="main",
         )
         assert ctx.collaborators == frozenset()
+
+
+class TestAgentOnlyProvider:
+    """Unit tests for _AgentOnlyProvider — the provider_agent= DI seam."""
+
+    def test_attaches_session_when_provided(self) -> None:
+        agent = MagicMock(spec=ProviderAgent)
+        session = MagicMock()
+        _AgentOnlyProvider(agent, session=session)
+        agent.attach_session.assert_called_once_with(session)
+
+    def test_provider_id_delegates_to_agent(self) -> None:
+        agent = MagicMock(spec=ProviderAgent)
+        agent.provider_id = ProviderID.CLAUDE_CODE
+        p = _AgentOnlyProvider(agent)
+        assert p.provider_id is agent.provider_id
+
+    def test_api_raises_not_implemented(self) -> None:
+        agent = MagicMock(spec=ProviderAgent)
+        p = _AgentOnlyProvider(agent)
+        with pytest.raises(NotImplementedError):
+            _ = p.api
 
 
 class TestWorker:
@@ -1322,10 +1375,7 @@ class TestWorker:
             tmp_path,
             MagicMock(),
             registry=MagicMock(spec=ActivityReporter),
-            provider_factory=DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md",
-                claude_session_factory_maker=spy,
-            ),
+            provider_factory=_factory_with_claude_spy(spy),
         )
         worker.create_session()
         spy.assert_session_created_once()
@@ -1336,10 +1386,7 @@ class TestWorker:
             tmp_path,
             MagicMock(),
             registry=MagicMock(spec=ActivityReporter),
-            provider_factory=DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md",
-                claude_session_factory_maker=spy,
-            ),
+            provider_factory=_factory_with_claude_spy(spy),
         )
         worker.create_session()
         assert spy.maker_kwargs.get("work_dir") == tmp_path
@@ -1351,10 +1398,7 @@ class TestWorker:
             tmp_path,
             MagicMock(),
             registry=MagicMock(spec=ActivityReporter),
-            provider_factory=DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md",
-                claude_session_factory_maker=spy,
-            ),
+            provider_factory=_factory_with_claude_spy(spy),
         )
         worker.create_session()
         assert spy.factory_kwargs.get("model") == "claude-opus-4-6"
@@ -1367,10 +1411,7 @@ class TestWorker:
             tmp_path,
             MagicMock(),
             registry=MagicMock(spec=ActivityReporter),
-            provider_factory=DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md",
-                claude_session_factory_maker=spy,
-            ),
+            provider_factory=_factory_with_claude_spy(spy),
         )
         worker.create_session()
         assert worker._provider.agent.session is mock_session  # pyright: ignore[reportPrivateUsage]
@@ -2795,7 +2836,7 @@ class TestAssertGitIdentity:
                 _tasks=Tasks(tmp_path),
                 _state=State(tmp_path / ".git" / "fido"),
                 nudges=Nudges(),
-                provider_factory=DefaultProviderFactory(
+                provider_factory=DefaultProviderFactory.real(
                     session_system_file=default_sub_dir() / "persona.md"
                 ),
                 prompt_builder=worker_module._DEFAULT_PROMPT_BUILDER,  # pyright: ignore[reportPrivateUsage]

@@ -26,7 +26,6 @@ from fido.appstate import (
     FidoState,
 )
 from fido.atomic import AtomicUpdater
-from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.harness_commit import (
@@ -52,6 +51,8 @@ from fido.provider import (
     PromptSession,
     Provider,
     ProviderAgent,
+    ProviderAPI,
+    ProviderID,
     ProviderModel,
     ProviderPressureStatus,
     SessionLeakError,
@@ -1536,6 +1537,36 @@ _DEFAULT_TASK_SYNCER: TaskSyncer = _RealTaskSyncer(runner=_DEFAULT_RUNNER)
 _DEFAULT_SUB_DIR_PROVIDER: SubDirProvider = _RealSubDirProvider()
 
 
+class _AgentOnlyProvider:
+    """Minimal Provider wrapping a bare ProviderAgent — for the provider_agent= DI seam.
+
+    Used by Worker when a caller passes a pre-built agent directly (typically
+    in tests).  The ``.api`` property is intentionally unimplemented: tests
+    that use this path never call provider pressure checks.
+    """
+
+    def __init__(
+        self, agent: ProviderAgent, session: PromptSession | None = None
+    ) -> None:
+        if session is not None:
+            agent.attach_session(session)
+        self._agent = agent
+
+    @property
+    def provider_id(self) -> ProviderID:
+        return self._agent.provider_id
+
+    @property
+    def api(self) -> ProviderAPI:
+        raise NotImplementedError(
+            "_AgentOnlyProvider has no API — pass provider= with a full Provider instead"
+        )
+
+    @property
+    def agent(self) -> ProviderAgent:
+        return self._agent
+
+
 class Worker:
     """Fido worker for a single repository.
 
@@ -1618,7 +1649,7 @@ class Worker:
             if session is not None:
                 self._provider.agent.attach_session(session)
         elif provider_agent is not None:
-            self._provider = ClaudeCode(agent=provider_agent, session=session)
+            self._provider = _AgentOnlyProvider(provider_agent, session=session)
         elif repo_cfg is not None:
             self._provider = self._provider_factory.create_provider(
                 repo_cfg,

@@ -27,9 +27,6 @@ from fido.infra import (
     Clock,
     IOSelector,
     PopenRunner,
-    RealClock,
-    RealIOSelector,
-    RealPopenRunner,
 )
 from fido.provider import (
     GLOBAL_DISALLOWED_TOOLS,
@@ -66,15 +63,6 @@ _CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_USAGE_BETA = "oauth-2025-04-20"
 _CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.110"
 _CLAUDE_USAGE_CACHE_SECONDS = 300.0
-
-# Module-level real-infra singletons — stateless or shared-safe, constructed
-# once at import time so subclasses and composition roots can reference them
-# as parameter defaults without repeating construction boilerplate.
-_REAL_POPEN_RUNNER: PopenRunner = RealPopenRunner()
-_REAL_IO_SELECTOR: IOSelector = RealIOSelector()
-_REAL_CLOCK: Clock = RealClock()
-_REAL_REQUESTS_SESSION: "_requests.Session" = _requests.Session()
-
 
 # ── Callable-Protocol collaborators ───────────────────────────────────────────
 
@@ -138,7 +126,7 @@ class ClaudeSessionFactoryMaker(Protocol):
         ...
 
 
-class _RealStreamingRunner:  # pragma: no cover
+class _RealStreamingRunner:  # pragma: no cover  # pyright: ignore[reportUnusedClass]
     """Real :class:`StreamingRunner` that delegates to :func:`_run_streaming`.
 
     Not tested directly — :func:`_run_streaming` is tested via its own suite;
@@ -267,7 +255,7 @@ def _claude(
     *args: str,
     prompt: str | None = None,
     timeout: int = 30,
-    popen: PopenRunner = _REAL_POPEN_RUNNER,
+    popen: PopenRunner,
 ) -> subprocess.CompletedProcess[str]:
     """Run the claude CLI with the given args, optionally piping prompt to stdin.
 
@@ -478,9 +466,10 @@ def _run_streaming(
     stdin_file: Path,
     idle_timeout: float = 1800.0,
     cwd: Path | str | None = None,
-    popen: PopenRunner = _REAL_POPEN_RUNNER,
-    selector: IOSelector = _REAL_IO_SELECTOR,
-    clock: Clock = _REAL_CLOCK,
+    *,
+    popen: PopenRunner,
+    selector: IOSelector,
+    clock: Clock,
 ) -> Iterator[str]:
     """Run a command, streaming stdout with idle-timeout detection.
 
@@ -591,9 +580,10 @@ class ClaudeSession(OwnedSession):
         work_dir: Path | str | None = None,
         model: ProviderModel | None = None,
         idle_timeout: float = 1800.0,
-        popen: PopenRunner = _REAL_POPEN_RUNNER,
-        selector: IOSelector = _REAL_IO_SELECTOR,
-        clock: Clock = _REAL_CLOCK,
+        *,
+        popen: PopenRunner,
+        selector: IOSelector,
+        clock: Clock,
         repo_name: str | None = None,
         session_id: str | None = None,
         tools: str | None = None,
@@ -1886,11 +1876,11 @@ class ClaudeAPI(ProviderAPI):
     def __init__(
         self,
         *,
-        session: "_requests.Session" = _REAL_REQUESTS_SESSION,
+        session: "_requests.Session",
         oauth_state_fn: Callable[
             [], _ClaudeOAuthState | None
         ] = _load_claude_oauth_state,
-        clock: Clock = _REAL_CLOCK,
+        clock: Clock,
     ) -> None:
         self._session = session
         self._oauth_state_fn = oauth_state_fn
@@ -2014,7 +2004,7 @@ class _RealClaudeSessionFactory:  # pragma: no cover
         )
 
 
-class _RealClaudeSessionFactoryMaker:  # pragma: no cover
+class _RealClaudeSessionFactoryMaker:  # pragma: no cover  # pyright: ignore[reportUnusedClass]
     """Real :class:`ClaudeSessionFactoryMaker` that constructs per-repo factories.
 
     Holds the infra collaborators (popen / selector / clock) shared across all
@@ -2048,34 +2038,6 @@ class _RealClaudeSessionFactoryMaker:  # pragma: no cover
         )
 
 
-# Module-level real factories — constructed once after their backing classes
-# are defined so ClaudeClient / ClaudeCode can use them as parameter defaults.
-_REAL_STREAMING_RUNNER: StreamingRunner = _RealStreamingRunner(
-    popen=_REAL_POPEN_RUNNER,
-    selector=_REAL_IO_SELECTOR,
-    clock=_REAL_CLOCK,
-)
-_REAL_SESSION_FACTORY_MAKER: ClaudeSessionFactoryMaker = _RealClaudeSessionFactoryMaker(
-    popen=_REAL_POPEN_RUNNER,
-    selector=_REAL_IO_SELECTOR,
-    clock=_REAL_CLOCK,
-)
-# Convenience singleton with work_dir=None / repo_name=None; used as the default
-# ClaudeSessionFactory in ClaudeClient when no factory-maker is available
-# (e.g. unit tests that inject a session directly and never spawn one).
-_REAL_SESSION_FACTORY: ClaudeSessionFactory = _RealClaudeSessionFactory(
-    work_dir=None,
-    repo_name=None,
-    popen=_REAL_POPEN_RUNNER,
-    selector=_REAL_IO_SELECTOR,
-    clock=_REAL_CLOCK,
-)
-_REAL_CLAUDE_API: "ClaudeAPI" = ClaudeAPI(
-    session=_REAL_REQUESTS_SESSION,
-    clock=_REAL_CLOCK,
-)
-
-
 class ClaudeClient(SessionBackedAgent, ProviderAgent):
     """Injectable collaborator for one-shot Claude CLI interactions.
 
@@ -2096,9 +2058,9 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
 
     def __init__(
         self,
-        streaming_runner: StreamingRunner = _REAL_STREAMING_RUNNER,
+        streaming_runner: StreamingRunner,
+        session_factory: ClaudeSessionFactory,
         session_fn: Callable[[], PromptSession] = provider.current_repo_session,
-        session_factory: ClaudeSessionFactory = _REAL_SESSION_FACTORY,
         session_system_file: Path | None = None,
         work_dir: Path | str | None = None,
         repo_name: str | None = None,
@@ -2314,13 +2276,11 @@ class ClaudeCode(Provider):
     def __init__(
         self,
         *,
-        api: ProviderAPI = _REAL_CLAUDE_API,
-        agent: ProviderAgent | None = None,
+        api: ProviderAPI,
+        agent: ProviderAgent,
         session: PromptSession | None = None,
     ) -> None:
-        if agent is None:
-            agent = ClaudeClient(session=session)
-        elif session is not None:
+        if session is not None:
             agent.attach_session(session)
         self._api = api
         self._agent = agent

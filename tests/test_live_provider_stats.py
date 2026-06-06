@@ -24,6 +24,7 @@ from fido.appstate import (
 from fido.atomic import AtomicUpdater, create_atomic
 from fido.claude import ClaudeSession
 from fido.color import Color
+from fido.infra import RealClock
 from fido.provider import SnapshotPublisher
 from fido.status import FidoStatus, RepoStatus, format_status
 
@@ -191,6 +192,7 @@ def _make_queue_session(
         selector=_FixedSelector(([proc.stdout], [], [])),
         repo_name=_REPO,
         snapshot_publisher=publisher,
+        clock=RealClock(),
     )
 
 
@@ -279,6 +281,7 @@ class TestLiveProviderStats:
             popen=_FixedPopenRunner(proc),
             selector=_FixedSelector(([proc.stdout], [], [])),
             repo_name=_REPO,
+            clock=RealClock(),
         )
 
         errors: list[BaseException] = []

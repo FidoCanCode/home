@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +20,9 @@ from fido.claude import (
     ClaudeCode,
     ClaudeProviderError,
     ClaudeSession,
+    ClaudeSessionFactory,
     ClaudeStreamError,
+    StreamingRunner,
     _active_children,
     _claude,
     _default_claude_credentials_path,
@@ -34,11 +36,14 @@ from fido.claude import (
     kill_active_children,
     raise_for_provider_error_output,
 )
+from fido.infra import RealClock, RealIOSelector, RealPopenRunner
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
+    PromptSession,
     ProviderID,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
+    ProviderModel,
     ThreadKind,
     TurnSessionMode,
 )
@@ -93,6 +98,45 @@ def _make_selector(result: object) -> MagicMock:
     m = MagicMock()
     m.select.return_value = result
     return m
+
+
+class _NoopStreamingRunner:
+    """StreamingRunner stub that yields nothing — for tests that don't exercise streaming."""
+
+    def __call__(
+        self,
+        cmd: list[str],
+        stdin_file: object,
+        idle_timeout: float = 1800.0,
+        *,
+        cwd: object = None,
+    ) -> "Iterator[str]":
+        return iter([])
+
+
+class _NoopSessionFactory:
+    """ClaudeSessionFactory stub that always raises — for tests that don't spawn sessions."""
+
+    def __call__(
+        self,
+        system_file: object,
+        *,
+        model: ProviderModel,
+        session_id: object,
+        snapshot_publisher: object,
+    ) -> PromptSession:
+        raise NotImplementedError("_NoopSessionFactory: no session should be spawned")
+
+
+_NOOP_SR: StreamingRunner = _NoopStreamingRunner()
+_NOOP_SF: ClaudeSessionFactory = _NoopSessionFactory()
+
+
+def _cc(**kwargs: object) -> ClaudeClient:
+    """Build a ClaudeClient with noop infra defaults — for tests that don't use streaming."""
+    kwargs.setdefault("streaming_runner", _NOOP_SR)
+    kwargs.setdefault("session_factory", _NOOP_SF)
+    return ClaudeClient(**kwargs)  # type: ignore[arg-type]
 
 
 class TestTrunc:
@@ -210,7 +254,15 @@ class TestRunStreaming:
 
         stdin_file = tmp_path / "input.txt"
         stdin_file.write_text("hello")
-        lines = list(_run_streaming(["echo", "hi"], stdin_file))
+        lines = list(
+            _run_streaming(
+                ["echo", "hi"],
+                stdin_file,
+                popen=RealPopenRunner(),
+                selector=RealIOSelector(),
+                clock=RealClock(),
+            )
+        )
         assert "".join(lines).strip() == "hi"
 
     def test_raises_on_file_not_found(self, tmp_path: Path) -> None:
@@ -221,7 +273,15 @@ class TestRunStreaming:
         import pytest
 
         with pytest.raises(FileNotFoundError):
-            list(_run_streaming(["/nonexistent/binary"], stdin_file))
+            list(
+                _run_streaming(
+                    ["/nonexistent/binary"],
+                    stdin_file,
+                    popen=RealPopenRunner(),
+                    selector=RealIOSelector(),
+                    clock=RealClock(),
+                )
+            )
 
     def test_raises_on_idle_timeout(self, tmp_path: Path) -> None:
         """Idle-timeout kills the subprocess when no output for N seconds.
@@ -274,7 +334,15 @@ class TestRunStreaming:
         import pytest
 
         with pytest.raises(ClaudeStreamError) as exc_info:
-            list(_run_streaming(["false"], stdin_file))
+            list(
+                _run_streaming(
+                    ["false"],
+                    stdin_file,
+                    popen=RealPopenRunner(),
+                    selector=RealIOSelector(),
+                    clock=RealClock(),
+                )
+            )
         assert exc_info.value.returncode != 0
 
     def test_handles_process_exit_without_eof(self, tmp_path: Path) -> None:
@@ -301,7 +369,11 @@ class TestRunStreaming:
 
         result = "".join(
             _run_streaming(
-                ["fake"], stdin_file, popen=mock_popen, selector=mock_selector
+                ["fake"],
+                stdin_file,
+                popen=mock_popen,
+                selector=mock_selector,
+                clock=RealClock(),
             )
         )
         assert "leftover" in result
@@ -333,7 +405,11 @@ class TestRunStreaming:
 
         result = "".join(
             _run_streaming(
-                ["fake"], stdin_file, popen=mock_popen, selector=mock_selector
+                ["fake"],
+                stdin_file,
+                popen=mock_popen,
+                selector=mock_selector,
+                clock=RealClock(),
             )
         )
         assert "line1" in result
@@ -551,6 +627,7 @@ class TestRunStreamingTracksChildren:
                 idle_timeout=1.0,
                 popen=_FuncPopenRunner(fake_popen_fn),
                 selector=_FuncSelector(fake_select),
+                clock=RealClock(),
             )
         )
         # Was registered (popen sees it not yet in set, but it is by the time
@@ -656,6 +733,7 @@ class TestRunStreamingTracksChildren:
                     idle_timeout=1.0,
                     popen=_FuncPopenRunner(fake_popen_fn),
                     selector=_FuncSelector(fake_select),
+                    clock=RealClock(),
                 )
             )
         finally:
@@ -744,6 +822,7 @@ def _make_session(
         popen=_make_popen(proc),
         selector=_make_selector(([proc.stdout], [], [])),
         repo_name="owner/repo",
+        clock=RealClock(),
     )
 
 
@@ -755,7 +834,11 @@ class TestClaudeSessionInit:
         fake_popen = _make_popen(proc)
         fake_selector = _make_selector(([], [], []))
         ClaudeSession(
-            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
         )
         cmd = fake_popen.spawn.call_args.args[0]
         assert cmd[0] == "claude"
@@ -795,6 +878,7 @@ class TestClaudeSessionInit:
             popen=fake_popen,
             selector=fake_selector,
             tools=READ_ONLY_ALLOWED_TOOLS,
+            clock=RealClock(),
         )
         cmd = fake_popen.spawn.call_args.args[0]
         assert "--permission-mode" in cmd
@@ -810,7 +894,9 @@ class TestClaudeSessionInit:
         proc = _make_session_proc([])
         fake_popen = _make_popen(proc)
         fake_selector = _make_selector(([], [], []))
-        ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
+        ClaudeSession(
+            system_file, popen=fake_popen, selector=fake_selector, clock=RealClock()
+        )
         kwargs = fake_popen.spawn.call_args.kwargs
         assert kwargs["stdin"] == subprocess.PIPE
         assert kwargs["stdout"] == subprocess.PIPE
@@ -823,7 +909,11 @@ class TestClaudeSessionInit:
         fake_popen = _make_popen(proc)
         fake_selector = _make_selector(([], [], []))
         ClaudeSession(
-            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
         )
         assert fake_popen.spawn.call_args.kwargs["cwd"] == tmp_path
 
@@ -833,7 +923,9 @@ class TestClaudeSessionInit:
         proc = _make_session_proc([])
         fake_popen = _make_popen(proc)
         fake_selector = _make_selector(([], [], []))
-        session = ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
+        session = ClaudeSession(
+            system_file, popen=fake_popen, selector=fake_selector, clock=RealClock()
+        )
         assert proc in _active_children
         # cleanup
         session.stop()
@@ -986,7 +1078,11 @@ class TestClaudeSessionMessageCounts:
         fake_popen.spawn.side_effect = [old_proc, new_proc]
         fake_selector = _make_selector(([old_proc.stdout], [], []))
         session = ClaudeSession(
-            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
         )
         session.send("hello")
         list(session.iter_events())
@@ -1017,6 +1113,7 @@ class TestClaudeSessionMessageCounts:
             popen=_make_popen(proc),
             selector=_make_selector(([proc.stdout], [], [])),
             snapshot_publisher=Recorder(),
+            clock=RealClock(),
         )
         session.send("hello")
         assert len(published) == 1
@@ -1044,6 +1141,7 @@ class TestClaudeSessionMessageCounts:
             popen=_make_popen(proc),
             selector=_make_selector(([proc.stdout], [], [])),
             snapshot_publisher=Recorder(),
+            clock=RealClock(),
         )
         session.send("hello")
         published.clear()  # ignore the send publication
@@ -1214,6 +1312,7 @@ class TestClaudeSessionDrainToBoundary:
             system_file,
             popen=_make_popen(proc),
             selector=_FuncSelector(tracking_selector),
+            clock=RealClock(),
         )
         session._stream_state = stream_fsm.Sending()
         session._drain_to_boundary()
@@ -1424,7 +1523,9 @@ class TestClaudeSessionIterEvents:
         fake_popen = _make_popen(proc)
         # selector never returns ready — forces poll() branch
         fake_selector = _make_selector(([], [], []))
-        session = ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
+        session = ClaudeSession(
+            system_file, popen=fake_popen, selector=fake_selector, clock=RealClock()
+        )
         events = list(session.iter_events())
         assert events == []
 
@@ -1464,6 +1565,7 @@ class TestClaudeSessionIterEvents:
             idle_timeout=0.0,
             popen=fake_popen,
             selector=fake_selector,
+            clock=RealClock(),
         )
         with pytest.raises(ClaudeStreamError) as exc_info:
             list(session.iter_events())
@@ -1621,6 +1723,7 @@ class TestClaudeSessionIterEvents:
                 system_file,
                 popen=fake_popen,
                 selector=_FuncSelector(selector_that_cancels),
+                clock=RealClock(),
             )
             session_ref.append(session)
             session._recover = MagicMock()  # type: ignore[method-assign]
@@ -1655,6 +1758,7 @@ class TestClaudeSessionIterEvents:
             system_file,
             popen=_make_popen(proc),
             selector=_FuncSelector(tracking_selector),
+            clock=RealClock(),
         )
         list(session.iter_events())
         # Every select call must include the wakeup fd alongside stdout
@@ -1693,7 +1797,10 @@ class TestClaudeSessionIterEvents:
         try:
             _claude_mod._CANCEL_DRAIN_TIMEOUT = 0.05
             session = ClaudeSession(
-                system_file, popen=fake_popen, selector=_FuncSelector(staged_selector)
+                system_file,
+                popen=fake_popen,
+                selector=_FuncSelector(staged_selector),
+                clock=RealClock(),
             )
             session_ref.append(session)
             # Put the FSM in an active turn state so the cancel triggers
@@ -1906,7 +2013,9 @@ class TestClaudeSessionSpawnTools:
         proc = _make_session_proc([])
         fake_popen = _make_popen(proc)
         fake_selector = _make_selector(([], [], []))
-        ClaudeSession(system_file, popen=fake_popen, selector=fake_selector)
+        ClaudeSession(
+            system_file, popen=fake_popen, selector=fake_selector, clock=RealClock()
+        )
         cmd = fake_popen.spawn.call_args.args[0]
         assert "--allowedTools" not in cmd
 
@@ -1923,6 +2032,7 @@ class TestClaudeSessionSpawnTools:
             popen=fake_popen,
             selector=fake_selector,
             tools=READ_ONLY_ALLOWED_TOOLS,
+            clock=RealClock(),
         )
         cmd = fake_popen.spawn.call_args.args[0]
         assert "--allowedTools" in cmd
@@ -1941,6 +2051,7 @@ class TestClaudeSessionSpawnTools:
             selector=fake_selector,
             tools=READ_ONLY_ALLOWED_TOOLS,
             session_id="sess-123",
+            clock=RealClock(),
         )
         cmd = fake_popen.spawn.call_args.args[0]
         assert "--allowedTools" in cmd
@@ -2041,7 +2152,11 @@ class TestClaudeSessionIsAliveAndReset:
         fake_popen.spawn.side_effect = [old_proc, new_proc]
         fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
-            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
         )
         session.reset("claude-sonnet-4-6")
         assert session._proc is new_proc
@@ -2058,7 +2173,11 @@ class TestClaudeSessionIsAliveAndReset:
         fake_popen.spawn.side_effect = [old_proc, new_proc]
         fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
-            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
         )
         session.reset()
         assert new_proc in _active_children
@@ -2075,7 +2194,11 @@ class TestClaudeSessionIsAliveAndReset:
         fake_popen.spawn.side_effect = [old_proc, new_proc]
         fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
-            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
         )
         session.reset()
         assert old_proc not in _active_children
@@ -2095,7 +2218,11 @@ class TestClaudeSessionIsAliveAndReset:
         fake_popen.spawn.side_effect = [old_proc, new_proc]
         fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
-            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
         )
         with caplog.at_level(_logging.INFO, logger="fido.claude"):
             session.reset()
@@ -2116,6 +2243,7 @@ class TestClaudeSessionIsAliveAndReset:
             work_dir=tmp_path,
             popen=fake_popen,
             selector=_make_selector(([], [], [])),
+            clock=RealClock(),
         )
         session._session_id = "sid-123"
         session.reset()
@@ -2133,7 +2261,11 @@ class TestClaudeSessionIsAliveAndReset:
         fake_popen.spawn.side_effect = [old_proc, new_proc]
         fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
-            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
         )
         session.reset()
         old_proc.kill.assert_not_called()
@@ -2152,7 +2284,11 @@ class TestClaudeSessionIsAliveAndReset:
         fake_popen.spawn.side_effect = [old_proc, new_proc]
         fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
-            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
         )
         with caplog.at_level(logging.WARNING, logger="fido.claude"):
             with pytest.raises(OSError):
@@ -2173,7 +2309,11 @@ class TestClaudeSessionIsAliveAndReset:
         fake_popen.spawn.side_effect = [old_proc, new_proc]
         fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
-            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
         )
         with caplog.at_level(logging.WARNING, logger="fido.claude"):
             with pytest.raises(_subprocess.TimeoutExpired):
@@ -2189,7 +2329,11 @@ class TestClaudeSessionIsAliveAndReset:
         fake_popen.spawn.side_effect = [old_proc, new_proc]
         fake_selector = _make_selector(([], [], []))
         session = ClaudeSession(
-            system_file, work_dir=tmp_path, popen=fake_popen, selector=fake_selector
+            system_file,
+            work_dir=tmp_path,
+            popen=fake_popen,
+            selector=fake_selector,
+            clock=RealClock(),
         )
         session.reset()
         session.stop()
@@ -2483,6 +2627,7 @@ class TestClaudeSessionLock:
             selector=fake_selector,
             repo_name="owner/repo",
             model="claude-opus-4-6",
+            clock=RealClock(),
         )
         try:
             # send() raises and a concurrent cancel set the sticky bit
@@ -2521,6 +2666,7 @@ class TestClaudeSessionLock:
             selector=fake_selector,
             repo_name="owner/repo",
             model="claude-opus-4-6",
+            clock=RealClock(),
         )
         try:
             result = session.prompt("hi there", model="claude-opus-4-6")
@@ -2557,6 +2703,7 @@ class TestClaudeSessionLock:
             selector=fake_selector,
             repo_name="owner/repo",
             model="claude-opus-4-6",
+            clock=RealClock(),
         )
         try:
             with session._stream_lock:
@@ -2595,6 +2742,7 @@ class TestClaudeSessionLock:
             selector=fake_selector,
             repo_name="owner/repo",
             model="claude-opus-4-6",
+            clock=RealClock(),
         )
         try:
             with session._stream_lock:
@@ -2631,6 +2779,7 @@ class TestClaudeSessionLock:
             popen=fake_popen,
             selector=fake_selector,
             repo_name="owner/repo",
+            clock=RealClock(),
         )
         try:
             session.prompt("the question", system_prompt="extra instructions")
@@ -2664,6 +2813,7 @@ class TestClaudeSessionLock:
             work_dir=tmp_path,
             popen=fake_popen,
             selector=_make_selector(([proc.stdout], [], [])),
+            clock=RealClock(),
         )
         with session:
             assert session.owner is None
@@ -2771,6 +2921,7 @@ class TestClaudeSessionPreemptLatency:
             ),  # real select — wakeup pipe must work
             repo_name="test/latency",
             idle_timeout=30.0,
+            clock=RealClock(),
         )
 
         worker_in_select = threading.Event()
@@ -2974,7 +3125,7 @@ class TestClaudeClientRunTurn:
     def test_delegates_to_session_prompt(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "hello"
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         assert client.run_turn("hi", model="claude-opus-4-6") == "hello"
         session.prompt.assert_called_once_with(
             "hi",
@@ -2986,21 +3137,21 @@ class TestClaudeClientRunTurn:
     def test_passes_system_prompt(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "ok"
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         client.run_turn("q", model="claude-opus-4-6", system_prompt="be fido")
         assert session.prompt.call_args.kwargs["system_prompt"] == "be fido"
 
     def test_session_errors_propagate(self) -> None:
         session = MagicMock()
         session.prompt.side_effect = ClaudeStreamError(1)
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         with pytest.raises(ClaudeStreamError):
             client.run_turn("q", model="claude-opus-4-6")
 
     def test_recovers_and_retries_after_stream_error(self) -> None:
         session = MagicMock()
         session.prompt.side_effect = [ClaudeStreamError(1), "hello"]
-        client = ClaudeClient(session=session)
+        client = _cc(session=session)
         assert client.run_turn("q", model="claude-opus-4-6") == "hello"
         assert session.prompt.call_count == 2
         session.recover.assert_called_once_with()
@@ -3008,7 +3159,7 @@ class TestClaudeClientRunTurn:
     def test_provider_errors_do_not_retry(self) -> None:
         session = MagicMock()
         session.prompt.side_effect = ClaudeProviderError(message="nope")
-        client = ClaudeClient(session=session)
+        client = _cc(session=session)
         with pytest.raises(ClaudeProviderError, match="nope"):
             client.run_turn("q", model="claude-opus-4-6")
         session.recover.assert_not_called()
@@ -3018,7 +3169,7 @@ class TestClaudeClientRunTurn:
         session.prompt.side_effect = ["", "hello"]
         session.last_turn_cancelled = False
         session.is_alive.side_effect = [False, True]
-        client = ClaudeClient(session=session)
+        client = _cc(session=session)
         assert client.run_turn("q", model="claude-opus-4-6") == "hello"
         session.recover.assert_called_once_with()
 
@@ -3027,7 +3178,7 @@ class TestClaudeClientRunTurn:
             prompt=MagicMock(side_effect=ClaudeStreamError(1)),
             is_alive=lambda: False,
         )
-        client = ClaudeClient(session=session)
+        client = _cc(session=session)
         with pytest.raises(ClaudeStreamError):
             client.run_turn("q", model="claude-opus-4-6")
 
@@ -3036,7 +3187,7 @@ class TestClaudeClientRunTurn:
         session.prompt.side_effect = ["", ""]
         session.last_turn_cancelled = False
         session.is_alive.side_effect = [False, False]
-        client = ClaudeClient(session=session)
+        client = _cc(session=session)
         with pytest.raises(RuntimeError, match="session died during prompt"):
             client.run_turn("q", model="claude-opus-4-6")
         session.recover.assert_called_once_with()
@@ -3045,7 +3196,7 @@ class TestClaudeClientRunTurn:
         attached = MagicMock()
         attached.prompt.return_value = "bound"
         resolver = MagicMock()
-        client = ClaudeClient(session_fn=resolver, session=attached)
+        client = _cc(session_fn=resolver, session=attached)
         assert client.run_turn("hi", model="claude-opus-4-6") == "bound"
         resolver.assert_not_called()
 
@@ -3053,59 +3204,59 @@ class TestClaudeClientRunTurn:
 class TestClaudeClientSessionAttachment:
     def test_attach_session_updates_bound_session(self) -> None:
         attached = MagicMock()
-        client = ClaudeClient()
+        client = _cc()
         client.attach_session(attached)
         assert client.session is attached
 
     def test_detach_session_returns_and_clears_bound_session(self) -> None:
         attached = MagicMock()
-        client = ClaudeClient(session=attached)
+        client = _cc(session=attached)
         assert client.detach_session() is attached
         assert client.session is None
 
     def test_session_owner_reads_from_bound_session(self) -> None:
         attached = MagicMock(owner="worker-home")
-        client = ClaudeClient(session=attached)
+        client = _cc(session=attached)
         assert client.session_owner == "worker-home"
 
     def test_session_alive_reads_from_bound_session(self) -> None:
         attached = MagicMock()
         attached.is_alive.return_value = True
-        client = ClaudeClient(session=attached)
+        client = _cc(session=attached)
         assert client.session_alive is True
 
     def test_session_pid_reads_from_bound_session(self) -> None:
         attached = MagicMock(pid=1234)
-        client = ClaudeClient(session=attached)
+        client = _cc(session=attached)
         assert client.session_pid == 1234
 
     def test_session_id_is_none_without_bound_session(self) -> None:
-        client = ClaudeClient()
+        client = _cc()
         assert client.session_id is None
 
     def test_session_id_is_none_when_bound_session_has_no_session_id(self) -> None:
-        client = ClaudeClient(session=object())
+        client = _cc(session=object())
         assert client.session_id is None
 
     def test_session_id_is_none_for_non_string_value(self) -> None:
         attached = SimpleNamespace(session_id=123)
-        client = ClaudeClient(session=attached)
+        client = _cc(session=attached)
         assert client.session_id is None
 
     def test_session_id_reads_string_from_bound_session(self) -> None:
         attached = SimpleNamespace(session_id="sess-123")
-        client = ClaudeClient(session=attached)
+        client = _cc(session=attached)
         assert client.session_id == "sess-123"
 
     def test_provider_id_is_claude_code(self) -> None:
-        client = ClaudeClient()
+        client = _cc()
         assert str(client.provider_id) == "claude-code"
 
     def test_supports_no_commit_reset_is_true(self) -> None:
-        assert ClaudeClient().supports_no_commit_reset is True
+        assert _cc().supports_no_commit_reset is True
 
     def test_ensure_session_requires_session_system_file_and_work_dir(self) -> None:
-        client = ClaudeClient()
+        client = _cc()
         with pytest.raises(
             ValueError,
             match="ClaudeClient.ensure_session requires session_system_file and work_dir",
@@ -3115,7 +3266,7 @@ class TestClaudeClientSessionAttachment:
     def test_ensure_session_requires_model_when_creating_session(
         self, tmp_path: Path
     ) -> None:
-        client = ClaudeClient(
+        client = _cc(
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
@@ -3127,14 +3278,14 @@ class TestClaudeClientSessionAttachment:
 
     def test_ensure_session_switches_model_when_session_exists(self) -> None:
         session = MagicMock()
-        client = ClaudeClient(session=session)
+        client = _cc(session=session)
         client.ensure_session("claude-opus-4-6")
         session.switch_model.assert_called_once_with("claude-opus-4-6")
 
     def test_run_turn_requires_model_when_spawning_owned_session(
         self, tmp_path: Path
     ) -> None:
-        client = ClaudeClient(
+        client = _cc(
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
@@ -3145,7 +3296,7 @@ class TestClaudeClientSessionAttachment:
             client.run_turn("fetch")
 
     def test_fresh_session_mode_requires_reset_method(self) -> None:
-        client = ClaudeClient(session=object())
+        client = _cc(session=object())
         with pytest.raises(
             ValueError,
             match="ClaudeClient.run_turn session_mode=fresh requires resettable session",
@@ -3161,7 +3312,7 @@ class TestClaudeClientSessionAttachment:
     ) -> None:
         session = MagicMock()
         session_factory = MagicMock(return_value=session)
-        client = ClaudeClient(
+        client = _cc(
             session_factory=session_factory,
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
@@ -3186,7 +3337,7 @@ class TestClaudeClientSessionAttachment:
     def test_fresh_session_mode_resets_existing_session(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "ok"
-        client = ClaudeClient(session=session)
+        client = _cc(session=session)
         assert (
             client.run_turn(
                 "fetch",
@@ -3208,7 +3359,7 @@ class TestClaudeClientSessionAttachment:
             return result
 
         session.prompt.side_effect = prompt
-        client = ClaudeClient(session=session)
+        client = _cc(session=session)
         assert client.run_turn("fetch", retry_on_preempt=True) == "done"
 
 
@@ -3300,11 +3451,16 @@ class TestClaudeUsageWindow:
 class TestClaudeAPI:
     def test_provider_id_is_claude_code(self) -> None:
         assert (
-            ClaudeAPI(oauth_state_fn=lambda: None).provider_id == ProviderID.CLAUDE_CODE
+            ClaudeAPI(
+                session=MagicMock(), clock=RealClock(), oauth_state_fn=lambda: None
+            ).provider_id
+            == ProviderID.CLAUDE_CODE
         )
 
     def test_limit_snapshot_marks_logged_out_accounts_unavailable(self) -> None:
-        api = ClaudeAPI(oauth_state_fn=lambda: None)
+        api = ClaudeAPI(
+            session=MagicMock(), clock=RealClock(), oauth_state_fn=lambda: None
+        )
         assert api.get_limit_snapshot() == ProviderLimitSnapshot(
             provider=ProviderID.CLAUDE_CODE,
             unavailable_reason="Claude Code is not logged in.",
@@ -3336,6 +3492,7 @@ class TestClaudeAPI:
         session.get.return_value = response
         api = ClaudeAPI(
             session=session,
+            clock=RealClock(),
             oauth_state_fn=lambda: type(
                 "OAuthState", (), {"access_token": "tok-123"}
             )(),
@@ -3415,6 +3572,7 @@ class TestClaudeAPI:
         session.get.return_value = response
         api = ClaudeAPI(
             session=session,
+            clock=RealClock(),
             oauth_state_fn=lambda: type(
                 "OAuthState", (), {"access_token": "tok-123"}
             )(),
@@ -3435,6 +3593,7 @@ class TestClaudeAPI:
         session.get.return_value = response
         api = ClaudeAPI(
             session=session,
+            clock=RealClock(),
             oauth_state_fn=lambda: type(
                 "OAuthState", (), {"access_token": "tok-123"}
             )(),
@@ -3458,6 +3617,7 @@ class TestClaudeAPI:
         session.get.return_value = response
         api = ClaudeAPI(
             session=session,
+            clock=RealClock(),
             oauth_state_fn=lambda: type(
                 "OAuthState", (), {"access_token": "tok-123"}
             )(),
@@ -3470,7 +3630,10 @@ class TestClaudeAPI:
 
 class TestClaudeCode:
     def test_provider_id_is_claude_code(self) -> None:
-        assert ClaudeCode().provider_id == ProviderID.CLAUDE_CODE
+        assert (
+            ClaudeCode(api=MagicMock(), agent=MagicMock()).provider_id
+            == ProviderID.CLAUDE_CODE
+        )
 
     def test_exposes_injected_api_and_agent(self) -> None:
         api = MagicMock()
@@ -3479,15 +3642,10 @@ class TestClaudeCode:
         assert provider.api is api
         assert provider.agent is agent
 
-    def test_default_agent_receives_session(self) -> None:
-        session = MagicMock()
-        provider = ClaudeCode(session=session)
-        assert provider.agent.session is session
-
     def test_attaches_session_to_injected_agent(self) -> None:
         agent = MagicMock()
         session = MagicMock()
-        ClaudeCode(agent=agent, session=session)
+        ClaudeCode(api=MagicMock(), agent=agent, session=session)
         agent.attach_session.assert_called_once_with(session)
 
 
@@ -3495,31 +3653,31 @@ class TestClaudeClientGenerateStatusEmoji:
     def test_extracts_json_value(self) -> None:
         session = MagicMock()
         session.prompt.return_value = '{"emoji": "42"}'
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         assert client.generate_status_emoji("q", "sys", "claude-opus-4-6") == "42"
 
     def test_returns_empty_on_empty_response(self) -> None:
         session = MagicMock()
         session.prompt.return_value = ""
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         assert client.generate_status_emoji("q", "sys", "claude-opus-4-6") == ""
 
     def test_returns_empty_on_malformed_json(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "not json"
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         assert client.generate_status_emoji("q", "sys", "claude-opus-4-6") == ""
 
     def test_scans_for_json_in_preamble(self) -> None:
         session = MagicMock()
         session.prompt.return_value = 'Here is the answer: {"emoji": "yes"}'
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         assert client.generate_status_emoji("q", "sys", "claude-opus-4-6") == "yes"
 
     def test_appends_json_instruction_to_system(self) -> None:
         session = MagicMock()
         session.prompt.return_value = '{"emoji": "v"}'
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         client.generate_status_emoji("q", "sys", "claude-opus-4-6")
         sp = session.prompt.call_args.kwargs["system_prompt"]
         assert sp.startswith("sys\n\n")
@@ -3528,7 +3686,7 @@ class TestClaudeClientGenerateStatusEmoji:
     def test_json_instruction_only_when_no_system(self) -> None:
         session = MagicMock()
         session.prompt.return_value = '{"emoji": "v"}'
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         client.generate_status_emoji("q", "", "claude-opus-4-6")
         sp = session.prompt.call_args.kwargs["system_prompt"]
         assert "Respond with ONLY" in sp
@@ -3536,13 +3694,13 @@ class TestClaudeClientGenerateStatusEmoji:
     def test_returns_empty_when_key_missing(self) -> None:
         session = MagicMock()
         session.prompt.return_value = '{"other": "val"}'
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         assert client.generate_status_emoji("q", "sys", "claude-opus-4-6") == ""
 
     def test_returns_empty_when_value_not_string(self) -> None:
         session = MagicMock()
         session.prompt.return_value = '{"emoji": 42}'
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         assert client.generate_status_emoji("q", "sys", "claude-opus-4-6") == ""
 
 
@@ -3550,7 +3708,7 @@ class TestClaudeClientGenerateStatus:
     def test_delegates_to_run_turn(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "🐶\ncoding up a storm"
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         assert (
             client.generate_status("working on #42", "be fido")
             == "🐶\ncoding up a storm"
@@ -3565,7 +3723,7 @@ class TestClaudeClientGenerateStatus:
     def test_custom_model(self) -> None:
         session = MagicMock()
         session.prompt.return_value = "🐶\nwoof"
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         client.generate_status("working", "sys", model="claude-sonnet-4-6")
         assert session.prompt.call_args.kwargs["model"] == "claude-sonnet-4-6"
 
@@ -3574,7 +3732,7 @@ class TestClaudeClientGenerateStatusEmojiDelegation:
     def test_delegates_to_run_turn(self) -> None:
         session = MagicMock()
         session.prompt.return_value = '{"emoji": "🐕"}'
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         assert client.generate_status_emoji("pick emoji", "be fido") == "🐕"
         session.prompt.assert_called_once_with(
             "pick emoji",
@@ -3589,7 +3747,7 @@ class TestClaudeClientGenerateStatusEmojiDelegation:
     def test_custom_model(self) -> None:
         session = MagicMock()
         session.prompt.return_value = '{"emoji": "🐕"}'
-        client = ClaudeClient(session_fn=lambda: session)
+        client = _cc(session_fn=lambda: session)
         client.generate_status_emoji("pick", "sys", model="claude-sonnet-4-6")
         assert session.prompt.call_args.kwargs["model"] == "claude-sonnet-4-6"
 
@@ -3605,35 +3763,35 @@ class TestClaudeClientPrintPromptFromFile:
     def test_returns_stdout_on_success(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(return_value=iter(["session output"]))
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         result = client.print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
         assert result == "session output"
 
     def test_raises_on_nonzero(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(side_effect=ClaudeStreamError(1))
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         with pytest.raises(ClaudeStreamError):
             client.print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
 
     def test_raises_on_idle_timeout(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(side_effect=ClaudeStreamError(_RETURNCODE_IDLE_TIMEOUT))
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         with pytest.raises(ClaudeStreamError):
             client.print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
 
     def test_raises_on_file_not_found(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(side_effect=FileNotFoundError)
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         with pytest.raises(FileNotFoundError):
             client.print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
 
     def test_passes_correct_cmd(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(return_value=iter(["out"]))
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         client.print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
         cmd = mock_stream.call_args[0][0]
         assert "--model" in cmd
@@ -3645,7 +3803,7 @@ class TestClaudeClientPrintPromptFromFile:
     def test_passes_idle_timeout(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(return_value=iter(["out"]))
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         client.print_prompt_from_file(
             sys, prompt, "claude-sonnet-4-6", idle_timeout=600.0
         )
@@ -3660,7 +3818,7 @@ class TestClaudeClientPrintPromptFromFile:
         """
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(return_value=iter(["out"]))
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         client.print_prompt_from_file(
             sys, prompt, "claude-sonnet-4-6", allowed_tools=None
         )
@@ -3672,7 +3830,7 @@ class TestClaudeClientPrintPromptFromFile:
     def test_passes_cwd(self, tmp_path: Path) -> None:
         sys, prompt = self._files(tmp_path)
         mock_stream = MagicMock(return_value=iter(["out"]))
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         client.print_prompt_from_file(sys, prompt, "claude-sonnet-4-6", cwd="/some/dir")
         assert mock_stream.call_args[1]["cwd"] == "/some/dir"
 
@@ -3683,7 +3841,7 @@ class TestClaudeClientPrintPromptFromFile:
                 ['API Error: 500 {"type":"error","message":"Internal server error"}']
             )
         )
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         with pytest.raises(ClaudeProviderError, match="500"):
             client.print_prompt_from_file(sys, prompt, "claude-sonnet-4-6")
 
@@ -3734,7 +3892,7 @@ class TestClaudeClientResumeSession:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("continue")
         mock_stream = MagicMock(return_value=iter(["resumed output"]))
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         result = client.resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
         assert result == "resumed output"
 
@@ -3742,7 +3900,7 @@ class TestClaudeClientResumeSession:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("continue")
         mock_stream = MagicMock(side_effect=ClaudeStreamError(1))
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         with pytest.raises(ClaudeStreamError):
             client.resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
 
@@ -3750,7 +3908,7 @@ class TestClaudeClientResumeSession:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("continue")
         mock_stream = MagicMock(return_value=iter(["out"]))
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         client.resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
         cmd = mock_stream.call_args[0][0]
         assert "--model" in cmd
@@ -3764,7 +3922,7 @@ class TestClaudeClientResumeSession:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("continue")
         mock_stream = MagicMock(return_value=iter(["out"]))
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         client.resume_session(
             "sess-123", prompt_file, "claude-sonnet-4-6", allowed_tools=None
         )
@@ -3781,7 +3939,7 @@ class TestClaudeClientResumeSession:
                 ['API Error: 500 {"type":"error","message":"Internal server error"}']
             )
         )
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         with pytest.raises(ClaudeProviderError, match="500"):
             client.resume_session("sess-123", prompt_file, "claude-sonnet-4-6")
 
@@ -3789,7 +3947,7 @@ class TestClaudeClientResumeSession:
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("continue")
         mock_stream = MagicMock(return_value=iter(["out"]))
-        client = ClaudeClient(streaming_runner=mock_stream)
+        client = _cc(streaming_runner=mock_stream)
         client.resume_session(
             "sess-123", prompt_file, "claude-sonnet-4-6", idle_timeout=600.0
         )
@@ -3806,7 +3964,7 @@ class TestClaudeClientSharedHelpers:
             "status text",
             "resumed status",
         ]
-        client = ClaudeClient(session=session)
+        client = _cc(session=session)
         assert client.generate_reply("write a reply") == "reply text"
         assert client.generate_branch_name("name this") == "branch-name"
         assert client.generate_status_with_session("doing stuff", "be fido") == (
@@ -3817,6 +3975,6 @@ class TestClaudeClientSharedHelpers:
 
     def test_resume_status_requires_matching_live_session(self) -> None:
         session = MagicMock(session_id="other")
-        client = ClaudeClient(session=session)
+        client = _cc(session=session)
         with pytest.raises(RuntimeError, match="matching live session"):
             client.resume_status("sess-42", "please shorten")

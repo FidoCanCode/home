@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from fido.claude import ClaudeSession
+from fido.infra import RealClock
 from fido.rocq.claude_session import (
     AwaitingReply,
     CancelFire,
@@ -364,6 +365,7 @@ def test_stream_transition_crashes_on_invalid_event(tmp_path: Path) -> None:
         work_dir=tmp_path,
         popen=_FixedPopenRunner(proc),
         selector=_FixedSelector(([], [], [])),
+        clock=RealClock(),
     )
     assert isinstance(session._stream_state, Idle)  # pyright: ignore[reportPrivateUsage]
 

@@ -64,7 +64,9 @@ def _make_thread(tmp_path: Path, **kwargs: object) -> WorkerThread:
     kwargs.setdefault("membership", RepoMembership())
     kwargs.setdefault(
         "provider_factory",
-        DefaultProviderFactory(session_system_file=default_sub_dir() / "persona.md"),
+        DefaultProviderFactory.real(
+            session_system_file=default_sub_dir() / "persona.md"
+        ),
     )
     kwargs.setdefault("issue_cache", IssueCache("owner/repo"))
     kwargs.setdefault("dispatcher", _FakeDispatcher())

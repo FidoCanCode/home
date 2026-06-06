@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from fido.atomic import AtomicUpdater
     from fido.critics import TaskCreationDropCounter, TaskCreationVerdict
 
-from fido.claude import ClaudeClient
 from fido.github import GitHub
 from fido.infra import ProcessRunner
 from fido.prompts import Prompts
@@ -3692,7 +3691,9 @@ def reorder_tasks(
         return
 
     if agent is None:
-        agent = (_client_factory if _client_factory is not None else ClaudeClient)()
+        if _client_factory is None:
+            raise ValueError("reorder_tasks: agent or _client_factory must be provided")
+        agent = _client_factory()
     if prompts is None:
         prompts = Prompts("")
 

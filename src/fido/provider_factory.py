@@ -8,16 +8,28 @@ import requests as _requests
 from fido.appstate import FidoState
 from fido.atomic import AtomicUpdater
 from fido.claude import (
-    _REAL_SESSION_FACTORY_MAKER,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     ClaudeAPI,
     ClaudeClient,
     ClaudeCode,
+    ClaudeSessionFactory,
     ClaudeSessionFactoryMaker,
+    StreamingRunner,
+    _RealClaudeSessionFactoryMaker,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
+    _RealStreamingRunner,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
 from fido.codex import Codex, CodexAPI, CodexClient
 from fido.config import RepoConfig
 from fido.copilotcli import CopilotCLI, CopilotCLIAPI, CopilotCLIClient
-from fido.infra import RealClock
+from fido.infra import (
+    Clock,
+    IOSelector,
+    PopenRunner,
+    ProcessRunner,
+    RealClock,
+    RealIOSelector,
+    RealPopenRunner,
+    RealProcessRunner,
+)
 from fido.provider import (
     PromptSession,
     Provider,
@@ -34,12 +46,40 @@ class DefaultProviderFactory:
         self,
         *,
         session_system_file: Path,
-        claude_session_factory_maker: ClaudeSessionFactoryMaker = _REAL_SESSION_FACTORY_MAKER,
+        claude_session_factory_maker: ClaudeSessionFactoryMaker,
+        claude_streaming_runner: StreamingRunner,
+        copilot_process_runner: ProcessRunner,
+        copilot_popen_runner: PopenRunner,
     ) -> None:
         self._session_system_file = session_system_file
         self._claude_session_factory_maker = claude_session_factory_maker
+        self._claude_streaming_runner = claude_streaming_runner
+        self._copilot_process_runner = copilot_process_runner
+        self._copilot_popen_runner = copilot_popen_runner
         self._api_lock = threading.Lock()
         self._apis: dict[ProviderID, ProviderAPI] = {}
+
+    @classmethod
+    def real(cls, *, session_system_file: Path) -> "DefaultProviderFactory":
+        """Construct wired to real infrastructure — call from composition roots."""
+        popen: PopenRunner = RealPopenRunner()
+        selector: IOSelector = RealIOSelector()
+        clock: Clock = RealClock()
+        return cls(
+            session_system_file=session_system_file,
+            claude_session_factory_maker=_RealClaudeSessionFactoryMaker(
+                popen=popen,
+                selector=selector,
+                clock=clock,
+            ),
+            claude_streaming_runner=_RealStreamingRunner(
+                popen=popen,
+                selector=selector,
+                clock=clock,
+            ),
+            copilot_process_runner=RealProcessRunner(),
+            copilot_popen_runner=popen,
+        )
 
     def create_api(self, repo_cfg: RepoConfig) -> ProviderAPI:
         with self._api_lock:
@@ -48,7 +88,10 @@ class DefaultProviderFactory:
                 return api
             match repo_cfg.provider:
                 case ProviderID.CLAUDE_CODE:
-                    api = ClaudeAPI(session=_requests.Session(), clock=RealClock())
+                    api = ClaudeAPI(
+                        session=_requests.Session(),
+                        clock=RealClock(),
+                    )
                 case ProviderID.COPILOT_CLI:
                     api = CopilotCLIAPI(clock=RealClock())
                 case ProviderID.CODEX:
@@ -69,18 +112,22 @@ class DefaultProviderFactory:
     ) -> Provider:
         match repo_cfg.provider:
             case ProviderID.CLAUDE_CODE:
-                factory = self._claude_session_factory_maker(
+                claude_api = self.create_api(repo_cfg)
+                assert isinstance(claude_api, ClaudeAPI)
+                factory: ClaudeSessionFactory = self._claude_session_factory_maker(
                     work_dir=work_dir, repo_name=repo_name
                 )
                 return ClaudeCode(
+                    api=claude_api,
                     agent=ClaudeClient(
+                        streaming_runner=self._claude_streaming_runner,
+                        session_factory=factory,
                         session_system_file=self._session_system_file,
                         work_dir=work_dir,
                         repo_name=repo_name,
                         session=session,
                         state_updater=state_updater,
-                        session_factory=factory,
-                    )
+                    ),
                 )
             case ProviderID.COPILOT_CLI:
                 shared_api = self.create_api(repo_cfg)
@@ -88,6 +135,8 @@ class DefaultProviderFactory:
                 return CopilotCLI(
                     api=shared_api,
                     agent=CopilotCLIClient(
+                        runner=self._copilot_process_runner,
+                        popen=self._copilot_popen_runner,
                         api=shared_api,
                         session_system_file=self._session_system_file,
                         work_dir=work_dir,

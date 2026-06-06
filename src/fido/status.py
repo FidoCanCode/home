@@ -543,7 +543,7 @@ def provider_statuses_for_repo_configs(
     if _provider_factory is not None:
         provider_factory = _provider_factory
     else:
-        provider_factory = DefaultProviderFactory(
+        provider_factory = DefaultProviderFactory.real(
             session_system_file=_status_persona_path()
         )
     statuses: dict[ProviderID, ProviderPressureStatus] = {}

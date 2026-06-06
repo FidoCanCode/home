@@ -1439,7 +1439,7 @@ def run(
     WebhookHandler.static_files = StaticFiles(
         Path(__file__).resolve().parent / "static"
     )
-    WebhookHandler.provider_factory = DefaultProviderFactory(
+    WebhookHandler.provider_factory = DefaultProviderFactory.real(
         session_system_file=config.sub_dir / "persona.md"
     )
     # Create the atomic FidoState cell here (composition root) and hand the

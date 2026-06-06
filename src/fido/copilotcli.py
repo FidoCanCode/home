@@ -37,9 +37,6 @@ from fido.infra import (
     Clock,
     PopenRunner,
     ProcessRunner,
-    RealClock,
-    RealPopenRunner,
-    RealProcessRunner,
 )
 from fido.provider import (
     OwnedSession,
@@ -72,11 +69,6 @@ _COPILOT_JSON_BASE_ARGS = (
     "-s",
 )
 _ACP_STREAM_LIMIT = 8 * 1024 * 1024
-
-# Default real-infra singletons — stateless or shared-safe.
-_REAL_CLOCK: Clock = RealClock()
-_REAL_POPEN_RUNNER: PopenRunner = RealPopenRunner()
-_REAL_PROCESS_RUNNER: ProcessRunner = RealProcessRunner()
 
 # ── Callable-Protocol collaborators ───────────────────────────────────────────
 
@@ -707,7 +699,7 @@ class CopilotACPRuntime:
         command: Sequence[str] = _COPILOT_COMMAND,
         spawn_agent_process: AgentProcessFactory = acp.spawn_agent_process,
         client_factory: ACPClientFactory | None = None,
-        popen: PopenRunner = _REAL_POPEN_RUNNER,
+        popen: PopenRunner,
         client_capabilities: ClientCapabilities | None = None,
         client_info: Implementation | None = None,
     ) -> None:
@@ -1095,6 +1087,7 @@ class CopilotCLISession(OwnedSession):
         repo_name: str | None = None,
         runtime: CopilotACPRuntime | None = None,
         runtime_factory: CopilotRuntimeFactory | None = None,
+        popen: PopenRunner | None = None,
         session_id: str | None = None,
         snapshot_publisher: provider.SnapshotPublisher | None = None,
         talker_resolver: provider.TalkerResolver = provider.get_talker,
@@ -1108,9 +1101,19 @@ class CopilotCLISession(OwnedSession):
             self._base_system_prompt = ""
         if runtime is not None:
             self._runtime = runtime
+        elif runtime_factory is not None:
+            self._runtime = runtime_factory(
+                work_dir=self._work_dir, repo_name=repo_name
+            )
         else:
-            factory = CopilotACPRuntime if runtime_factory is None else runtime_factory
-            self._runtime = factory(work_dir=self._work_dir, repo_name=repo_name)
+            if popen is None:
+                raise ValueError(
+                    "CopilotCLISession: popen is required when runtime and"
+                    " runtime_factory are both None"
+                )
+            self._runtime = CopilotACPRuntime(
+                work_dir=self._work_dir, repo_name=repo_name, popen=popen
+            )
         self._init_handler_reentry()
         self._pending_content: str | None = None
         self._last_turn_cancelled = False
@@ -1488,11 +1491,6 @@ class CopilotCLIAPI(ProviderAPI):
         )
 
 
-# Module-level real CopilotCLIAPI — shared-safe since CopilotCLIAPI tracks
-# quota errors in a lock, not per-instance transient connections.
-_REAL_COPILOT_API: "CopilotCLIAPI" = CopilotCLIAPI(clock=_REAL_CLOCK)
-
-
 class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
     """Injectable collaborator for Copilot CLI interactions."""
 
@@ -1502,7 +1500,8 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
 
     def __init__(
         self,
-        runner: ProcessRunner = _REAL_PROCESS_RUNNER,
+        runner: ProcessRunner,
+        popen: PopenRunner | None = None,
         session_fn: Callable[[], PromptSession] = provider.current_repo_session,
         session_factory: CopilotSessionFactory | None = None,
         session_system_file: Path | None = None,
@@ -1514,9 +1513,33 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
     ) -> None:
         self._runner = runner
         self._quota_api = api
-        self._session_factory = (
-            CopilotCLISession if session_factory is None else session_factory
-        )
+        if session_factory is not None:
+            self._session_factory = session_factory
+        else:
+            _popen = popen
+
+            def _default_session_factory(
+                system_file: Path,
+                *,
+                work_dir: Path | str,
+                model: ProviderModel | str,
+                repo_name: str | None = None,
+                session_id: str | None = None,
+                snapshot_publisher: provider.SnapshotPublisher | None = None,
+                talker_resolver: provider.TalkerResolver = provider.get_talker,
+            ) -> PromptSession:
+                return CopilotCLISession(
+                    system_file,
+                    work_dir=work_dir,
+                    model=model,
+                    repo_name=repo_name,
+                    popen=_popen,
+                    session_id=session_id,
+                    snapshot_publisher=snapshot_publisher,
+                    talker_resolver=talker_resolver,
+                )
+
+            self._session_factory = _default_session_factory
         super().__init__(
             session_fn=session_fn,
             session_system_file=session_system_file,
@@ -1664,13 +1687,11 @@ class CopilotCLI(Provider):
     def __init__(
         self,
         *,
-        api: CopilotCLIAPI = _REAL_COPILOT_API,
-        agent: ProviderAgent | None = None,
+        api: CopilotCLIAPI,
+        agent: ProviderAgent,
         session: PromptSession | None = None,
     ) -> None:
-        if agent is None:
-            agent = CopilotCLIClient(session=session, api=api)
-        elif session is not None:
+        if session is not None:
             agent.attach_session(session)
         self._api = api
         self._agent = agent

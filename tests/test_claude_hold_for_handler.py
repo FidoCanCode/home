@@ -8,6 +8,7 @@ import pytest
 
 from fido import provider
 from fido.claude import ClaudeSession
+from fido.infra import RealClock
 from fido.provider import SessionTalker, ThreadKind, talker_now
 
 # ── typed subprocess fakes ────────────────────────────────────────────────────
@@ -160,6 +161,7 @@ def _setup_session(
         repo_name=repo,
         model="claude-opus-4-6",
         register_talker=register_talker,
+        clock=RealClock(),
     )
 
 
@@ -235,6 +237,7 @@ def test_hold_preempt_fires_cancel_when_worker_holds(tmp_path: Path) -> None:
         repo_name="owner/repo",
         model="claude-opus-4-6",
         talker_resolver=fake_talker,
+        clock=RealClock(),
     )
     provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
@@ -264,6 +267,7 @@ def test_hold_preempt_no_fire_when_no_worker_holder(tmp_path: Path) -> None:
         repo_name="owner/repo",
         model="claude-opus-4-6",
         talker_resolver=lambda _repo: None,
+        clock=RealClock(),
     )
     provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
@@ -301,6 +305,7 @@ def test_hold_preempt_skipped_when_no_preempt_worker_flag(tmp_path: Path) -> Non
         repo_name="owner/repo",
         model="claude-opus-4-6",
         talker_resolver=fake_talker,
+        clock=RealClock(),
     )
     try:
         with session.hold_for_handler():  # preempt-always now lives in __enter__
@@ -383,6 +388,7 @@ def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
         selector=_FixedSelector(([proc.stdout], [], [])),
         repo_name="owner/repo",
         model="claude-opus-4-6",
+        clock=RealClock(),
     )
 
     worker_in_turn = threading.Event()
@@ -482,6 +488,7 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
         repo_name="owner/repo",
         model="claude-opus-4-6",
         talker_resolver=fake_talker,
+        clock=RealClock(),
     )
     provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:

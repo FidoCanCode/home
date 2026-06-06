@@ -1008,7 +1008,7 @@ def _make_thread(
         repo_cfg=repo_cfg,
         state_updater=state_updater,
         membership=repo_cfg.membership,
-        provider_factory=DefaultProviderFactory(
+        provider_factory=DefaultProviderFactory.real(
             session_system_file=default_sub_dir() / "persona.md"
         ),
         dispatcher=dispatchers[repo_cfg.name],
