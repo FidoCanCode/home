@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from typing import Protocol
 
-from fido.github import GitHub, GitHubSession, gh_token
+from fido.github import GitHub, GitHubFactory, RealGitHubFactory
 from fido.infra import RealClock, RealProcessRunner
 from fido.tasks import (
     AutoCompleter,
@@ -30,18 +30,13 @@ class SyncTasksFn(Protocol):
 def main(
     argv: list[str] | None = None,
     *,
-    _GitHub: type[GitHub] = GitHub,
+    github_factory: GitHubFactory,
     sync_tasks_fn: SyncTasksFn,
 ) -> None:
     args = sys.argv[1:] if argv is None else argv
     work_dir = Path(args[0]) if args else Path.cwd()
     runner = RealProcessRunner()
-    gh = _GitHub(
-        session=GitHubSession(),
-        runner=runner,
-        clock=RealClock(),
-        token_fetcher=lambda: gh_token(runner=runner),
-    )
+    gh = github_factory()
     sync_tasks_fn(
         work_dir,
         gh,
@@ -53,4 +48,7 @@ def main(
 if __name__ == "__main__":  # pragma: no cover
     from fido.tasks import sync_tasks
 
-    main(sync_tasks_fn=sync_tasks)
+    main(
+        github_factory=RealGitHubFactory(RealProcessRunner(), RealClock()),
+        sync_tasks_fn=sync_tasks,
+    )

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any, Protocol
 
-from fido.github import GitHub, GitHubSession, gh_token
+from fido.github import GitHub, GitHubFactory, RealGitHubFactory
 from fido.infra import ProcessRunner, RealClock, RealProcessRunner
 from fido.tasks import (
     RealBackgroundSyncer,
@@ -111,19 +111,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(
     argv: list[str] | None = None,
     *,
-    _GitHub: type[GitHub] = GitHub,
+    github_factory: GitHubFactory,
     parser_factory: ParserFactory,
 ) -> None:
     parser = parser_factory()
     args = parser.parse_args(argv)
     runner = RealProcessRunner()
     cmd = Cmd(
-        github=_GitHub(
-            session=GitHubSession(),
-            runner=runner,
-            clock=RealClock(),
-            token_fetcher=lambda: gh_token(runner=runner),
-        ),
+        github=github_factory(),
         runner=runner,
     )
 
@@ -147,4 +142,7 @@ def main(
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main(parser_factory=build_parser)
+    main(
+        github_factory=RealGitHubFactory(RealProcessRunner(), RealClock()),
+        parser_factory=build_parser,
+    )

@@ -65,20 +65,9 @@ class _FakeGitHub:
     ``resolve_thread``.  ``get_pull_comments`` is included because some tests
     set it up (legacy of an earlier implementation path) even though the
     current oracle path does not call it.
-
-    Accepts the same constructor signature as :class:`~fido.github.GitHub`
-    so it can be passed as ``_GitHub=_FakeGitHub`` to :func:`~fido.cli.main`.
     """
 
-    def __init__(
-        self,
-        token: str | None = None,
-        session: object = None,
-        *,
-        runner: object = None,
-        clock: object = None,
-        token_fetcher: object = None,
-    ) -> None:
+    def __init__(self) -> None:
         self.get_user: _FakeCallRecorder = _FakeCallRecorder(return_value="")
         self.get_pull_comments: _FakeCallRecorder = _FakeCallRecorder(return_value=[])
         self.get_review_threads: _FakeCallRecorder = _FakeCallRecorder(return_value=[])
@@ -522,9 +511,9 @@ class TestMain:
         _task_file(tmp_path)
         main(
             [str(tmp_path), "add", "spec", "task title"],
-            _GitHub=_FakeGitHub,
+            github_factory=lambda: _FakeGitHub(),
             parser_factory=build_parser,
-        )  # type: ignore[arg-type]
+        )
         capsys.readouterr()
 
         tasks = Tasks(tmp_path).list()
@@ -547,7 +536,7 @@ class TestMain:
                 "--pr",
                 "3",
             ],
-            _GitHub=_FakeGitHub,  # type: ignore[arg-type]
+            github_factory=lambda: _FakeGitHub(),
             parser_factory=build_parser,
         )
         capsys.readouterr()
@@ -561,16 +550,16 @@ class TestMain:
         _task_file(tmp_path)
         main(
             [str(tmp_path), "add", "spec", "finish me"],
-            _GitHub=_FakeGitHub,
+            github_factory=lambda: _FakeGitHub(),
             parser_factory=build_parser,
-        )  # type: ignore[arg-type]
+        )
         out = capsys.readouterr().out
         task_id = json.loads(out)["id"]
         main(
             [str(tmp_path), "complete", task_id],
-            _GitHub=_FakeGitHub,
+            github_factory=lambda: _FakeGitHub(),
             parser_factory=build_parser,
-        )  # type: ignore[arg-type]
+        )
 
         assert Tasks(tmp_path).list()[0]["status"] == "completed"
 
@@ -580,18 +569,22 @@ class TestMain:
         _task_file(tmp_path)
         main(
             [str(tmp_path), "add", "spec", "one"],
-            _GitHub=_FakeGitHub,
+            github_factory=lambda: _FakeGitHub(),
             parser_factory=build_parser,
-        )  # type: ignore[arg-type]
+        )
         capsys.readouterr()
-        main([str(tmp_path), "list"], _GitHub=_FakeGitHub, parser_factory=build_parser)  # type: ignore[arg-type]
+        main(
+            [str(tmp_path), "list"],
+            github_factory=lambda: _FakeGitHub(),
+            parser_factory=build_parser,
+        )
         out = capsys.readouterr().out
         data = json.loads(out)
         assert data[0]["title"] == "one"
 
     def test_no_args_exits(self) -> None:
         with pytest.raises(SystemExit):
-            main([], parser_factory=build_parser)
+            main([], github_factory=lambda: _FakeGitHub(), parser_factory=build_parser)
 
     def test_unknown_command_raises(self, tmp_path: Path) -> None:
         """Fallback case in match statement raises AssertionError."""
@@ -599,4 +592,8 @@ class TestMain:
         fake_parser = _FakeParser(fake_args)
 
         with pytest.raises(AssertionError, match="unreachable"):
-            main([], _GitHub=_FakeGitHub, parser_factory=lambda: fake_parser)  # type: ignore[arg-type]
+            main(
+                [],
+                github_factory=lambda: _FakeGitHub(),
+                parser_factory=lambda: fake_parser,
+            )

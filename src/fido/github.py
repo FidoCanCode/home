@@ -1661,3 +1661,33 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
             resp.raise_for_status()
             parts.append(resp.text)
         return "".join(parts)
+
+
+class GitHubFactory(Protocol):
+    """Typed collaborator: produce a :class:`GitHub` client."""
+
+    def __call__(self) -> GitHub: ...
+
+
+class RealGitHubFactory:
+    """Produce a :class:`GitHub` wired to real infrastructure.
+
+    Encapsulates the :class:`GitHubSession` + :class:`~fido.infra.ProcessRunner`
+    + :class:`~fido.infra.Clock` + :func:`gh_token` assembly so composition
+    roots don't repeat it.  Pass *runner* and *clock* from the caller's
+    :func:`~fido.infra.real_infra` bundle — or from freshly created
+    :class:`~fido.infra.RealProcessRunner` /
+    :class:`~fido.infra.RealClock` instances for stand-alone entry points.
+    """
+
+    def __init__(self, runner: ProcessRunner, clock: Clock) -> None:
+        self._runner = runner
+        self._clock = clock
+
+    def __call__(self) -> GitHub:
+        return GitHub(
+            session=GitHubSession(),
+            runner=self._runner,
+            clock=self._clock,
+            token_fetcher=lambda: gh_token(runner=self._runner),
+        )

@@ -38,7 +38,7 @@ class _FakeSyncTasks:
 def test_main_syncs_explicit_work_dir(tmp_path: Path) -> None:
     fake_sync = _FakeSyncTasks()
 
-    main([str(tmp_path)], _GitHub=_FakeGitHub, sync_tasks_fn=fake_sync)
+    main([str(tmp_path)], github_factory=lambda: _FakeGitHub(), sync_tasks_fn=fake_sync)
 
     assert len(fake_sync.calls) == 1
     assert fake_sync.calls[0][0] == tmp_path
@@ -47,7 +47,7 @@ def test_main_syncs_explicit_work_dir(tmp_path: Path) -> None:
 def test_main_defaults_to_cwd() -> None:
     fake_sync = _FakeSyncTasks()
 
-    main([], _GitHub=_FakeGitHub, sync_tasks_fn=fake_sync)
+    main([], github_factory=lambda: _FakeGitHub(), sync_tasks_fn=fake_sync)
 
     assert len(fake_sync.calls) == 1
     assert fake_sync.calls[0][0] == Path.cwd()

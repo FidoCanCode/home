@@ -38,9 +38,8 @@ from fido.events import (
 )
 from fido.github import (
     GitHub,
-    GitHubSession,
+    GitHubFactory,
     GraphQLError,
-    gh_token,
 )
 from fido.infra import (
     Clock,
@@ -1382,7 +1381,7 @@ def run(
     _preflight_tools: ToolsPreflight = preflight_tools,
     _preflight_sub_dir: SubDirPreflight = preflight_sub_dir,
     _preflight_gh_auth: GhAuthPreflight = preflight_gh_auth,
-    _GitHub: type[GitHub] = GitHub,
+    github_factory: GitHubFactory,
     _bootstrap_issue_caches: IssueCacheBootstrapper = bootstrap_issue_caches,
 ) -> None:
     config = _from_args()
@@ -1422,12 +1421,7 @@ def run(
     infra = real_infra()
     WebhookHandler.infra = infra
 
-    gh = _GitHub(
-        session=GitHubSession(),
-        runner=infra.proc,
-        clock=infra.clock,
-        token_fetcher=lambda: gh_token(runner=infra.proc),
-    )
+    gh = github_factory()
     try:
         _preflight_tools(infra.fs)
         _preflight_sub_dir(config, infra.fs)

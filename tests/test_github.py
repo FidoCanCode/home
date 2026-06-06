@@ -9,6 +9,7 @@ from fido.github import (
     GitHub,
     GitHubSession,
     GraphQLError,
+    RealGitHubFactory,
     TokenFetcher,
     _has_closing_keyword,  # noqa: PLC2701
     _pr_state_str,  # noqa: PLC2701
@@ -3717,3 +3718,16 @@ class TestGitHubClass:
         ]
         result = gh.get_reviews("o/r", 10)
         assert result["isDraft"] is True
+
+
+# ── RealGitHubFactory ─────────────────────────────────────────────────────────
+
+
+class TestRealGitHubFactory:
+    def test_call_returns_github_instance(self) -> None:
+        fake_run = _FakeCallable(return_value=_completed("test-token\n"))
+        runner = _FakeProcessRunner(fake_run)
+        clock = _FakeClock()
+        factory = RealGitHubFactory(runner, clock)
+        gh = factory()
+        assert isinstance(gh, GitHub)
