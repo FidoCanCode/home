@@ -86,17 +86,31 @@ class StreamingRunner(Protocol):
         ...
 
 
-class ClaudeSessionFactory(Protocol):
-    """Creates a new :class:`ClaudeSession`-compatible prompt session.
+class ClaudeSessionFactory:  # pragma: no cover
+    """Creates a new :class:`ClaudeSession` bound to a specific repo.
 
-    Instances are configured with a specific ``work_dir`` and ``repo_name``
-    at construction time (via :class:`ClaudeSessionFactoryMaker`), so
-    per-call parameters are limited to the values that genuinely vary per
-    session: ``system_file``, ``model``, ``session_id``, and
-    ``snapshot_publisher``.
+    ``work_dir``, ``repo_name``, and the infrastructure collaborators are
+    fixed at construction time; :meth:`create` is called once per session
+    with the values that genuinely vary: ``system_file``, ``model``,
+    ``session_id``, and ``snapshot_publisher``.
     """
 
-    def __call__(
+    def __init__(
+        self,
+        *,
+        work_dir: Path | str | None,
+        repo_name: str | None,
+        popen: PopenRunner,
+        selector: IOSelector,
+        clock: Clock,
+    ) -> None:
+        self._work_dir = work_dir
+        self._repo_name = repo_name
+        self._popen = popen
+        self._selector = selector
+        self._clock = clock
+
+    def create(
         self,
         system_file: Path,
         *,
@@ -104,26 +118,22 @@ class ClaudeSessionFactory(Protocol):
         session_id: str | None,
         snapshot_publisher: provider.SnapshotPublisher,
     ) -> PromptSession:
-        """Create and return a new prompt session."""
-        ...
-
-
-class ClaudeSessionFactoryMaker(Protocol):
-    """Constructs a :class:`ClaudeSessionFactory` bound to a specific repo.
-
-    Called once per :class:`~fido.claude.ClaudeClient` instance with the
-    ``work_dir`` and ``repo_name`` for that client's repository, returning a
-    factory that always spawns sessions in that directory.
-    """
-
-    def __call__(
-        self,
-        *,
-        work_dir: Path | str | None,
-        repo_name: str | None,
-    ) -> ClaudeSessionFactory:
-        """Return a factory configured for *work_dir* / *repo_name*."""
-        ...
+        """Spawn and return a new :class:`ClaudeSession`."""
+        return ClaudeSession(
+            system_file,
+            self._work_dir,
+            model,
+            1800.0,
+            popen=self._popen,
+            selector=self._selector,
+            clock=self._clock,
+            repo_name=self._repo_name,
+            session_id=session_id,
+            tools=None,
+            snapshot_publisher=snapshot_publisher,
+            talker_resolver=None,
+            register_talker=None,
+        )
 
 
 class _RealStreamingRunner:  # pragma: no cover  # pyright: ignore[reportUnusedClass]
@@ -1955,91 +1965,6 @@ class ClaudeAPI(ProviderAPI):
             return snapshot
 
 
-class _RealClaudeSessionFactory:  # pragma: no cover
-    """Real :class:`ClaudeSessionFactory` that spawns :class:`ClaudeSession` instances.
-
-    Not tested directly — :class:`ClaudeSession` is tested via its own suite;
-    this class is just the bridge from :class:`ClaudeClient` to it.
-
-    ``work_dir`` and ``repo_name`` are fixed at construction time via
-    :class:`_RealClaudeSessionFactoryMaker`; they do not change for the
-    lifetime of the factory object.
-    """
-
-    def __init__(
-        self,
-        *,
-        work_dir: Path | str | None,
-        repo_name: str | None,
-        popen: PopenRunner,
-        selector: IOSelector,
-        clock: Clock,
-    ) -> None:
-        self._work_dir = work_dir
-        self._repo_name = repo_name
-        self._popen = popen
-        self._selector = selector
-        self._clock = clock
-
-    def __call__(
-        self,
-        system_file: Path,
-        *,
-        model: ProviderModel,
-        session_id: str | None,
-        snapshot_publisher: provider.SnapshotPublisher,
-    ) -> PromptSession:
-        return ClaudeSession(
-            system_file,
-            self._work_dir,
-            model,
-            1800.0,
-            popen=self._popen,
-            selector=self._selector,
-            clock=self._clock,
-            repo_name=self._repo_name,
-            session_id=session_id,
-            tools=None,
-            snapshot_publisher=snapshot_publisher,
-            talker_resolver=None,
-            register_talker=None,
-        )
-
-
-class _RealClaudeSessionFactoryMaker:  # pragma: no cover  # pyright: ignore[reportUnusedClass]
-    """Real :class:`ClaudeSessionFactoryMaker` that constructs per-repo factories.
-
-    Holds the infra collaborators (popen / selector / clock) shared across all
-    repos; the per-call ``work_dir`` / ``repo_name`` are baked into each
-    returned factory instance.
-    """
-
-    def __init__(
-        self,
-        *,
-        popen: PopenRunner,
-        selector: IOSelector,
-        clock: Clock,
-    ) -> None:
-        self._popen = popen
-        self._selector = selector
-        self._clock = clock
-
-    def __call__(
-        self,
-        *,
-        work_dir: Path | str | None,
-        repo_name: str | None,
-    ) -> ClaudeSessionFactory:
-        return _RealClaudeSessionFactory(
-            work_dir=work_dir,
-            repo_name=repo_name,
-            popen=self._popen,
-            selector=self._selector,
-            clock=self._clock,
-        )
-
-
 class ClaudeClient(SessionBackedAgent, ProviderAgent):
     """Injectable collaborator for one-shot Claude CLI interactions.
 
@@ -2097,7 +2022,7 @@ class ClaudeClient(SessionBackedAgent, ProviderAgent):
         system_file = self._session_system_file
         assert system_file is not None
         assert self._work_dir is not None
-        return self._session_factory(
+        return self._session_factory.create(
             system_file,
             model=model,
             session_id=session_id,

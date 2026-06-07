@@ -114,10 +114,13 @@ class _NoopStreamingRunner:
         return iter([])
 
 
-class _NoopSessionFactory:
+class _NoopSessionFactory(ClaudeSessionFactory):
     """ClaudeSessionFactory stub that always raises — for tests that don't spawn sessions."""
 
-    def __call__(
+    def __init__(self) -> None:
+        pass  # no real infra needed in this stub
+
+    def create(
         self,
         system_file: object,
         *,
@@ -3592,7 +3595,8 @@ class TestClaudeClientSessionAttachment:
         self, tmp_path: Path
     ) -> None:
         session = MagicMock()
-        session_factory = MagicMock(return_value=session)
+        session_factory = MagicMock()
+        session_factory.create.return_value = session
         client = _cc(
             session_factory=session_factory,
             session_system_file=tmp_path / "persona.md",
@@ -3607,7 +3611,7 @@ class TestClaudeClientSessionAttachment:
             )
             == "ok"
         )
-        session_factory.assert_called_once_with(
+        session_factory.create.assert_called_once_with(
             tmp_path / "persona.md",
             model="claude-opus-4-6",
             session_id=None,

@@ -13,10 +13,8 @@ from fido.claude import (
     ClaudeClient,
     ClaudeCode,
     ClaudeSessionFactory,
-    ClaudeSessionFactoryMaker,
     StreamingRunner,
     _load_claude_oauth_state,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
-    _RealClaudeSessionFactoryMaker,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     _RealStreamingRunner,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
 from fido.codex import Codex, CodexAPI, CodexClient
@@ -48,13 +46,19 @@ class DefaultProviderFactory:
         self,
         *,
         session_system_file: Path,
-        claude_session_factory_maker: ClaudeSessionFactoryMaker,
+        claude_popen: PopenRunner,
+        claude_selector: IOSelector,
+        claude_clock: Clock,
+        claude_session_factory_class: type[ClaudeSessionFactory],
         claude_streaming_runner: StreamingRunner,
         copilot_process_runner: ProcessRunner,
         copilot_popen_runner: PopenRunner,
     ) -> None:
         self._session_system_file = session_system_file
-        self._claude_session_factory_maker = claude_session_factory_maker
+        self._claude_popen = claude_popen
+        self._claude_selector = claude_selector
+        self._claude_clock = claude_clock
+        self._claude_session_factory_class = claude_session_factory_class
         self._claude_streaming_runner = claude_streaming_runner
         self._copilot_process_runner = copilot_process_runner
         self._copilot_popen_runner = copilot_popen_runner
@@ -69,11 +73,10 @@ class DefaultProviderFactory:
         clock: Clock = RealClock()
         return cls(
             session_system_file=session_system_file,
-            claude_session_factory_maker=_RealClaudeSessionFactoryMaker(
-                popen=popen,
-                selector=selector,
-                clock=clock,
-            ),
+            claude_popen=popen,
+            claude_selector=selector,
+            claude_clock=clock,
+            claude_session_factory_class=ClaudeSessionFactory,
             claude_streaming_runner=_RealStreamingRunner(
                 popen=popen,
                 selector=selector,
@@ -117,14 +120,17 @@ class DefaultProviderFactory:
             case ProviderID.CLAUDE_CODE:
                 claude_api = self.create_api(repo_cfg)
                 assert isinstance(claude_api, ClaudeAPI)
-                factory: ClaudeSessionFactory = self._claude_session_factory_maker(
-                    work_dir=work_dir, repo_name=repo_name
-                )
                 return ClaudeCode(
                     api=claude_api,
                     agent=ClaudeClient(
                         streaming_runner=self._claude_streaming_runner,
-                        session_factory=factory,
+                        session_factory=self._claude_session_factory_class(
+                            work_dir=work_dir,
+                            repo_name=repo_name,
+                            popen=self._claude_popen,
+                            selector=self._claude_selector,
+                            clock=self._claude_clock,
+                        ),
                         session_fn=_provider.current_repo_session,
                         session_system_file=self._session_system_file,
                         work_dir=work_dir,

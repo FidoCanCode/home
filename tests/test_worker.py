@@ -21,9 +21,15 @@ from fido import provider
 from fido.appstate import (
     _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
-from fido.claude import ClaudeClient, StreamingRunner
+from fido.claude import ClaudeClient, ClaudeSessionFactory, StreamingRunner
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
-from fido.infra import RealClock, RealOsProcess, RealPopenRunner, RealProcessRunner
+from fido.infra import (
+    RealClock,
+    RealIOSelector,
+    RealOsProcess,
+    RealPopenRunner,
+    RealProcessRunner,
+)
 from fido.issue_cache import IssueCache, IssueNode
 from fido.nudges import Nudges
 from fido.prompts import Prompts
@@ -310,7 +316,7 @@ class Worker(_WorkerBase):
             kwargs["nudges"] = Nudges()
         if "provider_factory" not in kwargs:
             kwargs["provider_factory"] = _factory_with_claude_spy(
-                _no_spawn_session_factory
+                _NoSpawnSessionFactory
             )
         if "prompt_builder" not in kwargs:
             kwargs["prompt_builder"] = worker_module._DEFAULT_PROMPT_BUILDER  # pyright: ignore[reportPrivateUsage]
@@ -364,7 +370,7 @@ class WorkerThread(_WorkerThreadBase):
             )
         if "provider_factory" not in kwargs:
             kwargs["provider_factory"] = _factory_with_claude_spy(
-                _no_spawn_session_factory
+                _NoSpawnSessionFactory
             )
         if "issue_cache" not in kwargs:
             kwargs["issue_cache"] = IssueCache(repo_name)
@@ -377,12 +383,20 @@ class WorkerThread(_WorkerThreadBase):
         super().__init__(work_dir, repo_name, gh, *args, **kwargs)
 
 
-def _no_spawn_session_factory(*_args: object, **_kwargs: object) -> MagicMock:
-    """Factory-maker that returns a MagicMock factory; injected as
-    ``claude_session_factory_maker`` so no real subprocess is spawned when
-    tests call ``Worker.run()`` or run the ``WorkerThread`` loop.  Replaces
-    the old autouse ``_no_claude_session_spawn`` monkeypatch.setattr fixture."""
-    return MagicMock()
+class _NoSpawnSessionFactory(ClaudeSessionFactory):
+    """ClaudeSessionFactory subclass that returns a MagicMock instead of spawning a
+    real subprocess.  Injected as ``claude_session_factory_class`` so tests that
+    call ``Worker.run()`` or drive the ``WorkerThread`` loop don't hit the OS."""
+
+    def create(
+        self,
+        system_file: object,
+        *,
+        model: object,
+        session_id: object,
+        snapshot_publisher: object,
+    ) -> MagicMock:  # type: ignore[override]
+        return MagicMock()
 
 
 class _NoopStreamingRunner:
@@ -403,78 +417,91 @@ _NOOP_SR: StreamingRunner = _NoopStreamingRunner()  # type: ignore[assignment]
 
 
 def _factory_with_claude_spy(
-    spy: object,
+    spy_class: type[ClaudeSessionFactory],
     session_system_file: Path | None = None,
 ) -> DefaultProviderFactory:
-    """DefaultProviderFactory with injected ClaudeSessionFactory maker and noop copilot infra."""
+    """DefaultProviderFactory wired with a spy ClaudeSessionFactory class and noop copilot infra."""
     return DefaultProviderFactory(
         session_system_file=session_system_file or default_sub_dir() / "persona.md",
-        claude_session_factory_maker=spy,
+        claude_popen=RealPopenRunner(),
+        claude_selector=RealIOSelector(),
+        claude_clock=RealClock(),
+        claude_session_factory_class=spy_class,
         claude_streaming_runner=_NOOP_SR,
         copilot_process_runner=RealProcessRunner(),
         copilot_popen_runner=RealPopenRunner(),
     )
 
 
-class _SpySessionFactory:
-    """Two-level spy for ``create_session`` tests.
+class _SpySessionFactory(ClaudeSessionFactory):
+    """ClaudeSessionFactory subclass that records ``create()`` calls for assertions.
 
-    Acts as both a factory-maker (``__call__(work_dir=…, repo_name=…)``) and
-    the factory it returns (``__call__(system_file, model=…, …)``).  The first
-    call (no positional args) is the *maker* invocation from
-    ``DefaultProviderFactory.create_provider``; subsequent calls (with a
-    positional ``system_file``) are the *factory* invocations from
-    ``ClaudeClient._spawn_owned_session``.
-
-    Injected as ``claude_session_factory_maker`` via ``DefaultProviderFactory``.
+    Injected as ``claude_session_factory_class`` via ``_factory_with_claude_spy``.
+    After ``worker.create_session()`` the live instance is retrievable via
+    ``worker._provider.agent._session_factory``.
     """
 
-    def __init__(self, return_value: object = None) -> None:
-        self._return_value: object = (
-            return_value if return_value is not None else MagicMock()
+    def __init__(
+        self,
+        *,
+        work_dir: object,
+        repo_name: object,
+        popen: object,
+        selector: object,
+        clock: object,
+    ) -> None:
+        super().__init__(  # type: ignore[call-arg]
+            work_dir=work_dir,
+            repo_name=repo_name,
+            popen=popen,  # type: ignore[arg-type]
+            selector=selector,  # type: ignore[arg-type]
+            clock=clock,  # type: ignore[arg-type]
         )
-        self._maker_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-        self._factory_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        self._init_kwargs: dict[str, object] = {
+            "work_dir": work_dir,
+            "repo_name": repo_name,
+        }
+        self._create_calls: list[dict[str, object]] = []
+        self.session_mock: MagicMock = MagicMock()
 
-    def __call__(self, *args: object, **kwargs: object) -> object:
-        if args:
-            # Factory invocation: first positional arg is system_file
-            self._factory_calls.append((args, kwargs))
-            return self._return_value
-        else:
-            # Maker invocation: keyword-only (work_dir, repo_name)
-            self._maker_calls.append((args, kwargs))
-            return self  # self is also the factory
-
-    @property
-    def return_value(self) -> object:
-        return self._return_value
-
-    @return_value.setter
-    def return_value(self, val: object) -> None:
-        self._return_value = val
+    def create(
+        self,
+        system_file: object,
+        *,
+        model: object,
+        session_id: object,
+        snapshot_publisher: object,
+    ) -> MagicMock:  # type: ignore[override]
+        self._create_calls.append(
+            {
+                "system_file": system_file,
+                "model": model,
+                "session_id": session_id,
+                "snapshot_publisher": snapshot_publisher,
+            }
+        )
+        return self.session_mock
 
     def assert_session_created_once(self) -> None:
-        """Assert the factory was called (session created) exactly once."""
-        assert len(self._factory_calls) == 1, (
-            f"Expected 1 factory call, got {len(self._factory_calls)}"
+        """Assert ``create()`` was called exactly once."""
+        assert len(self._create_calls) == 1, (
+            f"Expected 1 create() call, got {len(self._create_calls)}"
         )
 
     @property
-    def maker_kwargs(self) -> dict[str, object]:
-        """kwargs from the last maker call (work_dir, repo_name)."""
-        assert self._maker_calls, "No maker calls recorded"
-        return self._maker_calls[-1][1]
+    def init_kwargs(self) -> dict[str, object]:
+        """kwargs recorded at ``__init__`` time (work_dir, repo_name)."""
+        return self._init_kwargs
 
     @property
     def factory_kwargs(self) -> dict[str, object]:
-        """kwargs from the last factory call (model, session_id, snapshot_publisher)."""
-        assert self._factory_calls, "No factory calls recorded"
-        return self._factory_calls[-1][1]
+        """kwargs from the last ``create()`` call (model, session_id, …)."""
+        assert self._create_calls, "No create() calls recorded"
+        return self._create_calls[-1]
 
     @property
     def call_count(self) -> int:
-        return len(self._factory_calls)
+        return len(self._create_calls)
 
 
 class _FakeWorker:
@@ -1370,51 +1397,53 @@ class TestWorker:
     # --- create_session / stop_session ---
 
     def test_create_session_instantiates_claude_session(self, tmp_path: Path) -> None:
-        spy = _SpySessionFactory()
         worker = Worker(
             tmp_path,
             MagicMock(),
             registry=MagicMock(spec=ActivityReporter),
-            provider_factory=_factory_with_claude_spy(spy),
+            provider_factory=_factory_with_claude_spy(_SpySessionFactory),
         )
         worker.create_session()
+        spy = worker._provider.agent._session_factory  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(spy, _SpySessionFactory)
         spy.assert_session_created_once()
 
     def test_create_session_passes_work_dir(self, tmp_path: Path) -> None:
-        spy = _SpySessionFactory()
         worker = Worker(
             tmp_path,
             MagicMock(),
             registry=MagicMock(spec=ActivityReporter),
-            provider_factory=_factory_with_claude_spy(spy),
+            provider_factory=_factory_with_claude_spy(_SpySessionFactory),
         )
         worker.create_session()
-        assert spy.maker_kwargs.get("work_dir") == tmp_path
+        spy = worker._provider.agent._session_factory  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(spy, _SpySessionFactory)
+        assert spy.init_kwargs.get("work_dir") == tmp_path
 
     def test_create_session_switches_to_opus(self, tmp_path: Path) -> None:
-        mock_session = MagicMock()
-        spy = _SpySessionFactory(return_value=mock_session)
         worker = Worker(
             tmp_path,
             MagicMock(),
             registry=MagicMock(spec=ActivityReporter),
-            provider_factory=_factory_with_claude_spy(spy),
+            provider_factory=_factory_with_claude_spy(_SpySessionFactory),
         )
         worker.create_session()
+        spy = worker._provider.agent._session_factory  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(spy, _SpySessionFactory)
         assert spy.factory_kwargs.get("model") == "claude-opus-4-6"
-        mock_session.switch_model.assert_not_called()
+        spy.session_mock.switch_model.assert_not_called()
 
     def test_create_session_stores_on_self(self, tmp_path: Path) -> None:
-        mock_session = MagicMock()
-        spy = _SpySessionFactory(return_value=mock_session)
         worker = Worker(
             tmp_path,
             MagicMock(),
             registry=MagicMock(spec=ActivityReporter),
-            provider_factory=_factory_with_claude_spy(spy),
+            provider_factory=_factory_with_claude_spy(_SpySessionFactory),
         )
         worker.create_session()
-        assert worker._provider.agent.session is mock_session  # pyright: ignore[reportPrivateUsage]
+        spy = worker._provider.agent._session_factory  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(spy, _SpySessionFactory)
+        assert worker._provider.agent.session is spy.session_mock  # pyright: ignore[reportPrivateUsage]
 
     def test_ensure_provider_creates_provider_from_repo_cfg(
         self, tmp_path: Path
