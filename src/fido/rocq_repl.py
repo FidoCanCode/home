@@ -10,12 +10,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import IO, Any
+from typing import IO, Any, Protocol
 
+from fido.infra import ProcessRunner, RealProcessRunner
 from fido.rocq_pymap import PyMap, PyMapError
 
 _IMPORT_MODULES = {
@@ -38,6 +38,30 @@ _IMPORT_NAMES = {
     "dataclass",
     "islice",
 }
+
+
+class ModuleImporter(Protocol):
+    """Imports a Python module from a generated Rocq extraction path."""
+
+    def __call__(self, path: Path) -> ModuleType:
+        """Import and return the module at *path*."""
+        ...
+
+
+class ReferenceFactory(Protocol):
+    """Creates an :class:`OcamlReference` (or compatible object) for comparison."""
+
+    def __call__(self, repo_root: Path, model: "LoadedModel", stderr: IO[str]) -> Any:  # noqa: ANN401
+        """Construct and return a reference evaluator."""
+        ...
+
+
+class ConsoleFactory(Protocol):
+    """Creates an interactive console over a namespace."""
+
+    def __call__(self, namespace: dict[str, object]) -> Any:  # noqa: ANN401
+        """Construct and return an interactive console."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -179,12 +203,18 @@ class ReferenceInvocation:
         return f"{module_name}.{constructor}"
 
 
+def _default_module_importer(path: Path) -> ModuleType:
+    """Import the Rocq-extracted Python module at *path* via :mod:`importlib`."""
+    module_name = f"fido.rocq.{path.stem}"
+    return importlib.import_module(module_name)
+
+
 class ModelLoader:
     def __init__(
         self,
         repo_root: Path,
         stderr: IO[str],
-        importer: Callable[[Path], ModuleType] | None = None,
+        importer: ModuleImporter = _default_module_importer,
     ) -> None:
         self._repo_root = repo_root
         self._stderr = stderr
@@ -244,10 +274,7 @@ class ModelLoader:
         return marker in path.read_text()
 
     def _import_module(self, path: Path) -> ModuleType:
-        if self._importer is not None:
-            return self._importer(path)
-        module_name = f"fido.rocq.{path.stem}"
-        return importlib.import_module(module_name)
+        return self._importer(path)
 
     def _public_symbols(self, module: ModuleType) -> dict[str, object]:
         public: dict[str, object] = {}
@@ -317,18 +344,21 @@ class ValueNormalizer:
         return repr(value)
 
 
+_REAL_RUNNER: ProcessRunner = RealProcessRunner()
+
+
 class OcamlReference:
     def __init__(
         self,
         repo_root: Path,
         model: LoadedModel,
         stderr: IO[str],
-        run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        runner: ProcessRunner = _REAL_RUNNER,
     ) -> None:
         self._repo_root = repo_root
         self._model = model
         self._stderr = stderr
-        self._run = run
+        self._runner = runner
 
     def evaluate(self, invocation: ReferenceInvocation) -> str:
         with tempfile.TemporaryDirectory(prefix="rocq-repl-") as raw:
@@ -449,7 +479,7 @@ class OcamlReference:
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["PATH"] = f"/home/opam/.opam/5.3/bin:{env.get('PATH', '')}"
-        result = self._run(
+        result = self._runner.run(
             argv,
             cwd=cwd,
             env=env,
@@ -463,6 +493,13 @@ class OcamlReference:
         return result
 
 
+def _default_console_factory(
+    namespace: dict[str, object],
+) -> code.InteractiveConsole:  # pragma: no cover
+    """Create an :class:`code.InteractiveConsole` over *namespace*."""
+    return code.InteractiveConsole(locals=namespace)
+
+
 class RocqRepl:
     def __init__(
         self,
@@ -471,22 +508,16 @@ class RocqRepl:
         stdout: IO[str],
         stderr: IO[str],
         *,
-        reference_factory: Callable[[Path, LoadedModel, IO[str]], Any] | None = None,
-        console_factory: Callable[[dict[str, object]], Any] | None = None,
+        reference_factory: ReferenceFactory = OcamlReference,
+        console_factory: ConsoleFactory = _default_console_factory,
     ) -> None:
         self._repo_root = repo_root
         self._stdin = stdin
         self._stdout = stdout
         self._stderr = stderr
         self._normalizer = ValueNormalizer()
-        self._reference_factory: Callable[[Path, LoadedModel, IO[str]], Any] = (
-            reference_factory if reference_factory is not None else OcamlReference
-        )
-        self._console_factory: Callable[[dict[str, object]], Any] = (
-            console_factory
-            if console_factory is not None
-            else lambda ns: code.InteractiveConsole(locals=ns)
-        )
+        self._reference_factory = reference_factory
+        self._console_factory = console_factory
 
     def run(self, argv: list[str]) -> int:
         parser = argparse.ArgumentParser(

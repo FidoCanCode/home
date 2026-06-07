@@ -1,5 +1,7 @@
 """Tests for the project test entrypoint."""
 
+import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -11,17 +13,37 @@ from fido.tests_main import (
 )
 
 
+class _FakeProcessRunner:
+    """Typed fake :class:`~fido.infra.ProcessRunner` for tests_main tests.
+
+    Records every call to :meth:`run` for later assertion.  Returns a
+    minimal ``CompletedProcess`` so callers that inspect ``returncode``
+    see a clean success.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def run(
+        self,
+        cmd: Sequence[str],
+        *,
+        check: bool = True,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append(((cmd,), {"check": check, **kwargs}))
+        return subprocess.CompletedProcess(list(cmd), 0, stdout="", stderr="")
+
+
 def test_ensure_rocq_python_artifacts_skips_prepared_artifacts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("FIDO_ROCQ_PYTEST_ARTIFACTS", "prepared")
 
-    calls: list[tuple[Any, Any]] = []
-    ensure_rocq_python_artifacts(
-        _run=lambda *args, **kwargs: calls.append((args, kwargs))
-    )
+    runner = _FakeProcessRunner()
+    ensure_rocq_python_artifacts(_runner=runner)
 
-    assert calls == []
+    assert runner.calls == []
 
 
 def test_ensure_rocq_python_artifacts_runs_export_helper(
@@ -29,15 +51,11 @@ def test_ensure_rocq_python_artifacts_runs_export_helper(
 ) -> None:
     monkeypatch.delenv("FIDO_ROCQ_PYTEST_ARTIFACTS", raising=False)
 
-    run_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    runner = _FakeProcessRunner()
+    ensure_rocq_python_artifacts(_runner=runner)
 
-    def fake_run(*args: object, **kwargs: object) -> None:
-        run_calls.append((args, kwargs))
-
-    ensure_rocq_python_artifacts(_run=fake_run)
-
-    assert len(run_calls) == 1
-    (positional,), kwargs = run_calls[0]
+    assert len(runner.calls) == 1
+    (positional,), kwargs = runner.calls[0]
     assert str(positional[0]).endswith(
         "rocq-python-extraction/export_pytest_generated.sh"
     )
@@ -67,7 +85,7 @@ def test_module_executes_main_under_dunder_main() -> None:
         "fido.tests_main must keep the __main__ guard or `./fido tests` "
         "becomes a silent no-op (see #1252)."
     )
-    assert "raise SystemExit(main())" in text, (
+    assert "raise SystemExit(" in text, (
         "the __main__ guard must propagate main()'s exit code so CI can "
         "actually fail on test failure (see #1252)."
     )

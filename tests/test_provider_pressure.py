@@ -104,7 +104,8 @@ class _FakeProviderFactory(DefaultProviderFactory):
         api: _FakeProviderAPI | None = None,
         api_factory: Callable[[RepoConfig], _FakeProviderAPI] | None = None,
     ) -> None:
-        super().__init__(session_system_file=Path("/dev/null"))
+        # Skip DefaultProviderFactory.__init__: create_api is fully overridden
+        # and no other parent methods are called in these tests.
         self._test_api = api
         self._test_api_factory = api_factory
         self.create_api_call_count: int = 0

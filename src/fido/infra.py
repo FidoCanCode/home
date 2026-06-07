@@ -10,11 +10,13 @@ Tests inject fakes or mocks constructed at the call site.
 
 import dataclasses
 import os
+import select as _select_module
 import shutil
 import signal
 import subprocess
 import time
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn, Protocol
 
@@ -71,8 +73,9 @@ class RealProcessRunner:
 class Clock(Protocol):
     """Time and sleep operations.
 
-    Wraps :func:`time.sleep` and :func:`time.monotonic` so callers can be
-    tested without real wall-clock delays.
+    Wraps :func:`time.sleep`, :func:`time.monotonic`, and
+    :func:`datetime.now` so callers can be tested without real wall-clock
+    delays or unpredictable timestamps.
     """
 
     def sleep(self, secs: float) -> None:
@@ -83,15 +86,22 @@ class Clock(Protocol):
         """Return a monotonic clock value in fractional seconds."""
         ...
 
+    def now(self) -> datetime:
+        """Return the current UTC wall-clock time."""
+        ...
+
 
 class RealClock:
-    """Real :class:`Clock` that delegates to :mod:`time`."""
+    """Real :class:`Clock` that delegates to :mod:`time` and :mod:`datetime`."""
 
     def sleep(self, secs: float) -> None:
         time.sleep(secs)
 
     def monotonic(self) -> float:
         return time.monotonic()
+
+    def now(self) -> datetime:
+        return datetime.now(UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +230,87 @@ class RealOsProcess:
 
     def install_signal(self, signum: int, handler: Callable[..., object]) -> object:
         return self._backend.signal(signum, handler)
+
+
+# ---------------------------------------------------------------------------
+# Process spawning (long-lived subprocesses)
+# ---------------------------------------------------------------------------
+
+
+class PopenRunner(Protocol):
+    """Spawns long-lived subprocesses.
+
+    Wraps :class:`subprocess.Popen` so callers can be tested without spawning
+    real processes.  Use :class:`ProcessRunner` for fire-and-forget
+    ``subprocess.run`` calls; use :class:`PopenRunner` when you need to
+    interact with the process while it runs (streaming output, sending signals,
+    communicating via stdin/stdout, etc.).
+    """
+
+    def spawn(
+        self,
+        cmd: Sequence[str],
+        **kwargs: Any,  # noqa: ANN401  # forwarded to subprocess.Popen
+    ) -> "subprocess.Popen[str]":
+        """Spawn *cmd* as a subprocess, forwarding kwargs to :class:`subprocess.Popen`.
+
+        Returns the :class:`subprocess.Popen` instance immediately; the caller
+        is responsible for waiting on it and reading its output streams.
+        """
+        ...
+
+
+class RealPopenRunner:
+    """Real :class:`PopenRunner` that delegates to :class:`subprocess.Popen`."""
+
+    def spawn(
+        self,
+        cmd: Sequence[str],
+        **kwargs: Any,  # noqa: ANN401  # forwarded to subprocess.Popen
+    ) -> "subprocess.Popen[str]":
+        return subprocess.Popen(cmd, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# I/O multiplexing
+# ---------------------------------------------------------------------------
+
+
+class IOSelector(Protocol):
+    """I/O multiplexing over sets of file objects.
+
+    Wraps :func:`select.select` so streaming read loops can be tested without
+    blocking on real file descriptors.
+    """
+
+    def select(
+        self,
+        rlist: list[Any],
+        wlist: list[Any],
+        xlist: list[Any],
+        timeout: float | None = None,
+    ) -> tuple[list[Any], list[Any], list[Any]]:
+        """Wait until one or more file objects in the given lists are ready.
+
+        Mirrors :func:`select.select`.  *timeout* ``None`` blocks indefinitely;
+        ``0.0`` polls without blocking.  Returns a 3-tuple of subsets of the
+        input lists that are ready for reading, writing, and exceptional
+        conditions respectively.
+        """
+        ...
+
+
+class RealIOSelector:
+    """Real :class:`IOSelector` that delegates to :func:`select.select`."""
+
+    def select(
+        self,
+        rlist: list[Any],
+        wlist: list[Any],
+        xlist: list[Any],
+        timeout: float | None = None,
+    ) -> tuple[list[Any], list[Any], list[Any]]:
+        return _select_module.select(rlist, wlist, xlist, timeout)
 
 
 # ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@ class TestDefaultProviderFactory:
     def test_create_api_caches_by_provider(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         repo_a = RepoConfig(
             name="owner/a",
             work_dir=tmp_path / "a",
@@ -46,7 +46,7 @@ class TestDefaultProviderFactory:
     def test_create_api_builds_copilot(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         api = factory.create_api(
             RepoConfig(
                 name="owner/repo",
@@ -59,7 +59,7 @@ class TestDefaultProviderFactory:
     def test_create_api_builds_codex(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         api = factory.create_api(
             RepoConfig(
                 name="owner/repo",
@@ -72,7 +72,7 @@ class TestDefaultProviderFactory:
     def test_create_provider_builds_claude(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         provider = factory.create_provider(
             RepoConfig(
                 name="owner/repo",
@@ -88,7 +88,7 @@ class TestDefaultProviderFactory:
     def test_create_provider_builds_copilot(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         provider = factory.create_provider(
             RepoConfig(
                 name="owner/repo",
@@ -111,7 +111,7 @@ class TestDefaultProviderFactory:
         # the pressure-pause check.
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         repo = RepoConfig(
             name="owner/repo",
             work_dir=tmp_path,
@@ -129,7 +129,7 @@ class TestDefaultProviderFactory:
     def test_create_agent_uses_repo_provider(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         agent = factory.create_agent(
             RepoConfig(
                 name="owner/repo",
@@ -144,7 +144,7 @@ class TestDefaultProviderFactory:
     def test_create_provider_builds_codex(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         provider = factory.create_provider(
             RepoConfig(
                 name="owner/repo",
@@ -163,7 +163,7 @@ class TestProviderSessionIdExtraction:
     def test_claude_agent_extracts_session_id(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         agent = factory.create_agent(
             RepoConfig(
                 name="owner/repo",
@@ -181,7 +181,7 @@ class TestProviderSessionIdExtraction:
     def test_copilot_agent_extracts_session_id(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         agent = factory.create_agent(
             RepoConfig(
                 name="owner/repo",
@@ -199,7 +199,7 @@ class TestProviderSessionIdExtraction:
     def test_codex_agent_extracts_session_id(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         agent = factory.create_agent(
             RepoConfig(
                 name="owner/repo",
@@ -223,7 +223,7 @@ class TestProviderStateUpdaterWiring:
     def test_default_updater_is_none_for_all_providers(self, tmp_path: Path) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         for provider_id in (
             ProviderID.CLAUDE_CODE,
             ProviderID.CODEX,
@@ -244,7 +244,7 @@ class TestProviderStateUpdaterWiring:
     ) -> None:
         system_file = tmp_path / "persona.md"
         system_file.write_text("")
-        factory = DefaultProviderFactory(session_system_file=system_file)
+        factory = DefaultProviderFactory.real(session_system_file=system_file)
         for provider_id in (
             ProviderID.CLAUDE_CODE,
             ProviderID.CODEX,

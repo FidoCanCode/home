@@ -12,6 +12,25 @@ class ExecCalled(Exception):
         self.argv = args
 
 
+class _FakeOsProcess:
+    """Minimal :class:`~fido.infra.OsProcess` fake for pyright-exec tests.
+
+    Only :meth:`execvp` is exercised; the other methods are not implemented.
+    Raises *ExecCalled* (a sentinel exception) so tests can assert on the
+    arguments without the process actually being replaced.
+    """
+
+    def execvp(self, file: str, args: list[str]) -> None:
+        raise ExecCalled(file, args)
+
+
+class _NoOpOsProcess:
+    """OsProcess fake whose execvp silently returns (simulates exec failure)."""
+
+    def execvp(self, file: str, args: list[str]) -> None:
+        return None
+
+
 def test_writes_pyright_config_and_execs_pyright(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -24,15 +43,12 @@ def test_writes_pyright_config_and_execs_pyright(
         "from generated_module import value\ncheck: int = value\n"
     )
 
-    def fake_execvp(file: str, args: list[str]) -> None:
-        raise ExecCalled(file, args)
-
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(ExecCalled) as exc_info:
         rocq_generated_pyright.main(
             [str(generated_dir), "--checks-dir", str(checks_dir)],
-            execvp=fake_execvp,
+            os_proc=_FakeOsProcess(),
         )
 
     copied_check = generated_dir / "pyright_generated_check.py"
@@ -58,11 +74,8 @@ def test_raises_if_exec_returns(tmp_path: Path) -> None:
     generated_dir.mkdir()
     checks_dir.mkdir()
 
-    def fake_execvp(file: str, args: list[str]) -> None:
-        return None
-
     with pytest.raises(RuntimeError, match="pyright exec failed"):
         rocq_generated_pyright.main(
             [str(generated_dir), "--checks-dir", str(checks_dir)],
-            execvp=fake_execvp,
+            os_proc=_NoOpOsProcess(),
         )

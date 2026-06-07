@@ -3,8 +3,8 @@
 import json
 import logging
 import threading
-from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
 from fido.appstate import FidoState, ProviderSnapshot
 from fido.atomic import AtomicUpdater
@@ -21,6 +21,19 @@ from fido.rocq import cancel_survives_respawn as cancel_fsm
 log = logging.getLogger(__name__)
 
 
+class SessionResolver(Protocol):
+    """Resolves a live :class:`~fido.provider.PromptSession` on demand.
+
+    Implemented by returning an existing session handle (e.g. from
+    ``.git/fido/state.json``) or raising :class:`RuntimeError` when no
+    session can be recovered.
+    """
+
+    def __call__(self) -> PromptSession:
+        """Return the current session, or raise ``RuntimeError`` if unavailable."""
+        ...
+
+
 class SessionBackedAgent(SnapshotPublisher):
     """Common session attachment and lifecycle logic for provider agents."""
 
@@ -30,7 +43,7 @@ class SessionBackedAgent(SnapshotPublisher):
     def __init__(
         self,
         *,
-        session_fn: Callable[[], PromptSession],
+        session_fn: SessionResolver,
         session_system_file: Path | None,
         work_dir: Path | str | None,
         repo_name: str | None,

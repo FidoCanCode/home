@@ -1,25 +1,54 @@
 """CLI wrapper for syncing repo tasks to GitHub."""
 
 import sys
-from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
-from fido.github import GitHub
+from fido.github import GitHub, GitHubFactory, RealGitHubFactory
+from fido.infra import RealClock, RealProcessRunner
+from fido.tasks import (
+    AutoCompleter,
+    GitDirResolver,
+    RealGitDirResolver,
+    auto_complete_ask_tasks,
+)
+
+
+class SyncTasksFn(Protocol):
+    """Typed collaborator: sync tasks.json → PR body work queue."""
+
+    def __call__(
+        self,
+        work_dir: Path,
+        gh: GitHub,
+        *,
+        git_dir_resolver: GitDirResolver,
+        auto_completer: AutoCompleter,
+    ) -> None: ...
 
 
 def main(
     argv: list[str] | None = None,
     *,
-    _GitHub: type[GitHub] = GitHub,
-    _sync_tasks: Callable[..., None] | None = None,
+    github_factory: GitHubFactory,
+    sync_tasks_fn: SyncTasksFn,
 ) -> None:
-    if _sync_tasks is None:
-        from fido.tasks import sync_tasks as _sync_tasks  # pragma: no cover
-
     args = sys.argv[1:] if argv is None else argv
     work_dir = Path(args[0]) if args else Path.cwd()
-    _sync_tasks(work_dir, _GitHub())
+    runner = RealProcessRunner()
+    gh = github_factory()
+    sync_tasks_fn(
+        work_dir,
+        gh,
+        git_dir_resolver=RealGitDirResolver(runner),
+        auto_completer=auto_complete_ask_tasks,
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    from fido.tasks import sync_tasks
+
+    main(
+        github_factory=RealGitHubFactory(RealProcessRunner(), RealClock()),
+        sync_tasks_fn=sync_tasks,
+    )

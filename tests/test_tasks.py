@@ -4036,6 +4036,15 @@ class TestReorderTasks:
         reorder_tasks(Tasks(tmp_path), "", _client_factory=fake_factory)
         assert factory_calls == [None]
 
+    def test_raises_when_agent_and_factory_both_missing(self, tmp_path: Path) -> None:
+        """Calling reorder_tasks without agent or _client_factory must
+        fail loudly rather than silently doing nothing (fail-fast invariant)."""
+        self._add(tmp_path, "Task A")
+        with pytest.raises(
+            ValueError, match="agent or _client_factory must be provided"
+        ):
+            reorder_tasks(Tasks(tmp_path), "")
+
     def test_skips_on_empty_opus_response(self, tmp_path: Path) -> None:
         self._add(tmp_path, "Task A")
         result_before = Tasks(tmp_path).list()

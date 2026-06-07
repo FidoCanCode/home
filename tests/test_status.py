@@ -104,6 +104,72 @@ class _FakeRun:
         assert actual_kwargs == kwargs, f"kwargs: {actual_kwargs!r} != {kwargs!r}"
 
 
+class _FakeProcessRunner:
+    """Typed :class:`~fido.infra.ProcessRunner` fake for status-module tests.
+
+    Exposes a ``.run()`` method (not ``__call__``) to match the
+    ``ProcessRunner`` protocol.  Supports a fixed stdout or per-call
+    side effects (list of stdout strings or an exception).
+    """
+
+    def __init__(
+        self,
+        stdout: str = "",
+        *,
+        side_effect: BaseException | type[BaseException] | list[str] | None = None,
+    ) -> None:
+        self._stdout = stdout
+        self._side_effect = side_effect
+        self._call_index: int = 0
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(
+        self,
+        cmd: object,
+        *,
+        check: bool = True,
+        **kwargs: object,
+    ) -> _FakeRunResult:
+        self.calls.append((list(cmd), {"check": check, **kwargs}))  # type: ignore[arg-type]
+        idx = self._call_index
+        self._call_index += 1
+        if isinstance(self._side_effect, list):
+            stdout = self._side_effect[idx] if idx < len(self._side_effect) else ""
+            return _FakeRunResult(stdout)
+        if self._side_effect is not None:
+            if isinstance(self._side_effect, type):
+                raise self._side_effect()
+            raise self._side_effect
+        return _FakeRunResult(self._stdout)
+
+    def assert_run_called_once_with(
+        self, cmd: list[str], *, check: bool, **kwargs: object
+    ) -> None:
+        assert len(self.calls) == 1, f"expected 1 call, got {len(self.calls)}"
+        actual_cmd, actual_kwargs = self.calls[0]
+        assert actual_cmd == cmd, f"cmd: {actual_cmd!r} != {cmd!r}"
+        expected_kwargs = {"check": check, **kwargs}
+        assert actual_kwargs == expected_kwargs, (
+            f"kwargs: {actual_kwargs!r} != {expected_kwargs!r}"
+        )
+
+
+class _FakeClock:
+    """Minimal :class:`~fido.infra.Clock` fake for tests that need controlled time."""
+
+    def __init__(self, now_value: datetime) -> None:
+        self._now_value = now_value
+
+    def sleep(self, secs: float) -> None:
+        pass
+
+    def monotonic(self) -> float:
+        return 0.0
+
+    def now(self) -> datetime:
+        return self._now_value
+
+
 class _FakeHTTPResponse:
     """Minimal HTTP response context manager — returns fixed bytes from read()."""
 
@@ -326,41 +392,40 @@ class TestFidoRunning:
             fd.close()
 
     def test_oserror_returns_false(self, tmp_path: Path) -> None:
+        # A directory triggers IsADirectoryError (OSError subclass) on open() —
+        # works whether the test runs as root or non-root.
         lock = tmp_path / "lock"
-        lock.touch()
-
-        def _raise_open(*_: object, **__: object) -> object:
-            raise OSError("no perms")
-
-        assert _fido_running(lock, _open=_raise_open) is False
+        lock.mkdir()
+        assert _fido_running(lock) is False
 
 
 class TestPgrep:
     def test_returns_pids(self) -> None:
-        mock_run = _FakeRun(stdout="12345\n67890\n")
-        assert _pgrep("some pattern", _run=mock_run) == [12345, 67890]
+        runner = _FakeProcessRunner(stdout="12345\n67890\n")
+        assert _pgrep("some pattern", runner=runner) == [12345, 67890]
 
     def test_strips_whitespace(self) -> None:
-        mock_run = _FakeRun(stdout="  42  \n")
-        assert _pgrep("pattern", _run=mock_run) == [42]
+        runner = _FakeProcessRunner(stdout="  42  \n")
+        assert _pgrep("pattern", runner=runner) == [42]
 
     def test_empty_output(self) -> None:
-        mock_run = _FakeRun(stdout="")
-        assert _pgrep("pattern", _run=mock_run) == []
+        runner = _FakeProcessRunner(stdout="")
+        assert _pgrep("pattern", runner=runner) == []
 
     def test_skips_non_integer_lines(self) -> None:
-        mock_run = _FakeRun(stdout="123\nnot-a-pid\n456\n")
-        assert _pgrep("pattern", _run=mock_run) == [123, 456]
+        runner = _FakeProcessRunner(stdout="123\nnot-a-pid\n456\n")
+        assert _pgrep("pattern", runner=runner) == [123, 456]
 
     def test_oserror_returns_empty(self) -> None:
-        mock_run = _FakeRun(side_effect=OSError("no pgrep"))
-        assert _pgrep("pattern", _run=mock_run) == []
+        runner = _FakeProcessRunner(side_effect=OSError("no pgrep"))
+        assert _pgrep("pattern", runner=runner) == []
 
     def test_passes_pattern_to_pgrep(self) -> None:
-        mock_run = _FakeRun(stdout="")
-        _pgrep("fido --port", _run=mock_run)
-        mock_run.assert_called_once_with(
+        runner = _FakeProcessRunner(stdout="")
+        _pgrep("fido --port", runner=runner)
+        runner.assert_run_called_once_with(
             ["pgrep", "-f", "fido --port"],
+            check=False,
             capture_output=True,
             text=True,
         )
@@ -456,26 +521,27 @@ class TestProviderStatusesForRepoConfigs:
 
 class TestProcessUptimeSeconds:
     def test_returns_elapsed_time(self) -> None:
-        mock_run = _FakeRun(stdout="  3742  ")
-        assert _process_uptime_seconds(12345, _run=mock_run) == 3742
+        runner = _FakeProcessRunner(stdout="  3742  ")
+        assert _process_uptime_seconds(12345, runner=runner) == 3742
 
     def test_none_when_no_output(self) -> None:
-        mock_run = _FakeRun(stdout="")
-        assert _process_uptime_seconds(99, _run=mock_run) is None
+        runner = _FakeProcessRunner(stdout="")
+        assert _process_uptime_seconds(99, runner=runner) is None
 
     def test_none_on_oserror(self) -> None:
-        mock_run = _FakeRun(side_effect=OSError)
-        assert _process_uptime_seconds(99, _run=mock_run) is None
+        runner = _FakeProcessRunner(side_effect=OSError)
+        assert _process_uptime_seconds(99, runner=runner) is None
 
     def test_none_on_value_error(self) -> None:
-        mock_run = _FakeRun(stdout="not-a-number")
-        assert _process_uptime_seconds(99, _run=mock_run) is None
+        runner = _FakeProcessRunner(stdout="not-a-number")
+        assert _process_uptime_seconds(99, runner=runner) is None
 
     def test_calls_ps_with_pid(self) -> None:
-        mock_run = _FakeRun(stdout="100")
-        _process_uptime_seconds(42, _run=mock_run)
-        mock_run.assert_called_once_with(
+        runner = _FakeProcessRunner(stdout="100")
+        _process_uptime_seconds(42, runner=runner)
+        runner.assert_run_called_once_with(
             ["ps", "-p", "42", "-o", "etimes="],
+            check=False,
             capture_output=True,
             text=True,
         )
@@ -558,8 +624,12 @@ class TestReposFromPid:
 class TestFidoPid:
     def test_returns_none_when_not_running(self) -> None:
         # No fido process in the test environment — covers both function lines.
-        result = _fido_pid()
+        result = _fido_pid(runner=_FakeProcessRunner(stdout=""))
         assert result is None
+
+    def test_returns_pid_when_running(self) -> None:
+        runner = _FakeProcessRunner(stdout="12345\n")
+        assert _fido_pid(runner=runner) == 12345
 
 
 class TestParsePortFromCmdline:
@@ -647,21 +717,30 @@ class TestTaskPosition:
 
 class TestElapsedSinceIso:
     def test_none_on_empty(self) -> None:
+        from datetime import datetime, timezone
+
         from fido.status import _elapsed_since_iso
 
-        assert _elapsed_since_iso(None) is None
-        assert _elapsed_since_iso("") is None
+        _clock = _FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        assert _elapsed_since_iso(None, clock=_clock) is None
+        assert _elapsed_since_iso("", clock=_clock) is None
 
     def test_none_on_bad_format(self) -> None:
+        from datetime import datetime, timezone
+
         from fido.status import _elapsed_since_iso
 
-        assert _elapsed_since_iso("not a date") is None
+        _clock = _FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        assert _elapsed_since_iso("not a date", clock=_clock) is None
 
     def test_none_on_wrong_type(self) -> None:
+        from datetime import datetime, timezone
+
         from fido.status import _elapsed_since_iso
 
+        _clock = _FakeClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
         # datetime.fromisoformat raises TypeError for non-str input.
-        assert _elapsed_since_iso(12345) is None  # type: ignore[arg-type]
+        assert _elapsed_since_iso(12345, clock=_clock) is None  # type: ignore[arg-type]
 
     def test_returns_seconds_since(self) -> None:
         from datetime import datetime, timedelta, timezone
@@ -670,7 +749,7 @@ class TestElapsedSinceIso:
 
         ref = datetime(2026, 1, 1, tzinfo=timezone.utc)
         iso = (ref - timedelta(minutes=5)).isoformat()
-        assert _elapsed_since_iso(iso, _now=lambda: ref) == 300
+        assert _elapsed_since_iso(iso, clock=_FakeClock(ref)) == 300
 
     def test_floors_at_zero_for_future_timestamps(self) -> None:
         from datetime import datetime, timedelta, timezone
@@ -679,7 +758,7 @@ class TestElapsedSinceIso:
 
         ref = datetime(2026, 1, 1, tzinfo=timezone.utc)
         future = (ref + timedelta(minutes=1)).isoformat()
-        assert _elapsed_since_iso(future, _now=lambda: ref) == 0
+        assert _elapsed_since_iso(future, clock=_FakeClock(ref)) == 0
 
 
 class TestSystemResources:
@@ -693,10 +772,8 @@ class TestSystemResources:
             meminfo_path=meminfo,
             loadavg_path=loadavg,
             disk_path=tmp_path,
-            _disk_usage=lambda _path: SimpleNamespace(
-                total=1024**3, free=256 * 1024**2
-            ),
-            _cpu_count=lambda: 4,
+            disk_usage=lambda _path: SimpleNamespace(total=1024**3, free=256 * 1024**2),
+            cpu_count_fn=lambda: 4,
         )
 
         assert result == SystemResourceInfo(
@@ -799,7 +876,7 @@ class TestFetchActivities:
                 "rate_limit": None,
             }
         ).encode()
-        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        result = _fetch_activities(9000, urlopen=self._make_urlopen(data))
         assert result == (
             {
                 "owner/repo": {
@@ -848,7 +925,7 @@ class TestFetchActivities:
                 "rate_limit": None,
             }
         ).encode()
-        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        result = _fetch_activities(9000, urlopen=self._make_urlopen(data))
         assert result == (
             {
                 "a/b": {
@@ -918,7 +995,7 @@ class TestFetchActivities:
                 "rate_limit": None,
             }
         ).encode()
-        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        result = _fetch_activities(9000, urlopen=self._make_urlopen(data))
         assert result[0]["owner/repo"]["provider_status"] == ProviderPressureStatus(
             provider=ProviderID.CLAUDE_CODE,
             window_name="five_hour",
@@ -943,7 +1020,7 @@ class TestFetchActivities:
                 "rate_limit": None,
             }
         ).encode()
-        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        result = _fetch_activities(9000, urlopen=self._make_urlopen(data))
         assert result[0]["owner/repo"]["provider_status"] is None
 
     def test_bad_provider_status_reset_time_defaults_to_none(self) -> None:
@@ -967,7 +1044,7 @@ class TestFetchActivities:
                 "rate_limit": None,
             }
         ).encode()
-        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        result = _fetch_activities(9000, urlopen=self._make_urlopen(data))
         assert result[0]["owner/repo"]["provider_status"] == ProviderPressureStatus(
             provider=ProviderID.CLAUDE_CODE,
             pressure=0.5,
@@ -975,20 +1052,20 @@ class TestFetchActivities:
 
     def test_returns_empty_on_exception(self) -> None:
         mock_urlopen = _FakeURLOpen(side_effect=OSError("refused"))
-        assert _fetch_activities(9000, _urlopen=mock_urlopen) == ({}, None)
+        assert _fetch_activities(9000, urlopen=mock_urlopen) == ({}, None)
 
     def test_skips_items_without_repo_name(self) -> None:
         data = json.dumps(
             {"activities": [{"what": "something", "busy": True}], "rate_limit": None}
         ).encode()
-        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        result = _fetch_activities(9000, urlopen=self._make_urlopen(data))
         assert result == ({}, None)
 
     def test_skips_items_without_what(self) -> None:
         data = json.dumps(
             {"activities": [{"repo_name": "a/b", "busy": True}], "rate_limit": None}
         ).encode()
-        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        result = _fetch_activities(9000, urlopen=self._make_urlopen(data))
         assert result == ({}, None)
 
     def test_is_stuck_defaults_to_false_when_absent(self) -> None:
@@ -1007,12 +1084,12 @@ class TestFetchActivities:
                 "rate_limit": None,
             }
         ).encode()
-        result = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        result = _fetch_activities(9000, urlopen=self._make_urlopen(data))
         assert result[0]["owner/repo"]["is_stuck"] is False
 
     def test_calls_correct_url(self) -> None:
         mock_urlopen = self._make_urlopen(b'{"activities": [], "rate_limit": null}')
-        _fetch_activities(8888, _urlopen=mock_urlopen)
+        _fetch_activities(8888, urlopen=mock_urlopen)
         mock_urlopen.assert_called_once_with(
             "http://localhost:8888/status.json", timeout=2
         )
@@ -1021,26 +1098,26 @@ class TestFetchActivities:
 class TestClaudePid:
     def test_returns_first_pid(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        result = _claude_pid(fido_dir, _pgrep_fn=lambda p: [999])
+        runner = _FakeProcessRunner(stdout="999\n")
+        result = _claude_pid(fido_dir, runner=runner)
         assert result == 999
 
     def test_returns_none_when_no_match_and_no_state(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        result = _claude_pid(fido_dir, _pgrep_fn=lambda p: [])
+        runner = _FakeProcessRunner(stdout="")
+        result = _claude_pid(fido_dir, runner=runner)
         assert result is None
 
     def test_searches_for_system_file_first(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        calls: list[str] = []
-
-        def tracking(pattern: str) -> list[int]:
-            calls.append(pattern)
-            return []
-
-        _claude_pid(fido_dir, _pgrep_fn=tracking)
-        assert str(fido_dir / "system") in calls
+        runner = _FakeProcessRunner(stdout="")
+        _claude_pid(fido_dir, runner=runner)
+        # First pgrep call must be for the system file path.
+        assert len(runner.calls) >= 1
+        first_cmd = runner.calls[0][0]
+        assert str(fido_dir / "system") in first_cmd
 
     def test_falls_back_to_resumed_session_id(self, tmp_path: Path) -> None:
         """Resumed sessions run with --resume <id> and don't reference the
@@ -1051,10 +1128,9 @@ class TestClaudePid:
         fido_dir.mkdir()
         State(fido_dir).save({"setup_session_id": "abc-123", "issue": 7})
 
-        def fake_pgrep(pattern: str) -> list[int]:
-            return [42] if pattern == "abc-123" else []
-
-        result = _claude_pid(fido_dir, _pgrep_fn=fake_pgrep)
+        # First call (system file) returns nothing; second (session id) returns pid 42.
+        runner = _FakeProcessRunner(side_effect=["", "42\n"])
+        result = _claude_pid(fido_dir, runner=runner)
         assert result == 42
 
     def test_resumed_fallback_returns_none_when_no_process(
@@ -1065,7 +1141,8 @@ class TestClaudePid:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         State(fido_dir).save({"setup_session_id": "abc-123"})
-        result = _claude_pid(fido_dir, _pgrep_fn=lambda p: [])
+        runner = _FakeProcessRunner(stdout="")
+        result = _claude_pid(fido_dir, runner=runner)
         assert result is None
 
     def test_resumed_fallback_skipped_when_no_session_id(self, tmp_path: Path) -> None:
@@ -1074,40 +1151,38 @@ class TestClaudePid:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
         State(fido_dir).save({"issue": 7})
-        calls: list[str] = []
-
-        def tracking(pattern: str) -> list[int]:
-            calls.append(pattern)
-            return []
-
-        result = _claude_pid(fido_dir, _pgrep_fn=tracking)
+        runner = _FakeProcessRunner(stdout="")
+        result = _claude_pid(fido_dir, runner=runner)
         assert result is None
         # Only the system-file pgrep fires when there's no session id.
-        assert len(calls) == 1
+        assert len(runner.calls) == 1
 
     def test_resumed_fallback_skipped_when_state_absent(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
         fido_dir.mkdir()
-        result = _claude_pid(fido_dir, _pgrep_fn=lambda p: [])
+        runner = _FakeProcessRunner(stdout="")
+        result = _claude_pid(fido_dir, runner=runner)
         assert result is None
 
 
 class TestGitDir:
     def test_returns_path(self, tmp_path: Path) -> None:
-        mock_run = _FakeRun(stdout="/repo/.git\n")
-        assert _git_dir(tmp_path, _run=mock_run) == Path("/repo/.git")
+        runner = _FakeProcessRunner(stdout="/repo/.git\n")
+        assert _git_dir(tmp_path, runner=runner) == Path("/repo/.git")
 
     def test_strips_whitespace(self, tmp_path: Path) -> None:
-        mock_run = _FakeRun(stdout="  /a/b/.git  \n")
-        assert _git_dir(tmp_path, _run=mock_run) == Path("/a/b/.git")
+        runner = _FakeProcessRunner(stdout="  /a/b/.git  \n")
+        assert _git_dir(tmp_path, runner=runner) == Path("/a/b/.git")
 
     def test_returns_none_on_called_process_error(self, tmp_path: Path) -> None:
-        mock_run = _FakeRun(side_effect=subprocess.CalledProcessError(128, "git"))
-        assert _git_dir(tmp_path, _run=mock_run) is None
+        runner = _FakeProcessRunner(
+            side_effect=subprocess.CalledProcessError(128, "git")
+        )
+        assert _git_dir(tmp_path, runner=runner) is None
 
     def test_returns_none_when_git_not_found(self, tmp_path: Path) -> None:
-        mock_run = _FakeRun(side_effect=FileNotFoundError("git not found"))
-        assert _git_dir(tmp_path, _run=mock_run) is None
+        runner = _FakeProcessRunner(side_effect=FileNotFoundError("git not found"))
+        assert _git_dir(tmp_path, runner=runner) is None
 
 
 class TestReadState:
@@ -1130,14 +1205,10 @@ class TestReadState:
 
     def test_oserror_returns_empty(self, tmp_path: Path) -> None:
         fido_dir = tmp_path / "fido"
-        fido_dir.mkdir()
-        path = fido_dir / "state.json"
-        path.touch()
-
-        def _raise(p: Path) -> str:
-            raise OSError("oops")
-
-        assert _read_state(fido_dir, _read_text_fn=_raise) == {}
+        # Make fido_dir a file — accessing its children raises NotADirectoryError
+        # (OSError subclass).  Works whether running as root or not.
+        fido_dir.touch()
+        assert _read_state(fido_dir) == {}
 
 
 class TestCurrentTask:
@@ -3345,7 +3416,7 @@ class TestFetchActivitiesRateLimit:
 
     def test_returns_none_when_rate_limit_missing(self) -> None:
         data = self._wrap([], None)
-        _, info = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        _, info = _fetch_activities(9000, urlopen=self._make_urlopen(data))
         assert info is None
 
     def test_parses_rate_limit_payload(self) -> None:
@@ -3364,7 +3435,7 @@ class TestFetchActivitiesRateLimit:
             },
         }
         data = self._wrap([], rate)
-        _, info = _fetch_activities(9000, _urlopen=self._make_urlopen(data))
+        _, info = _fetch_activities(9000, urlopen=self._make_urlopen(data))
         assert info is not None
         assert info.rest.used == 7
         assert info.graphql.used == 22

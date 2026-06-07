@@ -6,8 +6,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from fido import provider as provider_module
 from fido.appstate import (
@@ -27,6 +26,7 @@ from fido.appstate import (
 from fido.atomic import AtomicUpdater
 from fido.config import Config, RepoConfig, default_sub_dir
 from fido.github import GitHub
+from fido.infra import Clock, ProcessRunner, RealClock, RealOsProcess, RealProcessRunner
 from fido.issue_cache import CacheMetrics, IssueCache
 from fido.provider import PromptSession, Provider, ProviderAgent
 from fido.provider_factory import DefaultProviderFactory
@@ -46,9 +46,22 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def _utcnow() -> datetime:
-    """Return the current UTC time as a timezone-aware datetime."""
-    return datetime.now(tz=timezone.utc)
+class ThreadFactory(Protocol):
+    """Creates a :class:`WorkerThread` for a given repo config.
+
+    Injected into :class:`WorkerRegistry` so tests can supply fake threads
+    without patching module-level names.  The interface mirrors the kwargs
+    that :meth:`WorkerRegistry.start` passes when creating or rescuing a
+    thread.
+    """
+
+    def __call__(
+        self,
+        cfg: RepoConfig,
+        *,
+        provider: Provider | None = None,
+        session_issue: int | None = None,
+    ) -> WorkerThread: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +77,10 @@ class WebhookActivityHandle:
         self.registry.set_webhook_description(
             self.repo_name, self.handle_id, description
         )
+
+
+_REAL_RUNNER: ProcessRunner = RealProcessRunner()
+_REAL_CLOCK: Clock = RealClock()
 
 
 class WorkerRegistry:
@@ -89,8 +106,10 @@ class WorkerRegistry:
 
     def __init__(
         self,
-        thread_factory: Callable[..., WorkerThread],
+        thread_factory: ThreadFactory,
         state_updater: "AtomicUpdater[FidoState]",
+        runner: ProcessRunner = _REAL_RUNNER,
+        clock: Clock = _REAL_CLOCK,
     ) -> None:
         # _threads is single-writer: only start() (called from the watchdog
         # daemon thread or from the startup sequence) ever writes to it.
@@ -107,6 +126,8 @@ class WorkerRegistry:
         # value at a Lens path.  The read face (AtomicReader) lives in the
         # composition root; this class never reads the snapshot.
         self._state_updater: AtomicUpdater[FidoState] = state_updater
+        self._runner = runner
+        self._clock = clock
         # Owner-side crash records: the watchdog increments death_count here,
         # then publishes the result into FidoState via a pure lens write.
         # Only the watchdog thread writes; start() reads during crash recovery
@@ -257,7 +278,7 @@ class WorkerRegistry:
         # same resolved path (#1696 codex P1 round 5).  Failing
         # loudly here surfaces a misconfigured workspace at startup
         # rather than as a confusing flock-on-a-file error later.
-        git_dir = _resolve_git_dir(repo_cfg.work_dir)  # pyright: ignore[reportPrivateUsage]
+        git_dir = _resolve_git_dir(repo_cfg.work_dir, runner=self._runner)  # pyright: ignore[reportPrivateUsage]
         fido_dir = git_dir / "fido"
         repo = Repo(
             name=repo_cfg.name,
@@ -279,7 +300,7 @@ class WorkerRegistry:
         thread = self._factory(repo_cfg, provider=provider, session_issue=session_issue)
         self._threads[repo_cfg.name] = thread
         _name = repo_cfg.name
-        _now = _utcnow()
+        _now = self._clock.now()
         # Prepopulate the full RepoState with zero values.  Crash history
         # comes from the class-owned _crash_records (not from FidoState),
         # so this is a pure write — no read-modify-write CAS.
@@ -383,8 +404,6 @@ class WorkerRegistry:
         repo_name: str,
         what: str,
         busy: bool,
-        *,
-        _now: Callable[[], datetime] = _utcnow,
     ) -> None:
         """Record what *repo_name*'s worker is currently doing.
 
@@ -394,7 +413,10 @@ class WorkerRegistry:
         ``repos[name]`` key is prepopulated by :meth:`start`).
         """
         activity = WorkerActivity(
-            repo_name=repo_name, what=what, busy=busy, last_progress_at=_now()
+            repo_name=repo_name,
+            what=what,
+            busy=busy,
+            last_progress_at=self._clock.now(),
         )
         _name = repo_name
         self._state_updater.update(lambda root: root.repos[_name].activity, activity)
@@ -413,7 +435,7 @@ class WorkerRegistry:
         new_crash = WorkerCrash(
             death_count=existing.death_count + 1,
             last_error=error,
-            last_crash_time=_utcnow(),
+            last_crash_time=self._clock.now(),
         )
         self._crash_records[repo_name] = new_crash
         _name = repo_name
@@ -498,8 +520,6 @@ class WorkerRegistry:
         self,
         repo_name: str,
         description: str,
-        *,
-        _now: Callable[[], datetime] = _utcnow,
     ) -> Generator[WebhookActivityHandle, None, None]:
         """Register an in-flight webhook handler for the duration of the block.
 
@@ -518,7 +538,7 @@ class WorkerRegistry:
         activity = WebhookActivity(
             handle_id=id(object()),  # cheap unique id per call
             description=description,
-            started_at=_now(),
+            started_at=self._clock.now(),
             thread_id=threading.get_ident(),
         )
         handle = WebhookActivityHandle(repo_name, activity.handle_id, self)
@@ -937,6 +957,28 @@ class WorkerRegistry:
             return list(self._issue_caches.values())
 
 
+class MakeThreadFn(Protocol):
+    """Creates a :class:`WorkerThread` given full registry context.
+
+    Used exclusively by :func:`make_registry` to build the per-thread
+    closure that captures ``gh``, ``config``, ``dispatchers``, and
+    ``state_updater`` from the composition root.
+    """
+
+    def __call__(
+        self,
+        repo_cfg: RepoConfig,
+        registry: "WorkerRegistry",
+        *,
+        gh: GitHub,
+        provider: Provider | None = None,
+        session_issue: int | None = None,
+        config: Config | None = None,
+        dispatchers: "dict[str, Dispatcher]",
+        state_updater: AtomicUpdater[FidoState] | None = None,
+    ) -> WorkerThread: ...
+
+
 def _make_thread(
     repo_cfg: RepoConfig,
     registry: WorkerRegistry,
@@ -966,11 +1008,13 @@ def _make_thread(
         repo_cfg=repo_cfg,
         state_updater=state_updater,
         membership=repo_cfg.membership,
-        provider_factory=DefaultProviderFactory(
+        provider_factory=DefaultProviderFactory.real(
             session_system_file=default_sub_dir() / "persona.md"
         ),
         dispatcher=dispatchers[repo_cfg.name],
         issue_cache=registry.get_issue_cache(repo_cfg.name),
+        os_proc=RealOsProcess(),
+        runner=RealProcessRunner(),
     )
 
 
@@ -981,7 +1025,9 @@ def make_registry(
     *,
     dispatchers: "dict[str, Dispatcher]",
     state_updater: "AtomicUpdater[FidoState]",
-    _thread_factory: Callable[..., WorkerThread] = _make_thread,
+    runner: ProcessRunner = _REAL_RUNNER,
+    clock: Clock = _REAL_CLOCK,
+    _thread_factory: MakeThreadFn = _make_thread,
 ) -> WorkerRegistry:
     """Create a :class:`WorkerRegistry` and start threads for all repos.
 
@@ -1007,7 +1053,7 @@ def make_registry(
             state_updater=state_updater,
         )
 
-    registry = WorkerRegistry(factory, state_updater)
+    registry = WorkerRegistry(factory, state_updater, runner, clock)
     for repo_cfg in repos.values():
         registry.start(repo_cfg)
     return registry

@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from fido.claude import ClaudeSession
+from fido.infra import RealClock
 from fido.rocq.claude_session import (
     AwaitingReply,
     CancelFire,
@@ -43,6 +44,22 @@ from fido.rocq.claude_session import (
     TurnReturn,
     transition,
 )
+
+
+class _FixedPopenRunner:
+    def __init__(self, proc: object) -> None:
+        self._proc = proc
+
+    def spawn(self, *args: object, **kwargs: object) -> object:
+        return self._proc
+
+
+class _FixedSelector:
+    def __init__(self, result: tuple) -> None:
+        self._result = result
+
+    def select(self, *args: object, **kwargs: object) -> tuple:
+        return self._result
 
 
 class _FakeIO:
@@ -346,8 +363,17 @@ def test_stream_transition_crashes_on_invalid_event(tmp_path: Path) -> None:
     session = ClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=lambda *args, **kwargs: proc,  # type: ignore[arg-type]
-        selector=lambda *args, **kwargs: ([], [], []),  # type: ignore[arg-type]
+        popen=_FixedPopenRunner(proc),
+        selector=_FixedSelector(([], [], [])),
+        clock=RealClock(),
+        model=None,
+        idle_timeout=1800.0,
+        repo_name=None,
+        session_id=None,
+        tools=None,
+        snapshot_publisher=None,
+        talker_resolver=None,
+        register_talker=None,
     )
     assert isinstance(session._stream_state, Idle)  # pyright: ignore[reportPrivateUsage]
 

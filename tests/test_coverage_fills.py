@@ -25,6 +25,7 @@ from fido.appstate import (
 )
 from fido.atomic import create_atomic
 from fido.color import Color
+from fido.infra import RealClock, RealProcessRunner
 from fido.provider_factory import DefaultProviderFactory
 from fido.registry import WorkerRegistry
 from fido.tasks import (
@@ -358,23 +359,33 @@ class _FakeClaudeProc:
 
 
 class _FakePopen:
-    """Callable that returns a pre-built process object."""
+    """PopenRunner that returns a pre-built process object."""
 
     def __init__(self, proc: object) -> None:
         self._proc = proc
 
-    def __call__(self, *args: object, **kwargs: object) -> object:
+    def spawn(self, *args: object, **kwargs: object) -> object:
         return self._proc
 
 
 class _FakeSelector:
-    """Callable selector that always returns a fixed select result."""
+    """IOSelector that always returns a fixed select result."""
 
     def __init__(self, result: tuple) -> None:
         self._result = result
 
-    def __call__(self, *args: object, **kwargs: object) -> tuple:
+    def select(self, *args: object, **kwargs: object) -> tuple:
         return self._result
+
+
+class _FuncSelector:
+    """Wraps a raw callable as an IOSelector for test closures."""
+
+    def __init__(self, fn: Callable[..., object]) -> None:
+        self._fn = fn
+
+    def select(self, *args: object, **kwargs: object) -> object:
+        return self._fn(*args, **kwargs)
 
 
 class _FakeStreamingProcess:
@@ -452,13 +463,13 @@ class TestProviderFactoryUnsupported:
 
     def test_create_api_raises_for_unsupported_provider(self, tmp_path: Path) -> None:
         repo_cfg = _FakeRepoConfigForProvider()
-        factory = DefaultProviderFactory(session_system_file=tmp_path / "sys.md")
+        factory = DefaultProviderFactory.real(session_system_file=tmp_path / "sys.md")
         with pytest.raises(ValueError, match="unsupported provider"):
             factory.create_api(repo_cfg)  # type: ignore[arg-type]
 
     def test_create_agent_raises_for_unsupported_provider(self, tmp_path: Path) -> None:
         repo_cfg = _FakeRepoConfigForProvider()
-        factory = DefaultProviderFactory(session_system_file=tmp_path / "sys.md")
+        factory = DefaultProviderFactory.real(session_system_file=tmp_path / "sys.md")
         with pytest.raises(ValueError, match="unsupported provider"):
             factory.create_agent(repo_cfg, work_dir=tmp_path, repo_name="owner/repo")  # type: ignore[arg-type]
 
@@ -479,7 +490,9 @@ class TestWorkerRegistryPreemptionHelpers:
                 process_started_at=_EPOCH,
             )
         )
-        return WorkerRegistry(_FakeNoOpThreadFactory(), updater)
+        return WorkerRegistry(
+            _FakeNoOpThreadFactory(), updater, RealProcessRunner(), RealClock()
+        )
 
     def test_note_provider_interrupt_requested(self) -> None:
         registry = self._registry()
@@ -821,7 +834,7 @@ class TestStatusFallbacks:
             window_name="hourly",
             pressure=0.5,
         )
-        result = _styled_provider_status(status, c=Color(), _palette_for=lambda p: None)
+        result = _styled_provider_status(status, c=Color(), palette_fn=lambda p: None)
         assert "claude-code" in result
 
     def test_styled_repo_provider_no_palette(self) -> None:
@@ -830,7 +843,7 @@ class TestStatusFallbacks:
         from fido.status import _styled_repo_provider
 
         repo = self._make_repo()
-        result = _styled_repo_provider(repo, c=Color(), _palette_for=lambda p: None)  # type: ignore[arg-type]
+        result = _styled_repo_provider(repo, c=Color(), palette_fn=lambda p: None)  # type: ignore[arg-type]
         assert "claude-code" in result
 
     def test_should_show_worker_line_when_paused(self) -> None:
@@ -1526,6 +1539,13 @@ class TestClaudeDefensivePaths:
             selector=_FakeSelector(([proc.stdout], [], [])),
             repo_name="owner/repo",
             model="claude-opus-4-6",
+            clock=RealClock(),
+            idle_timeout=1800.0,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
 
     def test_send_acknowledges_prior_cancelled_turn(self, tmp_path: Path) -> None:
@@ -1562,6 +1582,13 @@ class TestClaudeDefensivePaths:
             selector=_FakeSelector(([], [], [])),
             repo_name="owner/repo",
             model="claude-opus-4-6",
+            clock=RealClock(),
+            idle_timeout=1800.0,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         # The stderr pump runs as a daemon thread; let it exit.
         import time
@@ -1684,6 +1711,11 @@ class TestCopilotCLIOwnerMore:
             model="gpt-5",
             runtime=_FakeRuntime(),
             repo_name=repo_name,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
 
     def test_owner_returns_none_when_no_talker_registered(self, tmp_path: Path) -> None:
@@ -1703,6 +1735,10 @@ class TestCopilotCLIOwnerMore:
             runtime=_FakeRuntime(),
             repo_name="test/repo",
             talker_resolver=lambda r: fake_talker,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
         )
         assert session.owner is None
 
@@ -1723,6 +1759,10 @@ class TestCopilotCLIOwnerMore:
             runtime=_FakeRuntime(),
             repo_name="test/repo",
             talker_resolver=lambda r: fake_talker,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
         )
         assert session.owner == current.name
 
@@ -1742,6 +1782,11 @@ class TestCopilotCLIOwner:
             model="gpt-5",
             runtime=_FakeRuntime(),
             repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         assert session.owner is None
         del ProviderID  # quiet pyright
@@ -2254,14 +2299,29 @@ class TestEventsCreateTaskExitUntriaged:
             def create_agent(self, *args: object, **kwargs: object) -> object:
                 return _FakeProviderAgent()
 
+        class _FakeCommitSummarizer:
+            def __call__(self, work_dir: Path) -> str:
+                return "summary"
+
+        class _FakeThreadStarter:
+            def __init__(self, fn: Callable[..., None]) -> None:
+                self._fn = fn
+
+            def start(self, thread: object) -> None:
+                self._fn(thread)
+
+        class _FakeBackgroundSyncer:
+            def __call__(self, work_dir: Path, gh: object) -> None:
+                pass
+
         dispatcher = Dispatcher(
             config,  # type: ignore[arg-type]
             repo_cfg,  # type: ignore[arg-type]
             gh,  # type: ignore[arg-type]
-            get_commit_summary_fn=lambda wd: "summary",
-            thread_start_fn=boom,
+            commit_summarizer=_FakeCommitSummarizer(),
+            thread_starter=_FakeThreadStarter(boom),
             reorder_coalesce_state={},
-            sync_fn=lambda *a, **kw: None,
+            background_syncer=_FakeBackgroundSyncer(),
             provider_factory=_FakeFactory(),  # type: ignore[arg-type]
         )
         with pytest.raises(RuntimeError, match="explode"):
@@ -2534,6 +2594,14 @@ class TestWorkerExecuteTaskBranches:
         assert "10" in context and "20" in context and "30" in context
 
 
+class _FakeCITaskPicker:
+    """Typed :class:`~fido.worker.CITaskPicker` fake that always returns a mismatched
+    value — used to exercise the assertion path in ``_assert_ci_failure_matches_oracle``."""
+
+    def pick_next_task(self, order: object, rows: object) -> str:
+        return "mismatched-task"
+
+
 class TestWorkerOracleAssertion:
     """Cover the AssertionError raise in _assert_ci_failure_matches_oracle
     (worker.py:849-852)."""
@@ -2542,7 +2610,7 @@ class TestWorkerOracleAssertion:
         from fido.worker import _assert_ci_failure_matches_oracle
 
         task_list: list[dict] = []
-        # Inject a fake pick_next_task that returns a value that does NOT
+        # Inject a typed fake picker that returns a value that does NOT
         # match the just-admitted CI failure → fires the assertion.
         with pytest.raises(AssertionError, match="not first pickup"):
             _assert_ci_failure_matches_oracle(
@@ -2550,7 +2618,7 @@ class TestWorkerOracleAssertion:
                 "tests",
                 "FAILURE",
                 "run-1",
-                _pick_next_task_fn=lambda *a, **k: "mismatched-task",
+                picker=_FakeCITaskPicker(),
             )
 
 
@@ -2606,8 +2674,18 @@ class TestClaudeIterEventsCancelPaths:
 
         session = ClaudeSession(
             system_file,
+            work_dir=None,
             popen=_FakePopen(proc),
-            selector=selector_that_cancels,
+            selector=_FuncSelector(selector_that_cancels),
+            clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session_ref.append(session)
         # Force the FSM to AwaitingReply so iter_events sees in_turn=True.
@@ -2661,8 +2739,18 @@ class TestClaudeIterEventsCancelPaths:
 
         session = ClaudeSession(
             system_file,
+            work_dir=None,
             popen=_FakePopen(proc),
-            selector=selector_that_cancels,
+            selector=_FuncSelector(selector_that_cancels),
+            clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            repo_name=None,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
         session_ref.append(session)
         session.recover = _FakeCallRecorder()  # type: ignore[method-assign]
@@ -2758,7 +2846,7 @@ class TestEventsClaimReplyOutboxEffectsDelivered:
                 repo_cfg,
                 delivery_id="d1",
                 promise_ids=["promise-1"],
-                _store_factory=_StoreStub,
+                store_factory=_StoreStub,
             )
 
 
@@ -3473,6 +3561,11 @@ class TestWorkerSleep:
 
             def monotonic(self) -> float:
                 return 0.0
+
+            def now(self) -> object:
+                from datetime import UTC, datetime
+
+                return datetime(2000, 1, 1, tzinfo=UTC)
 
         # Pass provider= directly so the factory is not invoked.
         worker = _Worker(

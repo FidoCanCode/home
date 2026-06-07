@@ -3,12 +3,17 @@
 import argparse
 import json
 import logging
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-from fido.github import GitHub
-from fido.tasks import Tasks, sync_tasks_background
+from fido.github import GitHub, GitHubFactory, RealGitHubFactory
+from fido.infra import ProcessRunner, RealClock, RealProcessRunner
+from fido.tasks import (
+    RealBackgroundSyncer,
+    RealThreadStarter,
+    Tasks,
+    auto_complete_ask_tasks,
+)
 from fido.types import TaskType
 
 log = logging.getLogger(__name__)
@@ -17,8 +22,9 @@ log = logging.getLogger(__name__)
 class Cmd:
     """CLI command handler with injectable dependencies for testability."""
 
-    def __init__(self, *, github: GitHub) -> None:
+    def __init__(self, *, github: GitHub, runner: ProcessRunner) -> None:
         self._github = github
+        self._runner = runner
 
     def add(
         self,
@@ -48,12 +54,24 @@ class Cmd:
 
     def complete(self, work_dir: Path, task_id: str) -> None:
         Tasks(work_dir).complete_with_resolve(
-            task_id, self._github, syncer=sync_tasks_background
+            task_id,
+            self._github,
+            syncer=RealBackgroundSyncer(
+                runner=self._runner,
+                auto_completer=auto_complete_ask_tasks,
+                starter=RealThreadStarter(),
+            ),
         )
 
     def list(self, work_dir: Path) -> None:
         result = Tasks(work_dir).list()
         print(json.dumps(result, indent=2))
+
+
+class ParserFactory(Protocol):
+    """Typed collaborator for building the argument parser."""
+
+    def __call__(self) -> argparse.ArgumentParser: ...
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -93,12 +111,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(
     argv: list[str] | None = None,
     *,
-    _GitHub: type[GitHub] = GitHub,
-    _build_parser: Callable[[], argparse.ArgumentParser] = build_parser,
+    github_factory: GitHubFactory,
+    parser_factory: ParserFactory,
 ) -> None:
-    parser = _build_parser()
+    parser = parser_factory()
     args = parser.parse_args(argv)
-    cmd = Cmd(github=_GitHub())
+    runner = RealProcessRunner()
+    cmd = Cmd(
+        github=github_factory(),
+        runner=runner,
+    )
 
     match args.command:
         case "add":
@@ -120,4 +142,7 @@ def main(
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    main(
+        github_factory=RealGitHubFactory(RealProcessRunner(), RealClock()),
+        parser_factory=build_parser,
+    )

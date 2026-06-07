@@ -2460,3 +2460,17 @@ class TestInsightDedupCriticPrompt:
         )
         assert "near-duplicate" in result
         assert "same core claim" in result.lower() or "SAME core claim" in result
+
+
+class TestSynthesisFailureExplanationPrompt:
+    """Covers :meth:`Prompts.synthesis_failure_explanation_prompt`."""
+
+    def test_includes_comment_body(self) -> None:
+        result = Prompts("").synthesis_failure_explanation_prompt(
+            "please add a docstring"
+        )
+        assert "please add a docstring" in result
+
+    def test_instructs_plain_prose_not_json(self) -> None:
+        result = Prompts("").synthesis_failure_explanation_prompt("x")
+        assert "no JSON" in result

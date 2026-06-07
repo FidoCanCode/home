@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import ANY, MagicMock, call
 
 import pytest
@@ -20,14 +21,22 @@ from fido import provider
 from fido.appstate import (
     _EPOCH,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
 )
-from fido.claude import ClaudeClient
+from fido.claude import ClaudeClient, ClaudeSessionFactory, StreamingRunner
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
+from fido.infra import (
+    RealClock,
+    RealIOSelector,
+    RealOsProcess,
+    RealPopenRunner,
+    RealProcessRunner,
+)
 from fido.issue_cache import IssueCache, IssueNode
 from fido.nudges import Nudges
 from fido.prompts import Prompts
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
     ContextOverflowError,
+    ProviderAgent,
     ProviderID,
     ProviderLimitSnapshot,
     ProviderLimitWindow,
@@ -49,8 +58,8 @@ from fido.store import FidoStore, PRCommentQueueRecord, ReplyPromiseRecord
 from fido.tasks import (
     Tasks,
     _apply_queue_to_body,
-    _auto_complete_ask_tasks,
     _format_work_queue,
+    auto_complete_ask_tasks,
     pr_body_lock,
     sync_tasks,
     sync_tasks_background,
@@ -67,6 +76,7 @@ from fido.worker import (
     RepoContextFilter,
     RepoNameFilter,
     WorkerContext,
+    _AgentOnlyProvider,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     _assert_ci_failure_matches_oracle,
     _is_leaked_task_comment,
     _node_to_dict,
@@ -197,6 +207,52 @@ class _FakeTaskSyncer:
         self.sync_tasks: MagicMock = MagicMock()
 
 
+class _FakeProcessRunner:
+    """Typed :class:`~fido.infra.ProcessRunner` fake for worker tests.
+
+    Pre-programs a sequence of results/errors returned in order.  Each entry
+    in *results* is either a :class:`subprocess.CompletedProcess` (returned)
+    or a :class:`subprocess.CalledProcessError` (raised).  When *results* is
+    omitted, every ``run()`` call returns a success result with *stdout*.
+
+    Records every ``run()`` call (cmd + kwargs) so tests can assert on the
+    commands issued and kwargs forwarded.
+    """
+
+    def __init__(
+        self,
+        results: "list[subprocess.CompletedProcess[str] | subprocess.CalledProcessError] | None" = None,
+        *,
+        stdout: str = "",
+    ) -> None:
+        self._results = list(results) if results is not None else None
+        self._stdout = stdout
+        self.calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def run(self, cmd: Any, **kwargs: Any) -> "subprocess.CompletedProcess[str]":  # noqa: ANN401
+        self.calls.append((cmd, kwargs))
+        if self._results is not None:
+            item = self._results.pop(0)
+            if isinstance(item, subprocess.CalledProcessError):
+                raise item
+            return item
+        return subprocess.CompletedProcess(cmd, 0, stdout=self._stdout, stderr="")
+
+
+class _FakeSubDirProvider:
+    """Typed :class:`~fido.worker.SubDirProvider` fake for worker tests.
+
+    Returns a fixed :class:`~pathlib.Path` from :meth:`sub_dir` so tests
+    can point the worker at a temporary directory containing fake persona files.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def sub_dir(self) -> Path:
+        return self._path
+
+
 def _enqueue_pr_comment(tmp_path: Path, *, pr_number: int = 1) -> None:
     FidoStore(tmp_path).enqueue_pr_comment(
         delivery_id=f"delivery-{pr_number}",
@@ -259,9 +315,8 @@ class Worker(_WorkerBase):
         if "nudges" not in kwargs:
             kwargs["nudges"] = Nudges()
         if "provider_factory" not in kwargs:
-            kwargs["provider_factory"] = DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md",
-                claude_session_factory=_no_spawn_session_factory,
+            kwargs["provider_factory"] = _factory_with_claude_spy(
+                _NoSpawnSessionFactory
             )
         if "prompt_builder" not in kwargs:
             kwargs["prompt_builder"] = worker_module._DEFAULT_PROMPT_BUILDER  # pyright: ignore[reportPrivateUsage]
@@ -275,6 +330,10 @@ class Worker(_WorkerBase):
             kwargs["task_syncer"] = worker_module._DEFAULT_TASK_SYNCER  # pyright: ignore[reportPrivateUsage]
         if "clock" not in kwargs:
             kwargs["clock"] = worker_module._DEFAULT_CLOCK  # pyright: ignore[reportPrivateUsage]
+        if "runner" not in kwargs:
+            kwargs["runner"] = worker_module._DEFAULT_RUNNER  # pyright: ignore[reportPrivateUsage]
+        if "sub_dir_provider" not in kwargs:
+            kwargs["sub_dir_provider"] = worker_module._DEFAULT_SUB_DIR_PROVIDER  # pyright: ignore[reportPrivateUsage]
         if "background_syncer" not in kwargs:
             kwargs["background_syncer"] = lambda _w, _g: None
         if "task_reorderer" not in kwargs:
@@ -310,62 +369,139 @@ class WorkerThread(_WorkerThreadBase):
                 membership=kwargs.get("membership"),
             )
         if "provider_factory" not in kwargs:
-            kwargs["provider_factory"] = DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md",
-                claude_session_factory=_no_spawn_session_factory,
+            kwargs["provider_factory"] = _factory_with_claude_spy(
+                _NoSpawnSessionFactory
             )
         if "issue_cache" not in kwargs:
             kwargs["issue_cache"] = IssueCache(repo_name)
         if "dispatcher" not in kwargs:
             kwargs["dispatcher"] = _FakeDispatcher()
+        if "os_proc" not in kwargs:
+            kwargs["os_proc"] = RealOsProcess()
+        if "runner" not in kwargs:
+            kwargs["runner"] = RealProcessRunner()
         super().__init__(work_dir, repo_name, gh, *args, **kwargs)
 
 
-def _no_spawn_session_factory(*_args: object, **_kwargs: object) -> MagicMock:
-    """Return a MagicMock session; injected as ``claude_session_factory`` so no
-    real subprocess is spawned when tests call ``Worker.run()`` or run the
-    ``WorkerThread`` loop.  Replaces the old autouse ``_no_claude_session_spawn``
-    monkeypatch.setattr fixture."""
-    return MagicMock()
+class _NoSpawnSessionFactory(ClaudeSessionFactory):
+    """ClaudeSessionFactory subclass that returns a MagicMock instead of spawning a
+    real subprocess.  Injected as ``claude_session_factory_class`` so tests that
+    call ``Worker.run()`` or drive the ``WorkerThread`` loop don't hit the OS."""
+
+    def create(
+        self,
+        system_file: object,
+        *,
+        model: object,
+        session_id: object,
+        snapshot_publisher: object,
+    ) -> MagicMock:  # type: ignore[override]
+        return MagicMock()
 
 
-class _SpySessionFactory:
-    """Spy callable replacing ``ClaudeSession`` for ``create_session`` tests.
+class _NoopStreamingRunner:
+    """StreamingRunner stub that yields nothing — for test factories that won't stream."""
 
-    Injected as ``claude_session_factory`` via ``DefaultProviderFactory`` so
-    tests can verify the factory was called with the expected args without
-    patching ``claude.ClaudeSession`` at the module level.
+    def __call__(
+        self,
+        cmd: list[str],
+        stdin_file: object,
+        idle_timeout: float = 1800.0,
+        *,
+        cwd: object = None,
+    ) -> "Iterator[str]":
+        return iter([])
+
+
+_NOOP_SR: StreamingRunner = _NoopStreamingRunner()  # type: ignore[assignment]
+
+
+def _factory_with_claude_spy(
+    spy_class: type[ClaudeSessionFactory],
+    session_system_file: Path | None = None,
+) -> DefaultProviderFactory:
+    """DefaultProviderFactory wired with a spy ClaudeSessionFactory class and noop copilot infra."""
+    return DefaultProviderFactory(
+        session_system_file=session_system_file or default_sub_dir() / "persona.md",
+        claude_popen=RealPopenRunner(),
+        claude_selector=RealIOSelector(),
+        claude_clock=RealClock(),
+        claude_session_factory_class=spy_class,
+        claude_streaming_runner=_NOOP_SR,
+        copilot_process_runner=RealProcessRunner(),
+        copilot_popen_runner=RealPopenRunner(),
+    )
+
+
+class _SpySessionFactory(ClaudeSessionFactory):
+    """ClaudeSessionFactory subclass that records ``create()`` calls for assertions.
+
+    Injected as ``claude_session_factory_class`` via ``_factory_with_claude_spy``.
+    After ``worker.create_session()`` the live instance is retrievable via
+    ``worker._provider.agent._session_factory``.
     """
 
-    def __init__(self, return_value: object = None) -> None:
-        self._return_value: object = (
-            return_value if return_value is not None else MagicMock()
+    def __init__(
+        self,
+        *,
+        work_dir: object,
+        repo_name: object,
+        popen: object,
+        selector: object,
+        clock: object,
+    ) -> None:
+        super().__init__(  # type: ignore[call-arg]
+            work_dir=work_dir,
+            repo_name=repo_name,
+            popen=popen,  # type: ignore[arg-type]
+            selector=selector,  # type: ignore[arg-type]
+            clock=clock,  # type: ignore[arg-type]
         )
-        self._calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        self._init_kwargs: dict[str, object] = {
+            "work_dir": work_dir,
+            "repo_name": repo_name,
+        }
+        self._create_calls: list[dict[str, object]] = []
+        self.session_mock: MagicMock = MagicMock()
 
-    def __call__(self, *args: object, **kwargs: object) -> object:
-        self._calls.append((args, kwargs))
-        return self._return_value
+    def create(
+        self,
+        system_file: object,
+        *,
+        model: object,
+        session_id: object,
+        snapshot_publisher: object,
+    ) -> MagicMock:  # type: ignore[override]
+        self._create_calls.append(
+            {
+                "system_file": system_file,
+                "model": model,
+                "session_id": session_id,
+                "snapshot_publisher": snapshot_publisher,
+            }
+        )
+        return self.session_mock
+
+    def assert_session_created_once(self) -> None:
+        """Assert ``create()`` was called exactly once."""
+        assert len(self._create_calls) == 1, (
+            f"Expected 1 create() call, got {len(self._create_calls)}"
+        )
 
     @property
-    def return_value(self) -> object:
-        return self._return_value
-
-    @return_value.setter
-    def return_value(self, val: object) -> None:
-        self._return_value = val
-
-    def assert_called_once(self) -> None:
-        assert len(self._calls) == 1, f"Expected 1 call, got {len(self._calls)}"
+    def init_kwargs(self) -> dict[str, object]:
+        """kwargs recorded at ``__init__`` time (work_dir, repo_name)."""
+        return self._init_kwargs
 
     @property
-    def call_args(self) -> tuple[tuple[object, ...], dict[str, object]]:
-        assert self._calls, "No calls recorded"
-        return self._calls[-1]
+    def factory_kwargs(self) -> dict[str, object]:
+        """kwargs from the last ``create()`` call (model, session_id, …)."""
+        assert self._create_calls, "No create() calls recorded"
+        return self._create_calls[-1]
 
     @property
     def call_count(self) -> int:
-        return len(self._calls)
+        return len(self._create_calls)
 
 
 class _FakeWorker:
@@ -465,34 +601,41 @@ class TestRepoNameFilter:
 
 
 class TestResolveGitDir:
-    def _make_worker(self, tmp_path: Path) -> Worker:
-        return Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))
+    def _make_worker(
+        self, tmp_path: Path, runner: _FakeProcessRunner | None = None
+    ) -> Worker:
+        return Worker(
+            tmp_path,
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            runner=runner or _FakeProcessRunner(stdout="/default/.git"),
+        )
 
     def test_returns_path(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="/some/repo/.git\n"))
-        result = self._make_worker(tmp_path).resolve_git_dir(_run=mock_run)
+        runner = _FakeProcessRunner(stdout="/some/repo/.git\n")
+        result = Worker(tmp_path, MagicMock(), runner=runner).resolve_git_dir()
         assert result == Path("/some/repo/.git")
 
     def test_strips_whitespace(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="  /a/b/.git  \n"))
-        result = self._make_worker(tmp_path).resolve_git_dir(_run=mock_run)
+        runner = _FakeProcessRunner(stdout="  /a/b/.git  \n")
+        result = Worker(tmp_path, MagicMock(), runner=runner).resolve_git_dir()
         assert result == Path("/a/b/.git")
 
     def test_calls_correct_command(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="/a/.git"))
-        self._make_worker(tmp_path).resolve_git_dir(_run=mock_run)
-        mock_run.assert_called_once_with(
-            ["git", "rev-parse", "--absolute-git-dir"],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        runner = _FakeProcessRunner(stdout="/a/.git")
+        Worker(tmp_path, MagicMock(), runner=runner).resolve_git_dir()
+        assert len(runner.calls) == 1
+        cmd, kwargs = runner.calls[0]
+        assert cmd == ["git", "rev-parse", "--absolute-git-dir"]
+        assert kwargs["cwd"] == tmp_path
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["check"] is True
 
     def test_propagates_called_process_error(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(128, "git"))
+        runner = _FakeProcessRunner(results=[subprocess.CalledProcessError(128, "git")])
         with pytest.raises(subprocess.CalledProcessError):
-            self._make_worker(tmp_path).resolve_git_dir(_run=mock_run)
+            Worker(tmp_path, MagicMock(), runner=runner).resolve_git_dir()
 
 
 class TestAcquireLock:
@@ -564,15 +707,18 @@ class TestWorkerContextManager:
 
 
 class TestCreateContext:
-    def _mock_run(self, git_dir: Path) -> MagicMock:
-        return MagicMock(return_value=MagicMock(stdout=str(git_dir) + "\n"))
+    def _runner(self, git_dir: Path) -> _FakeProcessRunner:
+        return _FakeProcessRunner(stdout=str(git_dir) + "\n")
 
     def test_returns_worker_context(self, tmp_path: Path) -> None:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
         ctx = Worker(
-            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-        ).create_context(_run=self._mock_run(git_dir))
+            tmp_path,
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            runner=self._runner(git_dir),
+        ).create_context()
         assert isinstance(ctx, WorkerContext)
         assert ctx.work_dir == tmp_path
         assert ctx.git_dir == git_dir
@@ -583,8 +729,11 @@ class TestCreateContext:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
         ctx = Worker(
-            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-        ).create_context(_run=self._mock_run(git_dir))
+            tmp_path,
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            runner=self._runner(git_dir),
+        ).create_context()
         assert ctx.fido_dir.is_dir()
         ctx.lock_fd.close()
 
@@ -596,8 +745,11 @@ class TestCreateContext:
         try:
             with pytest.raises(LockHeld):
                 Worker(
-                    tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-                ).create_context(_run=self._mock_run(git_dir))
+                    tmp_path,
+                    MagicMock(),
+                    registry=MagicMock(spec=ActivityReporter),
+                    runner=self._runner(git_dir),
+                ).create_context()
         finally:
             fd1.close()
 
@@ -628,6 +780,28 @@ class TestRepoContext:
             default_branch="main",
         )
         assert ctx.collaborators == frozenset()
+
+
+class TestAgentOnlyProvider:
+    """Unit tests for _AgentOnlyProvider — the provider_agent= DI seam."""
+
+    def test_attaches_session_when_provided(self) -> None:
+        agent = MagicMock(spec=ProviderAgent)
+        session = MagicMock()
+        _AgentOnlyProvider(agent, session=session)
+        agent.attach_session.assert_called_once_with(session)
+
+    def test_provider_id_delegates_to_agent(self) -> None:
+        agent = MagicMock(spec=ProviderAgent)
+        agent.provider_id = ProviderID.CLAUDE_CODE
+        p = _AgentOnlyProvider(agent)
+        assert p.provider_id is agent.provider_id
+
+    def test_api_raises_not_implemented(self) -> None:
+        agent = MagicMock(spec=ProviderAgent)
+        p = _AgentOnlyProvider(agent)
+        with pytest.raises(NotImplementedError):
+            _ = p.api
 
 
 class TestWorker:
@@ -846,7 +1020,8 @@ class TestWorker:
             gh,
             session=self._session(status="writing tests"),
             registry=MagicMock(spec=ActivityReporter),
-        ).set_status("writing tests", _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("writing tests")
         gh.set_user_status.assert_called_once_with("writing tests", "🐕", busy=True)
 
     def test_set_status_busy_false_forwarded(self, tmp_path: Path) -> None:
@@ -857,7 +1032,8 @@ class TestWorker:
             gh,
             session=self._session(status="napping", emoji="😴"),
             registry=MagicMock(spec=ActivityReporter),
-        ).set_status("napping", busy=False, _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("napping", busy=False)
         gh.set_user_status.assert_called_once_with("napping", "😴", busy=False)
 
     def test_set_status_uses_what_as_fallback_when_status_empty(
@@ -870,7 +1046,8 @@ class TestWorker:
             gh,
             session=self._session(status="", emoji=":dog:"),
             registry=MagicMock(spec=ActivityReporter),
-        ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("idle")
         assert gh.set_user_status.call_args[0][0] == "idle"
 
     def test_set_status_emoji_fallback_when_empty(self, tmp_path: Path) -> None:
@@ -881,7 +1058,8 @@ class TestWorker:
             gh,
             session=self._session(status="Sniffing endpoints", emoji=""),
             registry=MagicMock(spec=ActivityReporter),
-        ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("idle")
         gh.set_user_status.assert_called_once_with(
             "Sniffing endpoints", ":dog:", busy=True
         )
@@ -895,7 +1073,8 @@ class TestWorker:
             gh,
             session=self._session(status=long_text),
             registry=MagicMock(spec=ActivityReporter),
-        ).set_status("something", _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("something")
         called_text = gh.set_user_status.call_args[0][0]
         assert len(called_text) == 80
 
@@ -908,8 +1087,12 @@ class TestWorker:
         (tmp_path / "persona.md").write_text("I am Fido.")
         with caplog.at_level(logging.INFO, logger="fido"):
             Worker(
-                tmp_path, gh, session=None, registry=MagicMock(spec=ActivityReporter)
-            ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
+                tmp_path,
+                gh,
+                session=None,
+                registry=MagicMock(spec=ActivityReporter),
+                sub_dir_provider=_FakeSubDirProvider(tmp_path),
+            ).set_status("idle")
         gh.set_user_status.assert_not_called()
         assert "no session available" in caplog.text
 
@@ -926,7 +1109,8 @@ class TestWorker:
                 gh,
                 session=self._session(status="", emoji=":dog:"),
                 registry=MagicMock(spec=ActivityReporter),
-            ).set_status("idle", _sub_dir_fn=lambda: tmp_path)
+                sub_dir_provider=_FakeSubDirProvider(tmp_path),
+            ).set_status("idle")
         assert "falling back" in caplog.text
 
     def test_set_status_logs_info_on_success(
@@ -942,7 +1126,8 @@ class TestWorker:
                 gh,
                 session=self._session(status="fetching"),
                 registry=MagicMock(spec=ActivityReporter),
-            ).set_status("fetching", _sub_dir_fn=lambda: tmp_path)
+                sub_dir_provider=_FakeSubDirProvider(tmp_path),
+            ).set_status("fetching")
         assert "set_status" in caplog.text
 
     def test_set_status_falls_back_to_empty_persona_on_oserror(
@@ -951,9 +1136,12 @@ class TestWorker:
         gh = self._make_gh()
         missing_dir = tmp_path / "no_such_dir"
         session = self._session(status="working")
-        Worker(tmp_path, gh, session=session).set_status(
-            "working", _sub_dir_fn=lambda: missing_dir
-        )
+        Worker(
+            tmp_path,
+            gh,
+            session=session,
+            sub_dir_provider=_FakeSubDirProvider(missing_dir),
+        ).set_status("working")
         prompt_arg = session.prompt.call_args[0][0]
         assert "working (busy)" in prompt_arg
 
@@ -962,8 +1150,12 @@ class TestWorker:
         (tmp_path / "persona.md").write_text("I am Fido.")
         session = self._session(status="working")
         Worker(
-            tmp_path, gh, session=session, registry=MagicMock(spec=ActivityReporter)
-        ).set_status("working", _sub_dir_fn=lambda: tmp_path)
+            tmp_path,
+            gh,
+            session=session,
+            registry=MagicMock(spec=ActivityReporter),
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("working")
         assert session.prompt.call_args[1]["system_prompt"] is not None
 
     def test_set_status_reports_activity_to_registry(self, tmp_path: Path) -> None:
@@ -976,7 +1168,8 @@ class TestWorker:
             repo_name="owner/myrepo",
             registry=registry,
             session=self._session(status="working"),
-        ).set_status("working", busy=True, _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("working", busy=True)
         registry.report_activity.assert_called_once_with(
             "owner/myrepo", "working", True
         )
@@ -993,7 +1186,8 @@ class TestWorker:
             repo_name="owner/repo",
             registry=registry,
             session=self._session(status="working"),
-        ).set_status("working", _sub_dir_fn=lambda: tmp_path)
+            sub_dir_provider=_FakeSubDirProvider(tmp_path),
+        ).set_status("working")
         registry.status_update.assert_called_once()
 
     def test_set_status_serializes_concurrent_calls_via_registry_lock(
@@ -1017,7 +1211,9 @@ class TestWorker:
                 process_started_at=_EPOCH,
             )
         )
-        registry = WorkerRegistry(MagicMock(), updater)
+        registry = WorkerRegistry(
+            MagicMock(), updater, RealProcessRunner(), RealClock()
+        )
         # registry.start now resolves git_dir via git rev-parse, so
         # the work_dir must be a real git repo (#1696 codex P1
         # round 5).  ``git init`` is idempotent.
@@ -1056,6 +1252,7 @@ class TestWorker:
                 repo_name=f"owner/repo{i}",
                 registry=registry,
                 session=make_session(),
+                sub_dir_provider=_FakeSubDirProvider(tmp_path / "nosub"),
             )
             for i in range(3)
         ]
@@ -1063,7 +1260,6 @@ class TestWorker:
             threading.Thread(
                 target=w.set_status,
                 args=("working",),
-                kwargs={"_sub_dir_fn": lambda: tmp_path / "nosub"},
             )
             for w in workers
         ]
@@ -1201,65 +1397,53 @@ class TestWorker:
     # --- create_session / stop_session ---
 
     def test_create_session_instantiates_claude_session(self, tmp_path: Path) -> None:
-        spy = _SpySessionFactory()
         worker = Worker(
             tmp_path,
             MagicMock(),
             registry=MagicMock(spec=ActivityReporter),
-            provider_factory=DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md",
-                claude_session_factory=spy,
-            ),
+            provider_factory=_factory_with_claude_spy(_SpySessionFactory),
         )
         worker.create_session()
-        spy.assert_called_once()
+        spy = worker._provider.agent._session_factory  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(spy, _SpySessionFactory)
+        spy.assert_session_created_once()
 
     def test_create_session_passes_work_dir(self, tmp_path: Path) -> None:
-        spy = _SpySessionFactory()
         worker = Worker(
             tmp_path,
             MagicMock(),
             registry=MagicMock(spec=ActivityReporter),
-            provider_factory=DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md",
-                claude_session_factory=spy,
-            ),
+            provider_factory=_factory_with_claude_spy(_SpySessionFactory),
         )
         worker.create_session()
-        _, kwargs = spy.call_args
-        assert kwargs.get("work_dir") == tmp_path
+        spy = worker._provider.agent._session_factory  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(spy, _SpySessionFactory)
+        assert spy.init_kwargs.get("work_dir") == tmp_path
 
     def test_create_session_switches_to_opus(self, tmp_path: Path) -> None:
-        mock_session = MagicMock()
-        spy = _SpySessionFactory(return_value=mock_session)
         worker = Worker(
             tmp_path,
             MagicMock(),
             registry=MagicMock(spec=ActivityReporter),
-            provider_factory=DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md",
-                claude_session_factory=spy,
-            ),
+            provider_factory=_factory_with_claude_spy(_SpySessionFactory),
         )
         worker.create_session()
-        _, kwargs = spy.call_args
-        assert kwargs.get("model") == "claude-opus-4-6"
-        mock_session.switch_model.assert_not_called()
+        spy = worker._provider.agent._session_factory  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(spy, _SpySessionFactory)
+        assert spy.factory_kwargs.get("model") == "claude-opus-4-6"
+        spy.session_mock.switch_model.assert_not_called()
 
     def test_create_session_stores_on_self(self, tmp_path: Path) -> None:
-        mock_session = MagicMock()
-        spy = _SpySessionFactory(return_value=mock_session)
         worker = Worker(
             tmp_path,
             MagicMock(),
             registry=MagicMock(spec=ActivityReporter),
-            provider_factory=DefaultProviderFactory(
-                session_system_file=default_sub_dir() / "persona.md",
-                claude_session_factory=spy,
-            ),
+            provider_factory=_factory_with_claude_spy(_SpySessionFactory),
         )
         worker.create_session()
-        assert worker._provider.agent.session is mock_session  # pyright: ignore[reportPrivateUsage]
+        spy = worker._provider.agent._session_factory  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(spy, _SpySessionFactory)
+        assert worker._provider.agent.session is spy.session_mock  # pyright: ignore[reportPrivateUsage]
 
     def test_ensure_provider_creates_provider_from_repo_cfg(
         self, tmp_path: Path
@@ -2681,7 +2865,7 @@ class TestAssertGitIdentity:
                 _tasks=Tasks(tmp_path),
                 _state=State(tmp_path / ".git" / "fido"),
                 nudges=Nudges(),
-                provider_factory=DefaultProviderFactory(
+                provider_factory=DefaultProviderFactory.real(
                     session_system_file=default_sub_dir() / "persona.md"
                 ),
                 prompt_builder=worker_module._DEFAULT_PROMPT_BUILDER,  # pyright: ignore[reportPrivateUsage]
@@ -2689,6 +2873,8 @@ class TestAssertGitIdentity:
                 harness_committer_factory=worker_module._DEFAULT_HARNESS_COMMITTER_FACTORY,  # pyright: ignore[reportPrivateUsage]
                 task_syncer=worker_module._DEFAULT_TASK_SYNCER,  # pyright: ignore[reportPrivateUsage]
                 clock=worker_module._DEFAULT_CLOCK,  # pyright: ignore[reportPrivateUsage]
+                runner=worker_module._DEFAULT_RUNNER,  # pyright: ignore[reportPrivateUsage]
+                sub_dir_provider=worker_module._DEFAULT_SUB_DIR_PROVIDER,  # pyright: ignore[reportPrivateUsage]
                 dispatcher=_FakeDispatcher(),
                 issue_cache=IssueCache("test/repo"),
                 background_syncer=lambda _w, _g: None,
@@ -4531,51 +4717,49 @@ class TestParseStatusNudge:
 class TestGit:
     """Tests for Worker._git helper."""
 
-    def test_calls_subprocess_run_with_git_prefix(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
-            ["status"], _run=mock_run
+    def _worker(self, tmp_path: Path, runner: _FakeProcessRunner) -> Worker:
+        return Worker(
+            tmp_path,
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            runner=runner,
         )
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
-        assert args[0] == "git"
-        assert args[1] == "status"
+
+    def test_calls_subprocess_run_with_git_prefix(self, tmp_path: Path) -> None:
+        runner = _FakeProcessRunner()
+        self._worker(tmp_path, runner)._git(["status"])
+        assert len(runner.calls) == 1
+        cmd = runner.calls[0][0]
+        assert cmd[0] == "git"
+        assert cmd[1] == "status"
 
     def test_passes_work_dir_as_cwd(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
-            ["status"], _run=mock_run
-        )
-        assert mock_run.call_args[1]["cwd"] == tmp_path
+        runner = _FakeProcessRunner()
+        self._worker(tmp_path, runner)._git(["status"])
+        assert runner.calls[0][1]["cwd"] == tmp_path
 
     def test_check_true_by_default(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
-            ["status"], _run=mock_run
-        )
-        assert mock_run.call_args[1]["check"] is True
+        runner = _FakeProcessRunner()
+        self._worker(tmp_path, runner)._git(["status"])
+        assert runner.calls[0][1]["check"] is True
 
     def test_check_false_propagated(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(returncode=1))
-        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
-            ["status"], check=False, _run=mock_run
+        runner = _FakeProcessRunner(
+            results=[subprocess.CompletedProcess([], 1, stdout="", stderr="")]
         )
-        assert mock_run.call_args[1]["check"] is False
+        self._worker(tmp_path, runner)._git(["status"], check=False)
+        assert runner.calls[0][1]["check"] is False
 
     def test_propagates_called_process_error(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, "git"))
+        runner = _FakeProcessRunner(results=[subprocess.CalledProcessError(1, "git")])
         with pytest.raises(subprocess.CalledProcessError):
-            Worker(
-                tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-            )._git(["checkout", "no-such-branch"], _run=mock_run)
+            self._worker(tmp_path, runner)._git(["checkout", "no-such-branch"])
 
     def test_capture_output_and_text_set(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(returncode=0))
-        Worker(tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter))._git(
-            ["log"], _run=mock_run
-        )
-        assert mock_run.call_args[1]["capture_output"] is True
-        assert mock_run.call_args[1]["text"] is True
+        runner = _FakeProcessRunner()
+        self._worker(tmp_path, runner)._git(["log"])
+        assert runner.calls[0][1]["capture_output"] is True
+        assert runner.calls[0][1]["text"] is True
 
     def test_stale_index_lock_removed_and_retried(self, tmp_path: Path) -> None:
         """First call fails with git's index.lock error; when the lock
@@ -4589,24 +4773,17 @@ class TestGit:
         old = datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp()
         _os.utime(lock, (old, old))
 
-        calls: list[int] = []
-        success = MagicMock(returncode=0)
+        lock_error = subprocess.CalledProcessError(
+            128,
+            "git",
+            stderr="fatal: Unable to create '.git/index.lock': File exists.",
+        )
+        success = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        runner = _FakeProcessRunner(results=[lock_error, success])
 
-        def _run(*args: object, **kwargs: object) -> object:  # noqa: ARG001
-            calls.append(1)
-            if len(calls) == 1:
-                raise subprocess.CalledProcessError(
-                    128,
-                    args[0],
-                    stderr="fatal: Unable to create '.git/index.lock': File exists.",
-                )
-            return success
-
-        result = Worker(
-            tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-        )._git(["add", "-A"], _run=_run)
+        result = self._worker(tmp_path, runner)._git(["add", "-A"])
         assert result is success
-        assert len(calls) == 2
+        assert len(runner.calls) == 2
         assert not lock.exists()
 
     def test_fresh_index_lock_not_removed(self, tmp_path: Path) -> None:
@@ -4617,32 +4794,29 @@ class TestGit:
         lock = git_dir / "index.lock"
         lock.write_bytes(b"fresh")
 
-        mock_run = MagicMock(
-            side_effect=subprocess.CalledProcessError(
-                128,
-                "git",
-                stderr="fatal: Unable to create '.git/index.lock': File exists.",
-            )
+        lock_error = subprocess.CalledProcessError(
+            128,
+            "git",
+            stderr="fatal: Unable to create '.git/index.lock': File exists.",
         )
+        runner = _FakeProcessRunner(results=[lock_error])
         with pytest.raises(subprocess.CalledProcessError):
-            Worker(
-                tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-            )._git(["add", "-A"], _run=mock_run)
+            self._worker(tmp_path, runner)._git(["add", "-A"])
         assert lock.exists()
-        assert mock_run.call_count == 1
+        assert len(runner.calls) == 1
 
     def test_non_lock_error_propagates_without_retry(self, tmp_path: Path) -> None:
         """Other git failures must not trigger the lock self-heal."""
-        mock_run = MagicMock(
-            side_effect=subprocess.CalledProcessError(
-                128, "git", stderr="fatal: not a git repository"
-            )
+        runner = _FakeProcessRunner(
+            results=[
+                subprocess.CalledProcessError(
+                    128, "git", stderr="fatal: not a git repository"
+                )
+            ]
         )
         with pytest.raises(subprocess.CalledProcessError):
-            Worker(
-                tmp_path, MagicMock(), registry=MagicMock(spec=ActivityReporter)
-            )._git(["status"], _run=mock_run)
-        assert mock_run.call_count == 1
+            self._worker(tmp_path, runner)._git(["status"])
+        assert len(runner.calls) == 1
 
 
 class TestStaleIndexLockHelpers:
@@ -4904,6 +5078,7 @@ class TestWritePrDescription:
             issue,
             task_list or [],
             existing_body,
+            runner=RealProcessRunner(),
             agent=mock_cc,
         )
         return result, mock_cc
@@ -5120,7 +5295,9 @@ class TestWritePrDescription:
         with pytest.raises(
             ValueError, match="_write_pr_description requires agent or pre_baked"
         ):
-            _write_pr_description(Path("/tmp"), gh, "owner/repo", 99, 42, [])
+            _write_pr_description(
+                Path("/tmp"), gh, "owner/repo", 99, 42, [], runner=_FakeProcessRunner()
+            )
 
     def test_pre_baked_description_skips_provider(self, tmp_path: Path) -> None:
         """When pre_baked_description is provided, the LLM call is skipped
@@ -5135,6 +5312,7 @@ class TestWritePrDescription:
             99,
             42,
             [{"title": "x", "status": "pending"}],
+            runner=RealProcessRunner(),
             agent=agent,
             pre_baked_description="## Summary\n\n- thing\n\nFixes #42.",
         )
@@ -5156,6 +5334,7 @@ class TestWritePrDescription:
             99,
             42,
             [{"title": "x", "status": "pending"}],
+            runner=RealProcessRunner(),
             pre_baked_description="## Summary\n\nbody.",
         )
         body = gh.edit_pr_body.call_args[0][2]
@@ -5173,6 +5352,7 @@ class TestWritePrDescription:
             99,
             42,
             [{"title": "x", "status": "pending"}],
+            runner=RealProcessRunner(),
             pre_baked_description="## Summary\n\nbody.\n\nFixes #42.",
         )
         body = gh.edit_pr_body.call_args[0][2]
@@ -5191,6 +5371,7 @@ class TestWritePrDescription:
             99,
             42,
             [{"title": "x", "status": "pending"}],
+            runner=RealProcessRunner(),
             pre_baked_description="## Summary\n\nbody.\n\nFixes #42",
         )
         body = gh.edit_pr_body.call_args[0][2]
@@ -10858,7 +11039,6 @@ class TestRescopeBeforePickRealKwargs:
             MagicMock(spec=ActivityReporter),
             MagicMock(),
             MagicMock(),
-            MagicMock(),
         )
         # The after-apply chain lives outside kwargs.
         assert isinstance(after_applies, list)
@@ -11074,17 +11254,13 @@ class TestNewDelegationMethods:
                 registry: object,
                 agent: object,
                 prompts: object,
-                rewrite_fn: object,
-                sync_fn: object = None,
-                sync_tasks_fn: object = None,
             ) -> tuple[dict[str, object], list[object]]:  # type: ignore[override]
-                calls.append((registry, agent, prompts, rewrite_fn, {}))
+                calls.append((registry, agent, prompts))
                 return {"k": "v"}, []
 
         fake_registry = MagicMock(spec=ActivityReporter)
         fake_agent = MagicMock()
         fake_prompts = MagicMock()
-        fake_rewrite = MagicMock()
         worker = Worker(
             tmp_path,
             MagicMock(),
@@ -11095,7 +11271,6 @@ class TestNewDelegationMethods:
             fake_registry,
             fake_agent,
             fake_prompts,
-            fake_rewrite,
         )
         assert len(calls) == 1
         assert calls[0][0] is fake_registry
@@ -11648,7 +11823,7 @@ class TestExecuteTask:
         worker._tasks.complete_with_resolve.assert_called_once_with(
             task["id"],
             gh,
-            syncer=sync_tasks_background,
+            syncer=ANY,
             collaborators=frozenset({"owner"}),
             allowed_bots=frozenset(),
         )
@@ -11754,7 +11929,7 @@ class TestExecuteTask:
         worker._tasks.complete_with_resolve.assert_called_once_with(
             task["id"],
             gh,
-            syncer=sync_tasks_background,
+            syncer=ANY,
             collaborators=frozenset({"owner"}),
             allowed_bots=frozenset(),
         )
@@ -16289,23 +16464,23 @@ class TestRunPromoteMergeIntegration:
 
 class TestResolveGitDirModuleLevel:
     def test_returns_path_from_stdout(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="/some/repo/.git\n"))
-        assert _resolve_git_dir(tmp_path, _run=mock_run) == Path("/some/repo/.git")
+        runner = _FakeProcessRunner(stdout="/some/repo/.git\n")
+        assert _resolve_git_dir(tmp_path, runner=runner) == Path("/some/repo/.git")
 
     def test_passes_absolute_git_dir_flag(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="/repo/.git\n"))
-        _resolve_git_dir(tmp_path, _run=mock_run)
-        assert "--absolute-git-dir" in mock_run.call_args[0][0]
+        runner = _FakeProcessRunner(stdout="/repo/.git\n")
+        _resolve_git_dir(tmp_path, runner=runner)
+        assert "--absolute-git-dir" in runner.calls[0][0]
 
     def test_raises_on_subprocess_failure(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, "git"))
+        runner = _FakeProcessRunner(results=[subprocess.CalledProcessError(1, "git")])
         with pytest.raises(subprocess.CalledProcessError):
-            _resolve_git_dir(tmp_path, _run=mock_run)
+            _resolve_git_dir(tmp_path, runner=runner)
 
     def test_passes_cwd(self, tmp_path: Path) -> None:
-        mock_run = MagicMock(return_value=MagicMock(stdout="/repo/.git\n"))
-        _resolve_git_dir(tmp_path, _run=mock_run)
-        assert mock_run.call_args.kwargs["cwd"] == tmp_path
+        runner = _FakeProcessRunner(stdout="/repo/.git\n")
+        _resolve_git_dir(tmp_path, runner=runner)
+        assert runner.calls[0][1]["cwd"] == tmp_path
 
 
 class TestFormatWorkQueue:
@@ -16400,7 +16575,7 @@ class TestPrBodyLock:
         subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
         fido_dir = tmp_path / ".git" / "fido"
         fido_dir.mkdir(parents=True, exist_ok=True)
-        with pr_body_lock(tmp_path):
+        with pr_body_lock(tmp_path, runner=RealProcessRunner()):
             assert (fido_dir / "sync.lock").exists()
 
     def test_lock_blocks_sync_tasks(self, tmp_path: Path) -> None:
@@ -16412,12 +16587,12 @@ class TestPrBodyLock:
         fido_dir.mkdir(parents=True, exist_ok=True)
         (fido_dir / "state.json").write_text('{"issue": 1}')
         gh = MagicMock()
-        with pr_body_lock(tmp_path):
+        with pr_body_lock(tmp_path, runner=RealProcessRunner()):
             sync_tasks(
                 tmp_path,
                 gh,
-                _resolve_git_dir_fn=MagicMock(return_value=tmp_path / ".git"),
-                _auto_complete_ask_tasks_fn=MagicMock(),
+                git_dir_resolver=MagicMock(return_value=tmp_path / ".git"),
+                auto_completer=MagicMock(),
             )
         # sync_tasks should have skipped (couldn't acquire LOCK_NB)
         gh.find_pr.assert_not_called()
@@ -16493,7 +16668,7 @@ class TestAutoCompleteAskTasks:
     def test_no_ask_tasks_does_nothing(self, tmp_path: Path) -> None:
         gh = MagicMock()
         self._fido_dir(tmp_path, tasks=[])
-        _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         gh.get_review_threads.assert_not_called()
 
     def test_completes_ask_task_when_thread_resolved(self, tmp_path: Path) -> None:
@@ -16501,7 +16676,7 @@ class TestAutoCompleteAskTasks:
         task = self._ask_task(42)
         self._fido_dir(tmp_path, tasks=[task])
         gh.get_review_threads.return_value = [self._resolved_node(42)]
-        _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         assert self._task_status(tmp_path, "ask-1") == "completed"
 
     def test_does_not_complete_ask_task_when_thread_not_resolved(
@@ -16513,7 +16688,7 @@ class TestAutoCompleteAskTasks:
         gh.get_review_threads.return_value = [
             {"isResolved": False, "comments": {"nodes": [{"databaseId": 42}]}}
         ]
-        _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         assert self._task_status(tmp_path, "ask-1") == "pending"
 
     def test_get_review_threads_exception_propagates(self, tmp_path: Path) -> None:
@@ -16522,7 +16697,7 @@ class TestAutoCompleteAskTasks:
         self._fido_dir(tmp_path, tasks=[task])
         gh.get_review_threads.side_effect = RuntimeError("api fail")
         with pytest.raises(RuntimeError, match="api fail"):
-            _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+            auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         assert self._task_status(tmp_path, "ask-1") == "pending"
 
     def test_non_ask_tasks_ignored(self, tmp_path: Path) -> None:
@@ -16535,7 +16710,7 @@ class TestAutoCompleteAskTasks:
         }
         self._fido_dir(tmp_path, tasks=[task])
         gh.get_review_threads.return_value = [self._resolved_node(1)]
-        _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         # No ASK-prefixed title => get_review_threads not called, no completion
         gh.get_review_threads.assert_not_called()
 
@@ -16543,7 +16718,7 @@ class TestAutoCompleteAskTasks:
         gh = MagicMock()
         task = {"title": "ASK: question", "status": "pending", "type": "thread"}
         self._fido_dir(tmp_path, tasks=[task])
-        _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         gh.get_review_threads.assert_not_called()
 
     def test_resolved_node_without_database_id_skipped(self, tmp_path: Path) -> None:
@@ -16553,7 +16728,7 @@ class TestAutoCompleteAskTasks:
         gh.get_review_threads.return_value = [
             {"isResolved": True, "comments": {"nodes": [{}]}}
         ]
-        _auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
+        auto_complete_ask_tasks(tmp_path, gh, "owner/repo", 1)
         assert self._task_status(tmp_path, "ask-1") == "pending"
 
 
@@ -16567,10 +16742,10 @@ class TestSyncTasks:
         (fido_dir / "state.json").write_text(f'{{"issue": {issue}}}')
 
     def _sync_kwargs(self, fido_dir: Path) -> dict:
-        """Return injection kwargs for sync_tasks pointing _resolve_git_dir at fido_dir.parent."""
+        """Return injection kwargs for sync_tasks pointing git_dir_resolver at fido_dir.parent."""
         return {
-            "_resolve_git_dir_fn": MagicMock(return_value=fido_dir.parent),
-            "_auto_complete_ask_tasks_fn": MagicMock(),
+            "git_dir_resolver": MagicMock(return_value=fido_dir.parent),
+            "auto_completer": MagicMock(),
         }
 
     def test_warns_when_git_dir_not_resolved(
@@ -16583,9 +16758,10 @@ class TestSyncTasks:
             sync_tasks(
                 tmp_path,
                 gh,
-                _resolve_git_dir_fn=MagicMock(
+                git_dir_resolver=MagicMock(
                     side_effect=subprocess.CalledProcessError(1, "git")
                 ),
+                auto_completer=MagicMock(),
             )
         assert "could not resolve git dir" in caplog.text
 
@@ -16949,20 +17125,38 @@ class TestSyncTasksBackground:
     def test_starts_daemon_thread(self, tmp_path: Path) -> None:
         gh = MagicMock()
         started: list = []
-        sync_tasks_background(tmp_path, gh, _start=started.append)
+        sync_tasks_background(
+            tmp_path,
+            gh,
+            git_dir_resolver=MagicMock(),
+            auto_completer=MagicMock(),
+            starter=started.append,
+        )
         assert len(started) == 1
         assert started[0].daemon is True
 
     def test_thread_name_includes_dir_name(self, tmp_path: Path) -> None:
         gh = MagicMock()
         captured: list = []
-        sync_tasks_background(tmp_path, gh, _start=captured.append)
+        sync_tasks_background(
+            tmp_path,
+            gh,
+            git_dir_resolver=MagicMock(),
+            auto_completer=MagicMock(),
+            starter=captured.append,
+        )
         assert tmp_path.name in captured[0].name
 
     def test_thread_target_is_sync_tasks(self, tmp_path: Path) -> None:
         gh = MagicMock()
         captured: list = []
-        sync_tasks_background(tmp_path, gh, _start=captured.append)
+        sync_tasks_background(
+            tmp_path,
+            gh,
+            git_dir_resolver=MagicMock(),
+            auto_completer=MagicMock(),
+            starter=captured.append,
+        )
         assert captured[0]._target is sync_tasks
 
 
@@ -17773,18 +17967,39 @@ class TestWorkerThread:
         wt._wake.wait.assert_called_once()
 
     def test_run_halts_on_claude_leak_error(self, tmp_path: Path) -> None:
-        """SessionLeakError in the worker loop calls os._exit(3)."""
-        wt = self._make_thread(tmp_path)
-        exits: list[int] = []
-        WorkerThread._fn_exit = exits.append  # type: ignore[assignment]
-        try:
-            # Force the loop to raise a leak error on the first iteration.
-            wt._registry = MagicMock()
-            wt._registry.report_activity.side_effect = provider.SessionLeakError("leak")
-            wt.run()
-        finally:
-            del WorkerThread._fn_exit
-        assert exits == [3]
+        """SessionLeakError in the worker loop calls os._exit(3) via OsProcess."""
+
+        class _FakeOsProcess:
+            def __init__(self) -> None:
+                self.exit_calls: list[int] = []
+
+            def exit(self, code: int) -> None:
+                self.exit_calls.append(code)
+
+            def execvp(
+                self, file: str, args: list[str]
+            ) -> None: ...  # pragma: no cover
+
+            def chdir(self, path: object) -> None: ...  # pragma: no cover
+
+            def install_signal(
+                self, signum: int, handler: object
+            ) -> object:  # pragma: no cover
+                return None
+
+        os_proc = _FakeOsProcess()
+        wt = WorkerThread(
+            tmp_path,
+            "owner/repo",
+            MagicMock(),
+            registry=MagicMock(spec=ActivityReporter),
+            os_proc=os_proc,
+        )
+        # Force the loop to raise a leak error on the first iteration.
+        wt._registry = MagicMock()
+        wt._registry.report_activity.side_effect = provider.SessionLeakError("leak")
+        wt.run()
+        assert os_proc.exit_calls == [3]
 
     # ── config / repo_cfg injection ───────────────────────────────────────
 

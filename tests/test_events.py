@@ -1,5 +1,6 @@
+from collections.abc import Callable
 from pathlib import Path
-from typing import Never
+from typing import Any, Never
 from unittest.mock import MagicMock
 
 import pytest
@@ -45,6 +46,128 @@ from fido.tasks import Tasks
 from fido.types import ActiveIssue, ActivePR, IntentVerdict, RescopeIntent
 from fido.worker import ActivityReporter
 from tests.fakes import _FakeDispatcher
+
+# ---------------------------------------------------------------------------
+# Test fakes for events.py callable-slot collaborators
+# ---------------------------------------------------------------------------
+
+
+class _FakeSynthesisCaller:
+    """Test stub for :class:`~fido.events.SynthesisCaller`.
+
+    Wraps two callables — one for ``call_synthesis``, one for
+    ``call_failure_explanation`` — so tests can inject arbitrary
+    behaviour (fixed responses, captured args, exception raises) without
+    touching module-level names.
+    """
+
+    def __init__(
+        self,
+        fn: Callable[..., Any],
+        *,
+        failure_fn: Callable[..., Any] | None = None,
+    ) -> None:
+        self._fn = fn
+        self._failure_fn = failure_fn if failure_fn is not None else fn
+
+    def call_synthesis(self, comment_body: str, **kwargs: Any) -> Any:  # noqa: ANN401
+        return self._fn(comment_body, **kwargs)
+
+    def call_failure_explanation(self, comment_body: str, **kwargs: Any) -> Any:  # noqa: ANN401
+        return self._failure_fn(comment_body, **kwargs)
+
+
+class _FakeThreadStarter:
+    """Test stub for :class:`~fido.events.ThreadStarter`."""
+
+    def __init__(self, fn: Callable[..., None] | None = None) -> None:
+        self._fn = fn or (lambda t: None)
+
+    def start(self, thread: Any) -> None:  # noqa: ANN401
+        self._fn(thread)
+
+
+class _FakeTaskReorderer:
+    """Test stub for :class:`~fido.events.TaskReorderer`."""
+
+    def __init__(self, fn: Callable[..., None]) -> None:
+        self._fn = fn
+
+    def __call__(self, tasks: Any, commit_summary: str, **kwargs: Any) -> None:  # noqa: ANN401
+        self._fn(tasks, commit_summary, **kwargs)
+
+
+class _FakePrDescriptionRewriter:
+    """Test stub for :class:`~fido.events.PrDescriptionRewriter`."""
+
+    def __init__(self, fn: Callable[..., None] | None = None) -> None:
+        self._fn = fn or (lambda *a, **kw: None)
+
+    def rewrite_pr_description(
+        self,
+        work_dir: Path,
+        gh: Any,  # noqa: ANN401
+        *,
+        agent: Any = None,  # noqa: ANN401
+    ) -> None:
+        self._fn(work_dir, gh, agent=agent)
+
+
+class _FakeBackgroundSyncer:
+    """Test stub for :class:`~fido.events.BackgroundTaskSyncer`."""
+
+    def __init__(self, fn: Callable[..., None] | None = None) -> None:
+        self._fn = fn or (lambda *a, **kw: None)
+
+    def __call__(self, work_dir: Path, gh: Any) -> None:  # noqa: ANN401
+        self._fn(work_dir, gh)
+
+
+class _FakeCommitSummarizer:
+    """Test stub for :class:`~fido.events.CommitSummarizer`."""
+
+    def __init__(self, summary: str = "summary") -> None:
+        self._summary = summary
+
+    def __call__(self, work_dir: Path) -> str:
+        return self._summary
+
+
+class _FakeBackfillReplier:
+    """Test stub for :class:`~fido.events.BackfillReplier`."""
+
+    def __init__(self, fn: Callable[..., Any]) -> None:
+        self._fn = fn
+
+    def reply_to_issue_comment(
+        self,
+        action: Any,  # noqa: ANN401
+        registry: Any,  # noqa: ANN401
+        *,
+        agent: Any = None,  # noqa: ANN401
+        prompts: Any = None,  # noqa: ANN401
+    ) -> tuple[str, list[str]]:
+        return self._fn(action, registry, agent=agent, prompts=prompts)
+
+
+class _FakePrDescriptionWriter:
+    """Test stub for :class:`~fido.events.PrDescriptionWriter`."""
+
+    def __init__(self, fn: Callable[..., None]) -> None:
+        self._fn = fn
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        self._fn(*args, **kwargs)
+
+
+class _FakeProcessRunner:
+    """Test stub for :class:`~fido.infra.ProcessRunner`."""
+
+    def __init__(self, fn: Callable[..., Any]) -> None:
+        self._fn = fn
+
+    def run(self, cmd: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        return self._fn(cmd, **kwargs)
 
 
 def _synthesis_response(
@@ -292,13 +415,13 @@ class TestRecoverReplyPromises:
             _config(tmp_path),
             _repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                change_request="task one"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(change_request="task one")
             ),
-            sync_fn=lambda *a, **kw: None,
-            thread_start_fn=lambda t: None,
+            background_syncer=_FakeBackgroundSyncer(),
+            thread_starter=_FakeThreadStarter(),
             reorder_coalesce_state={},
-            get_commit_summary_fn=lambda wd: "summary",
+            commit_summarizer=_FakeCommitSummarizer(),
         ).recover_reply_promises(fido_dir, 7, registry=fake_registry)
         assert result is True
         assert FidoStore(tmp_path).promise(promise.promise_id).state == "acked"
@@ -528,7 +651,7 @@ class TestRecoverReplyPromises:
                 _config(tmp_path),
                 _repo_cfg(tmp_path),
                 gh,
-                call_synthesis_fn=_failing_synthesis,
+                synthesis_caller=_FakeSynthesisCaller(_failing_synthesis),
             ).recover_reply_promises(
                 fido_dir,
                 7,
@@ -591,7 +714,7 @@ class TestRecoverReplyPromises:
                 _config(tmp_path),
                 _repo_cfg(tmp_path),
                 gh,
-                call_synthesis_fn=_failing_synthesis,
+                synthesis_caller=_FakeSynthesisCaller(_failing_synthesis),
             ).recover_reply_promises(
                 fido_dir,
                 7,
@@ -623,9 +746,11 @@ class TestRecoverReplyPromises:
             _config(tmp_path),
             _repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(),
-            sync_fn=lambda *a, **kw: None,
-            thread_start_fn=lambda t: None,
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response()
+            ),
+            background_syncer=_FakeBackgroundSyncer(),
+            thread_starter=_FakeThreadStarter(),
             reorder_coalesce_state={},
         ).recover_reply_promises(fido_dir, 7, registry=MagicMock(spec=ActivityReporter))
         assert result is True
@@ -658,13 +783,13 @@ class TestRecoverReplyPromises:
                 _config(tmp_path),
                 _repo_cfg(tmp_path),
                 gh,
-                call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                    change_request="task one"
+                synthesis_caller=_FakeSynthesisCaller(
+                    lambda *a, **kw: _synthesis_response(change_request="task one")
                 ),
-                sync_fn=lambda *a, **kw: None,
-                thread_start_fn=lambda t: None,
+                background_syncer=_FakeBackgroundSyncer(),
+                thread_starter=_FakeThreadStarter(),
                 reorder_coalesce_state={},
-                get_commit_summary_fn=lambda wd: "summary",
+                commit_summarizer=_FakeCommitSummarizer(),
             ).recover_reply_promises(fido_dir, 7, registry=fake_registry)
         # Task creation failure must not ack the promise — the worker can retry.
         # The reply was sent before tasks are created, so state is "posted"
@@ -720,11 +845,11 @@ class TestRecoverReplyPromises:
             _config(tmp_path),
             _repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=capture_synthesis,
-            sync_fn=lambda *a, **kw: None,
-            thread_start_fn=lambda t: None,
+            synthesis_caller=_FakeSynthesisCaller(capture_synthesis),
+            background_syncer=_FakeBackgroundSyncer(),
+            thread_starter=_FakeThreadStarter(),
             reorder_coalesce_state={},
-            get_commit_summary_fn=lambda wd: "summary",
+            commit_summarizer=_FakeCommitSummarizer(),
         ).recover_reply_promises(fido_dir, 7, registry=fake_registry)
         assert result is True
         assert synthesis_bodies[0] == "first\n\n---\n\nsecond"
@@ -784,11 +909,11 @@ class TestRecoverReplyPromises:
             _config(tmp_path),
             _repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=capture_synthesis,
-            sync_fn=lambda *a, **kw: None,
-            thread_start_fn=lambda t: None,
+            synthesis_caller=_FakeSynthesisCaller(capture_synthesis),
+            background_syncer=_FakeBackgroundSyncer(),
+            thread_starter=_FakeThreadStarter(),
             reorder_coalesce_state={},
-            get_commit_summary_fn=lambda wd: "summary",
+            commit_summarizer=_FakeCommitSummarizer(),
         ).recover_reply_promises(fido_dir, 7, registry=fake_registry)
         assert result is True
         assert synthesis_bodies[0] == "first\n\n---\n\nsecond"
@@ -843,11 +968,11 @@ class TestRecoverReplyPromises:
             _config(tmp_path),
             _repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "One combined reply."
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("One combined reply.")
             ),
-            sync_fn=lambda *a, **kw: None,
-            thread_start_fn=lambda t: None,
+            background_syncer=_FakeBackgroundSyncer(),
+            thread_starter=_FakeThreadStarter(),
             reorder_coalesce_state={},
         ).recover_reply_promises(
             fido_dir,
@@ -923,13 +1048,13 @@ class TestRecoverReplyPromises:
                 _config(tmp_path),
                 _repo_cfg(tmp_path),
                 gh,
-                call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                    change_request="task a"
+                synthesis_caller=_FakeSynthesisCaller(
+                    lambda *a, **kw: _synthesis_response(change_request="task a")
                 ),
-                sync_fn=lambda *a, **kw: None,
-                thread_start_fn=lambda t: None,
+                background_syncer=_FakeBackgroundSyncer(),
+                thread_starter=_FakeThreadStarter(),
                 reorder_coalesce_state={},
-                get_commit_summary_fn=lambda wd: "summary",
+                commit_summarizer=_FakeCommitSummarizer(),
             ).recover_reply_promises(fido_dir, 7, registry=fake_registry)
         store = FidoStore(tmp_path)
         assert store.promise(first.promise_id).state != "acked"
@@ -987,11 +1112,11 @@ class TestRecoverReplyPromises:
             _config(tmp_path),
             _repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "One combined review reply."
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("One combined review reply.")
             ),
-            sync_fn=lambda *a, **kw: None,
-            thread_start_fn=lambda t: None,
+            background_syncer=_FakeBackgroundSyncer(),
+            thread_starter=_FakeThreadStarter(),
             reorder_coalesce_state={},
         ).recover_reply_promises(
             fido_dir,
@@ -1081,7 +1206,7 @@ class TestRecoverReplyPromises:
                 _config(tmp_path),
                 _repo_cfg(tmp_path),
                 gh,
-                call_synthesis_fn=capture_synthesis,
+                synthesis_caller=_FakeSynthesisCaller(capture_synthesis),
             ).recover_reply_promises(
                 fido_dir,
                 7,
@@ -1149,7 +1274,7 @@ class TestRecoverReplyPromises:
             _config(tmp_path),
             _repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=capture_synthesis,
+            synthesis_caller=_FakeSynthesisCaller(capture_synthesis),
         ).recover_reply_promises(
             fido_dir,
             7,
@@ -1201,7 +1326,7 @@ class TestReplayPendingRescopeIntents:
             _config(tmp_path),
             _repo_cfg(tmp_path),
             gh,
-            thread_start_fn=thread_starts.append,
+            thread_starter=_FakeThreadStarter(thread_starts.append),
             reorder_coalesce_state={},
         ).replay_pending_rescope_intents(
             MagicMock(spec=ActivityReporter),
@@ -1236,7 +1361,7 @@ class TestReplayPendingRescopeIntents:
             _config(tmp_path),
             _repo_cfg(tmp_path),
             gh,
-            thread_start_fn=thread_starts.append,
+            thread_starter=_FakeThreadStarter(thread_starts.append),
             reorder_coalesce_state=coalesce_state,
         ).replay_pending_rescope_intents(
             MagicMock(spec=ActivityReporter),
@@ -2028,9 +2153,11 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                reply_text="I will add logging.",
-                change_request="Add logging to the request handler",
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    reply_text="I will add logging.",
+                    change_request="Add logging to the request handler",
+                )
             ),
         ).reply_to_comment(
             action,
@@ -2079,7 +2206,9 @@ class TestReplyToComment:
             cfg,
             repo_cfg,
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response("Yep."),
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("Yep.")
+            ),
         ).reply_to_comment(
             action,
             agent=_client(),
@@ -2125,7 +2254,9 @@ class TestReplyToComment:
                 cfg,
                 repo_cfg,
                 mock_gh,
-                call_synthesis_fn=lambda *a, **kw: _synthesis_response("Yep."),
+                synthesis_caller=_FakeSynthesisCaller(
+                    lambda *a, **kw: _synthesis_response("Yep.")
+                ),
             ).reply_to_comment(
                 action,
                 agent=_client(),
@@ -2149,8 +2280,8 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "What specifically?"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("What specifically?")
             ),
         ).reply_to_comment(
             action,
@@ -2180,7 +2311,9 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response("Handled."),
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("Handled.")
+            ),
         ).reply_to_comment(
             action,
             agent=_client(),
@@ -2229,10 +2362,10 @@ class TestReplyToComment:
             cfg,
             repo_cfg,
             MagicMock(),
-            sync_fn=lambda *a, **kw: None,
-            thread_start_fn=lambda t: None,
+            background_syncer=_FakeBackgroundSyncer(),
+            thread_starter=_FakeThreadStarter(),
             reorder_coalesce_state={},
-            get_commit_summary_fn=lambda wd: "summary",
+            commit_summarizer=_FakeCommitSummarizer(),
         )._apply_reply_result(
             "ACT",
             ["Remove redundant empty-list concatenation"],
@@ -2262,8 +2395,8 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "I did this because..."
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("I did this because...")
             ),
         ).reply_to_comment(
             action,
@@ -2288,9 +2421,11 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "On it!",
-                change_request="Cache results for performance",
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "On it!",
+                    change_request="Cache results for performance",
+                )
             ),
         ).reply_to_comment(
             action,
@@ -2315,9 +2450,11 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "That's noted for a future PR.",
-                change_request="Refactor everything in a separate PR",
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "That's noted for a future PR.",
+                    change_request="Refactor everything in a separate PR",
+                )
             ),
         ).reply_to_comment(
             action,
@@ -2344,8 +2481,8 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "Not applicable here."
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("Not applicable here.")
             ),
         ).reply_to_comment(
             action,
@@ -2373,7 +2510,7 @@ class TestReplyToComment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 gh,
-                call_synthesis_fn=_raise_exhausted,
+                synthesis_caller=_FakeSynthesisCaller(_raise_exhausted),
             ).reply_to_comment(
                 action,
                 agent=_client(),
@@ -2420,8 +2557,8 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "ok", change_request="Do it"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("ok", change_request="Do it")
             ),
         ).reply_to_comment(
             action,
@@ -2447,9 +2584,11 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "On it!",
-                change_request="Add tests and update docs",
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "On it!",
+                    change_request="Add tests and update docs",
+                )
             ),
         ).reply_to_comment(
             action,
@@ -2478,9 +2617,11 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "I'll fix the parser right away.",
-                change_request="Fix the parser",
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "I'll fix the parser right away.",
+                    change_request="Fix the parser",
+                )
             ),
         ).reply_to_comment(
             action,
@@ -2524,8 +2665,10 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "On it!", change_request="Reorder sub issues by priority"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "On it!", change_request="Reorder sub issues by priority"
+                )
             ),
         ).reply_to_comment(
             action,
@@ -2556,8 +2699,8 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "Could you clarify?"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("Could you clarify?")
             ),
         ).reply_to_comment(
             action,
@@ -2599,7 +2742,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=capture_synthesis,
+            synthesis_caller=_FakeSynthesisCaller(capture_synthesis),
         ).reply_to_comment(
             action,
             agent=_client(),
@@ -2632,7 +2775,7 @@ class TestReplyToComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=capture_synthesis,
+            synthesis_caller=_FakeSynthesisCaller(capture_synthesis),
         ).reply_to_comment(
             action,
             agent=_client(),
@@ -2743,8 +2886,9 @@ class TestReplyToCommentSynthesisFallback:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=_raise_exhausted,
-            call_failure_explanation_fn=fake_fallback,
+            synthesis_caller=_FakeSynthesisCaller(
+                _raise_exhausted, failure_fn=fake_fallback
+            ),
         ).reply_to_comment(
             action,
             agent=_client(),
@@ -2795,8 +2939,9 @@ class TestReplyToCommentSynthesisFallback:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                call_synthesis_fn=_raise_exhausted,
-                call_failure_explanation_fn=_raise_fallback_exhausted,
+                synthesis_caller=_FakeSynthesisCaller(
+                    _raise_exhausted, failure_fn=_raise_fallback_exhausted
+                ),
             ).reply_to_comment(
                 action,
                 agent=_client(),
@@ -2844,8 +2989,9 @@ class TestReplyToCommentSynthesisFallback:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=_raise_critic_exhausted,
-            call_failure_explanation_fn=fake_fallback,
+            synthesis_caller=_FakeSynthesisCaller(
+                _raise_critic_exhausted, failure_fn=fake_fallback
+            ),
         ).reply_to_comment(
             action,
             agent=_client(),
@@ -2913,9 +3059,9 @@ class TestReplyToCommentSynthesisFallback:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                call_synthesis_fn=_raise_critic_exhausted,
-                call_failure_explanation_fn=lambda *a, **kw: _synthesis_response(
-                    "should-not-fire"
+                synthesis_caller=_FakeSynthesisCaller(
+                    _raise_critic_exhausted,
+                    failure_fn=lambda *a, **kw: _synthesis_response("should-not-fire"),
                 ),
             ).reply_to_comment(
                 action,
@@ -2959,9 +3105,9 @@ class TestReplyToCommentSynthesisFallback:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                call_synthesis_fn=_raise_critic_exhausted,
-                call_failure_explanation_fn=lambda *a, **kw: _synthesis_response(
-                    "should-not-fire"
+                synthesis_caller=_FakeSynthesisCaller(
+                    _raise_critic_exhausted,
+                    failure_fn=lambda *a, **kw: _synthesis_response("should-not-fire"),
                 ),
             ).reply_to_issue_comment(
                 action,
@@ -2999,9 +3145,9 @@ class TestReplyToCommentSynthesisFallback:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=_raise_critic_exhausted,
-            call_failure_explanation_fn=lambda *a, **kw: _synthesis_response(
-                "should-not-fire"
+            synthesis_caller=_FakeSynthesisCaller(
+                _raise_critic_exhausted,
+                failure_fn=lambda *a, **kw: _synthesis_response("should-not-fire"),
             ),
         ).reply_to_issue_comment(
             action,
@@ -3049,8 +3195,9 @@ class TestReplyToCommentSynthesisFallback:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=_raise_exhausted,
-            call_failure_explanation_fn=fake_fallback,
+            synthesis_caller=_FakeSynthesisCaller(
+                _raise_exhausted, failure_fn=fake_fallback
+            ),
         ).reply_to_issue_comment(
             action,
             agent=_client(),
@@ -3104,8 +3251,10 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "I'll fix that.", change_request="Fix the bug"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "I'll fix that.", change_request="Fix the bug"
+                )
             ),
         ).reply_to_issue_comment(
             self._action(),
@@ -3124,7 +3273,9 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response("What do you mean?"),
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("What do you mean?")
+            ),
         ).reply_to_issue_comment(
             self._action("unclear"),
             agent=_client(),
@@ -3141,7 +3292,9 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response("Yes, because..."),
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("Yes, because...")
+            ),
         ).reply_to_issue_comment(
             self._action("why?"),
             agent=_client(),
@@ -3181,7 +3334,9 @@ class TestReplyToIssueComment:
             cfg,
             repo_cfg,
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response("Yes, because..."),
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("Yes, because...")
+            ),
         ).reply_to_issue_comment(
             action,
             agent=_client(),
@@ -3202,8 +3357,8 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "That won't work here."
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("That won't work here.")
             ),
         ).reply_to_issue_comment(
             self._action("do it differently"),
@@ -3221,9 +3376,11 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "Out of scope for now.",
-                change_request="Big refactor in separate PR",
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "Out of scope for now.",
+                    change_request="Big refactor in separate PR",
+                )
             ),
         ).reply_to_issue_comment(
             self._action("big refactor"),
@@ -3263,7 +3420,9 @@ class TestReplyToIssueComment:
             cfg,
             repo_cfg,
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response("Yep."),
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("Yep.")
+            ),
         ).reply_to_issue_comment(
             Action(
                 prompt="PR top-level comment on #7 by owner:\n\nplease fix",
@@ -3296,7 +3455,7 @@ class TestReplyToIssueComment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 gh,
-                call_synthesis_fn=_raise_exhausted,
+                synthesis_caller=_FakeSynthesisCaller(_raise_exhausted),
             ).reply_to_issue_comment(
                 self._action(),
                 agent=_client(),
@@ -3320,7 +3479,9 @@ class TestReplyToIssueComment:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                call_synthesis_fn=lambda *a, **kw: _synthesis_response("ok"),
+                synthesis_caller=_FakeSynthesisCaller(
+                    lambda *a, **kw: _synthesis_response("ok")
+                ),
             ).reply_to_issue_comment(
                 action,
                 agent=_client(),
@@ -3342,8 +3503,8 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "ok", change_request="Do it"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("ok", change_request="Do it")
             ),
         ).reply_to_issue_comment(
             action,
@@ -3382,7 +3543,7 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=_capture_synthesis,
+            synthesis_caller=_FakeSynthesisCaller(_capture_synthesis),
         ).reply_to_issue_comment(action, registry=registry)
         assert agent_for_calls == ["owner/repo"]
         assert captured_agent == [sentinel_agent]
@@ -3409,7 +3570,7 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=capture_synthesis,
+            synthesis_caller=_FakeSynthesisCaller(capture_synthesis),
         ).reply_to_issue_comment(
             action,
             agent=_client(),
@@ -3439,8 +3600,8 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "ok", change_request="Do it"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("ok", change_request="Do it")
             ),
         ).reply_to_issue_comment(
             action,
@@ -3458,8 +3619,8 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "Yes, here is why..."
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("Yes, here is why...")
             ),
         ).reply_to_issue_comment(
             self._action(cid=4275080243),
@@ -3502,8 +3663,8 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "ok", change_request="Do it"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("ok", change_request="Do it")
             ),
         ).reply_to_issue_comment(
             action,
@@ -3536,7 +3697,7 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=capture_synthesis,
+            synthesis_caller=_FakeSynthesisCaller(capture_synthesis),
         ).reply_to_issue_comment(
             self._action(),
             agent=_client(),
@@ -3563,7 +3724,7 @@ class TestReplyToIssueComment:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=capture_synthesis,
+            synthesis_caller=_FakeSynthesisCaller(capture_synthesis),
         ).reply_to_issue_comment(
             self._action(),
             agent=_client(),
@@ -3587,7 +3748,7 @@ class TestGetCommitSummary:
             run_calls.append((args, kwargs))
             return fake_result
 
-        result = _get_commit_summary(tmp_path, _run=fake_run)
+        result = _get_commit_summary(tmp_path, runner=_FakeProcessRunner(fake_run))
         assert result == "abc123 add thing"
         assert len(run_calls) == 1
         args, kwargs = run_calls[0]
@@ -3605,7 +3766,7 @@ class TestGetCommitSummary:
             raise FileNotFoundError
 
         with pytest.raises(FileNotFoundError):
-            _get_commit_summary(tmp_path, _run=_raise)
+            _get_commit_summary(tmp_path, runner=_FakeProcessRunner(_raise))
 
     def test_raises_on_timeout(self, tmp_path: Path) -> None:
         import subprocess as sp
@@ -3614,7 +3775,7 @@ class TestGetCommitSummary:
             raise sp.TimeoutExpired(cmd="git", timeout=10)
 
         with pytest.raises(sp.TimeoutExpired):
-            _get_commit_summary(tmp_path, _run=_raise)
+            _get_commit_summary(tmp_path, runner=_FakeProcessRunner(_raise))
 
     def test_raises_on_nonzero_exit(self, tmp_path: Path) -> None:
         import subprocess as sp
@@ -3623,14 +3784,14 @@ class TestGetCommitSummary:
             raise sp.CalledProcessError(128, ["git"])
 
         with pytest.raises(sp.CalledProcessError):
-            _get_commit_summary(tmp_path, _run=_raise)
+            _get_commit_summary(tmp_path, runner=_FakeProcessRunner(_raise))
 
     def test_raises_on_oserror(self, tmp_path: Path) -> None:
         def _raise(*args: object, **kwargs: object) -> Never:
             raise OSError("permission denied")
 
         with pytest.raises(OSError):
-            _get_commit_summary(tmp_path, _run=_raise)
+            _get_commit_summary(tmp_path, runner=_FakeProcessRunner(_raise))
 
 
 class _FakeRescopeRegistry:
@@ -3708,8 +3869,8 @@ class TestReorderTasksBackground:
         """Return (calls_list, mock_reorder_fn) that records (work_dir, cs, kwargs)."""
         calls: list = []
 
-        def mock_reorder(work_dir: Path, commit_summary: str, **kwargs: object) -> None:
-            calls.append((work_dir, commit_summary, kwargs))
+        def mock_reorder(tasks: object, commit_summary: str, **kwargs: object) -> None:
+            calls.append((tasks, commit_summary, kwargs))
 
         return calls, mock_reorder
 
@@ -3720,8 +3881,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "some commits",
@@ -3738,8 +3899,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "commits",
@@ -3758,8 +3919,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "feat: add parser",
@@ -3780,8 +3941,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "commits",
@@ -3801,8 +3962,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "commits",
@@ -3826,8 +3987,8 @@ class TestReorderTasksBackground:
             self._dispatcher(
                 tmp_path,
                 MagicMock(),
-                thread_start_fn=fail_start,
-                reorder_fn=MagicMock(),
+                thread_starter=_FakeThreadStarter(fail_start),
+                task_reorderer=_FakeTaskReorderer(MagicMock()),
                 reorder_coalesce_state={},
             ).reorder_tasks_background(
                 "commits",
@@ -3849,8 +4010,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "commits",
@@ -3886,8 +4047,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "commits",
@@ -3917,8 +4078,8 @@ class TestReorderTasksBackground:
             self._dispatcher(
                 tmp_path,
                 MagicMock(),
-                thread_start_fn=fail_start,
-                reorder_fn=MagicMock(),
+                thread_starter=_FakeThreadStarter(fail_start),
+                task_reorderer=_FakeTaskReorderer(MagicMock()),
                 reorder_coalesce_state={},
             ).reorder_tasks_background(
                 "commits",
@@ -3948,10 +4109,10 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            rewrite_fn=mock_rewrite,
-            reorder_fn=mock_reorder,
-            sync_fn=mock_sync,
+            thread_starter=_FakeThreadStarter(started.append),
+            pr_rewriter=_FakePrDescriptionRewriter(mock_rewrite),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
+            foreground_syncer=_FakeBackgroundSyncer(mock_sync),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "commits",
@@ -3978,10 +4139,10 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            rewrite_fn=mock_rewrite,
-            sync_fn=lambda *a, **kw: None,
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            pr_rewriter=_FakePrDescriptionRewriter(mock_rewrite),
+            foreground_syncer=_FakeBackgroundSyncer(),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "commits",
@@ -4008,10 +4169,10 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            rewrite_fn=mock_rewrite,
-            reorder_fn=mock_reorder,
-            sync_fn=mock_sync,
+            thread_starter=_FakeThreadStarter(started.append),
+            pr_rewriter=_FakePrDescriptionRewriter(mock_rewrite),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
+            foreground_syncer=_FakeBackgroundSyncer(mock_sync),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "commits",
@@ -4034,11 +4195,11 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            rewrite_fn=lambda *a, **kw: None,
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            pr_rewriter=_FakePrDescriptionRewriter(),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
-            sync_fn=fake_sync,
+            foreground_syncer=_FakeBackgroundSyncer(fake_sync),
         ).reorder_tasks_background(
             "commits",
             registry=MagicMock(spec=ActivityReporter),
@@ -4059,8 +4220,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "cs1",
@@ -4073,8 +4234,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "cs2",
@@ -4094,8 +4255,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "cs1",
@@ -4105,8 +4266,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "cs2",
@@ -4131,8 +4292,8 @@ class TestReorderTasksBackground:
             self._dispatcher(
                 tmp_path,
                 gh,
-                thread_start_fn=lambda t: started.append(t),
-                reorder_fn=mock_reorder,
+                thread_starter=_FakeThreadStarter(started.append),
+                task_reorderer=_FakeTaskReorderer(mock_reorder),
                 reorder_coalesce_state=state,
             ).reorder_tasks_background(
                 cs,
@@ -4162,8 +4323,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "cs1",
@@ -4174,8 +4335,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "cs2",
@@ -4187,8 +4348,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "cs3",
@@ -4227,8 +4388,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "csA",
@@ -4238,8 +4399,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "csB",
@@ -4249,8 +4410,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "csC",
@@ -4290,8 +4451,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "csA",
@@ -4303,8 +4464,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "csB",
@@ -4314,8 +4475,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "csC",
@@ -4337,8 +4498,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "cs",
@@ -4359,8 +4520,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "cs1",
@@ -4371,8 +4532,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "cs2",
@@ -4393,8 +4554,8 @@ class TestReorderTasksBackground:
             self._cfg(tmp_path),
             RepoConfig(name="owner/repo", work_dir=dir_a),
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "cs",
@@ -4404,8 +4565,8 @@ class TestReorderTasksBackground:
             self._cfg(tmp_path),
             RepoConfig(name="owner/repo", work_dir=dir_b),
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state=state,
         ).reorder_tasks_background(
             "cs",
@@ -4425,8 +4586,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "cs",
@@ -4443,8 +4604,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "cs",
@@ -4466,8 +4627,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             MagicMock(),
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=boom,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(boom),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "cs",
@@ -4494,8 +4655,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "cs",
@@ -4516,8 +4677,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "cs",
@@ -4541,8 +4702,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=boom,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(boom),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "cs",
@@ -4574,8 +4735,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "cs",
@@ -4598,8 +4759,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=mock_reorder,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(mock_reorder),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "cs",
@@ -4623,8 +4784,8 @@ class TestReorderTasksBackground:
         self._dispatcher(
             tmp_path,
             gh,
-            thread_start_fn=lambda t: started.append(t),
-            reorder_fn=boom,
+            thread_starter=_FakeThreadStarter(started.append),
+            task_reorderer=_FakeTaskReorderer(boom),
             reorder_coalesce_state={},
         ).reorder_tasks_background(
             "cs",
@@ -5549,7 +5710,7 @@ class TestBackfillMissedPrComments:
             return ("ACT", [])
 
         count = Dispatcher(
-            cfg, repo_cfg, mock_gh, backfill_reply_fn=fake_reply
+            cfg, repo_cfg, mock_gh, backfill_replier=_FakeBackfillReplier(fake_reply)
         ).backfill_missed_pr_comments(
             1, gh_user="fidocancode", registry=self._registry()
         )
@@ -5573,7 +5734,7 @@ class TestBackfillMissedPrComments:
             self._cfg(tmp_path),
             self._repo_cfg(tmp_path),
             mock_gh,
-            backfill_reply_fn=lambda *a, **kw: ("ACT", []),
+            backfill_replier=_FakeBackfillReplier(lambda *a, **kw: ("ACT", [])),
         ).backfill_missed_pr_comments(
             1,
             gh_user="fidocancode",
@@ -5592,7 +5753,7 @@ class TestBackfillMissedPrComments:
             self._cfg(tmp_path),
             self._repo_cfg(tmp_path),
             mock_gh,
-            backfill_reply_fn=_should_not_be_called_reply,
+            backfill_replier=_FakeBackfillReplier(_should_not_be_called_reply),
         ).backfill_missed_pr_comments(
             1,
             gh_user="FidoCanCode",
@@ -5609,7 +5770,7 @@ class TestBackfillMissedPrComments:
             self._cfg(tmp_path),
             self._repo_cfg(tmp_path),
             mock_gh,
-            backfill_reply_fn=_should_not_be_called_reply,
+            backfill_replier=_FakeBackfillReplier(_should_not_be_called_reply),
         ).backfill_missed_pr_comments(
             1,
             gh_user="alice",
@@ -5632,7 +5793,7 @@ class TestBackfillMissedPrComments:
             self._cfg(tmp_path),
             self._repo_cfg(tmp_path),
             mock_gh,
-            backfill_reply_fn=_should_not_be_called_reply,
+            backfill_replier=_FakeBackfillReplier(_should_not_be_called_reply),
         ).backfill_missed_pr_comments(
             1,
             gh_user="mis-configured-bot",
@@ -5649,7 +5810,7 @@ class TestBackfillMissedPrComments:
             self._cfg(tmp_path),
             self._repo_cfg(tmp_path, collaborators=frozenset({"rhencke"})),
             mock_gh,
-            backfill_reply_fn=_should_not_be_called_reply,
+            backfill_replier=_FakeBackfillReplier(_should_not_be_called_reply),
         ).backfill_missed_pr_comments(
             1,
             gh_user="fidocancode",
@@ -5670,7 +5831,7 @@ class TestBackfillMissedPrComments:
             self._cfg(tmp_path, allowed_bots=frozenset({"dependabot[bot]"})),
             self._repo_cfg(tmp_path),
             mock_gh,
-            backfill_reply_fn=fake_reply,
+            backfill_replier=_FakeBackfillReplier(fake_reply),
         ).backfill_missed_pr_comments(
             1, gh_user="fidocancode", registry=self._registry()
         )
@@ -5695,7 +5856,7 @@ class TestBackfillMissedPrComments:
             self._cfg(tmp_path, allowed_bots=frozenset({"bot[bot]"})),
             self._repo_cfg(tmp_path),
             mock_gh,
-            backfill_reply_fn=fake_reply,
+            backfill_replier=_FakeBackfillReplier(fake_reply),
         ).backfill_missed_pr_comments(
             1, gh_user="fidocancode", registry=self._registry()
         )
@@ -5721,7 +5882,7 @@ class TestBackfillMissedPrComments:
             self._cfg(tmp_path),
             self._repo_cfg(tmp_path),
             mock_gh,
-            backfill_reply_fn=_should_not_be_called_reply,
+            backfill_replier=_FakeBackfillReplier(_should_not_be_called_reply),
         ).backfill_missed_pr_comments(
             1,
             gh_user="fidocancode",
@@ -5739,7 +5900,7 @@ class TestBackfillMissedPrComments:
             self._cfg(tmp_path),
             self._repo_cfg(tmp_path),
             mock_gh,
-            backfill_reply_fn=_should_not_be_called_reply,
+            backfill_replier=_FakeBackfillReplier(_should_not_be_called_reply),
         ).backfill_missed_pr_comments(
             1,
             gh_user="fidocancode",
@@ -5777,7 +5938,7 @@ class TestBackfillMissedPrComments:
             self._cfg(tmp_path),
             self._repo_cfg(tmp_path),
             mock_gh,
-            backfill_reply_fn=fake_reply,
+            backfill_replier=_FakeBackfillReplier(fake_reply),
         ).backfill_missed_pr_comments(
             1, gh_user="fidocancode", registry=self._registry()
         )
@@ -5812,7 +5973,7 @@ class TestBackfillMissedPrComments:
             self._cfg(tmp_path),
             self._repo_cfg(tmp_path),
             mock_gh,
-            backfill_reply_fn=fake_reply,
+            backfill_replier=_FakeBackfillReplier(fake_reply),
         ).backfill_missed_pr_comments(
             1, gh_user="fidocancode", registry=self._registry()
         )
@@ -5843,7 +6004,10 @@ class TestLaunchSync:
             sync_calls.append(args)
 
         Dispatcher(
-            cfg, self._repo_cfg(tmp_path), mock_gh, sync_fn=fake_sync
+            cfg,
+            self._repo_cfg(tmp_path),
+            mock_gh,
+            background_syncer=_FakeBackgroundSyncer(fake_sync),
         ).launch_sync()
         assert len(sync_calls) == 1
         assert sync_calls[0] == (tmp_path, mock_gh)
@@ -5854,7 +6018,7 @@ class TestLaunchSync:
             cfg,
             self._repo_cfg(tmp_path),
             _make_mock_gh(),
-            sync_fn=lambda *a, **kw: None,
+            background_syncer=_FakeBackgroundSyncer(),
         ).launch_sync()  # should not raise
 
 
@@ -6310,8 +6474,8 @@ class TestReplyToCommentElseBranch:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "I'll look into this."
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("I'll look into this.")
             ),
         ).reply_to_comment(
             action,
@@ -6339,7 +6503,9 @@ class TestReplyToCommentElseBranch:
                 cfg,
                 self._repo_cfg(tmp_path),
                 mock_gh,
-                call_synthesis_fn=lambda *a, **kw: _synthesis_response("I'll fix it."),
+                synthesis_caller=_FakeSynthesisCaller(
+                    lambda *a, **kw: _synthesis_response("I'll fix it.")
+                ),
             ).reply_to_comment(
                 action,
                 agent=_client(),
@@ -6384,8 +6550,10 @@ class TestReplyToCommentElseBranch:
             cfg,
             repo_cfg,
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "I'll fix it.", change_request="Fix it"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "I'll fix it.", change_request="Fix it"
+                )
             ),
         ).reply_to_comment(
             action,
@@ -6440,8 +6608,10 @@ class TestReplyToCommentThreadRefetch:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "On it!", change_request="Refactor this module"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "On it!", change_request="Refactor this module"
+                )
             ),
         ).reply_to_comment(
             action,
@@ -6495,7 +6665,9 @@ class TestReplyToCommentThreadRefetch:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response("Will do!"),
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("Will do!")
+            ),
         ).reply_to_comment(
             action,
             agent=_client(),
@@ -6552,8 +6724,10 @@ class TestReplyToCommentThreadRefetch:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "Adding tests now!", change_request="Add tests"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "Adding tests now!", change_request="Add tests"
+                )
             ),
         ).reply_to_comment(
             action,
@@ -6594,8 +6768,10 @@ class TestReplyToCommentThreadRefetch:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "Fixed!", change_request="Fix the import"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "Fixed!", change_request="Fix the import"
+                )
             ),
         ).reply_to_comment(
             action,
@@ -6651,8 +6827,10 @@ class TestReplyToCommentThreadRefetch:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "Woof, on it!", change_request="Add docstrings"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "Woof, on it!", change_request="Add docstrings"
+                )
             ),
         ).reply_to_comment(
             action,
@@ -6710,8 +6888,10 @@ class TestReplyToCommentThreadRefetch:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "Woof, on it!", change_request="Add docstrings"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "Woof, on it!", change_request="Add docstrings"
+                )
             ),
         ).reply_to_comment(
             action,
@@ -6751,8 +6931,8 @@ class TestReplyToCommentThreadRefetch:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "Thanks for the feedback!"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response("Thanks for the feedback!")
             ),
         ).reply_to_comment(
             action,
@@ -6802,8 +6982,10 @@ class TestReplyToCommentThreadRefetch:
             cfg,
             self._repo_cfg(tmp_path),
             mock_gh,
-            call_synthesis_fn=lambda *a, **kw: _synthesis_response(
-                "Fixed the typo!", change_request="Fix the typo"
+            synthesis_caller=_FakeSynthesisCaller(
+                lambda *a, **kw: _synthesis_response(
+                    "Fixed the typo!", change_request="Fix the typo"
+                )
             ),
         ).reply_to_comment(
             action,
@@ -7010,7 +7192,7 @@ class TestRewritePrDescription:
             mock_gh,
             _state=self._mock_state(),
             _tasks=self._mock_tasks(),
-            _write_fn=capture_write,
+            pr_description_writer=_FakePrDescriptionWriter(capture_write),
         )
         assert len(write_calls) == 1
         assert write_calls[0][1].get("agent") is None
@@ -7241,7 +7423,7 @@ class TestMakeReorderKwargsActiveContext:
         gh = MagicMock()
         kwargs, _ = Dispatcher(
             self._cfg(tmp_path), self._repo_cfg(tmp_path), gh
-        )._make_reorder_kwargs(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        )._make_reorder_kwargs(MagicMock(), MagicMock(), MagicMock())
         assert "issue" not in kwargs
         assert "pr" not in kwargs
 
@@ -7252,7 +7434,7 @@ class TestMakeReorderKwargsActiveContext:
         gh.view_issue.return_value = {"title": "Do the thing", "body": "Details."}
         kwargs, _ = Dispatcher(
             self._cfg(tmp_path), self._repo_cfg(tmp_path), gh
-        )._make_reorder_kwargs(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        )._make_reorder_kwargs(MagicMock(), MagicMock(), MagicMock())
         assert "issue" in kwargs
         issue = kwargs["issue"]
         assert isinstance(issue, ActiveIssue)
@@ -7268,7 +7450,7 @@ class TestMakeReorderKwargsActiveContext:
         gh.get_pr.return_value = {"title": "Fix it (closes #5)", "body": ""}
         kwargs, _ = Dispatcher(
             self._cfg(tmp_path), self._repo_cfg(tmp_path), gh
-        )._make_reorder_kwargs(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        )._make_reorder_kwargs(MagicMock(), MagicMock(), MagicMock())
         assert "pr" in kwargs
         pr = kwargs["pr"]
         assert isinstance(pr, ActivePR)
@@ -7307,13 +7489,15 @@ class TestMakeReorderKwargsAfterApply:
             calls.append("after_apply")
 
         kwargs, _ = Dispatcher(
-            self._cfg(tmp_path), self._cfg(tmp_path).repos["owner/repo"], gh
+            self._cfg(tmp_path),
+            self._cfg(tmp_path).repos["owner/repo"],
+            gh,
+            pr_rewriter=_FakePrDescriptionRewriter(rewrite_fn),
+            foreground_syncer=_FakeBackgroundSyncer(sync_fn),
         )._make_reorder_kwargs(
             MagicMock(),
             MagicMock(),
             MagicMock(),
-            rewrite_fn,
-            sync_fn,
             after_apply=after_apply,
         )
         kwargs["_on_done"]()
@@ -8468,7 +8652,9 @@ class TestDispatcher:
         def fake_sync(*args: object, **kwargs: object) -> None:
             sync_calls.append(args)
 
-        d = Dispatcher(cfg, repo_cfg, mock_gh, sync_fn=fake_sync)
+        d = Dispatcher(
+            cfg, repo_cfg, mock_gh, background_syncer=_FakeBackgroundSyncer(fake_sync)
+        )
         d.launch_sync()
         assert len(sync_calls) == 1
         assert sync_calls[0] == (repo_cfg.work_dir, mock_gh)

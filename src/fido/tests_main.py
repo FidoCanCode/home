@@ -1,21 +1,38 @@
 """Project test runner entrypoint."""
 
 import os
-import subprocess
 import sys
-from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
+
+from fido.infra import ProcessRunner, RealProcessRunner
+
+
+class PytestRunner(Protocol):
+    """Runs a pytest session and returns the exit code."""
+
+    def __call__(self, args: list[str]) -> int:
+        """Run pytest with *args* and return the exit code."""
+        ...
+
+
+class EnsureHook(Protocol):
+    """Ensures Rocq Python artifacts are present before tests run."""
+
+    def __call__(self) -> None:
+        """Prepare artifacts, or return immediately if already prepared."""
+        ...
 
 
 def ensure_rocq_python_artifacts(
     *,
-    _run: Callable[..., object] = subprocess.run,
+    _runner: ProcessRunner,
 ) -> None:
     if os.environ.get("FIDO_ROCQ_PYTEST_ARTIFACTS") == "prepared":
         return
 
     repo_root = Path(__file__).resolve().parents[2]
-    _run(
+    _runner.run(
         [str(repo_root / "rocq-python-extraction" / "export_pytest_generated.sh")],
         check=True,
         cwd=repo_root,
@@ -27,13 +44,8 @@ def run_pytest(
     *,
     paths: list[str],
     coverage: list[str],
-    _pytest_main: Callable[[list[str]], int] | None = None,
+    _pytest_main: PytestRunner,
 ) -> int:
-    if _pytest_main is None:  # pragma: no cover
-        import pytest
-
-        _pytest_main = pytest.main
-
     # Cap xdist parallelism at 2 workers by default to keep total memory
     # footprint bounded under the 4 GiB cgroup cap on the test container
     # (#1248 + PR #1254).  pytest-xdist's per-worker memory grows with
@@ -60,12 +72,11 @@ def run_pytest(
 def main(
     argv: list[str] | None = None,
     *,
-    _ensure: Callable[[], None] | None = None,
-    _pytest_main: Callable[[list[str]], int] | None = None,
+    _ensure: EnsureHook,
+    _pytest_main: PytestRunner,
 ) -> int:
     actual_argv = sys.argv[1:] if argv is None else argv
-    ensure = _ensure if _ensure is not None else ensure_rocq_python_artifacts
-    ensure()
+    _ensure()
     return run_pytest(
         actual_argv,
         paths=[],
@@ -74,5 +85,13 @@ def main(
     )
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__ == "__main__":  # pragma: no cover
+    import pytest
+
+    _real_runner = RealProcessRunner()
+    raise SystemExit(
+        main(
+            _ensure=lambda: ensure_rocq_python_artifacts(_runner=_real_runner),
+            _pytest_main=pytest.main,
+        )
+    )

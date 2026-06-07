@@ -2,12 +2,13 @@
 
 import fcntl
 import json
-import subprocess
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from fido.infra import ProcessRunner
 
 if TYPE_CHECKING:
     from fido.appstate import FidoState
@@ -214,10 +215,10 @@ class State(JsonFileStore):
 def _resolve_git_dir(  # pyright: ignore[reportUnusedFunction]  # imported by tasks/worker
     work_dir: Path,
     *,
-    _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    runner: ProcessRunner,
 ) -> Path:
     """Return the absolute .git directory for *work_dir*."""
-    result = _run(
+    result = runner.run(
         ["git", "rev-parse", "--absolute-git-dir"],
         cwd=work_dir,
         capture_output=True,

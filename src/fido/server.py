@@ -4,7 +4,6 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import signal
 import subprocess
 import sys
@@ -14,7 +13,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from types import TracebackType
-from typing import IO, Any
+from typing import IO, Any, Protocol
 from urllib.parse import urlparse
 
 import requests
@@ -25,7 +24,7 @@ from fido.appstate import (
     _ZERO_GITHUB_LIMITS,  # noqa: PLC2701  # pyright: ignore[reportPrivateUsage]
     FidoState,
 )
-from fido.atomic import AtomicReader, create_atomic
+from fido.atomic import AtomicReader, AtomicUpdater, create_atomic
 from fido.claude import kill_active_children
 from fido.config import Config, RepoConfig, RepoMembership
 from fido.events import (
@@ -37,7 +36,11 @@ from fido.events import (
     reply_to_review,
     thread_lineage_comment_ids,
 )
-from fido.github import GitHub, GraphQLError
+from fido.github import (
+    GitHub,
+    GitHubFactory,
+    GraphQLError,
+)
 from fido.infra import (
     Clock,
     Filesystem,
@@ -174,7 +177,7 @@ def _get_self_repo(runner_dir: Path, proc: ProcessRunner) -> str | None:
 
 def preflight_repo_identity(
     repos: dict[str, RepoConfig],
-    proc: ProcessRunner,
+    runner: ProcessRunner,
 ) -> None:
     """Verify each configured work_dir is a git repo whose origin matches its name.
 
@@ -183,7 +186,7 @@ def preflight_repo_identity(
     """
     for name, repo_cfg in repos.items():
         try:
-            result = proc.run(
+            result = runner.run(
                 ["git", "remote", "get-url", "origin"],
                 cwd=str(repo_cfg.work_dir),
                 capture_output=True,
@@ -328,13 +331,52 @@ def _spawn_bg(fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
     threading.Thread(target=fn, args=args, daemon=True).start()
 
 
-def _noop_after_post() -> None:
-    """Default no-op hook called at the end of do_POST.
+class WebhookActions(Protocol):
+    """Grouped collaborator injected on :class:`WebhookHandler`.
 
-    Tests override _fn_after_do_post to synchronise without sleeping — the
-    hook fires after _fn_spawn_bg so any captured background thread is in
-    the capture list before the test wakes up.
+    Groups the six external actions that vary between production and tests
+    so the handler can be tested without patching module-level names.
+    Tests set ``WebhookHandler.actions`` to a test double; production leaves
+    the class attribute at its default ``RealWebhookActions()`` instance.
     """
+
+    def reply_to_review(
+        self, action: Action, config: Config, repo_cfg: RepoConfig, gh: GitHub
+    ) -> None: ...
+
+    def launch_worker(self, repo_cfg: RepoConfig, registry: WorkerRegistry) -> None: ...
+
+    def spawn_bg(self, fn: Callable[..., Any], args: tuple[Any, ...]) -> None: ...
+
+    def after_do_post(self) -> None: ...
+
+    def runner_dir(self) -> Path: ...
+
+    def kill_active_children(self) -> None: ...
+
+
+class RealWebhookActions:
+    """Production implementation of :class:`WebhookActions`."""
+
+    def reply_to_review(
+        self, action: Action, config: Config, repo_cfg: RepoConfig, gh: GitHub
+    ) -> None:
+        reply_to_review(action, config, repo_cfg, gh)
+
+    def launch_worker(self, repo_cfg: RepoConfig, registry: WorkerRegistry) -> None:
+        launch_worker(repo_cfg, registry)
+
+    def spawn_bg(self, fn: Callable[..., Any], args: tuple[Any, ...]) -> None:
+        _spawn_bg(fn, args)
+
+    def after_do_post(self) -> None:
+        """No-op in production — tests override to synchronise with do_POST."""
+
+    def runner_dir(self) -> Path:
+        return _runner_dir()
+
+    def kill_active_children(self) -> None:
+        kill_active_children()
 
 
 class WebhookHandler(BaseHTTPRequestHandler):
@@ -364,13 +406,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
     # Infrastructure ports — set by server.run() composition root.
     infra: Infra = real_infra()
     static_files: StaticFiles | None = None
-    _fn_reply_to_review = staticmethod(reply_to_review)
-    _fn_launch_worker = staticmethod(launch_worker)
-    _fn_spawn_bg = staticmethod(_spawn_bg)
-    _fn_after_do_post = staticmethod(_noop_after_post)
-    _fn_runner_dir = staticmethod(_runner_dir)
-    _fn_kill_active_children = staticmethod(kill_active_children)
-    _fn_exit: Callable[[int], None] = os._exit  # type: ignore[assignment]
+    # Webhook action collaborator — tests replace this with a typed fake.
+    actions: WebhookActions = RealWebhookActions()
     # Per-process ingress deduplication oracle (webhook_ingress_dedupe.v).
     # Shared across all handler instances via the class attribute so every
     # request on every thread sees the same delivery-ID table.  Created once
@@ -420,7 +457,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         try:
             self._do_post_inner()
         finally:
-            type(self)._fn_after_do_post()
+            self.actions.after_do_post()
 
     def _do_post_inner(self) -> None:
         content_length = int(self.headers.get("Content-Length", 0))
@@ -561,7 +598,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         # Process in background thread so we don't block the server.
         if action:
-            type(self)._fn_spawn_bg(self._process_action, (action, repo_cfg))
+            self.actions.spawn_bg(self._process_action, (action, repo_cfg))
 
     def _preempt_worker_best_effort(self, repo_name: str) -> None:
         """Try to interrupt the current worker after durable demand is recorded."""
@@ -672,7 +709,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 "claude leak detected in webhook handler for %s — halting",
                 repo_cfg.name,
             )
-            type(self)._fn_exit(3)
+            self.infra.os_proc.exit(3)
         finally:
             log.info(
                 "webhook handler: EXIT repo=%s tid=%d",
@@ -902,7 +939,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
             if action.review_comments:
                 activity.set_description("replying to review thread")
-                type(self)._fn_reply_to_review(action, self.config, repo_cfg, gh)
+                self.actions.reply_to_review(action, self.config, repo_cfg, gh)
                 handled = True  # inline comments handled individually
 
             # Top-level PR comments (issue_comment) — no reply_to, but has comment_body
@@ -936,7 +973,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             # Non-comment events just trigger fido worker — no task needed.
             # The unblock for comment events ran above, before handlers,
             # to close a race with the background rescope (codex on #1738).
-            type(self)._fn_launch_worker(repo_cfg, self.registry)
+            self.actions.launch_worker(repo_cfg, self.registry)
         except provider.SessionLeakError:
             # Let the outer _process_action handler halt fido — we must not
             # swallow a leak into the generic "confused reaction" path below.
@@ -1018,7 +1055,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             log.exception("failed to post error reaction on comment %s", comment_id)
 
     def _self_restart(self, repo_name: str, *, reason: str = "") -> None:
-        runner_dir = type(self)._fn_runner_dir()
+        runner_dir = self.actions.runner_dir()
         self_repo = _get_self_repo(runner_dir, self.infra.proc)
         if self_repo != repo_name:
             return  # Not our repo — nothing to do.
@@ -1066,7 +1103,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # FSM oracle: StoppingWorkers → KillingChildren.  Validates
         # workers_before_children: all workers stopped before kill fires.
         self._restart_fsm_transition(restart_fsm.WorkersStopped())
-        type(self)._fn_kill_active_children()
+        self.actions.kill_active_children()
         # FSM oracle: KillingChildren → Exiting.  Validates
         # exit_requires_full_teardown: process only exits after full teardown.
         self._restart_fsm_transition(restart_fsm.ChildrenKilled())
@@ -1191,28 +1228,161 @@ def bootstrap_issue_caches(
             )
 
 
+class ChildKiller(Protocol):
+    """Typed collaborator: terminates all active claude child processes."""
+
+    def __call__(self) -> None: ...
+
+
+class SignalInstaller(Protocol):
+    """Typed collaborator: installs an OS signal handler."""
+
+    def __call__(self, signalnum: int, handler: Any) -> Any: ...  # noqa: ANN401
+
+
+class ConfigLoader(Protocol):
+    """Typed collaborator: load server Config (e.g. from sys.argv)."""
+
+    def __call__(self) -> Config: ...
+
+
+class HTTPServerFactory(Protocol):
+    """Typed collaborator: construct an HTTPServer bound to an address."""
+
+    def __call__(
+        self,
+        server_address: tuple[str, int],
+        RequestHandlerClass: type[BaseHTTPRequestHandler],
+    ) -> HTTPServer: ...
+
+
+class RegistryFactory(Protocol):
+    """Typed collaborator: create a WorkerRegistry from config."""
+
+    def __call__(
+        self,
+        repos: dict[str, RepoConfig],
+        gh: GitHub,
+        config: Config | None,
+        *,
+        dispatchers: dict[str, Dispatcher],
+        state_updater: AtomicUpdater[FidoState],
+        runner: ProcessRunner,
+        clock: Clock,
+    ) -> WorkerRegistry: ...
+
+
+class LogConfigurator(Protocol):
+    """Typed collaborator: configure the logging system."""
+
+    def __call__(self, **kwargs: Any) -> None: ...  # noqa: ANN401
+
+
+class MembershipPopulator(Protocol):
+    """Typed collaborator: populate repo membership lists."""
+
+    def __call__(self, config: Config, gh: GitHub) -> None: ...
+
+
+class ToolsPreflight(Protocol):
+    """Typed collaborator: verify required CLI tools are installed."""
+
+    def __call__(self, fs: Filesystem) -> None: ...
+
+
+class SubDirPreflight(Protocol):
+    """Typed collaborator: verify sub-dir is present and readable."""
+
+    def __call__(self, config: Config, fs: Filesystem) -> None: ...
+
+
+class GhAuthPreflight(Protocol):
+    """Typed collaborator: verify GitHub authentication is working."""
+
+    def __call__(self, gh: GitHub) -> None: ...
+
+
+class RepoIdentityPreflight(Protocol):
+    """Typed collaborator: verify remote repo identities match config."""
+
+    def __call__(self, repos: dict[str, RepoConfig], runner: ProcessRunner) -> None: ...
+
+
+class IssueCacheBootstrapper(Protocol):
+    """Typed collaborator: eagerly load issue caches at startup."""
+
+    def __call__(
+        self,
+        repos: dict[str, RepoConfig],
+        gh: GitHub,
+        registry: WorkerRegistry,
+    ) -> None: ...
+
+
+class ServerRunner:
+    """Manages server lifecycle: signal installation, serve_forever, and shutdown.
+
+    Extracted from the ``run()`` composition root so the lifecycle behaviour
+    (signal handlers, shutdown on SIGTERM/SIGINT, KeyboardInterrupt teardown)
+    is testable without standing up the full server infrastructure.
+    """
+
+    def __init__(
+        self,
+        server: HTTPServer,
+        *,
+        kill_fn: ChildKiller = kill_active_children,
+        signal_fn: SignalInstaller = signal.signal,
+    ) -> None:
+        self._server = server
+        self._kill_fn = kill_fn
+        self._signal_fn = signal_fn
+
+    def run(self) -> None:
+        def _shutdown_handler(signum: int, _frame: object) -> None:
+            log.info("fido received signal %d — terminating claude children", signum)
+            self._kill_fn()
+            self._server.server_close()
+            sys.exit(0)
+
+        self._signal_fn(signal.SIGTERM, _shutdown_handler)
+        self._signal_fn(signal.SIGINT, _shutdown_handler)
+
+        # Diagnostic hook: ``kill -USR1 <fido-pid>`` (or ``docker kill --signal=
+        # SIGUSR1 fido``) dumps every thread's Python stack to stderr — captured
+        # in fido.log via the launcher's redirect.  Lets us see exactly which
+        # line a hung worker thread is parked on without needing pdb attached.
+        # The :class:`faulthandler` module's signal handler is async-signal-safe
+        # and compatible with the free-threaded (3.14t) runtime.
+        faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
+
+        try:
+            self._server.serve_forever()
+        except KeyboardInterrupt:
+            log.info("shutting down")
+            self._kill_fn()
+            self._server.server_close()
+
+
 def run(
     *,
-    _from_args: Callable[..., Config] = Config.from_args,
-    _HTTPServer: Callable[..., HTTPServer] = FidoHTTPServer,
-    _make_registry: Callable[..., WorkerRegistry] = make_registry,
-    _path_home: Callable[[], Path] = Path.home,
-    _basic_config: Callable[..., None] = logging.basicConfig,
+    _from_args: ConfigLoader = Config.from_args,
+    _HTTPServer: HTTPServerFactory = FidoHTTPServer,
+    _make_registry: RegistryFactory = make_registry,
+    _basic_config: LogConfigurator = logging.basicConfig,  # pyright: ignore[reportArgumentType]
     _stderr: IO[str] = sys.stderr,
-    _populate_memberships: Callable[..., None] = populate_memberships,
-    _signal: Callable[..., Any] = signal.signal,
-    _kill_active_children: Callable[..., None] = kill_active_children,
+    _populate_memberships: MembershipPopulator = populate_memberships,
     _Watchdog: type[Watchdog] = Watchdog,
     _IssueReconcileWatchdog: type[IssueReconcileWatchdog] = IssueReconcileWatchdog,
     _SessionLockWatchdog: type[SessionLockWatchdog] = SessionLockWatchdog,
     _RateLimitMonitor: type[RateLimitMonitor] = RateLimitMonitor,
     _ProviderPressureMonitor: type[ProviderPressureMonitor] = ProviderPressureMonitor,
-    _preflight_repo_identity: Callable[..., None] = preflight_repo_identity,
-    _preflight_tools: Callable[..., None] = preflight_tools,
-    _preflight_sub_dir: Callable[..., None] = preflight_sub_dir,
-    _preflight_gh_auth: Callable[..., None] = preflight_gh_auth,
-    _GitHub: type[GitHub] = GitHub,
-    _bootstrap_issue_caches: Callable[..., None] = bootstrap_issue_caches,
+    _preflight_repo_identity: RepoIdentityPreflight = preflight_repo_identity,
+    _preflight_tools: ToolsPreflight = preflight_tools,
+    _preflight_sub_dir: SubDirPreflight = preflight_sub_dir,
+    _preflight_gh_auth: GhAuthPreflight = preflight_gh_auth,
+    github_factory: GitHubFactory,
+    _bootstrap_issue_caches: IssueCacheBootstrapper = bootstrap_issue_caches,
 ) -> None:
     config = _from_args()
 
@@ -1251,7 +1421,7 @@ def run(
     infra = real_infra()
     WebhookHandler.infra = infra
 
-    gh = _GitHub()
+    gh = github_factory()
     try:
         _preflight_tools(infra.fs)
         _preflight_sub_dir(config, infra.fs)
@@ -1269,7 +1439,7 @@ def run(
     WebhookHandler.static_files = StaticFiles(
         Path(__file__).resolve().parent / "static"
     )
-    WebhookHandler.provider_factory = DefaultProviderFactory(
+    WebhookHandler.provider_factory = DefaultProviderFactory.real(
         session_system_file=config.sub_dir / "persona.md"
     )
     # Create the atomic FidoState cell here (composition root) and hand the
@@ -1297,6 +1467,8 @@ def run(
         config,
         dispatchers=dispatchers,
         state_updater=state_updater,
+        runner=infra.proc,
+        clock=infra.clock,
     )
     WebhookHandler.registry = registry
     WebhookHandler.state_reader = state_reader
@@ -1313,36 +1485,13 @@ def run(
     # the deadline — without it, a holder wedged inside
     # ``consume_until_result`` on a streaming-forever subprocess holds
     # the lock indefinitely (closes #1377).
-    _SessionLockWatchdog(registry, config.repos).start_thread()
+    _SessionLockWatchdog(registry, config.repos, clock=infra.clock).start_thread()
     _RateLimitMonitor(gh, state_updater).start_thread()
     _ProviderPressureMonitor(
         config.repos, state_updater, WebhookHandler.provider_factory
     ).start_thread()
 
     server = _HTTPServer(("", config.port), WebhookHandler)
-
-    def _shutdown_handler(signum: int, _frame: object) -> None:
-        log.info("fido received signal %d — terminating claude children", signum)
-        _kill_active_children()
-        server.server_close()
-        sys.exit(0)
-
-    _signal(signal.SIGTERM, _shutdown_handler)
-    _signal(signal.SIGINT, _shutdown_handler)
-
-    # Diagnostic hook: ``kill -USR1 <fido-pid>`` (or ``docker kill --signal=
-    # SIGUSR1 fido``) dumps every thread's Python stack to stderr — captured
-    # in fido.log via the launcher's redirect.  Lets us see exactly which
-    # line a hung worker thread is parked on without needing pdb attached.
-    # The :class:`faulthandler` module's signal handler is async-signal-safe
-    # and compatible with the free-threaded (3.14t) runtime.
-    faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
-
     repos_str = ", ".join(f"{name}={rc.work_dir}" for name, rc in config.repos.items())
     log.info("fido listening on :%d — repos: %s", config.port, repos_str)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        log.info("shutting down")
-        _kill_active_children()
-        server.server_close()
+    ServerRunner(server).run()

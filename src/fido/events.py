@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from fido.config import Config, RepoConfig
 from fido.critics import (
@@ -19,6 +19,7 @@ from fido.critics import (
     run_insight_dedup_critic,
 )
 from fido.github import GitHub
+from fido.infra import ProcessRunner, RealProcessRunner
 from fido.prompts import NO_TOOLS_CLAUSE, Prompts
 from fido.provider import (
     READ_ONLY_ALLOWED_TOOLS,
@@ -1016,12 +1017,11 @@ def _claim_reply_outbox_effects(
     *,
     delivery_id: str,
     promise_ids: Iterable[str],
-    _store_factory: Callable[..., Any] | None = None,
+    store_factory: "StoreFactory | None" = None,
 ) -> None:
     """Durably claim every visible-reply outbox effect before posting."""
-    store = (_store_factory if _store_factory is not None else FidoStore)(
-        repo_cfg.work_dir
-    )
+    _factory = store_factory if store_factory is not None else _DEFAULT_STORE_FACTORY
+    store = _factory(repo_cfg.work_dir)
     for promise_id in promise_ids:
         promise = store.promise(promise_id)
         assert promise is not None, (
@@ -1472,6 +1472,345 @@ def _gather_claim_grounding_state(work_dir: Path) -> dict[str, Any]:
     return {"recent_commit_shas": shas}
 
 
+# ---------------------------------------------------------------------------
+# Dispatcher collaborator protocols
+# ---------------------------------------------------------------------------
+
+
+class SynthesisCaller(Protocol):
+    """Groups call_synthesis and call_failure_explanation as one injectable unit.
+
+    Wraps the two synthesis entry points so tests can inject a single fake
+    that controls both the normal-synthesis and failure-explanation paths
+    without touching module-level names.
+    """
+
+    def call_synthesis(
+        self,
+        comment_body: str,
+        *,
+        is_bot: bool,
+        context: dict[str, Any] | None = None,
+        issue: "ActiveIssue | None" = None,
+        pr: "ActivePR | None" = None,
+        agent: ProviderAgent,
+        prompts: Prompts,
+        claim_grounding_state: dict[str, Any] | None = None,
+    ) -> CommentResponse: ...
+
+    def call_failure_explanation(
+        self,
+        comment_body: str,
+        *,
+        agent: ProviderAgent,
+        prompts: Prompts,
+    ) -> CommentResponse: ...
+
+
+class _RealSynthesisCaller:  # pragma: no cover
+    """Real :class:`SynthesisCaller` — delegates to :mod:`fido.synthesis_call`."""
+
+    def call_synthesis(
+        self,
+        comment_body: str,
+        *,
+        is_bot: bool,
+        context: dict[str, Any] | None = None,
+        issue: "ActiveIssue | None" = None,
+        pr: "ActivePR | None" = None,
+        agent: ProviderAgent,
+        prompts: Prompts,
+        claim_grounding_state: dict[str, Any] | None = None,
+    ) -> CommentResponse:
+        return call_synthesis(
+            comment_body,
+            is_bot=is_bot,
+            context=context,
+            issue=issue,
+            pr=pr,
+            agent=agent,
+            prompts=prompts,
+            claim_grounding_state=claim_grounding_state,
+        )
+
+    def call_failure_explanation(
+        self,
+        comment_body: str,
+        *,
+        agent: ProviderAgent,
+        prompts: Prompts,
+    ) -> CommentResponse:
+        return call_failure_explanation(comment_body, agent=agent, prompts=prompts)
+
+
+class BackfillReplier(Protocol):
+    """Generates a reply to an issue comment during a backfill pass.
+
+    In production, :class:`Dispatcher` itself satisfies this protocol
+    (its ``reply_to_issue_comment`` method is the default implementation).
+    Tests inject a simpler fake to avoid running the full synthesis path.
+    """
+
+    def reply_to_issue_comment(
+        self,
+        action: "Action",
+        registry: Any,  # noqa: ANN401
+        *,
+        agent: ProviderAgent | None = None,
+        prompts: Prompts | None = None,
+    ) -> tuple[str, list[str]]: ...
+
+
+class ThreadStarter(Protocol):
+    """Starts a :class:`threading.Thread`.
+
+    Wraps :meth:`threading.Thread.start` so background thread launches
+    can be suppressed in tests (e.g. to run the thread's target synchronously
+    in the test body instead of concurrently).
+    """
+
+    def start(self, thread: threading.Thread) -> None: ...
+
+
+class _RealThreadStarter:
+    """Real :class:`ThreadStarter` — calls :meth:`threading.Thread.start`."""
+
+    def start(self, thread: threading.Thread) -> None:
+        thread.start()
+
+
+class TaskReorderer(Protocol):
+    """Reorders the pending task list via an Opus dependency-analysis call.
+
+    Wraps :func:`~fido.tasks.reorder_tasks` so the background rescope path
+    can be tested without spawning real LLM calls.
+    """
+
+    def __call__(
+        self,
+        tasks: Tasks,
+        commit_summary: str,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> None: ...
+
+
+class _RealTaskReorderer:
+    """Real :class:`TaskReorderer` — delegates to :func:`fido.tasks.reorder_tasks`."""
+
+    def __call__(
+        self,
+        tasks: Tasks,
+        commit_summary: str,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> None:
+        from fido.tasks import reorder_tasks
+
+        reorder_tasks(tasks, commit_summary, **kwargs)
+
+
+class PrDescriptionRewriter(Protocol):
+    """Rewrites the PR description summary after a successful rescope.
+
+    Wraps :func:`_rewrite_pr_description` so the on-done callback in the
+    background rescope thread can be tested without touching GitHub.
+    """
+
+    def rewrite_pr_description(
+        self,
+        work_dir: Path,
+        gh: GitHub,
+        *,
+        agent: ProviderAgent | None = None,
+    ) -> None: ...
+
+
+class _RealPrDescriptionRewriter:
+    """Real :class:`PrDescriptionRewriter` — delegates to :func:`_rewrite_pr_description`."""
+
+    def rewrite_pr_description(
+        self,
+        work_dir: Path,
+        gh: GitHub,
+        *,
+        agent: ProviderAgent | None = None,
+    ) -> None:
+        _rewrite_pr_description(work_dir, gh, agent=agent)
+
+
+class BackgroundTaskSyncer(Protocol):
+    """Syncs tasks.json to the PR body in a background daemon thread.
+
+    Used exclusively for fire-and-forget paths (e.g. :meth:`Dispatcher.launch_sync`).
+    For paths that must complete before subsequent work (e.g. post-rescope
+    ``on_done`` closures), use :class:`ForegroundTaskSyncer` instead.
+    """
+
+    def __call__(self, work_dir: Path, gh: GitHub) -> None: ...
+
+
+class _RealBackgroundTaskSyncer:  # pragma: no cover
+    """Real :class:`BackgroundTaskSyncer` — delegates to :class:`~fido.tasks.RealBackgroundSyncer`."""
+
+    def __init__(self, runner: ProcessRunner) -> None:
+        self._runner = runner
+
+    def __call__(self, work_dir: Path, gh: GitHub) -> None:
+        from fido.tasks import (  # noqa: PLC0415
+            RealBackgroundSyncer,
+            RealThreadStarter,
+            auto_complete_ask_tasks,
+        )
+
+        RealBackgroundSyncer(
+            runner=self._runner,
+            auto_completer=auto_complete_ask_tasks,
+            starter=RealThreadStarter(),
+        )(work_dir, gh)
+
+
+class ForegroundTaskSyncer(Protocol):
+    """Syncs tasks.json to the PR body synchronously before returning.
+
+    Used for paths that must complete before subsequent work — specifically
+    the post-rescope ``on_done`` closure, which must sync task state before
+    :meth:`PrDescriptionRewriter.rewrite_pr_description` runs so the rewrite
+    sees up-to-date task data (e.g. auto-completed ``ASK:`` tasks).
+    """
+
+    def __call__(self, work_dir: Path, gh: GitHub) -> None: ...
+
+
+class _RealForegroundTaskSyncer:  # pragma: no cover
+    """Real :class:`ForegroundTaskSyncer` — calls :func:`~fido.tasks.sync_tasks` directly."""
+
+    def __init__(self, runner: ProcessRunner) -> None:
+        self._runner = runner
+
+    def __call__(self, work_dir: Path, gh: GitHub) -> None:
+        from fido.tasks import (  # noqa: PLC0415
+            RealGitDirResolver,
+            auto_complete_ask_tasks,
+            sync_tasks,
+        )
+
+        sync_tasks(
+            work_dir,
+            gh,
+            git_dir_resolver=RealGitDirResolver(self._runner),
+            auto_completer=auto_complete_ask_tasks,
+        )
+
+
+class CommitSummarizer(Protocol):
+    """Returns a short ``git log --oneline`` summary for Opus context.
+
+    Wraps :func:`_get_commit_summary` so the rescope-trigger path can be
+    tested without a real git repository.
+    """
+
+    def __call__(self, work_dir: Path) -> str: ...
+
+
+class _RealCommitSummarizer:  # pragma: no cover
+    """Real :class:`CommitSummarizer` — delegates to :func:`_get_commit_summary`."""
+
+    def __call__(self, work_dir: Path) -> str:
+        return _get_commit_summary(work_dir)
+
+
+class StoreFactory(Protocol):
+    """Creates a :class:`~fido.store.FidoStore` for a given work directory.
+
+    Wraps the :class:`~fido.store.FidoStore` constructor so
+    :func:`_claim_reply_outbox_effects` can be tested without real durable
+    state.
+    """
+
+    def __call__(self, work_dir: Path) -> "FidoStore": ...
+
+
+class _RealStoreFactory:
+    """Real :class:`StoreFactory` — calls :class:`~fido.store.FidoStore` directly."""
+
+    def __call__(self, work_dir: Path) -> "FidoStore":
+        return FidoStore(work_dir)
+
+
+class PrDescriptionWriter(Protocol):
+    """Writes (or rewrites) the PR description body.
+
+    Wraps :func:`~fido.worker._write_pr_description` so
+    :func:`_rewrite_pr_description` can be tested without a real GitHub
+    connection or LLM call.
+    """
+
+    def __call__(
+        self,
+        work_dir: Path,
+        gh: GitHub,
+        repo: str,
+        pr_number: int,
+        issue: int,
+        task_list: list[dict[str, Any]],
+        existing_body: str,
+        *,
+        agent: ProviderAgent | None = None,
+    ) -> None: ...
+
+
+class _RealPrDescriptionWriter:
+    """Real :class:`PrDescriptionWriter` — imports and calls worker._write_pr_description."""
+
+    def __init__(self, runner: ProcessRunner) -> None:
+        self._runner = runner
+
+    def __call__(
+        self,
+        work_dir: Path,
+        gh: GitHub,
+        repo: str,
+        pr_number: int,
+        issue: int,
+        task_list: list[dict[str, Any]],
+        existing_body: str,
+        *,
+        agent: ProviderAgent | None = None,
+    ) -> None:
+        from fido.worker import (
+            _write_pr_description,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        _write_pr_description(
+            work_dir,
+            gh,
+            repo,
+            pr_number,
+            issue,
+            task_list,
+            existing_body,
+            runner=self._runner,
+            agent=agent,
+        )
+
+
+_DEFAULT_RUNNER: ProcessRunner = RealProcessRunner()
+_DEFAULT_SYNTHESIS_CALLER: SynthesisCaller = _RealSynthesisCaller()
+_DEFAULT_THREAD_STARTER: ThreadStarter = _RealThreadStarter()
+_DEFAULT_TASK_REORDERER: TaskReorderer = _RealTaskReorderer()
+_DEFAULT_PR_REWRITER: PrDescriptionRewriter = _RealPrDescriptionRewriter()
+_DEFAULT_BACKGROUND_SYNCER: BackgroundTaskSyncer = _RealBackgroundTaskSyncer(
+    runner=RealProcessRunner()
+)
+_DEFAULT_FOREGROUND_SYNCER: ForegroundTaskSyncer = _RealForegroundTaskSyncer(
+    runner=RealProcessRunner()
+)
+_DEFAULT_COMMIT_SUMMARIZER: CommitSummarizer = _RealCommitSummarizer()
+_DEFAULT_STORE_FACTORY: StoreFactory = _RealStoreFactory()
+_DEFAULT_PR_DESCRIPTION_WRITER: PrDescriptionWriter = _RealPrDescriptionWriter(
+    runner=_DEFAULT_RUNNER
+)
+
+
 class Dispatcher:
     """Typed collaborator that owns the dispatch, backfill, and sync logic.
 
@@ -1495,30 +1834,34 @@ class Dispatcher:
         repo_cfg: RepoConfig,
         gh: GitHub,
         *,
-        call_synthesis_fn: Callable[..., Any] = call_synthesis,
-        call_failure_explanation_fn: Callable[..., Any] = call_failure_explanation,
         provider_factory: "DefaultProviderFactory | None" = None,
-        backfill_reply_fn: "Callable[..., tuple[str, list[str]]] | None" = None,
-        thread_start_fn: Callable[[threading.Thread], None] = threading.Thread.start,
-        reorder_fn: "Callable[..., None] | None" = None,
-        rewrite_fn: "Callable[..., None] | None" = None,
-        sync_fn: "Callable[[Path, Any], None] | None" = None,
+        synthesis_caller: SynthesisCaller = _DEFAULT_SYNTHESIS_CALLER,
+        backfill_replier: "BackfillReplier | None" = None,
+        thread_starter: ThreadStarter = _DEFAULT_THREAD_STARTER,
+        task_reorderer: TaskReorderer = _DEFAULT_TASK_REORDERER,
+        pr_rewriter: PrDescriptionRewriter = _DEFAULT_PR_REWRITER,
+        background_syncer: BackgroundTaskSyncer = _DEFAULT_BACKGROUND_SYNCER,
+        foreground_syncer: ForegroundTaskSyncer = _DEFAULT_FOREGROUND_SYNCER,
+        commit_summarizer: CommitSummarizer = _DEFAULT_COMMIT_SUMMARIZER,
+        store_factory: StoreFactory = _DEFAULT_STORE_FACTORY,
         reorder_coalesce_state: "dict[str, Any] | None" = None,
-        get_commit_summary_fn: "Callable[[Path], str] | None" = None,
     ) -> None:
         self._config = config
         self._repo_cfg = repo_cfg
         self._gh = gh
-        self._call_synthesis_fn = call_synthesis_fn
-        self._call_failure_explanation_fn = call_failure_explanation_fn
         self._provider_factory = provider_factory
-        self._backfill_reply_fn = backfill_reply_fn
-        self._thread_start_fn = thread_start_fn
-        self._reorder_fn = reorder_fn
-        self._rewrite_fn = rewrite_fn
-        self._sync_fn = sync_fn
+        self._synthesis_caller = synthesis_caller
+        self._backfill_replier: BackfillReplier = (
+            backfill_replier if backfill_replier is not None else self
+        )
+        self._thread_starter = thread_starter
+        self._task_reorderer = task_reorderer
+        self._pr_rewriter = pr_rewriter
+        self._background_syncer = background_syncer
+        self._foreground_syncer = foreground_syncer
+        self._commit_summarizer = commit_summarizer
+        self._store_factory = store_factory
         self._reorder_coalesce_state = reorder_coalesce_state
-        self._get_commit_summary_fn = get_commit_summary_fn
         # HOL-19 follow-up / #1935: one process-local
         # transport-failure counter shared across all insight-dedup
         # critic calls for this Dispatcher (= this repo).  Escalates
@@ -1938,12 +2281,7 @@ class Dispatcher:
                 comment=c,
             )
             try:
-                _backfill_reply = (
-                    self._backfill_reply_fn
-                    if self._backfill_reply_fn is not None
-                    else self.reply_to_issue_comment
-                )
-                _backfill_reply(
+                self._backfill_replier.reply_to_issue_comment(
                     action,
                     registry,
                     agent=agent,
@@ -1959,10 +2297,7 @@ class Dispatcher:
 
     def launch_sync(self) -> None:
         """Sync tasks.json → PR body in a background thread."""
-        from fido.tasks import sync_tasks_background
-
-        sync_fn = self._sync_fn if self._sync_fn is not None else sync_tasks_background
-        sync_fn(self._repo_cfg.work_dir, self._gh)
+        self._background_syncer(self._repo_cfg.work_dir, self._gh)
         log.info("sync-tasks launched")
 
     # ── reply / task creation ──────────────────────────────────────────────
@@ -2279,8 +2614,6 @@ class Dispatcher:
             agent = registry.agent_for(repo_cfg.name)
         if prompts is None:
             prompts = Prompts(_load_persona(config))
-        _synthesis_fn = self._call_synthesis_fn
-        _failure_fn = self._call_failure_explanation_fn
         info = action.reply_to
         if not info or not action.comment_body:
             return ("ACT", [action.comment_body or action.prompt])
@@ -2391,7 +2724,7 @@ class Dispatcher:
             info["comment_id"],
         )
         try:
-            synthesis_response = _synthesis_fn(
+            synthesis_response = self._synthesis_caller.call_synthesis(
                 comment,
                 is_bot=action.is_bot,
                 context=context or None,
@@ -2463,7 +2796,9 @@ class Dispatcher:
                 info.get("comment_id"),
             )
             try:
-                synthesis_response = _failure_fn(comment, agent=agent, prompts=prompts)
+                synthesis_response = self._synthesis_caller.call_failure_explanation(
+                    comment, agent=agent, prompts=prompts
+                )
             except SynthesisExhaustedError:
                 # Even the fallback explanation exhausted retries.  Best-effort
                 # clear the eyes reaction so it does not sit forever as a false
@@ -2626,8 +2961,6 @@ class Dispatcher:
             agent = registry.agent_for(repo_cfg.name)
         if prompts is None:
             prompts = Prompts(_load_persona(config))
-        _synthesis_fn = self._call_synthesis_fn
-        _failure_fn = self._call_failure_explanation_fn
         comment = action.comment_body or ""
         context = dict(action.context) if action.context else {}
         direct_promise = None
@@ -2729,7 +3062,7 @@ class Dispatcher:
 
         log.info("synthesis: calling for issue comment on PR #%s", number)
         try:
-            synthesis_response = _synthesis_fn(
+            synthesis_response = self._synthesis_caller.call_synthesis(
                 comment,
                 is_bot=action.is_bot,
                 context=context or None,
@@ -2778,7 +3111,9 @@ class Dispatcher:
                 number,
             )
             try:
-                synthesis_response = _failure_fn(comment, agent=agent, prompts=prompts)
+                synthesis_response = self._synthesis_caller.call_failure_explanation(
+                    comment, agent=agent, prompts=prompts
+                )
             except SynthesisExhaustedError:
                 # Even the fallback explanation exhausted retries.  Best-effort
                 # clear the eyes reaction so it does not sit forever as a false
@@ -3121,8 +3456,6 @@ class Dispatcher:
         registry: ActivityReporter,
         agent: ProviderAgent,
         prompts: Prompts,
-        rewrite_fn: Callable[..., None],
-        sync_fn: Callable[[Path, Any], None] | None = None,
         *,
         after_apply: Callable[[], None] | None = None,
     ) -> tuple[dict[str, Any], list[Callable[[], None]]]:
@@ -3139,15 +3472,9 @@ class Dispatcher:
         ``reorder_tasks`` from ``Worker.rescope_before_pick``, which
         does not filter side-channel kwargs).
         """
-        from fido.tasks import sync_tasks as _real_sync_tasks
-
         repo_cfg = self._repo_cfg
         gh = self._gh
         work_dir = repo_cfg.work_dir
-
-        _effective_sync: Callable[[Path, Any], None] = (
-            sync_fn if sync_fn is not None else _real_sync_tasks
-        )
 
         # Codex P2 (fourteenth round) on PR #1938: per-caller
         # after-apply hooks live in a mutable shared list so
@@ -3161,13 +3488,11 @@ class Dispatcher:
             after_applies.append(after_apply)
 
         def on_done() -> None:
-            _effective_sync(work_dir, gh)
-            rewrite_fn(
+            self._foreground_syncer(work_dir, gh)
+            self._pr_rewriter.rewrite_pr_description(
                 work_dir,
                 gh,
                 agent=agent,
-                _state=State(work_dir / ".git" / "fido"),
-                _tasks=Tasks(work_dir),
             )
             for hook in after_applies:
                 hook()
@@ -3398,18 +3723,10 @@ class Dispatcher:
         successful reorder, so the human-facing summary stays in sync with the
         updated plan.
         """
-        from fido.tasks import reorder_tasks as _reorder_tasks
-
         config = self._config
         repo_cfg = self._repo_cfg
         work_dir = repo_cfg.work_dir
 
-        reorder = self._reorder_fn if self._reorder_fn is not None else _reorder_tasks
-        rewrite_fn = (
-            self._rewrite_fn
-            if self._rewrite_fn is not None
-            else _rewrite_pr_description
-        )
         state = (
             self._reorder_coalesce_state
             if self._reorder_coalesce_state is not None
@@ -3425,8 +3742,6 @@ class Dispatcher:
             registry,
             agent,
             prompts,
-            rewrite_fn,
-            self._sync_fn,
             after_apply=_on_done,
         )
 
@@ -3532,7 +3847,7 @@ class Dispatcher:
                         agent=iter_agent,
                         prompts=iter_prompts,
                     )
-                    reorder(
+                    self._task_reorderer(
                         registry.tasks_for(repo_cfg.name),
                         cs,
                         intents=current_intents or None,
@@ -3579,7 +3894,7 @@ class Dispatcher:
             daemon=True,
         )
         try:
-            self._thread_start_fn(t)
+            self._thread_starter.start(t)
         except Exception:
             release_untriaged = 0
             with _reorder_coalesce_lock:
@@ -3694,12 +4009,7 @@ class Dispatcher:
         new_task = _tasks.add(title=prompt, task_type=task_type, thread=thread)
         self.launch_sync()
         if thread:
-            _cs_fn = (
-                self._get_commit_summary_fn
-                if self._get_commit_summary_fn is not None
-                else _get_commit_summary
-            )
-            commit_summary = _cs_fn(repo_cfg.work_dir)
+            commit_summary = self._commit_summarizer(repo_cfg.work_dir)
             # Bookkeep the inbox regardless of which background function is used.
             # Without a registry, skip the rescope entirely and log loudly
             # (#1336): silently dropping the rescope is exactly the fail-soft
@@ -3859,7 +4169,7 @@ def _maybe_abort_for_new_task(
 def _get_commit_summary(
     work_dir: Path,
     *,
-    _run: Callable[..., Any] | None = None,
+    runner: ProcessRunner = _DEFAULT_RUNNER,
 ) -> str:
     """Return a short ``git log --oneline`` summary of recent commits.
 
@@ -3868,8 +4178,7 @@ def _get_commit_summary(
     exit so callers see real failures rather than silently receiving an empty
     string.
     """
-    run = _run if _run is not None else subprocess.run
-    result = run(
+    result = runner.run(
         ["git", "log", "--oneline", "-20"],
         cwd=work_dir,
         capture_output=True,
@@ -3897,7 +4206,7 @@ def _rewrite_pr_description(
     _state: State | None = None,
     _tasks: Tasks | None = None,
     _max_retries: int = 3,
-    _write_fn: Callable[..., None] | None = None,
+    pr_description_writer: PrDescriptionWriter = _DEFAULT_PR_DESCRIPTION_WRITER,
 ) -> None:
     """Rewrite the PR description summary after a successful rescope.
 
@@ -3913,13 +4222,6 @@ def _rewrite_pr_description(
     the state of the task list at the moment Opus returned.  The PR body is
     re-fetched on each retry so the work-queue section stays current.
     """
-    if _write_fn is None:
-        from fido.worker import (
-            _write_pr_description,  # pyright: ignore[reportPrivateUsage]
-        )
-
-        _write_fn = _write_pr_description
-
     if _state is None or _tasks is None:
         from fido.state import State as StateStore
         from fido.tasks import Tasks as TaskStore
@@ -3950,7 +4252,7 @@ def _rewrite_pr_description(
         snapshot_before = _task_snapshot(task_list)
 
         body = gh.get_pr_body(repo, pr_number)
-        _write_fn(
+        pr_description_writer(
             work_dir,
             gh,
             repo,

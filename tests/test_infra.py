@@ -1,5 +1,6 @@
 """Tests for fido.infra — infrastructure port protocols and real implementations."""
 
+import os
 import signal
 import subprocess
 import time
@@ -9,7 +10,14 @@ from typing import NoReturn
 
 import pytest
 
-from fido.infra import RealClock, RealFilesystem, RealOsProcess, RealProcessRunner
+from fido.infra import (
+    RealClock,
+    RealFilesystem,
+    RealIOSelector,
+    RealOsProcess,
+    RealPopenRunner,
+    RealProcessRunner,
+)
 
 
 class TestRealProcessRunner:
@@ -56,6 +64,17 @@ class TestRealClock:
         result = RealClock().monotonic()
         t2 = time.monotonic()
         assert t1 <= result <= t2
+
+    def test_now_returns_utc_datetime(self) -> None:
+        """now() returns a timezone-aware UTC datetime."""
+        import datetime as _dt
+
+        before = _dt.datetime.now(_dt.UTC)
+        result = RealClock().now()
+        after = _dt.datetime.now(_dt.UTC)
+        assert isinstance(result, _dt.datetime)
+        assert result.tzinfo is not None
+        assert before <= result <= after
 
 
 class TestRealFilesystem:
@@ -143,3 +162,75 @@ class TestRealOsProcess:
         result = RealOsProcess(backend).install_signal(signal.SIGTERM, my_handler)
         assert backend.signal_calls == [(signal.SIGTERM, my_handler)]
         assert result is old_handler_sentinel
+
+
+class TestRealPopenRunner:
+    def test_spawn_returns_popen_instance(self) -> None:
+        """spawn() creates a subprocess and returns a Popen object."""
+        runner = RealPopenRunner()
+        proc = runner.spawn(
+            ["/bin/sh", "-c", "exit 0"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        proc.wait()
+        assert isinstance(proc, subprocess.Popen)
+        assert proc.returncode == 0
+
+    def test_spawn_forwards_kwargs_to_popen(self) -> None:
+        """env kwarg is forwarded — the subprocess receives the provided environment."""
+        runner = RealPopenRunner()
+        proc = runner.spawn(
+            ["/bin/sh", "-c", "echo $FIDO_TEST"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={"FIDO_TEST": "woof", "PATH": "/usr/bin:/bin"},
+        )
+        stdout, _ = proc.communicate()
+        assert stdout == "woof\n"
+
+    def test_spawn_process_stdout_readable(self) -> None:
+        """Output written by the spawned process is readable from proc.stdout."""
+        runner = RealPopenRunner()
+        proc = runner.spawn(
+            ["/bin/sh", "-c", "echo bark"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert proc.stdout is not None
+        stdout, _ = proc.communicate()
+        assert stdout == "bark\n"
+
+
+class TestRealIOSelector:
+    def test_select_returns_ready_file_when_data_available(self) -> None:
+        """select() includes the file in rlist when data is ready to read."""
+        r_fd, w_fd = os.pipe()
+        os.write(w_fd, b"hello")
+        os.close(w_fd)
+        r_file = os.fdopen(r_fd, "rb", buffering=0)
+        try:
+            selector = RealIOSelector()
+            readable, writable, exceptional = selector.select([r_file], [], [], 0.0)
+            assert r_file in readable
+            assert writable == []
+            assert exceptional == []
+        finally:
+            r_file.close()
+
+    def test_select_returns_empty_when_no_data_ready(self) -> None:
+        """select() returns empty lists when the pipe has no data (zero timeout)."""
+        r_fd, w_fd = os.pipe()
+        r_file = os.fdopen(r_fd, "rb", buffering=0)
+        try:
+            selector = RealIOSelector()
+            readable, writable, exceptional = selector.select([r_file], [], [], 0.0)
+            assert readable == []
+            assert writable == []
+            assert exceptional == []
+        finally:
+            r_file.close()
+            os.close(w_fd)

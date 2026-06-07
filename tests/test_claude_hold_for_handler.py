@@ -8,9 +8,30 @@ import pytest
 
 from fido import provider
 from fido.claude import ClaudeSession
+from fido.infra import RealClock
 from fido.provider import SessionTalker, ThreadKind, talker_now
 
 # ── typed subprocess fakes ────────────────────────────────────────────────────
+
+
+class _FixedPopenRunner:
+    """PopenRunner that always returns the same pre-built process."""
+
+    def __init__(self, proc: object) -> None:
+        self._proc = proc
+
+    def spawn(self, *args: object, **kwargs: object) -> object:
+        return self._proc
+
+
+class _FixedSelector:
+    """IOSelector that always returns the same fixed result."""
+
+    def __init__(self, result: tuple) -> None:
+        self._result = result
+
+    def select(self, *args: object, **kwargs: object) -> tuple:
+        return self._result
 
 
 class _WriteCallRecord:
@@ -135,11 +156,17 @@ def _setup_session(
     return ClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
-        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
+        popen=_FixedPopenRunner(proc),
+        selector=_FixedSelector(([proc.stdout], [], [])),
         repo_name=repo,
         model="claude-opus-4-6",
         register_talker=register_talker,
+        clock=RealClock(),
+        idle_timeout=1800.0,
+        session_id=None,
+        tools=None,
+        snapshot_publisher=None,
+        talker_resolver=None,
     )
 
 
@@ -210,11 +237,17 @@ def test_hold_preempt_fires_cancel_when_worker_holds(tmp_path: Path) -> None:
     session = _SpyClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
-        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
+        popen=_FixedPopenRunner(proc),
+        selector=_FixedSelector(([proc.stdout], [], [])),
         repo_name="owner/repo",
         model="claude-opus-4-6",
         talker_resolver=fake_talker,
+        clock=RealClock(),
+        idle_timeout=1800.0,
+        session_id=None,
+        tools=None,
+        snapshot_publisher=None,
+        register_talker=None,
     )
     provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
@@ -239,11 +272,17 @@ def test_hold_preempt_no_fire_when_no_worker_holder(tmp_path: Path) -> None:
     session = _SpyClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
-        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
+        popen=_FixedPopenRunner(proc),
+        selector=_FixedSelector(([proc.stdout], [], [])),
         repo_name="owner/repo",
         model="claude-opus-4-6",
         talker_resolver=lambda _repo: None,
+        clock=RealClock(),
+        idle_timeout=1800.0,
+        session_id=None,
+        tools=None,
+        snapshot_publisher=None,
+        register_talker=None,
     )
     provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
@@ -276,11 +315,17 @@ def test_hold_preempt_skipped_when_no_preempt_worker_flag(tmp_path: Path) -> Non
     session = _SpyClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
-        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
+        popen=_FixedPopenRunner(proc),
+        selector=_FixedSelector(([proc.stdout], [], [])),
         repo_name="owner/repo",
         model="claude-opus-4-6",
         talker_resolver=fake_talker,
+        clock=RealClock(),
+        idle_timeout=1800.0,
+        session_id=None,
+        tools=None,
+        snapshot_publisher=None,
+        register_talker=None,
     )
     try:
         with session.hold_for_handler():  # preempt-always now lives in __enter__
@@ -359,10 +404,17 @@ def test_webhook_preempts_worker_mid_turn(tmp_path: Path) -> None:
     session = ClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
-        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
+        popen=_FixedPopenRunner(proc),
+        selector=_FixedSelector(([proc.stdout], [], [])),
         repo_name="owner/repo",
         model="claude-opus-4-6",
+        clock=RealClock(),
+        idle_timeout=1800.0,
+        session_id=None,
+        tools=None,
+        snapshot_publisher=None,
+        talker_resolver=None,
+        register_talker=None,
     )
 
     worker_in_turn = threading.Event()
@@ -457,11 +509,17 @@ def test_handler_prompt_runs_after_preempt_does_not_inherit_cancel(
     session = ClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
-        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
+        popen=_FixedPopenRunner(proc),
+        selector=_FixedSelector(([proc.stdout], [], [])),
         repo_name="owner/repo",
         model="claude-opus-4-6",
         talker_resolver=fake_talker,
+        clock=RealClock(),
+        idle_timeout=1800.0,
+        session_id=None,
+        tools=None,
+        snapshot_publisher=None,
+        register_talker=None,
     )
     provider.set_thread_kind(ThreadKind.WEBHOOK)
     try:
@@ -771,7 +829,7 @@ def test_force_release_unblocks_wedged_holder_end_to_end(tmp_path: Path) -> None
     session._proc = fake_proc  # type: ignore[assignment]
     # Selector: stdout always reported ready so iter_events keeps
     # calling readline on the streaming proc.
-    session._selector = lambda *_a, **_kw: ([fake_proc.stdout], [], [])  # type: ignore[assignment]
+    session._selector = _FixedSelector(([fake_proc.stdout], [], []))
 
     holder_done = threading.Event()
     holder_exception: list[BaseException] = []

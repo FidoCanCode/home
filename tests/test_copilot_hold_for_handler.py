@@ -45,6 +45,11 @@ def _session(tmp_path: Path) -> CopilotCLISession:
         model=CopilotCLIClient.work_model,
         runtime=FakeRuntime(),
         repo_name="owner/repo",
+        runtime_factory=None,
+        popen=None,
+        session_id=None,
+        snapshot_publisher=None,
+        talker_resolver=provider.get_talker,
     )
 
 
@@ -106,6 +111,10 @@ def test_hold_for_handler_preempt_fires_runtime_cancel_on_worker_holder(
         runtime=FakeRuntime(),
         repo_name="owner/repo",
         talker_resolver=fake_talker,
+        runtime_factory=None,
+        popen=None,
+        session_id=None,
+        snapshot_publisher=None,
     )
     assert isinstance(session._runtime, FakeRuntime)
     provider.set_thread_kind(ThreadKind.WEBHOOK)

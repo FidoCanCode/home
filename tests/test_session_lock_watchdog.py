@@ -27,6 +27,20 @@ from fido.provider import (
 from fido.session_lock_watchdog import SessionLockWatchdog
 
 
+class _FakeClock:
+    """Controllable :class:`~fido.infra.Clock` for watchdog tests.
+
+    ``_now_value`` is set at construction; only :meth:`now` is used
+    by :class:`SessionLockWatchdog`.
+    """
+
+    def __init__(self, now_value: datetime) -> None:
+        self._now_value = now_value
+
+    def now(self) -> datetime:
+        return self._now_value
+
+
 class _RecordingSession(OwnedSession):
     """OwnedSession stub that records every ``force_release`` call.
 
@@ -140,7 +154,7 @@ def test_run_skips_holder_within_deadline() -> None:
             registry,  # type: ignore[arg-type]
             {repo_name: _repo_config(repo_name)},
             no_reply_seconds=10.0,
-            now=lambda: sent_at + timedelta(seconds=5),
+            clock=_FakeClock(sent_at + timedelta(seconds=5)),
         )
         watchdog.run()
         assert session.force_release_calls == []
@@ -179,7 +193,7 @@ def test_run_evicts_holder_past_deadline() -> None:
             registry,  # type: ignore[arg-type]
             {repo_name: _repo_config(repo_name)},
             no_reply_seconds=60.0,
-            now=lambda: sent_at + timedelta(seconds=120),
+            clock=_FakeClock(sent_at + timedelta(seconds=120)),
         )
         watchdog.run()
     finally:
@@ -233,7 +247,7 @@ def test_run_handles_multiple_repos_independently() -> None:
                 "rhencke/confusio": _repo_config("rhencke/confusio"),
             },
             no_reply_seconds=10.0,
-            now=lambda: sent_at + timedelta(seconds=60),
+            clock=_FakeClock(sent_at + timedelta(seconds=60)),
         )
         watchdog.run()
     finally:
@@ -332,7 +346,7 @@ def test_module_level_run_evicts_past_deadline() -> None:
             registry,  # type: ignore[arg-type]
             {repo_name: _repo_config(repo_name)},
             no_reply_seconds=1.0,
-            now=lambda: sent_at + timedelta(seconds=2),
+            clock=_FakeClock(sent_at + timedelta(seconds=2)),
         )
     finally:
         unregister_talker(repo_name, 7)
@@ -371,7 +385,7 @@ def test_idle_session_with_no_outstanding_send_is_left_alone() -> None:
             registry,  # type: ignore[arg-type]
             {repo_name: _repo_config(repo_name)},
             no_reply_seconds=60.0,
-            now=lambda: started_at + timedelta(hours=24),
+            clock=_FakeClock(started_at + timedelta(hours=24)),
         )
         watchdog.run()
     finally:
@@ -413,7 +427,7 @@ def test_no_eviction_when_outstanding_set_but_no_talker() -> None:
         registry,  # type: ignore[arg-type]
         {repo_name: _repo_config(repo_name)},
         no_reply_seconds=60.0,
-        now=lambda: sent_at + timedelta(seconds=3600),
+        clock=_FakeClock(sent_at + timedelta(seconds=3600)),
     )
     watchdog.run()
     assert session.force_release_calls == [], (

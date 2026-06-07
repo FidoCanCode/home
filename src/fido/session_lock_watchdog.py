@@ -49,11 +49,10 @@ directly — every action goes through the modeled
 import logging
 import threading
 import time
-from collections.abc import Callable
-from datetime import datetime
 
 from fido.config import RepoConfig
-from fido.provider import OwnedSession, get_talker, talker_now
+from fido.infra import Clock, RealClock
+from fido.provider import OwnedSession, get_talker
 from fido.registry import WorkerRegistry
 
 log = logging.getLogger(__name__)
@@ -73,6 +72,9 @@ _WATCHDOG_INTERVAL: float = 30.0
 _DEFAULT_NO_REPLY_SECONDS: float = 3600.0
 
 
+_REAL_CLOCK: Clock = RealClock()
+
+
 class SessionLockWatchdog:
     """Per-repo poller that evicts FSM lock holders past a no-reply
     deadline.
@@ -90,12 +92,12 @@ class SessionLockWatchdog:
         repos: dict[str, RepoConfig],
         *,
         no_reply_seconds: float = _DEFAULT_NO_REPLY_SECONDS,
-        now: Callable[[], datetime] = talker_now,
+        clock: Clock = _REAL_CLOCK,
     ) -> None:
         self.registry = registry
         self.repos = repos
         self.no_reply_seconds = no_reply_seconds
-        self._now = now
+        self._clock = clock
 
     def run(self) -> int:
         """Run one watchdog iteration. Returns 0.
@@ -133,7 +135,7 @@ class SessionLockWatchdog:
             talker = get_talker(repo_name)
             if talker is None:
                 continue
-            silent_for = (self._now() - outstanding).total_seconds()
+            silent_for = (self._clock.now() - outstanding).total_seconds()
             if silent_for <= self.no_reply_seconds:
                 continue
             reason = (
@@ -186,9 +188,9 @@ def run(
     repos: dict[str, RepoConfig],
     *,
     no_reply_seconds: float = _DEFAULT_NO_REPLY_SECONDS,
-    now: Callable[[], datetime] = talker_now,
+    clock: Clock,
 ) -> int:
     """Module-level entry point — create a watchdog and run one tick."""
     return SessionLockWatchdog(
-        registry, repos, no_reply_seconds=no_reply_seconds, now=now
+        registry, repos, no_reply_seconds=no_reply_seconds, clock=clock
     ).run()

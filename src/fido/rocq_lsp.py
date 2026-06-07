@@ -5,10 +5,9 @@ import json
 import re
 import sys
 from ast import AnnAssign, Assign, AsyncFunctionDef, ClassDef, FunctionDef, Name, parse
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Protocol
 from urllib.parse import unquote, urlparse
 
 from fido.rocq_pymap import PyMap, PyMapEntry, PyMapError, UnsupportedPyMapStability
@@ -1301,6 +1300,29 @@ def _lsp_text_position(params: dict[str, Any]) -> tuple[Path, int, int]:
     return path, int(position["line"]), int(position["character"])
 
 
+class RocqLspCliFactory(Protocol):
+    """Creates a :class:`RocqLspCli` (or compatible object) for CLI dispatch."""
+
+    def __call__(
+        self, repo_root: Path, stdout: IO[str], stderr: IO[str]
+    ) -> "RocqLspCli":
+        """Construct and return a CLI handler."""
+        ...
+
+
+class RocqLspServerFactory(Protocol):
+    """Creates a :class:`RocqLspServer` (or compatible object) for LSP dispatch."""
+
+    def __call__(
+        self,
+        service: "RocqLanguageService",
+        stdin: IO[str],
+        stdout: IO[str],
+    ) -> "RocqLspServer":
+        """Construct and return an LSP server."""
+        ...
+
+
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -1308,29 +1330,25 @@ def repo_root() -> Path:
 def main_cli(
     argv: list[str] | None = None,
     *,
-    cli_factory: Callable[[Path, IO[str], IO[str]], Any] | None = None,
+    cli_factory: RocqLspCliFactory,
 ) -> int:
-    factory = cli_factory if cli_factory is not None else RocqLspCli
-    return factory(repo_root(), sys.stdout, sys.stderr).run(
+    return cli_factory(repo_root(), sys.stdout, sys.stderr).run(
         argv if argv is not None else sys.argv[1:]
     )
 
 
 def main_lsp(
     *,
-    server_factory: Callable[[RocqLanguageService, IO[str], IO[str]], Any]
-    | None = None,
+    server_factory: RocqLspServerFactory,
 ) -> int:
-    factory = server_factory if server_factory is not None else RocqLspServer
-    return factory(RocqLanguageService(repo_root()), sys.stdin, sys.stdout).run()
+    return server_factory(RocqLanguageService(repo_root()), sys.stdin, sys.stdout).run()
 
 
 def main(
     argv: list[str] | None = None,
     *,
-    cli_factory: Callable[[Path, IO[str], IO[str]], Any] | None = None,
-    server_factory: Callable[[RocqLanguageService, IO[str], IO[str]], Any]
-    | None = None,
+    cli_factory: RocqLspCliFactory,
+    server_factory: RocqLspServerFactory,
 ) -> int:
     actual_argv = argv if argv is not None else sys.argv[1:]
     if len(actual_argv) > 0 and actual_argv[0] == "--stdio":
@@ -1339,4 +1357,4 @@ def main(
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(cli_factory=RocqLspCli, server_factory=RocqLspServer))

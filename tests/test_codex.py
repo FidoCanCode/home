@@ -2,6 +2,7 @@ import io
 import queue
 import subprocess
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -204,6 +205,9 @@ class _FakeClock:
     def monotonic(self) -> float:
         return self._t
 
+    def now(self) -> datetime:
+        return datetime(2000, 1, 1, tzinfo=UTC)
+
 
 class _AdvancingClock:
     """Typed fake for :class:`fido.infra.Clock` whose monotonic value advances
@@ -217,6 +221,9 @@ class _AdvancingClock:
 
     def monotonic(self) -> float:
         return self._t
+
+    def now(self) -> datetime:
+        return datetime(2000, 1, 1, tzinfo=UTC)
 
     def advance(self, secs: float) -> None:
         self._t += secs

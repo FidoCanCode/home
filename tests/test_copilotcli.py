@@ -6,6 +6,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from fido.copilotcli import (
     CopilotCLIAPI,
     CopilotCLIClient,
     CopilotCLISession,
+    CopilotSessionFactory,
     _combine_prompt,
     _CopilotACPClient,
     _is_cancel_sentinel,
@@ -38,6 +40,7 @@ from fido.copilotcli import (
     extract_result_text,
     extract_session_id,
 )
+from fido.infra import RealClock, RealPopenRunner, RealProcessRunner
 from fido.provider import (
     ProviderID,
     ProviderLimitSnapshot,
@@ -115,17 +118,44 @@ class _FakeCallArgs:
 
 
 class _FakeRunner:
-    """Callable returning a fixed CompletedProcess; exposes ``call_args``."""
+    """ProcessRunner fake returning a fixed CompletedProcess; exposes ``call_args``."""
 
     def __init__(self, result: subprocess.CompletedProcess[str]) -> None:
         self._result = result
         self.call_args: _FakeCallArgs | None = None
 
-    def __call__(
+    def run(
         self, args: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         self.call_args = _FakeCallArgs((args,), kwargs)
         return self._result
+
+
+class _FakePopenRunner:
+    """Wraps a callable as a PopenRunner for _TerminalManager tests."""
+
+    def __init__(self, fn: Callable[..., object]) -> None:
+        self._fn = fn
+
+    def spawn(self, cmd: object, **kwargs: object) -> object:
+        return self._fn(cmd, **kwargs)
+
+
+class _FakeClock:
+    """Fake Clock backed by mutable list cells for CopilotCLIAPI tests."""
+
+    def __init__(self, times: list[float], now: datetime) -> None:
+        self.times = times
+        self._now = now
+
+    def monotonic(self) -> float:
+        return self.times[0]
+
+    def now(self) -> datetime:
+        return self._now
+
+    def sleep(self, secs: float) -> None:
+        pass
 
 
 class _FakeACPRuntime:
@@ -180,6 +210,111 @@ class _FakeAgent:
 
 class _FakeAPI:
     """Bare API stub — used only for identity checks in CopilotCLI tests."""
+
+
+class _NoopProcessRunner:
+    """ProcessRunner stub that always returns an empty success — for tests that don't run CLI."""
+
+    def run(
+        self, args: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="", stderr=""
+        )
+
+
+_NOOP_PR: RealProcessRunner = _NoopProcessRunner()  # type: ignore[assignment]
+
+
+class _NoopCopilotSessionFactory(CopilotSessionFactory):
+    """CopilotSessionFactory stub that raises if create() is called.
+
+    Default session_factory for _ccc() — safe for tests that don't spawn sessions.
+    """
+
+    def __init__(self) -> None:
+        pass  # no real infra needed in this stub
+
+    def create(  # type: ignore[override]
+        self,
+        system_file: object,
+        *,
+        model: object,
+        session_id: object,
+        snapshot_publisher: object,
+        talker_resolver: object,
+    ) -> object:
+        raise NotImplementedError(
+            "_NoopCopilotSessionFactory: no session should be spawned"
+        )
+
+
+_NOOP_CSF: CopilotSessionFactory = _NoopCopilotSessionFactory()
+
+
+class _SpyCopilotSessionFactory(CopilotSessionFactory):
+    """CopilotSessionFactory subclass that records create() calls for assertions."""
+
+    def __init__(
+        self,
+        *,
+        work_dir: object,
+        repo_name: object,
+        return_value: object = None,
+    ) -> None:
+        # Don't call super().__init__() — no real popen needed in this spy
+        self._work_dir = work_dir
+        self._repo_name = repo_name
+        self._create_calls: list[dict[str, object]] = []
+        self._return_value: object = return_value
+
+    def create(
+        self,
+        system_file: object,
+        *,
+        model: object,
+        session_id: object,
+        snapshot_publisher: object,
+        talker_resolver: object,
+    ) -> object:  # type: ignore[override]
+        self._create_calls.append(
+            {
+                "system_file": system_file,
+                "model": model,
+                "session_id": session_id,
+                "snapshot_publisher": snapshot_publisher,
+                "talker_resolver": talker_resolver,
+            }
+        )
+        return self._return_value
+
+    def assert_called_once_with(self, system_file: object, **kwargs: object) -> None:
+        """Assert create() was called exactly once with the given arguments."""
+        assert len(self._create_calls) == 1, (
+            f"Expected 1 create() call, got {len(self._create_calls)}"
+        )
+        call = self._create_calls[0]
+        assert call["system_file"] == system_file, (
+            f"system_file: expected {system_file!r}, got {call['system_file']!r}"
+        )
+        for key, expected in kwargs.items():
+            assert call[key] == expected, (
+                f"{key}: expected {expected!r}, got {call[key]!r}"
+            )
+
+
+def _ccc(**kwargs: object) -> CopilotCLIClient:
+    """Build a CopilotCLIClient with a noop runner default — for tests that don't run CLI."""
+    kwargs.setdefault("runner", _NOOP_PR)
+    kwargs.setdefault("session_fn", provider.current_repo_session)
+    kwargs.setdefault("session_factory", _NOOP_CSF)
+    kwargs.setdefault("session_system_file", None)
+    kwargs.setdefault("work_dir", None)
+    kwargs.setdefault("repo_name", None)
+    kwargs.setdefault("session", None)
+    kwargs.setdefault("api", None)
+    kwargs.setdefault("state_updater", None)
+    return CopilotCLIClient(**kwargs)  # type: ignore[arg-type]
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -498,7 +633,7 @@ class TestHelpers:
 
     def test_normalize_passthrough_is_used_by_cli_prompt(self, tmp_path: Path) -> None:
         runner = _FakeRunner(_completed(_copilot_output()))
-        client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
+        client = _ccc(runner=runner, work_dir=tmp_path)
         client._run_cli_prompt("body", model="gpt-5", timeout=1)
         assert runner.call_args is not None
         assert "gpt-5" in runner.call_args.args[0]
@@ -561,6 +696,12 @@ class TestStripCopilotChatter:
             work_dir=tmp_path,
             model=CopilotCLIClient.work_model,
             runtime=runtime,
+            repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         result = session.prompt("do the thing")
         assert result == "You're right, the fix is straightforward."
@@ -622,6 +763,11 @@ class TestChunkLevelChatterFiltering:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(connection),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             session_id = runtime.ensure_session(None, None)
@@ -655,6 +801,11 @@ class TestChunkLevelChatterFiltering:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(connection),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             session_id = runtime.ensure_session(None, None)
@@ -666,7 +817,7 @@ class TestChunkLevelChatterFiltering:
 
 class TestTerminalManager:
     def test_read_stream_stops_on_empty_chunk(self) -> None:
-        manager = _TerminalManager()
+        manager = _TerminalManager(popen=RealPopenRunner())
 
         class EmptyStream:
             def __init__(self) -> None:
@@ -689,7 +840,9 @@ class TestTerminalManager:
     def test_terminal_record_handles_signal_exit(self) -> None:
         process = FakeProcess("", "", 0)
         process.returncode = -signal.SIGTERM
-        manager = _TerminalManager(popen=lambda *args, **kwargs: process)
+        manager = _TerminalManager(
+            popen=_FakePopenRunner(lambda *args, **kwargs: process)
+        )
         terminal_id = manager.create("sleep")
         output, truncated, exit_code, signal_name = manager.output(terminal_id)
         assert output == ""
@@ -700,7 +853,9 @@ class TestTerminalManager:
     def test_terminal_record_handles_normal_exit(self) -> None:
         process = FakeProcess("", "", 0)
         process.returncode = 7
-        manager = _TerminalManager(popen=lambda *args, **kwargs: process)
+        manager = _TerminalManager(
+            popen=_FakePopenRunner(lambda *args, **kwargs: process)
+        )
         terminal_id = manager.create("sleep")
         output, truncated, exit_code, signal_name = manager.output(terminal_id)
         assert output == ""
@@ -710,7 +865,9 @@ class TestTerminalManager:
 
     def test_create_output_wait_and_release(self) -> None:
         manager = _TerminalManager(
-            popen=lambda *args, **kwargs: FakeProcess("hello", " world", 0)
+            popen=_FakePopenRunner(
+                lambda *args, **kwargs: FakeProcess("hello", " world", 0)
+            )
         )
         terminal_id = manager.create("echo", args=["hi"], output_byte_limit=4)
         # Join reader threads explicitly rather than sleeping so the test is
@@ -729,7 +886,9 @@ class TestTerminalManager:
     def test_kill_kills_running_process(self) -> None:
         process = FakeProcess("x", "", 0)
         process.returncode = None
-        manager = _TerminalManager(popen=lambda *args, **kwargs: process)
+        manager = _TerminalManager(
+            popen=_FakePopenRunner(lambda *args, **kwargs: process)
+        )
         terminal_id = manager.create("sleep")
         manager.kill(terminal_id)
         assert process.kill_calls == 1
@@ -737,7 +896,9 @@ class TestTerminalManager:
     def test_wait_returns_signal_name(self) -> None:
         process = FakeProcess("", "", 0)
         process._wait_returncode = -signal.SIGTERM
-        manager = _TerminalManager(popen=lambda *args, **kwargs: process)
+        manager = _TerminalManager(
+            popen=_FakePopenRunner(lambda *args, **kwargs: process)
+        )
         terminal_id = manager.create("sleep")
         assert manager.wait(terminal_id) == (None, "SIGTERM")
 
@@ -758,12 +919,12 @@ class TestTerminalManager:
 
         process = TimeoutProcess()
 
-        def popen(*args: object, **kwargs: object) -> object:
+        def popen_fn(*args: object, **kwargs: object) -> object:
             del args
             process.last_env = kwargs["env"]
             return process
 
-        manager = _TerminalManager(popen=popen)
+        manager = _TerminalManager(popen=_FakePopenRunner(popen_fn))
         terminal_id = manager.create(
             "echo",
             env=[SimpleNamespace(name="COPILOT_TEST", value="yes")],
@@ -776,7 +937,7 @@ class TestTerminalManager:
 
         release_process = TimeoutProcess()
         release_manager = _TerminalManager(
-            popen=lambda *args, **kwargs: release_process
+            popen=_FakePopenRunner(lambda *args, **kwargs: release_process)
         )
         release_id = release_manager.create("echo")
         release_manager.release(release_id)
@@ -835,7 +996,10 @@ class TestCopilotACPClient:
 
     def test_on_connect_is_noop(self) -> None:
         runtime = _FakeACPRuntime()
-        client = _CopilotACPClient(runtime)  # type: ignore[arg-type]
+        client = _CopilotACPClient(  # type: ignore[arg-type]
+            runtime,
+            terminals=_TerminalManager(popen=RealPopenRunner()),
+        )
         assert client.on_connect(object()) is None
         runtime.log_info.assert_called_once_with("copilot system: connected")
 
@@ -856,7 +1020,15 @@ class TestCopilotACPRuntime:
             finally:
                 await context.__aexit__(None, None, None)
 
-        runtime = CopilotACPRuntime(work_dir=tmp_path, spawn_agent_process=spawn)
+        runtime = CopilotACPRuntime(
+            work_dir=tmp_path,
+            spawn_agent_process=spawn,
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
+        )
         try:
             runtime.ensure_session(None, None)
             assert seen_kwargs["transport_kwargs"] == {
@@ -870,6 +1042,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(FakeConnection()),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             assert runtime._command_for_effort(None) == runtime._command_base
@@ -880,6 +1057,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(FakeConnection()),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             assert runtime._command_for_effort("high") == (
@@ -894,6 +1076,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(FakeConnection()),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             model = ProviderModel("gpt-5.4", ("xhigh", "high"))
@@ -906,6 +1093,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(connection),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             session_id = runtime.ensure_session(None, "claude-opus-4-6")
@@ -931,6 +1123,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(first, second),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             assert runtime.ensure_session("persisted", None) == "persisted"
@@ -950,6 +1147,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(connection),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             assert runtime.ensure_session("persisted", None) == "persisted"
@@ -964,6 +1166,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(connection),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             assert runtime.ensure_session("persisted", None) == "sess-1"
@@ -978,6 +1185,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(connection),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             session_id = runtime.ensure_session("persisted", None)
@@ -997,6 +1209,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(connection),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             assert runtime.ensure_session("persisted", None) == "sess-1"
@@ -1019,6 +1236,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(connection),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             with pytest.raises(RequestError, match="boom"):
@@ -1030,6 +1252,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(FakeConnection()),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             assert runtime.pid is None
@@ -1041,6 +1268,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(FakeConnection()),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             runtime.record_session_update(
@@ -1093,6 +1325,10 @@ class TestCopilotACPRuntime:
             work_dir=tmp_path,
             repo_name="owner/orly",
             spawn_agent_process=_spawn_factory(FakeConnection()),
+            popen=RealPopenRunner(),
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             runtime._active_prompt_session_id = "sess"  # pyright: ignore[reportPrivateUsage]
@@ -1132,6 +1368,10 @@ class TestCopilotACPRuntime:
             work_dir=tmp_path,
             repo_name="owner/orly",
             spawn_agent_process=_spawn_factory(FakeConnection()),
+            popen=RealPopenRunner(),
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             runtime._active_prompt_session_id = "sess"  # pyright: ignore[reportPrivateUsage]
@@ -1192,6 +1432,10 @@ class TestCopilotACPRuntime:
             work_dir=tmp_path,
             repo_name="owner/orly",
             spawn_agent_process=_spawn_factory(FakeConnection()),
+            popen=RealPopenRunner(),
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             runtime._active_prompt_session_id = "sess"  # pyright: ignore[reportPrivateUsage]
@@ -1231,6 +1475,11 @@ class TestCopilotACPRuntime:
         runtime = CopilotACPRuntime(
             work_dir=tmp_path,
             spawn_agent_process=_spawn_factory(BrokenConnection()),
+            popen=RealPopenRunner(),
+            repo_name=None,
+            client_factory=None,
+            client_capabilities=None,
+            client_info=None,
         )
         try:
             with pytest.raises(RuntimeError, match="boom"):
@@ -1250,6 +1499,12 @@ class TestCopilotCLISession:
             work_dir=tmp_path,
             model=CopilotCLIClient.work_model,
             runtime=runtime,
+            repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
 
         assert session.session_id == "sess-created"
@@ -1293,6 +1548,12 @@ class TestCopilotCLISession:
             work_dir=tmp_path,
             model=CopilotCLIClient.work_model,
             runtime=runtime,
+            repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         assert session.sent_count == 0
         assert session.received_count == 0
@@ -1318,6 +1579,12 @@ class TestCopilotCLISession:
             work_dir=tmp_path,
             model=CopilotCLIClient.work_model,
             runtime=runtime,
+            repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         with session._metrics_lock:
             session._last_turn_cancelled = True
@@ -1339,6 +1606,12 @@ class TestCopilotCLISession:
             work_dir=tmp_path,
             model=CopilotCLIClient.work_model,
             runtime=runtime,
+            repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
 
         def failing_locked(*_a: object, **_k: object) -> str:
@@ -1362,6 +1635,12 @@ class TestCopilotCLISession:
             work_dir=tmp_path,
             model=CopilotCLIClient.work_model,
             runtime=runtime,
+            repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         boom = BrokenPipeError("copilot pipe gone")
         boom.cancel_observed = True  # type: ignore[attr-defined]
@@ -1386,6 +1665,12 @@ class TestCopilotCLISession:
             work_dir=tmp_path,
             model=CopilotCLIClient.work_model,
             runtime=runtime,
+            repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         _inner2 = _FakeCallRecorder()
         _inner2.side_effect = RuntimeError("enter failed")
@@ -1412,6 +1697,12 @@ class TestCopilotCLISession:
             work_dir=tmp_path,
             model=CopilotCLIClient.work_model,
             runtime=runtime,
+            repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         assert session.prompt("task") == ""
         assert session.last_turn_cancelled is True
@@ -1429,6 +1720,11 @@ class TestCopilotCLISession:
             model=CopilotCLIClient.work_model,
             runtime=runtime,
             repo_name="owner/repo",
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         acquired = threading.Event()
         release = threading.Event()
@@ -1475,6 +1771,11 @@ class TestCopilotCLISession:
             model=CopilotCLIClient.work_model,
             runtime=runtime,
             repo_name="owner/repo",
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         acquired = threading.Event()
         release = threading.Event()
@@ -1519,6 +1820,11 @@ class TestCopilotCLISession:
             model=CopilotCLIClient.work_model,
             runtime=runtime,
             repo_name="owner/repo",
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         # Pre-register a different tid as the active talker so the session's
         # own register_talker inside __enter__ raises SessionLeakError.
@@ -1557,6 +1863,11 @@ class TestCopilotCLISession:
             model=CopilotCLIClient.work_model,
             runtime=runtime,
             repo_name="owner/repo",
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         acquired = threading.Event()
         release = threading.Event()
@@ -1595,6 +1906,12 @@ class TestCopilotCLISession:
             work_dir=tmp_path,
             model=CopilotCLIClient.work_model,
             runtime_factory=lambda **kwargs: runtime,
+            repo_name=None,
+            runtime=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         assert session.owner is None
         assert session.prompt("body") == "done"
@@ -1607,6 +1924,12 @@ class TestCopilotCLISession:
             work_dir=tmp_path,
             model=CopilotCLIClient.work_model,
             runtime=runtime,
+            repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         acquired = threading.Event()
 
@@ -1637,6 +1960,11 @@ class TestCopilotCLISession:
             model=CopilotCLIClient.work_model,
             runtime=runtime,
             repo_name="owner/orly",
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         with caplog.at_level(logging.INFO):
             assert (
@@ -1666,6 +1994,11 @@ class TestCopilotCLISession:
             model=CopilotCLIClient.voice_model,
             runtime=runtime,
             snapshot_publisher=Recorder(),
+            repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            talker_resolver=provider.get_talker,
         )
         session.prompt("hello", model=None, system_prompt=None)
         # sent publication fires first, then received publication after the
@@ -1686,10 +2019,70 @@ class TestCopilotCLISession:
             work_dir=tmp_path,
             model=CopilotCLIClient.voice_model,
             runtime=runtime,
+            repo_name=None,
+            runtime_factory=None,
+            popen=None,
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
         # No publisher — prompt must not raise.
         session.prompt("hello", model=None, system_prompt=None)
         assert session.sent_count == 1
+
+    def test_raises_when_popen_missing_and_no_runtime_or_factory(
+        self, tmp_path: Path
+    ) -> None:
+        """CopilotCLISession requires popen when neither runtime nor
+        runtime_factory is provided — fail-fast invariant."""
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("")
+        with pytest.raises(
+            ValueError, match="popen is required when runtime and runtime_factory"
+        ):
+            CopilotCLISession(
+                system_file,
+                work_dir=tmp_path,
+                model=CopilotCLIClient.work_model,
+                repo_name=None,
+                runtime=None,
+                runtime_factory=None,
+                popen=None,
+                session_id=None,
+                snapshot_publisher=None,
+                talker_resolver=provider.get_talker,
+            )
+
+    def test_make_runtime_branch_reached_via_popen(self, tmp_path: Path) -> None:
+        """CopilotCLISession._make_runtime() is called when popen is provided
+        and no runtime/runtime_factory is injected.
+
+        _make_runtime is ``# pragma: no cover`` (spawns real infrastructure), but
+        the *call site* in __init__ is not — this test exercises that branch by
+        subclassing and overriding _make_runtime with a fake.
+        """
+        system_file = tmp_path / "persona.md"
+        system_file.write_text("persona")
+        fake_runtime = FakeRuntime()
+
+        class _StubSession(CopilotCLISession):
+            def _make_runtime(self, popen: object) -> object:  # type: ignore[override]
+                return fake_runtime
+
+        session = _StubSession(
+            system_file,
+            work_dir=tmp_path,
+            model=CopilotCLIClient.work_model,
+            repo_name=None,
+            runtime=None,
+            runtime_factory=None,
+            popen=RealPopenRunner(),
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
+        )
+        assert session.session_id == "sess-created"
+        assert fake_runtime.ensure_calls == [(None, CopilotCLIClient.work_model)]
 
 
 class TestIsCopilotQuotaError:
@@ -1740,15 +2133,14 @@ class TestCopilotCLIAPI:
         monotonic_start: float = 0.0,
         pause_seconds: float = _COPILOT_QUOTA_PAUSE_SECONDS,
     ) -> tuple["CopilotCLIAPI", list[float]]:
-        """Return an API instance with injectable monotonic clock."""
-        clock = [monotonic_start]
-        now_clock = [self._FIXED_NOW]
+        """Return an API instance with injectable Clock fake."""
+        clock_times = [monotonic_start]
+        fake_clock = _FakeClock(times=clock_times, now=self._FIXED_NOW)
         api = CopilotCLIAPI(
-            monotonic=lambda: clock[0],
-            now=lambda: now_clock[0],
+            clock=fake_clock,
             pause_seconds=pause_seconds,
         )
-        return api, clock
+        return api, clock_times
 
     def test_limit_snapshot_is_unknown_by_default(self) -> None:
         api, _ = self._api()
@@ -1804,7 +2196,7 @@ class TestCopilotCLIAPI:
         )
 
     def test_provider_id(self) -> None:
-        api = CopilotCLIAPI()
+        api = CopilotCLIAPI(clock=RealClock())
         assert api.provider_id == ProviderID.COPILOT_CLI
 
 
@@ -1815,7 +2207,7 @@ class TestCopilotCLIClient:
         provider.set_session_resolver(lambda repo: session)  # type: ignore[arg-type]
         provider.set_thread_repo("owner/repo")
         try:
-            client = CopilotCLIClient()
+            client = _ccc()
             assert client.run_turn("hi", model=client.voice_model) == "ok"
         finally:
             provider.set_thread_repo(None)
@@ -1823,7 +2215,7 @@ class TestCopilotCLIClient:
 
     def test_session_attachment_and_properties(self) -> None:
         attached = _FakeSession(owner="worker-home", pid=12)
-        client = CopilotCLIClient(session=attached)  # type: ignore[arg-type]
+        client = _ccc(session=attached)  # type: ignore[arg-type]
         assert client.session is attached
         assert client.session_owner == "worker-home"
         assert client.session_alive is True
@@ -1834,22 +2226,20 @@ class TestCopilotCLIClient:
 
     def test_attach_session_sets_session(self) -> None:
         attached = _FakeSession()
-        client = CopilotCLIClient()
+        client = _ccc()
         client.attach_session(attached)  # type: ignore[arg-type]
         assert client.session is attached
 
     def test_supports_no_commit_reset_is_false(self) -> None:
-        assert CopilotCLIClient().supports_no_commit_reset is False
+        assert _ccc().supports_no_commit_reset is False
 
     def test_session_id_none_branches(self) -> None:
-        assert CopilotCLIClient().session_id is None
-        assert CopilotCLIClient(session=object()).session_id is None
-        assert (
-            CopilotCLIClient(session=SimpleNamespace(session_id=123)).session_id is None
-        )
+        assert _ccc().session_id is None
+        assert _ccc(session=object()).session_id is None
+        assert _ccc(session=SimpleNamespace(session_id=123)).session_id is None
 
     def test_ensure_session_requires_factory_inputs(self) -> None:
-        client = CopilotCLIClient()
+        client = _ccc()
         with pytest.raises(
             ValueError,
             match="CopilotCLIClient.ensure_session requires session_system_file and work_dir",
@@ -1859,7 +2249,7 @@ class TestCopilotCLIClient:
     def test_ensure_session_requires_model_when_creating_session(
         self, tmp_path: Path
     ) -> None:
-        client = CopilotCLIClient(
+        client = _ccc(
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
@@ -1872,7 +2262,7 @@ class TestCopilotCLIClient:
     def test_run_turn_requires_model_when_spawning_owned_session(
         self, tmp_path: Path
     ) -> None:
-        client = CopilotCLIClient(
+        client = _ccc(
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
@@ -1883,7 +2273,7 @@ class TestCopilotCLIClient:
             client.run_turn("fetch")
 
     def test_fresh_session_mode_requires_reset_method(self) -> None:
-        client = CopilotCLIClient(session=object())
+        client = _ccc(session=object())
         with pytest.raises(
             ValueError,
             match="CopilotCLIClient.run_turn session_mode=fresh requires resettable session",
@@ -1896,9 +2286,11 @@ class TestCopilotCLIClient:
 
     def test_ensure_fresh_stop_noop_branches(self, tmp_path: Path) -> None:
         session = _FakeSession()
-        session_factory = _FakeCallRecorder(return_value=session)
-        client = CopilotCLIClient(
-            session_factory=session_factory,  # type: ignore[arg-type]
+        spy = _SpyCopilotSessionFactory(
+            work_dir=tmp_path, repo_name=None, return_value=session
+        )
+        client = _ccc(
+            session_factory=spy,
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
@@ -1913,11 +2305,9 @@ class TestCopilotCLIClient:
             == "ok"
         )
         client.stop_session()
-        session_factory.assert_called_once_with(
+        spy.assert_called_once_with(
             tmp_path / "persona.md",
-            work_dir=tmp_path,
             model=client.voice_model,
-            repo_name=None,
             session_id=None,
             snapshot_publisher=client,
             talker_resolver=provider.get_talker,
@@ -1928,7 +2318,7 @@ class TestCopilotCLIClient:
 
     def test_ensure_session_switches_model_when_session_exists(self) -> None:
         session = _FakeSession()
-        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
+        client = _ccc(session=session)  # type: ignore[arg-type]
         client.ensure_session(client.voice_model)
         session.switch_model.assert_called_once_with(client.voice_model)
 
@@ -1936,9 +2326,11 @@ class TestCopilotCLIClient:
         self, tmp_path: Path
     ) -> None:
         session = _FakeSession()
-        session_factory = _FakeCallRecorder(return_value=session)
-        client = CopilotCLIClient(
-            session_factory=session_factory,  # type: ignore[arg-type]
+        spy = _SpyCopilotSessionFactory(
+            work_dir=tmp_path, repo_name=None, return_value=session
+        )
+        client = _ccc(
+            session_factory=spy,
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
@@ -1951,11 +2343,9 @@ class TestCopilotCLIClient:
             )
             == "ok"
         )
-        session_factory.assert_called_once_with(
+        spy.assert_called_once_with(
             tmp_path / "persona.md",
-            work_dir=tmp_path,
             model=client.voice_model,
-            repo_name=None,
             session_id=None,
             snapshot_publisher=client,
             talker_resolver=provider.get_talker,
@@ -1972,7 +2362,7 @@ class TestCopilotCLIClient:
             return result
 
         session.prompt.side_effect = prompt
-        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
+        client = _ccc(session=session)  # type: ignore[arg-type]
         assert client.run_turn("fetch", retry_on_preempt=True) == "done"
 
     def test_run_turn_recovers_and_retries_after_connection_loss(self) -> None:
@@ -1981,7 +2371,7 @@ class TestCopilotCLIClient:
             RuntimeError("Copilot ACP connection is not available"),
             "done",
         ]
-        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
+        client = _ccc(session=session)  # type: ignore[arg-type]
         assert client.run_turn("fetch", model=client.voice_model) == "done"
         assert session.prompt.call_count == 2
         session.recover.assert_called_once_with()
@@ -1992,7 +2382,7 @@ class TestCopilotCLIClient:
             ValueError("Separator is found, but chunk is longer than limit"),
             "done",
         ]
-        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
+        client = _ccc(session=session)  # type: ignore[arg-type]
         assert client.run_turn("fetch", model=client.voice_model) == "done"
         assert session.prompt.call_count == 2
         session.recover.assert_called_once_with()
@@ -2001,14 +2391,14 @@ class TestCopilotCLIClient:
         session = _FakeSession()
         session.prompt.side_effect = ["", "done"]
         session.is_alive.side_effect = [False, True]
-        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
+        client = _ccc(session=session)  # type: ignore[arg-type]
         assert client.run_turn("fetch", model=client.voice_model) == "done"
         session.recover.assert_called_once_with()
 
     def test_run_turn_runtime_stopped_still_raises(self) -> None:
         session = _FakeSession()
         session.prompt.side_effect = RuntimeError("Copilot ACP runtime is stopped")
-        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
+        client = _ccc(session=session)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="runtime is stopped"):
             client.run_turn("fetch", model=client.voice_model)
         session.recover.assert_not_called()
@@ -2022,7 +2412,7 @@ class TestCopilotCLIClient:
             prompt=_prompt,
             is_alive=lambda: False,
         )
-        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
+        client = _ccc(session=session)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="connection is not available"):
             client.run_turn("fetch", model=client.voice_model)
 
@@ -2030,7 +2420,7 @@ class TestCopilotCLIClient:
         session = _FakeSession()
         session.prompt.side_effect = ["", ""]
         session.is_alive.side_effect = [False, False]
-        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
+        client = _ccc(session=session)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="session died during prompt"):
             client.run_turn("fetch", model=client.voice_model)
         session.recover.assert_called_once_with()
@@ -2038,8 +2428,8 @@ class TestCopilotCLIClient:
     def test_quota_error_records_on_api_and_is_not_retried(self) -> None:
         session = _FakeSession()
         session.prompt.side_effect = RuntimeError("rate limit exceeded")
-        api = CopilotCLIAPI()
-        client = CopilotCLIClient(session=session, api=api)  # type: ignore[arg-type]
+        api = CopilotCLIAPI(clock=RealClock())
+        client = _ccc(session=session, api=api)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="rate limit exceeded"):
             client.run_turn("fetch", model=client.voice_model)
         # The error was recorded — snapshot now shows 100% pressure.
@@ -2052,9 +2442,7 @@ class TestCopilotCLIClient:
     def test_quota_error_without_api_still_raises(self) -> None:
         session = _FakeSession()
         session.prompt.side_effect = RuntimeError("rate limit exceeded")
-        client = CopilotCLIClient(
-            session=session
-        )  # no api injected  # type: ignore[arg-type]
+        client = _ccc(session=session)  # no api injected  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="rate limit exceeded"):
             client.run_turn("fetch", model=client.voice_model)
 
@@ -2064,8 +2452,8 @@ class TestCopilotCLIClient:
             ValueError("Separator is found, but chunk is longer than limit"),
             "done",
         ]
-        api = CopilotCLIAPI()
-        client = CopilotCLIClient(session=session, api=api)  # type: ignore[arg-type]
+        api = CopilotCLIAPI(clock=RealClock())
+        client = _ccc(session=session, api=api)  # type: ignore[arg-type]
         assert client.run_turn("fetch", model=client.voice_model) == "done"
         session.recover.assert_called_once_with()
         # Non-quota error did not poison the snapshot.
@@ -2077,7 +2465,7 @@ class TestCopilotCLIClient:
         prompt_file = tmp_path / "prompt"
         system_file.write_text("system")
         prompt_file.write_text("prompt")
-        client = CopilotCLIClient(
+        client = _ccc(
             runner=runner,
             session_system_file=system_file,
             work_dir=tmp_path,
@@ -2103,7 +2491,7 @@ class TestCopilotCLIClient:
             "status text",
             "resumed text",
         ]
-        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
+        client = _ccc(session=session)  # type: ignore[arg-type]
         assert client.generate_reply("reply", client.voice_model) == "reply text"
         assert (
             client.generate_branch_name("branch", client.brief_model) == "branch-name"
@@ -2125,24 +2513,24 @@ class TestCopilotCLIClient:
     ) -> None:
         session = _FakeSession()
         session.prompt.side_effect = ["", "not json"]
-        client = CopilotCLIClient(session=session)  # type: ignore[arg-type]
+        client = _ccc(session=session)  # type: ignore[arg-type]
         assert client.generate_status_emoji("q", "sys", client.voice_model) == ""
         assert client.generate_status_emoji("q", "sys", client.voice_model) == ""
 
         bad_session = _FakeSession(session_id="other")
-        client = CopilotCLIClient(session=bad_session)  # type: ignore[arg-type]
+        client = _ccc(session=bad_session)  # type: ignore[arg-type]
         with pytest.raises(RuntimeError, match="matching live session"):
             client.resume_status("sess", "status", client.voice_model)
 
         runner = _FakeRunner(_completed("", returncode=1))
-        client = CopilotCLIClient(runner=runner, work_dir=tmp_path)
+        client = _ccc(runner=runner, work_dir=tmp_path)
         assert client._run_cli_prompt("body", model="claude-opus-4-6", timeout=1) == ""
 
     def test_cli_prompt_logs_transcript(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         runner = _FakeRunner(_completed(_copilot_output("cli result")))
-        client = CopilotCLIClient(
+        client = _ccc(
             runner=runner,
             work_dir=tmp_path,
             repo_name="owner/orly",
@@ -2158,27 +2546,14 @@ class TestCopilotCLI:
     def test_default_provider_id_and_injected_components(self) -> None:
         api = _FakeAPI()
         agent = _FakeAgent()
-        provider = CopilotCLI(api=api, agent=agent)  # type: ignore[arg-type]
+        provider = CopilotCLI(api=api, agent=agent, session=None)  # type: ignore[arg-type]
         assert provider.provider_id == ProviderID.COPILOT_CLI
         assert provider.api is api
         assert provider.agent is agent
 
-    def test_default_agent_receives_session(self) -> None:
-        session = _FakeSession()
-        provider = CopilotCLI(session=session)  # type: ignore[arg-type]
-        assert provider.agent.session is session
-
-    def test_injected_agent_receives_session(self) -> None:
+    def test_attaches_session_to_injected_agent(self) -> None:
+        api = _FakeAPI()
         agent = _FakeAgent()
         session = _FakeSession()
-        CopilotCLI(agent=agent, session=session)  # type: ignore[arg-type]
+        CopilotCLI(api=api, agent=agent, session=session)  # type: ignore[arg-type]
         agent.attach_session.assert_called_once_with(session)
-
-    def test_default_construction_wires_api_to_default_agent(self) -> None:
-        # When neither api nor agent is injected, CopilotCLI must create a
-        # shared CopilotCLIAPI and wire it into the CopilotCLIClient so that
-        # quota errors recorded during prompts are visible via api.
-        copilot = CopilotCLI()
-        assert isinstance(copilot.api, CopilotCLIAPI)
-        assert isinstance(copilot.agent, CopilotCLIClient)
-        assert copilot.agent._quota_api is copilot.api

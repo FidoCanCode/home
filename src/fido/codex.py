@@ -986,7 +986,7 @@ class CodexSession(OwnedSession):
         idle_deadline = IdleDeadline(
             self._turn_idle_timeout,
             poll_interval=_CODEX_TURN_POLL_INTERVAL,
-            clock=self._clock.monotonic,
+            clock=self._clock,
         )
         while True:
             timeout = idle_deadline.poll_timeout_or_expired()

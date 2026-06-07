@@ -24,11 +24,28 @@ from fido.appstate import (
 from fido.atomic import AtomicUpdater, create_atomic
 from fido.claude import ClaudeSession
 from fido.color import Color
+from fido.infra import RealClock
 from fido.provider import SnapshotPublisher
 from fido.status import FidoStatus, RepoStatus, format_status
 
 _REPO = "owner/repo"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+class _FixedPopenRunner:
+    def __init__(self, proc: object) -> None:
+        self._proc = proc
+
+    def spawn(self, *args: object, **kwargs: object) -> object:
+        return self._proc
+
+
+class _FixedSelector:
+    def __init__(self, result: tuple) -> None:
+        self._result = result
+
+    def select(self, *args: object, **kwargs: object) -> tuple:
+        return self._result
 
 
 def _make_fido_state(repo_name: str) -> FidoState:
@@ -171,10 +188,17 @@ def _make_queue_session(
     return ClaudeSession(
         system_file,
         work_dir=tmp_path,
-        popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
-        selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
+        popen=_FixedPopenRunner(proc),
+        selector=_FixedSelector(([proc.stdout], [], [])),
         repo_name=_REPO,
         snapshot_publisher=publisher,
+        clock=RealClock(),
+        model=None,
+        idle_timeout=1800.0,
+        session_id=None,
+        tools=None,
+        talker_resolver=None,
+        register_talker=None,
     )
 
 
@@ -260,9 +284,17 @@ class TestLiveProviderStats:
         session = ClaudeSession(
             system_file,
             work_dir=tmp_path,
-            popen=lambda *_a, **_kw: proc,  # type: ignore[arg-type]
-            selector=lambda *_a, **_kw: ([proc.stdout], [], []),  # type: ignore[arg-type]
+            popen=_FixedPopenRunner(proc),
+            selector=_FixedSelector(([proc.stdout], [], [])),
             repo_name=_REPO,
+            clock=RealClock(),
+            model=None,
+            idle_timeout=1800.0,
+            session_id=None,
+            tools=None,
+            snapshot_publisher=None,
+            talker_resolver=None,
+            register_talker=None,
         )
 
         errors: list[BaseException] = []

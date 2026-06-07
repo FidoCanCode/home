@@ -4,7 +4,6 @@ import fcntl
 import hashlib
 import json
 import logging
-import os
 import re
 import subprocess
 import threading
@@ -27,7 +26,6 @@ from fido.appstate import (
     FidoState,
 )
 from fido.atomic import AtomicUpdater
-from fido.claude import ClaudeCode
 from fido.config import Config, RepoConfig, RepoMembership, default_sub_dir
 from fido.github import GitHub
 from fido.harness_commit import (
@@ -37,7 +35,13 @@ from fido.harness_commit import (
     RealCommitOracle,
     RealDecisionOracle,
 )
-from fido.infra import Clock, ProcessRunner, RealClock, RealProcessRunner
+from fido.infra import (
+    Clock,
+    OsProcess,
+    ProcessRunner,
+    RealClock,
+    RealProcessRunner,
+)
 from fido.issue_cache import IssueCache, IssueNode
 from fido.nudges import Nudges
 from fido.prompts import Prompts, render_active_context
@@ -47,6 +51,8 @@ from fido.provider import (
     PromptSession,
     Provider,
     ProviderAgent,
+    ProviderAPI,
+    ProviderID,
     ProviderModel,
     ProviderPressureStatus,
     SessionLeakError,
@@ -160,7 +166,6 @@ def _remove_stale_index_lock(
     work_dir: Path,
     *,
     stale_after_seconds: float = _STALE_INDEX_LOCK_SECONDS,
-    _now: Callable[..., datetime] = datetime.now,
 ) -> bool:
     """Remove ``<work_dir>/.git/index.lock`` iff it is older than
     *stale_after_seconds*.  Returns ``True`` when a stale lock was
@@ -177,7 +182,7 @@ def _remove_stale_index_lock(
         stat = lock.stat()
     except FileNotFoundError:
         return False
-    age = _now(tz=timezone.utc).timestamp() - stat.st_mtime
+    age = datetime.now(tz=timezone.utc).timestamp() - stat.st_mtime
     if age < stale_after_seconds:
         return False
     lock.unlink()
@@ -330,6 +335,23 @@ def _queued_comment_payload(queued: PRCommentQueueRecord) -> dict[str, Any]:
 def _sub_dir() -> Path:
     """Return the path to the sub/ skill-instructions directory."""
     return default_sub_dir()
+
+
+class SubDirProvider(Protocol):
+    """Returns the path to the sub/ skill-instructions directory.
+
+    Wraps :func:`_sub_dir` / :func:`~fido.config.default_sub_dir` so callers
+    can be tested without touching the real filesystem path.
+    """
+
+    def sub_dir(self) -> Path: ...
+
+
+class _RealSubDirProvider:
+    """Real :class:`SubDirProvider` — delegates to :func:`default_sub_dir`."""
+
+    def sub_dir(self) -> Path:
+        return default_sub_dir()
 
 
 def acquire_lock(fido_dir: Path) -> IO[str]:
@@ -995,18 +1017,43 @@ def _ci_oracle_snapshot(
     )
 
 
+class CITaskPicker(Protocol):
+    """Selects the next task to execute from the CI oracle task queue.
+
+    Wraps :func:`~fido.rocq.ci_task_lifecycle.pick_next_task` so
+    :func:`_assert_ci_failure_matches_oracle` can be tested with a fake
+    picker that returns a deliberately wrong result to exercise the
+    assertion path.
+    """
+
+    def pick_next_task(
+        self,
+        order: list[int],
+        rows: dict[int, ci_oracle.TaskRow],
+    ) -> int | None: ...
+
+
+class _RealCITaskPicker:
+    """Real :class:`CITaskPicker` — delegates to :func:`ci_oracle.pick_next_task`."""
+
+    def pick_next_task(
+        self,
+        order: list[int],
+        rows: dict[int, ci_oracle.TaskRow],
+    ) -> int | None:
+        return ci_oracle.pick_next_task(order, rows)
+
+
+_DEFAULT_CI_TASK_PICKER: CITaskPicker = _RealCITaskPicker()
+
+
 def _assert_ci_failure_matches_oracle(
     task_list: list[dict[str, Any]],
     check_name: str,
     state: str,
     run_id: str,
-    _pick_next_task_fn: Callable[..., Any] | None = None,
+    picker: CITaskPicker = _DEFAULT_CI_TASK_PICKER,
 ) -> None:
-    _pick_fn = (
-        _pick_next_task_fn
-        if _pick_next_task_fn is not None
-        else ci_oracle.pick_next_task
-    )
     order, rows = _ci_oracle_task_rows(task_list)
     new_task = len(order) + 1
     result, created_task = ci_oracle.record_ci_failure(
@@ -1019,7 +1066,7 @@ def _assert_ci_failure_matches_oracle(
     )
     store_order, next_rows = result
     _store, next_order = store_order
-    picked = _pick_fn(next_order, next_rows)
+    picked = picker.pick_next_task(next_order, next_rows)
     if picked != created_task:
         raise AssertionError(
             "ci_task_lifecycle oracle: admitted CI failure was not first pickup"
@@ -1141,6 +1188,7 @@ def _write_pr_description(
     task_list: list[dict[str, Any]],
     existing_body: str = "",
     *,
+    runner: ProcessRunner,
     agent: ProviderAgent | None = None,
     pre_baked_description: str = "",
 ) -> None:
@@ -1246,7 +1294,7 @@ def _write_pr_description(
     new_body = f"{new_desc.strip()}{divider}{rest}"
     # Hold sync.lock during the PATCH so concurrent sync_tasks calls (which
     # also acquire this lock) cannot interleave and overwrite each other.
-    with tasks.pr_body_lock(work_dir):
+    with tasks.pr_body_lock(work_dir, runner=runner):
         gh.edit_pr_body(repo, pr_number, new_body)
     log.info("_write_pr_description: PR #%s description written", pr_number)
 
@@ -1465,8 +1513,17 @@ class _RealTaskSyncer:  # pragma: no cover
     Tests inject a fake :class:`TaskSyncer` instead.
     """
 
+    def __init__(self, runner: ProcessRunner) -> None:
+        self._runner = runner
+
     def sync_tasks(self, work_dir: Path, gh: GitHub, *, blocking: bool = False) -> None:
-        tasks.sync_tasks(work_dir, gh, blocking=blocking)
+        tasks.sync_tasks(
+            work_dir,
+            gh,
+            blocking=blocking,
+            git_dir_resolver=tasks.RealGitDirResolver(self._runner),
+            auto_completer=tasks.auto_complete_ask_tasks,
+        )
 
 
 _DEFAULT_PROMPT_BUILDER: PromptBuilder = _RealPromptBuilder()
@@ -1474,8 +1531,40 @@ _DEFAULT_PROVIDER_RUNNER: ProviderRunner = _RealProviderRunner()
 _DEFAULT_HARNESS_COMMITTER_FACTORY: HarnessCommitterFactory = (
     _RealHarnessCommitterFactory()
 )
-_DEFAULT_TASK_SYNCER: TaskSyncer = _RealTaskSyncer()
 _DEFAULT_CLOCK: Clock = RealClock()
+_DEFAULT_RUNNER: ProcessRunner = RealProcessRunner()
+_DEFAULT_TASK_SYNCER: TaskSyncer = _RealTaskSyncer(runner=_DEFAULT_RUNNER)
+_DEFAULT_SUB_DIR_PROVIDER: SubDirProvider = _RealSubDirProvider()
+
+
+class _AgentOnlyProvider:
+    """Minimal Provider wrapping a bare ProviderAgent — for the provider_agent= DI seam.
+
+    Used by Worker when a caller passes a pre-built agent directly (typically
+    in tests).  The ``.api`` property is intentionally unimplemented: tests
+    that use this path never call provider pressure checks.
+    """
+
+    def __init__(
+        self, agent: ProviderAgent, session: PromptSession | None = None
+    ) -> None:
+        if session is not None:
+            agent.attach_session(session)
+        self._agent = agent
+
+    @property
+    def provider_id(self) -> ProviderID:
+        return self._agent.provider_id
+
+    @property
+    def api(self) -> ProviderAPI:
+        raise NotImplementedError(
+            "_AgentOnlyProvider has no API — pass provider= with a full Provider instead"
+        )
+
+    @property
+    def agent(self) -> ProviderAgent:
+        return self._agent
 
 
 class Worker:
@@ -1516,6 +1605,8 @@ class Worker:
         harness_committer_factory: HarnessCommitterFactory,
         task_syncer: TaskSyncer,
         clock: Clock,
+        runner: ProcessRunner,
+        sub_dir_provider: SubDirProvider,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
         background_syncer: BackgroundTaskSyncer,
@@ -1558,7 +1649,7 @@ class Worker:
             if session is not None:
                 self._provider.agent.attach_session(session)
         elif provider_agent is not None:
-            self._provider = ClaudeCode(agent=provider_agent, session=session)
+            self._provider = _AgentOnlyProvider(provider_agent, session=session)
         elif repo_cfg is not None:
             self._provider = self._provider_factory.create_provider(
                 repo_cfg,
@@ -1576,6 +1667,8 @@ class Worker:
         self._harness_committer_factory = harness_committer_factory
         self._task_syncer = task_syncer
         self._clock = clock
+        self._runner = runner
+        self._sub_dir_provider = sub_dir_provider
         self._background_syncer = background_syncer
         self._task_reorderer = task_reorderer
         self._commit_summarizer = commit_summarizer
@@ -1660,35 +1753,32 @@ class Worker:
             issue,
             task_list,
             existing_body,
+            runner=self._runner,
             agent=agent,
             pre_baked_description=pre_baked_description,
         )
 
-    def _get_prompts(self, *, _sub_dir_fn: Callable[..., Path] = _sub_dir) -> Prompts:
+    def _get_prompts(self) -> Prompts:
         """Return the injected Prompts or build one from the persona file."""
         if self._prompts is not None:
             return self._prompts
-        persona_path = _sub_dir_fn() / "persona.md"
+        persona_path = self._sub_dir_provider.sub_dir() / "persona.md"
         try:
             persona = persona_path.read_text()
         except OSError:
             persona = ""
         return Prompts(persona)
 
-    def resolve_git_dir(
-        self, *, _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
-    ) -> Path:
+    def resolve_git_dir(self) -> Path:
         """Return the absolute .git directory for self.work_dir."""
-        return _resolve_git_dir(self.work_dir, _run=_run)
+        return _resolve_git_dir(self.work_dir, runner=self._runner)
 
-    def create_context(
-        self, *, _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
-    ) -> WorkerContext:
+    def create_context(self) -> WorkerContext:
         """Build a WorkerContext for self.work_dir, acquiring the fido lock.
 
         Raises LockHeld if the lock is already held.
         """
-        git_dir = self.resolve_git_dir(_run=_run)
+        git_dir = self.resolve_git_dir()
         fido_dir = git_dir / "fido"
         lock_fd = acquire_lock(fido_dir)
         return WorkerContext(
@@ -1794,8 +1884,6 @@ class Worker:
         self,
         what: str,
         busy: bool = True,
-        *,
-        _sub_dir_fn: Callable[..., Path] = _sub_dir,
     ) -> None:
         """Set the authenticated user's GitHub status using provider-generated text.
 
@@ -1809,7 +1897,7 @@ class Worker:
         logs and returns — status is best-effort and callers should not block
         on it.
         """
-        prompts = self._get_prompts(_sub_dir_fn=_sub_dir_fn)
+        prompts = self._get_prompts()
 
         ctx = (
             self._registry.status_update()
@@ -2044,9 +2132,6 @@ class Worker:
         self,
         args: list[str],
         check: bool = True,
-        *,
-        _run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-        _now: Callable[..., datetime] = datetime.now,
     ) -> subprocess.CompletedProcess[str]:
         """Run a git command in self.work_dir.
 
@@ -2059,7 +2144,7 @@ class Worker:
         """
 
         def _call() -> subprocess.CompletedProcess[str]:
-            return _run(
+            return self._runner.run(
                 ["git", *args],
                 cwd=self.work_dir,
                 capture_output=True,
@@ -2072,7 +2157,7 @@ class Worker:
         except subprocess.CalledProcessError as exc:
             if not _stderr_is_index_lock_error(exc.stderr or ""):
                 raise
-            if not _remove_stale_index_lock(self.work_dir, _now=_now):
+            if not _remove_stale_index_lock(self.work_dir):
                 raise
             log.warning(
                 "git: removed stale .git/index.lock in %s and retrying %s",
@@ -3775,7 +3860,11 @@ class Worker:
         self._tasks.complete_with_resolve(
             task["id"],
             self.gh,
-            syncer=tasks.sync_tasks_background,
+            syncer=tasks.RealBackgroundSyncer(
+                runner=self._runner,
+                auto_completer=tasks.auto_complete_ask_tasks,
+                starter=tasks.RealThreadStarter(),
+            ),
             collaborators=repo_ctx.collaborators,
             allowed_bots=allowed_bots,
         )
@@ -5254,10 +5343,6 @@ class Worker:
             log.debug("rescope_before_pick: fewer than 2 pending tasks — skipping")
             return
 
-        from fido.events import (
-            _rewrite_pr_description,  # pyright: ignore[reportPrivateUsage]
-        )
-
         commit_summary = self._get_commit_summary_fn()
         # _make_reorder_kwargs always wires up on_inprogress_affected (#1336);
         # at pick time there is no in-progress task so the callback won't fire,
@@ -5276,7 +5361,6 @@ class Worker:
             self._registry,
             self._provider_agent,
             self._get_prompts(),
-            _rewrite_pr_description,
         )
         log.info("rescope_before_pick: rescoping task list before next pick")
         self._reorder_tasks_fn(self._tasks, commit_summary, reorder_kwargs)
@@ -5289,15 +5373,11 @@ class Worker:
         registry: "ActivityReporter",
         agent: ProviderAgent,
         prompts: Prompts,
-        rewrite_fn: Callable[..., None],
-        sync_fn: Callable[[Path, Any], None] | None = None,
     ) -> tuple[dict[str, Any], list[Callable[[], None]]]:
         return self._dispatcher._make_reorder_kwargs(  # pyright: ignore[reportPrivateUsage]
             registry,
             agent,
             prompts,
-            rewrite_fn,
-            sync_fn,
         )
 
     def _reorder_tasks_fn(
@@ -5617,12 +5697,7 @@ class WorkerThread(threading.Thread):
     with no provider-attached session and creates a fresh session on its first
     iteration.
 
-    ``_fn_exit`` is a class-level injectable: override it on a test subclass to
-    intercept the ``SessionLeakError`` halt path instead of actually calling
-    ``os._exit``.
     """
-
-    _fn_exit: Callable[[int], None] = os._exit  # type: ignore[assignment]
 
     def __init__(
         self,
@@ -5641,6 +5716,8 @@ class WorkerThread(threading.Thread):
         provider_factory: DefaultProviderFactory,
         dispatcher: "Dispatcher",
         issue_cache: IssueCache,
+        os_proc: OsProcess,
+        runner: ProcessRunner,
         _state: State | None = None,
     ) -> None:
         super().__init__(name=f"worker-{work_dir.name}", daemon=True)
@@ -5648,6 +5725,8 @@ class WorkerThread(threading.Thread):
         self._repo_name = repo_name
         self._gh = gh
         self._registry = registry
+        self._os_proc = os_proc
+        self._runner_proc = runner
         self._membership = membership
         self._wake = threading.Event()
         self._abort_task = AbortHandle()
@@ -5933,9 +6012,15 @@ class WorkerThread(threading.Thread):
             harness_committer_factory=_DEFAULT_HARNESS_COMMITTER_FACTORY,
             task_syncer=_DEFAULT_TASK_SYNCER,
             clock=_DEFAULT_CLOCK,
+            runner=_DEFAULT_RUNNER,
+            sub_dir_provider=_DEFAULT_SUB_DIR_PROVIDER,
             dispatcher=self._dispatcher,
             issue_cache=self._issue_cache,
-            background_syncer=tasks.sync_tasks_background,
+            background_syncer=tasks.RealBackgroundSyncer(
+                runner=_DEFAULT_RUNNER,
+                auto_completer=tasks.auto_complete_ask_tasks,
+                starter=tasks.RealThreadStarter(),
+            ),
             task_reorderer=tasks.reorder_tasks,  # pyright: ignore[reportArgumentType]
             commit_summarizer=_fev._get_commit_summary,  # pyright: ignore[reportPrivateUsage]
         )
@@ -5948,7 +6033,7 @@ class WorkerThread(threading.Thread):
         "no persistence available" rather than raising.
         """
         try:
-            return _resolve_git_dir(self.work_dir) / "fido"
+            return _resolve_git_dir(self.work_dir, runner=self._runner_proc) / "fido"
         except subprocess.CalledProcessError, FileNotFoundError, OSError:
             return None
 
@@ -6099,7 +6184,7 @@ class WorkerThread(threading.Thread):
                 "claude leak detected in worker thread for %s — halting",
                 self._repo_name,
             )
-            type(self)._fn_exit(3)
+            self._os_proc.exit(3)
         except Exception as exc:
             self.crash_error = f"{type(exc).__name__}: {exc}"
             log.exception("WorkerThread %s: unexpected error", self.name)

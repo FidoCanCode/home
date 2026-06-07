@@ -2,9 +2,11 @@
 
 
 def main() -> None:  # pragma: no cover
+    from fido.github import RealGitHubFactory
+    from fido.infra import RealClock, RealProcessRunner
     from fido.server import run
 
-    run()
+    run(github_factory=RealGitHubFactory(RealProcessRunner(), RealClock()))
 
 
 if __name__ == "__main__":  # pragma: no cover

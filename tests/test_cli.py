@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from fido.cli import Cmd, build_parser, main
+from fido.infra import RealProcessRunner
 from fido.tasks import Tasks
 from fido.types import TaskType
 
@@ -71,6 +72,11 @@ class _FakeGitHub:
         self.get_pull_comments: _FakeCallRecorder = _FakeCallRecorder(return_value=[])
         self.get_review_threads: _FakeCallRecorder = _FakeCallRecorder(return_value=[])
         self.resolve_thread: _FakeCallRecorder = _FakeCallRecorder()
+
+
+def _cmd(github: "_FakeGitHub | object") -> Cmd:
+    """Construct a ``Cmd`` with the given github fake and a noop runner."""
+    return Cmd(github=github, runner=RealProcessRunner())  # type: ignore[arg-type]
 
 
 class _FakeArgs:
@@ -166,7 +172,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path, TaskType.SPEC, "my task", "some description"
         )
         capsys.readouterr()  # consume add output
@@ -181,7 +187,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).add(tmp_path, TaskType.CI, "bare task", "")  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(tmp_path, TaskType.CI, "bare task", "")  # type: ignore[arg-type]
         capsys.readouterr()
 
         tasks = Tasks(tmp_path).list()
@@ -192,7 +198,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path, TaskType.THREAD, "threaded", "", comment_id=42, repo="a/b", pr=7
         )
         capsys.readouterr()
@@ -205,7 +211,7 @@ class TestCmdAdd:
     ) -> None:
         """comment_id without repo/pr still sets a thread for dedup purposes."""
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path, TaskType.THREAD, "threaded", "", comment_id=99
         )
         capsys.readouterr()
@@ -217,7 +223,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path,
             TaskType.THREAD,
             "first title",
@@ -227,7 +233,7 @@ class TestCmdAdd:
             pr=7,
         )
         capsys.readouterr()
-        Cmd(github=_FakeGitHub()).add(  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(  # type: ignore[arg-type]
             tmp_path,
             TaskType.THREAD,
             "different title",
@@ -246,7 +252,7 @@ class TestCmdAdd:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).add(tmp_path, TaskType.SPEC, "my task", "")  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).add(tmp_path, TaskType.SPEC, "my task", "")  # type: ignore[arg-type]
         out = capsys.readouterr().out
         data = json.loads(out)
         assert data["title"] == "my task"
@@ -261,7 +267,7 @@ class TestCmdComplete:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        cmd = Cmd(github=_FakeGitHub())  # type: ignore[arg-type]
+        cmd = _cmd(_FakeGitHub())  # type: ignore[arg-type]
         task = cmd.add(tmp_path, TaskType.SPEC, "task to finish", "")
         capsys.readouterr()
         cmd.complete(tmp_path, task["id"])
@@ -319,7 +325,7 @@ class TestCmdComplete:
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
-            Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
+            _cmd(mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_called_once_with("thread_node_abc")
         assert "thread resolved: thread_node_abc" in caplog.text
@@ -375,7 +381,7 @@ class TestCmdComplete:
         ]
 
         with caplog.at_level(logging.INFO, logger="fido"):
-            Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
+            _cmd(mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_not_called()
         assert "not resolving" in caplog.text
@@ -394,7 +400,7 @@ class TestCmdComplete:
         mock_github.get_user.return_value = "fido-bot"
         mock_github.get_pull_comments.return_value = []
 
-        Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
+        _cmd(mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_not_called()
 
@@ -413,7 +419,7 @@ class TestCmdComplete:
 
         # Should not raise; exception is swallowed and logged
         with caplog.at_level(logging.WARNING, logger="fido"):
-            Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
+            _cmd(mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
         assert "thread resolution skipped" in caplog.text
 
     def test_completes_task_with_thread_already_resolved(self, tmp_path: Path) -> None:
@@ -442,7 +448,7 @@ class TestCmdComplete:
             }
         ]
 
-        Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
+        _cmd(mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_not_called()
 
@@ -456,14 +462,14 @@ class TestCmdComplete:
         )
 
         mock_github = _FakeGitHub()
-        Cmd(github=mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
+        _cmd(mock_github).complete(tmp_path, task["id"])  # type: ignore[arg-type]
 
         mock_github.resolve_thread.assert_not_called()
 
     def test_complete_nonexistent_id_no_error(self, tmp_path: Path) -> None:
         """Completing a non-existent task ID should not raise."""
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).complete(tmp_path, "nonexistent-id")  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).complete(tmp_path, "nonexistent-id")  # type: ignore[arg-type]
 
 
 # ── Cmd.list ──────────────────────────────────────────────────────────────────
@@ -474,7 +480,7 @@ class TestCmdList:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        cmd = Cmd(github=_FakeGitHub())  # type: ignore[arg-type]
+        cmd = _cmd(_FakeGitHub())  # type: ignore[arg-type]
         cmd.add(tmp_path, TaskType.SPEC, "alpha", "")
         capsys.readouterr()
         cmd.add(tmp_path, TaskType.SPEC, "beta", "desc")
@@ -490,7 +496,7 @@ class TestCmdList:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        Cmd(github=_FakeGitHub()).list(tmp_path)  # type: ignore[arg-type]
+        _cmd(_FakeGitHub()).list(tmp_path)  # type: ignore[arg-type]
         out = capsys.readouterr().out
         assert json.loads(out) == []
 
@@ -503,7 +509,11 @@ class TestMain:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "spec", "task title"], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
+        main(
+            [str(tmp_path), "add", "spec", "task title"],
+            github_factory=lambda: _FakeGitHub(),
+            parser_factory=build_parser,
+        )
         capsys.readouterr()
 
         tasks = Tasks(tmp_path).list()
@@ -526,7 +536,8 @@ class TestMain:
                 "--pr",
                 "3",
             ],
-            _GitHub=_FakeGitHub,  # type: ignore[arg-type]
+            github_factory=lambda: _FakeGitHub(),
+            parser_factory=build_parser,
         )
         capsys.readouterr()
 
@@ -537,10 +548,18 @@ class TestMain:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "spec", "finish me"], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
+        main(
+            [str(tmp_path), "add", "spec", "finish me"],
+            github_factory=lambda: _FakeGitHub(),
+            parser_factory=build_parser,
+        )
         out = capsys.readouterr().out
         task_id = json.loads(out)["id"]
-        main([str(tmp_path), "complete", task_id], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
+        main(
+            [str(tmp_path), "complete", task_id],
+            github_factory=lambda: _FakeGitHub(),
+            parser_factory=build_parser,
+        )
 
         assert Tasks(tmp_path).list()[0]["status"] == "completed"
 
@@ -548,16 +567,24 @@ class TestMain:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _task_file(tmp_path)
-        main([str(tmp_path), "add", "spec", "one"], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
+        main(
+            [str(tmp_path), "add", "spec", "one"],
+            github_factory=lambda: _FakeGitHub(),
+            parser_factory=build_parser,
+        )
         capsys.readouterr()
-        main([str(tmp_path), "list"], _GitHub=_FakeGitHub)  # type: ignore[arg-type]
+        main(
+            [str(tmp_path), "list"],
+            github_factory=lambda: _FakeGitHub(),
+            parser_factory=build_parser,
+        )
         out = capsys.readouterr().out
         data = json.loads(out)
         assert data[0]["title"] == "one"
 
     def test_no_args_exits(self) -> None:
         with pytest.raises(SystemExit):
-            main([])
+            main([], github_factory=lambda: _FakeGitHub(), parser_factory=build_parser)
 
     def test_unknown_command_raises(self, tmp_path: Path) -> None:
         """Fallback case in match statement raises AssertionError."""
@@ -565,4 +592,8 @@ class TestMain:
         fake_parser = _FakeParser(fake_args)
 
         with pytest.raises(AssertionError, match="unreachable"):
-            main([], _GitHub=_FakeGitHub, _build_parser=lambda: fake_parser)  # type: ignore[arg-type]
+            main(
+                [],
+                github_factory=lambda: _FakeGitHub(),
+                parser_factory=lambda: fake_parser,
+            )

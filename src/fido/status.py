@@ -7,11 +7,10 @@ import re
 import shutil
 import subprocess
 import urllib.request
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from fido.color import (
     BOLD,
@@ -28,6 +27,7 @@ from fido.color import (
     Color,
 )
 from fido.config import RepoConfig, default_sub_dir
+from fido.infra import Clock, ProcessRunner, RealClock, RealProcessRunner
 from fido.provider import (
     ProviderID,
     ProviderPalette,
@@ -37,6 +37,42 @@ from fido.provider import (
 from fido.provider_factory import DefaultProviderFactory
 from fido.state import State
 from fido.tasks import Tasks
+
+
+class UrlOpener(Protocol):
+    """Opens a URL for reading — wraps :func:`urllib.request.urlopen`.
+
+    Callers that need to fetch live data from the fido HTTP server accept this
+    protocol so tests can inject a fake without a real network connection.
+    """
+
+    def __call__(self, url: str, *, timeout: float) -> Any:  # noqa: ANN401
+        """Open *url* and return an HTTP response context manager."""
+        ...
+
+
+class DiskUsageFn(Protocol):
+    """Returns disk usage statistics for a path — wraps :func:`shutil.disk_usage`."""
+
+    def __call__(self, path: Path) -> Any:  # noqa: ANN401
+        """Return a named tuple with ``total`` and ``free`` byte counts."""
+        ...
+
+
+class CpuCountFn(Protocol):
+    """Returns the number of logical CPUs — wraps :func:`os.cpu_count`."""
+
+    def __call__(self) -> int | None:
+        """Return the CPU count, or ``None`` if the value cannot be determined."""
+        ...
+
+
+class PaletteLookup(Protocol):
+    """Resolves a :class:`~fido.provider.ProviderPalette` for a provider ID."""
+
+    def __call__(self, provider: ProviderID) -> ProviderPalette | None:
+        """Return the palette for *provider*, or ``None`` if not defined."""
+        ...
 
 
 @dataclass
@@ -288,16 +324,12 @@ def _format_resource_line(
     )
 
 
-def _fido_running(
-    lock_path: Path,
-    *,
-    _open: Callable[..., Any] = open,  # noqa: A002
-) -> bool:
+def _fido_running(lock_path: Path) -> bool:
     """Return True if the fido lock file is held by another process."""
     if not lock_path.exists():
         return False
     try:
-        fd = _open(lock_path)
+        fd = open(lock_path)  # noqa: SIM115
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -310,7 +342,7 @@ def _fido_running(
         return False
 
 
-def _pgrep(pattern: str, *, _run: Callable[..., Any] = subprocess.run) -> list[int]:
+def _pgrep(pattern: str, *, runner: ProcessRunner) -> list[int]:
     """Return PIDs whose command line matches pattern via pgrep -f.
 
     Best-effort enrichment for status display.  A nonzero exit code (e.g.
@@ -319,10 +351,11 @@ def _pgrep(pattern: str, *, _run: Callable[..., Any] = subprocess.run) -> list[i
     (e.g. pgrep not installed).
     """
     try:
-        result = _run(
+        result = runner.run(
             ["pgrep", "-f", pattern],
             capture_output=True,
             text=True,
+            check=False,
         )
         pids = []
         for line in result.stdout.splitlines():
@@ -337,9 +370,7 @@ def _pgrep(pattern: str, *, _run: Callable[..., Any] = subprocess.run) -> list[i
         return []
 
 
-def _process_uptime_seconds(
-    pid: int, *, _run: Callable[..., Any] = subprocess.run
-) -> int | None:
+def _process_uptime_seconds(pid: int, *, runner: ProcessRunner) -> int | None:
     """Return elapsed seconds since the process started, or None if unavailable.
 
     Best-effort enrichment for status display.  A nonzero exit code (e.g.
@@ -347,10 +378,11 @@ def _process_uptime_seconds(
     callers receive None whenever the value cannot be determined.
     """
     try:
-        result = _run(
+        result = runner.run(
             ["ps", "-p", str(pid), "-o", "etimes="],
             capture_output=True,
             text=True,
+            check=False,
         )
         text = result.stdout.strip()
         if text:
@@ -365,8 +397,8 @@ def _system_resources(
     meminfo_path: Path = Path("/proc/meminfo"),
     loadavg_path: Path = Path("/proc/loadavg"),
     disk_path: Path = Path("/"),
-    _disk_usage: Callable[[Path], Any] = shutil.disk_usage,
-    _cpu_count: Callable[[], int | None] = os.cpu_count,
+    disk_usage: DiskUsageFn = shutil.disk_usage,
+    cpu_count_fn: CpuCountFn = os.cpu_count,
 ) -> SystemResourceInfo | None:
     """Return a best-effort host resource snapshot for status display."""
     try:
@@ -376,12 +408,12 @@ def _system_resources(
             value = raw.strip().split()[0]
             meminfo[key] = int(value) * 1024
         load_parts = loadavg_path.read_text().split()
-        disk = _disk_usage(disk_path)
+        disk = disk_usage(disk_path)
         return SystemResourceInfo(
             load_1=float(load_parts[0]),
             load_5=float(load_parts[1]),
             load_15=float(load_parts[2]),
-            cpu_count=_cpu_count(),
+            cpu_count=cpu_count_fn(),
             mem_total_bytes=meminfo["MemTotal"],
             mem_available_bytes=meminfo["MemAvailable"],
             disk_path=str(disk_path),
@@ -431,10 +463,14 @@ def _repos_from_pid(pid: int) -> list[RepoConfig]:
     return _parse_repo_cmdline(cmdline)
 
 
-def _fido_pid() -> int | None:
+def _fido_pid(*, runner: ProcessRunner) -> int | None:
     """Return the PID of the running fido server, or None."""
-    pids = _pgrep("fido --port")
+    pids = _pgrep("fido --port", runner=runner)
     return pids[0] if pids else None
+
+
+_REAL_RUNNER: ProcessRunner = RealProcessRunner()
+_REAL_URLOPEN: UrlOpener = urllib.request.urlopen  # type: ignore[assignment]
 
 
 class StatusCollector:
@@ -447,20 +483,29 @@ class StatusCollector:
     others.
     """
 
+    def __init__(
+        self,
+        *,
+        runner: ProcessRunner = _REAL_RUNNER,
+        urlopen: UrlOpener = _REAL_URLOPEN,
+    ) -> None:
+        self._runner = runner
+        self._urlopen = urlopen
+
     def git_dir(self, path: Path) -> Path | None:
-        return _git_dir(path)
+        return _git_dir(path, runner=self._runner)
 
     def fido_running(self, lock_path: Path) -> bool:
         return _fido_running(lock_path)
 
     def claude_pid(self, fido_dir: Path) -> int | None:
-        return _claude_pid(fido_dir)
+        return _claude_pid(fido_dir, runner=self._runner)
 
     def process_uptime(self, pid: int) -> int | None:
-        return _process_uptime_seconds(pid)
+        return _process_uptime_seconds(pid, runner=self._runner)
 
     def fido_pid(self) -> int | None:
-        return _fido_pid()
+        return _fido_pid(runner=self._runner)
 
     def repos_from_pid(self, pid: int) -> list[RepoConfig]:
         return _repos_from_pid(pid)
@@ -471,15 +516,12 @@ class StatusCollector:
     def fetch_activities(
         self, port: int
     ) -> tuple[dict[str, Any], RateLimitInfo | None]:
-        return _fetch_activities(port)
-
-
-_REAL_COLLECTOR: StatusCollector = StatusCollector()
+        return _fetch_activities(port, urlopen=self._urlopen)
 
 
 def running_repo_configs(
     *,
-    collector: StatusCollector = _REAL_COLLECTOR,
+    collector: StatusCollector,
 ) -> list[RepoConfig]:
     """Return the repo configs for the currently running fido, or []."""
     pid = collector.fido_pid()
@@ -501,7 +543,7 @@ def provider_statuses_for_repo_configs(
     if _provider_factory is not None:
         provider_factory = _provider_factory
     else:
-        provider_factory = DefaultProviderFactory(
+        provider_factory = DefaultProviderFactory.real(
             session_system_file=_status_persona_path()
         )
     statuses: dict[ProviderID, ProviderPressureStatus] = {}
@@ -590,7 +632,7 @@ def _port_from_pid(pid: int) -> int | None:
 
 
 def _fetch_activities(
-    port: int, *, _urlopen: Callable[..., Any] = urllib.request.urlopen
+    port: int, *, urlopen: UrlOpener
 ) -> tuple[dict[str, dict[str, Any]], RateLimitInfo | None]:
     """Query GET /status.json for live worker activity, provider pressure,
     and the global GitHub rate-limit snapshot (closes #812 follow-up).
@@ -599,7 +641,7 @@ def _fetch_activities(
     treats empty as "fido down" and renders accordingly.
     """
     try:
-        with _urlopen(f"http://localhost:{port}/status.json", timeout=2) as resp:
+        with urlopen(f"http://localhost:{port}/status.json", timeout=2) as resp:
             data = json.loads(resp.read())
         activities_raw = data.get("activities", [])
         rate_limit_raw = data.get("rate_limit")
@@ -657,11 +699,7 @@ def _parse_rate_window(raw: dict[str, Any]) -> RateLimitWindowInfo:
     )
 
 
-def _claude_pid(
-    fido_dir: Path,
-    *,
-    _pgrep_fn: Callable[[str], list[int]] = _pgrep,
-) -> int | None:
+def _claude_pid(fido_dir: Path, *, runner: ProcessRunner) -> int | None:
     """Return the PID of the claude process for this fido_dir, or None.
 
     Matches both initial sessions (command line includes the system-prompt
@@ -669,26 +707,24 @@ def _claude_pid(
     ``--resume <session_id>`` from state.json, which doesn't mention the
     system file).
     """
-    pids = _pgrep_fn(str(fido_dir / "system"))
+    pids = _pgrep(str(fido_dir / "system"), runner=runner)
     if pids:
         return pids[0]
     session_id = State(fido_dir).load().get("setup_session_id")
     if not session_id:
         return None
-    pids = _pgrep_fn(session_id)
+    pids = _pgrep(session_id, runner=runner)
     return pids[0] if pids else None
 
 
-def _git_dir(
-    work_dir: Path, *, _run: Callable[..., Any] = subprocess.run
-) -> Path | None:
+def _git_dir(work_dir: Path, *, runner: ProcessRunner) -> Path | None:
     """Return the absolute git directory for work_dir, or None if unavailable.
 
     Best-effort enrichment for status display.  Returns None on nonzero
     exit (not a git repo) or if git is not installed.
     """
     try:
-        result = _run(
+        result = runner.run(
             ["git", "rev-parse", "--absolute-git-dir"],
             cwd=work_dir,
             capture_output=True,
@@ -702,8 +738,6 @@ def _git_dir(
 
 def _read_state(  # pyright: ignore[reportUnusedFunction]  # used by tests
     fido_dir: Path,
-    *,
-    _read_text_fn: Callable[[Path], str] = Path.read_text,
 ) -> dict[str, Any]:
     """Read state.json from fido_dir, returning {} if absent or unreadable."""
     path = fido_dir / "state.json"
@@ -714,7 +748,7 @@ def _read_state(  # pyright: ignore[reportUnusedFunction]  # used by tests
             fcntl.flock(lock_fd, fcntl.LOCK_SH)
             if not path.exists():
                 return {}
-            return json.loads(_read_text_fn(path))
+            return json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):  # fmt: skip
         return {}
 
@@ -748,9 +782,7 @@ def _task_position(task_list: list[dict[str, Any]]) -> tuple[int | None, int | N
     return (1, total)
 
 
-def _elapsed_since_iso(
-    iso: str | None, *, _now: Callable[[], datetime] | None = None
-) -> int | None:
+def _elapsed_since_iso(iso: str | None, *, clock: Clock) -> int | None:
     """Return integer seconds since *iso* (an ISO-8601 timestamp), or None."""
     if not iso:
         return None
@@ -758,8 +790,7 @@ def _elapsed_since_iso(
         started = datetime.fromisoformat(iso)
     except TypeError, ValueError:
         return None
-    now = _now() if _now is not None else datetime.now(tz=timezone.utc)
-    return max(0, int((now - started).total_seconds()))
+    return max(0, int((clock.now() - started).total_seconds()))
 
 
 def repo_status(
@@ -781,7 +812,7 @@ def repo_status(
     provider_status: ProviderPressureStatus | None = None,
     issue_cache: IssueCacheInfo | None = None,
     *,
-    collector: StatusCollector = _REAL_COLLECTOR,
+    collector: StatusCollector,
 ) -> RepoStatus:
     """Collect status for a single repo."""
     webhook_activities = list(webhook_activities or [])
@@ -826,7 +857,7 @@ def repo_status(
     state = State(fido_dir).load()
     issue = state.get("issue")
     issue_title = state.get("issue_title")
-    issue_elapsed = _elapsed_since_iso(state.get("issue_started_at"))
+    issue_elapsed = _elapsed_since_iso(state.get("issue_started_at"), clock=RealClock())
     pr_number = state.get("pr_number")
     pr_title = state.get("pr_title")
 
@@ -885,7 +916,7 @@ def repo_status(
 
 def collect(
     *,
-    collector: StatusCollector = _REAL_COLLECTOR,
+    collector: StatusCollector,
 ) -> FidoStatus:
     """Collect the full fido + per-repo status."""
     pid = collector.fido_pid()
@@ -1154,7 +1185,7 @@ def _styled_provider_status(
     status: ProviderPressureStatus,
     *,
     c: Color,
-    _palette_for: Callable[..., ProviderPalette | None] | None = None,
+    palette_fn: PaletteLookup = palette_for,
 ) -> str:
     base_style = _provider_status_style(status)
     summary = _provider_status_summary(status)
@@ -1165,9 +1196,7 @@ def _styled_provider_status(
         return c.color(base_style, summary)
     # Highlight the provider name (prefix of the summary) with the provider's
     # bright fg so each provider is visually identifiable in the limits line.
-    palette = (_palette_for if _palette_for is not None else palette_for)(
-        status.provider
-    )
+    palette = palette_fn(status.provider)
     provider_token = str(status.provider)
     if palette is not None and summary.startswith(provider_token):
         tail = summary[len(provider_token) :]
@@ -1179,7 +1208,7 @@ def _styled_repo_provider(
     repo: RepoStatus,
     *,
     c: Color,
-    _palette_for: Callable[..., ProviderPalette | None] | None = None,
+    palette_fn: PaletteLookup = palette_for,
 ) -> str:
     """Render the repo's provider label without repeating global limits details."""
     provider_str = str(repo.provider)
@@ -1190,7 +1219,7 @@ def _styled_repo_provider(
             # Warning/paused state wins over identity color — same precedence
             # as the global limits line in _styled_provider_status.
             return c.color(base_style, provider_str)
-    palette = (_palette_for if _palette_for is not None else palette_for)(repo.provider)
+    palette = palette_fn(repo.provider)
     if palette is not None:
         return c.wrap_raw(c.rgb_fg(*palette.bright_fg), provider_str)
     return provider_str

@@ -1,4 +1,5 @@
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -6,11 +7,13 @@ import pytest
 from fido.github import (
     _HTTP_TIMEOUT,  # noqa: PLC2701
     GitHub,
+    GitHubSession,
     GraphQLError,
-    _gh_token,
+    RealGitHubFactory,
+    TokenFetcher,
     _has_closing_keyword,  # noqa: PLC2701
     _pr_state_str,  # noqa: PLC2701
-    _TimeoutSession,  # noqa: PLC2701
+    gh_token,
 )
 
 
@@ -198,6 +201,63 @@ class _FakeSession:
         self.delete = _FakeCallable()
 
 
+class _FakeProcessRunner:
+    """Typed :class:`~fido.infra.ProcessRunner` fake for github tests.
+
+    Wraps a :class:`_FakeCallable` so tests can assert on the subprocess
+    commands issued via :meth:`GitHub.get_repo_info`,
+    :meth:`GitHub.get_default_branch`, and :func:`gh_token`.
+    """
+
+    def __init__(self, fn: _FakeCallable | None = None) -> None:
+        self._fn: _FakeCallable = fn if fn is not None else _FakeCallable()
+
+    def run(self, cmd: object, **kwargs: object) -> "subprocess.CompletedProcess[str]":
+        return self._fn(cmd, **kwargs)  # type: ignore[return-value]
+
+
+class _FakeClock:
+    """Typed :class:`~fido.infra.Clock` fake for github tests.
+
+    Records :meth:`sleep` calls via an inner :class:`_FakeCallable` so
+    existing retry-delay assertions can be expressed as
+    ``clock.sleep_fn.call_count`` / ``call_args_list``.
+    """
+
+    def __init__(self, sleeper: _FakeCallable | None = None) -> None:
+        self.sleep_fn: _FakeCallable = (
+            sleeper if sleeper is not None else _FakeCallable()
+        )
+
+    def sleep(self, secs: float) -> None:
+        self.sleep_fn(secs)
+
+    def monotonic(self) -> float:
+        return 0.0
+
+    def now(self) -> datetime:
+        return datetime.now(UTC)
+
+
+def _noop_runner() -> _FakeProcessRunner:
+    """Return a runner that will never be called (for tests that don't need it)."""
+    return _FakeProcessRunner()
+
+
+def _noop_token_fetcher() -> TokenFetcher:
+    """Return a token fetcher that returns a fixed dummy token."""
+
+    def _fetch() -> str:
+        return "test-token"
+
+    return _fetch
+
+
+def _noop_session() -> GitHubSession:
+    """Return a fresh GitHubSession for tests that don't inspect session calls."""
+    return GitHubSession()
+
+
 class _RawCall:
     """One recorded call to :meth:`_FakeTimeoutSession._raw_request`."""
 
@@ -212,8 +272,8 @@ class _RawCall:
         self.kwargs = kwargs
 
 
-class _FakeTimeoutSession(_TimeoutSession):
-    """Test double for :class:`_TimeoutSession`: replaces network calls.
+class _FakeTimeoutSession(GitHubSession):
+    """Test double for :class:`GitHubSession`: replaces network calls.
 
     Pass a single response object to return the same response on every call,
     or a list to dequeue one response per call.
@@ -264,25 +324,27 @@ def _completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedPro
 
 class TestGhToken:
     def test_uses_env_var(self) -> None:
-        assert _gh_token(environ={"GITHUB_TOKEN": "mytoken"}) == "mytoken"
+        assert (
+            gh_token(_noop_runner(), environ={"GITHUB_TOKEN": "mytoken"}) == "mytoken"
+        )
 
     def test_falls_back_to_gh_cli(self) -> None:
         mock_run = _FakeCallable(return_value=_completed("ghp_abc\n"))
-        assert _gh_token(runner=mock_run, environ={}) == "ghp_abc"
+        assert gh_token(_FakeProcessRunner(mock_run), environ={}) == "ghp_abc"
 
     def test_gh_cli_strips_whitespace(self) -> None:
         mock_run = _FakeCallable(return_value=_completed("  tok  \n"))
-        assert _gh_token(runner=mock_run, environ={}) == "tok"
+        assert gh_token(_FakeProcessRunner(mock_run), environ={}) == "tok"
 
     def test_raises_on_nonzero_exit(self) -> None:
         mock_run = _FakeCallable(return_value=_completed("", returncode=1))
         with pytest.raises(RuntimeError, match="gh auth token failed"):
-            _gh_token(runner=mock_run, environ={})
+            gh_token(_FakeProcessRunner(mock_run), environ={})
 
     def test_error_message_includes_exit_code(self) -> None:
         mock_run = _FakeCallable(return_value=_completed("", returncode=4))
         with pytest.raises(RuntimeError, match=r"exit 4"):
-            _gh_token(runner=mock_run, environ={})
+            gh_token(_FakeProcessRunner(mock_run), environ={})
 
 
 class TestHasClosingKeyword:
@@ -402,9 +464,17 @@ class TestTimeoutSession:
         assert s.call_args is not None
         assert s.call_args.kwargs.get("timeout") == 5
 
-    def test_uses_timeout_session_when_no_session_injected(self) -> None:
-        gh = GitHub("tok")
-        assert isinstance(gh._s, _TimeoutSession)
+    def test_injected_session_is_stored(self) -> None:
+        """The session passed at construction is the one stored on the instance."""
+        session = GitHubSession()
+        gh = GitHub(
+            "tok",
+            session=session,
+            runner=_noop_runner(),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
+        assert gh._s is session
 
     def test_get_caches_response_then_replays_on_304(self) -> None:
         """GET response with ETag is cached; second GET that gets a 304
@@ -500,14 +570,26 @@ class TestTimeoutSession:
         assert r.content == b"B"
 
     def test_github_clear_repo_cache_delegates_to_session(self) -> None:
-        gh = GitHub("tok")
+        gh = GitHub(
+            "tok",
+            session=GitHubSession(),
+            runner=_noop_runner(),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
         # Empty cache → 0 dropped, no error.
         assert gh.clear_repo_cache("owner/repo") == 0
 
     def test_github_clear_repo_cache_returns_zero_for_non_caching_session(
         self,
     ) -> None:
-        gh = GitHub("tok", session=_FakeSession())
+        gh = GitHub(
+            "tok",
+            session=_FakeSession(),
+            runner=_noop_runner(),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
         assert gh.clear_repo_cache("owner/repo") == 0
 
     def test_non_repo_urls_are_not_cached(self) -> None:
@@ -552,7 +634,13 @@ class TestTimeoutSession:
             content=b"under old token",
         )
         s = _FakeTimeoutSession(first)
-        gh = GitHub("tok-old", session=s, token_fetcher=lambda: "tok-old")
+        gh = GitHub(
+            "tok-old",
+            session=s,
+            runner=_noop_runner(),
+            clock=_FakeClock(),
+            token_fetcher=lambda: "tok-old",
+        )
         gh._s.request(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
             "GET", "https://api.github.com/repos/o/r/issues/1"
         )
@@ -574,7 +662,13 @@ class TestTimeoutSession:
             content=b"stable",
         )
         s = _FakeTimeoutSession(first)
-        gh = GitHub("tok", session=s, token_fetcher=lambda: "tok")
+        gh = GitHub(
+            "tok",
+            session=s,
+            runner=_noop_runner(),
+            clock=_FakeClock(),
+            token_fetcher=lambda: "tok",
+        )
         gh._s.request(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
             "GET", "https://api.github.com/repos/o/r/issues/1"
         )
@@ -584,12 +678,31 @@ class TestTimeoutSession:
 
 
 class TestGitHubClass:
-    def _gh(self) -> tuple[GitHub, _FakeSession]:
+    def _gh(
+        self,
+        runner: _FakeProcessRunner | None = None,
+        clock: _FakeClock | None = None,
+    ) -> tuple[GitHub, _FakeSession]:
         mock_s = _FakeSession()
-        return GitHub("test-token", session=mock_s), mock_s
+        return (
+            GitHub(
+                "test-token",
+                session=mock_s,
+                runner=runner or _noop_runner(),
+                clock=clock or _FakeClock(),
+                token_fetcher=_noop_token_fetcher(),
+            ),
+            mock_s,
+        )
 
     def test_sets_auth_header(self) -> None:
-        gh = GitHub("test-token")
+        gh = GitHub(
+            "test-token",
+            session=GitHubSession(),
+            runner=_noop_runner(),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
         assert gh._s.headers["Authorization"] == "Bearer test-token"
 
     def test_refresh_token_picks_up_new_value(self) -> None:
@@ -600,7 +713,13 @@ class TestGitHubClass:
         subsequent API requests use the new token.
         """
         tokens = iter(["old-token", "new-token"])
-        gh = GitHub(token=None, token_fetcher=lambda: next(tokens))
+        gh = GitHub(
+            token=None,
+            session=GitHubSession(),
+            runner=_noop_runner(),
+            clock=_FakeClock(),
+            token_fetcher=lambda: next(tokens),
+        )
         assert gh._s.headers["Authorization"] == "Bearer old-token"
         changed = gh.refresh_token()
         assert changed is True
@@ -609,13 +728,25 @@ class TestGitHubClass:
     def test_refresh_token_noop_when_unchanged(self) -> None:
         """When the token hasn't changed, refresh is a no-op and
         returns False so callers can skip downstream work."""
-        gh = GitHub(token=None, token_fetcher=lambda: "same-token")
+        gh = GitHub(
+            token=None,
+            session=GitHubSession(),
+            runner=_noop_runner(),
+            clock=_FakeClock(),
+            token_fetcher=lambda: "same-token",
+        )
         changed = gh.refresh_token()
         assert changed is False
         assert gh._s.headers["Authorization"] == "Bearer same-token"
 
     def test_sets_accept_header(self) -> None:
-        gh = GitHub("test-token")
+        gh = GitHub(
+            "test-token",
+            session=GitHubSession(),
+            runner=_noop_runner(),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
         assert gh._s.headers["Accept"] == "application/vnd.github+json"
 
     def test_get_calls_session(self) -> None:
@@ -1116,13 +1247,20 @@ class TestGitHubClass:
         import requests as _requests
 
         sleeper = _FakeCallable()
+        clock = _FakeClock(sleeper)
         mock_s = _FakeSession()
         mock_s.get.side_effect = [
             self._transient_resp(500),
             self._transient_resp(503),
             self._ok_resp([{"id": 7}]),
         ]
-        gh = GitHub("tok", session=mock_s, sleeper=sleeper)
+        gh = GitHub(
+            "tok",
+            session=mock_s,
+            runner=_noop_runner(),
+            clock=clock,
+            token_fetcher=_noop_token_fetcher(),
+        )
         assert gh._get("/anything") == [{"id": 7}]
         assert mock_s.get.call_count == 3
         # Two failures → two sleeps from the retry schedule.
@@ -1138,7 +1276,13 @@ class TestGitHubClass:
         sleeper = _FakeCallable()
         mock_s = _FakeSession()
         mock_s.get.return_value = self._transient_resp(502)
-        gh = GitHub("tok", session=mock_s, sleeper=sleeper)
+        gh = GitHub(
+            "tok",
+            session=mock_s,
+            runner=_noop_runner(),
+            clock=_FakeClock(sleeper),
+            token_fetcher=_noop_token_fetcher(),
+        )
         with pytest.raises(_requests.HTTPError, match="502"):
             gh._get("/always-bad")
         # Initial attempt + len(_GET_RETRY_DELAYS) retries.
@@ -1154,7 +1298,13 @@ class TestGitHubClass:
             _requests.ConnectionError("boom"),
             self._ok_resp([{"ok": True}]),
         ]
-        gh = GitHub("tok", session=mock_s, sleeper=sleeper)
+        gh = GitHub(
+            "tok",
+            session=mock_s,
+            runner=_noop_runner(),
+            clock=_FakeClock(sleeper),
+            token_fetcher=_noop_token_fetcher(),
+        )
         assert gh._get("/flaky") == [{"ok": True}]
         assert mock_s.get.call_count == 2
         assert sleeper.call_count == 1
@@ -1168,7 +1318,13 @@ class TestGitHubClass:
             status_code=404,
             raise_side_effect=_requests.HTTPError("404"),
         )
-        gh = GitHub("tok", session=mock_s, sleeper=sleeper)
+        gh = GitHub(
+            "tok",
+            session=mock_s,
+            runner=_noop_runner(),
+            clock=_FakeClock(sleeper),
+            token_fetcher=_noop_token_fetcher(),
+        )
         with pytest.raises(_requests.HTTPError, match="404"):
             gh._get("/nope")
         # No retry on 4xx — single GET, no sleep.
@@ -1205,7 +1361,13 @@ class TestGitHubClass:
         bad = self._transient_resp(502)
         page2 = self._ok_resp([{"id": 2}])
         mock_s.get.side_effect = [page1, bad, page2]
-        gh = GitHub("tok", session=mock_s, sleeper=sleeper)
+        gh = GitHub(
+            "tok",
+            session=mock_s,
+            runner=_noop_runner(),
+            clock=_FakeClock(sleeper),
+            token_fetcher=_noop_token_fetcher(),
+        )
         result = list(gh._paginate("https://api.github.com/repos/o/r/items"))
         assert result == [{"id": 1}, {"id": 2}]
         assert mock_s.get.call_count == 3
@@ -2503,58 +2665,108 @@ class TestGitHubClass:
         assert gh.get_collaborators("o/r") == ["bob"]
 
     def test_get_repo_info_https(self) -> None:
-        gh = GitHub("test-token")
         mock_run = _FakeCallable(
             return_value=_completed("https://github.com/owner/repo.git\n")
         )
-        assert gh.get_repo_info(runner=mock_run) == "owner/repo"
+        gh = GitHub(
+            "test-token",
+            session=_noop_session(),
+            runner=_FakeProcessRunner(mock_run),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
+        assert gh.get_repo_info() == "owner/repo"
 
     def test_get_repo_info_ssh(self) -> None:
-        gh = GitHub("test-token")
         mock_run = _FakeCallable(
             return_value=_completed("git@github.com:owner/repo.git\n")
         )
-        assert gh.get_repo_info(runner=mock_run) == "owner/repo"
+        gh = GitHub(
+            "test-token",
+            session=_noop_session(),
+            runner=_FakeProcessRunner(mock_run),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
+        assert gh.get_repo_info() == "owner/repo"
 
     def test_get_repo_info_passes_cwd(self) -> None:
-        gh = GitHub("test-token")
         mock_run = _FakeCallable(return_value=_completed("https://github.com/o/r.git"))
-        gh.get_repo_info(cwd="/tmp/repo", runner=mock_run)
+        gh = GitHub(
+            "test-token",
+            session=_noop_session(),
+            runner=_FakeProcessRunner(mock_run),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
+        gh.get_repo_info(cwd="/tmp/repo")
         assert mock_run.call_args.kwargs["cwd"] == "/tmp/repo"
 
     def test_get_repo_info_raises_unknown(self) -> None:
-        gh = GitHub("test-token")
         mock_run = _FakeCallable(
             return_value=_completed("https://example.com/repo.git")
         )
+        gh = GitHub(
+            "test-token",
+            session=_noop_session(),
+            runner=_FakeProcessRunner(mock_run),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
         with pytest.raises(ValueError, match="Cannot parse"):
-            gh.get_repo_info(runner=mock_run)
+            gh.get_repo_info()
 
     def test_get_repo_info_raises_on_git_failure(self) -> None:
-        gh = GitHub("test-token")
         mock_run = _FakeCallable(side_effect=subprocess.CalledProcessError(128, "git"))
+        gh = GitHub(
+            "test-token",
+            session=_noop_session(),
+            runner=_FakeProcessRunner(mock_run),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
         with pytest.raises(subprocess.CalledProcessError):
-            gh.get_repo_info(runner=mock_run)
+            gh.get_repo_info()
 
     def test_get_repo_info_raises_on_file_not_found(self) -> None:
-        gh = GitHub("test-token")
         mock_run = _FakeCallable(side_effect=FileNotFoundError("git not found"))
+        gh = GitHub(
+            "test-token",
+            session=_noop_session(),
+            runner=_FakeProcessRunner(mock_run),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
         with pytest.raises(FileNotFoundError):
-            gh.get_repo_info(runner=mock_run)
+            gh.get_repo_info()
 
     def test_get_default_branch(self) -> None:
-        gh, mock_s = self._gh()
         remote_resp = _completed("https://github.com/o/r.git\n")
         mock_run = _FakeCallable(return_value=remote_resp)
+        mock_s = _FakeSession()
+        gh = GitHub(
+            "test-token",
+            session=mock_s,
+            runner=_FakeProcessRunner(mock_run),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
         mock_s.get.return_value = _FakeResponse(json_data={"default_branch": "main"})
-        assert gh.get_default_branch(runner=mock_run) == "main"
+        assert gh.get_default_branch() == "main"
 
     def test_get_default_branch_passes_cwd(self) -> None:
-        gh, mock_s = self._gh()
         remote_resp = _completed("https://github.com/o/r.git\n")
         mock_run = _FakeCallable(return_value=remote_resp)
+        mock_s = _FakeSession()
+        gh = GitHub(
+            "test-token",
+            session=mock_s,
+            runner=_FakeProcessRunner(mock_run),
+            clock=_FakeClock(),
+            token_fetcher=_noop_token_fetcher(),
+        )
         mock_s.get.return_value = _FakeResponse(json_data={"default_branch": "main"})
-        gh.get_default_branch(cwd=Path("/repo"), runner=mock_run)
+        gh.get_default_branch(cwd=Path("/repo"))
         assert mock_run.call_args.kwargs["cwd"] == Path("/repo")
 
     def test_set_user_status_graphql(self) -> None:
@@ -3506,3 +3718,16 @@ class TestGitHubClass:
         ]
         result = gh.get_reviews("o/r", 10)
         assert result["isDraft"] is True
+
+
+# ── RealGitHubFactory ─────────────────────────────────────────────────────────
+
+
+class TestRealGitHubFactory:
+    def test_call_returns_github_instance(self) -> None:
+        fake_run = _FakeCallable(return_value=_completed("test-token\n"))
+        runner = _FakeProcessRunner(fake_run)
+        clock = _FakeClock()
+        factory = RealGitHubFactory(runner, clock)
+        gh = factory()
+        assert isinstance(gh, GitHub)
