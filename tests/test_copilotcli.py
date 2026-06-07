@@ -25,6 +25,7 @@ from fido.copilotcli import (
     CopilotCLIAPI,
     CopilotCLIClient,
     CopilotCLISession,
+    CopilotSessionFactory,
     _combine_prompt,
     _CopilotACPClient,
     _is_cancel_sentinel,
@@ -225,12 +226,88 @@ class _NoopProcessRunner:
 _NOOP_PR: RealProcessRunner = _NoopProcessRunner()  # type: ignore[assignment]
 
 
+class _NoopCopilotSessionFactory(CopilotSessionFactory):
+    """CopilotSessionFactory stub that raises if create() is called.
+
+    Default session_factory for _ccc() — safe for tests that don't spawn sessions.
+    """
+
+    def __init__(self) -> None:
+        pass  # no real infra needed in this stub
+
+    def create(  # type: ignore[override]
+        self,
+        system_file: object,
+        *,
+        model: object,
+        session_id: object,
+        snapshot_publisher: object,
+        talker_resolver: object,
+    ) -> object:
+        raise NotImplementedError(
+            "_NoopCopilotSessionFactory: no session should be spawned"
+        )
+
+
+_NOOP_CSF: CopilotSessionFactory = _NoopCopilotSessionFactory()
+
+
+class _SpyCopilotSessionFactory(CopilotSessionFactory):
+    """CopilotSessionFactory subclass that records create() calls for assertions."""
+
+    def __init__(
+        self,
+        *,
+        work_dir: object,
+        repo_name: object,
+        return_value: object = None,
+    ) -> None:
+        # Don't call super().__init__() — no real popen needed in this spy
+        self._work_dir = work_dir
+        self._repo_name = repo_name
+        self._create_calls: list[dict[str, object]] = []
+        self._return_value: object = return_value
+
+    def create(
+        self,
+        system_file: object,
+        *,
+        model: object,
+        session_id: object,
+        snapshot_publisher: object,
+        talker_resolver: object,
+    ) -> object:  # type: ignore[override]
+        self._create_calls.append(
+            {
+                "system_file": system_file,
+                "model": model,
+                "session_id": session_id,
+                "snapshot_publisher": snapshot_publisher,
+                "talker_resolver": talker_resolver,
+            }
+        )
+        return self._return_value
+
+    def assert_called_once_with(self, system_file: object, **kwargs: object) -> None:
+        """Assert create() was called exactly once with the given arguments."""
+        assert len(self._create_calls) == 1, (
+            f"Expected 1 create() call, got {len(self._create_calls)}"
+        )
+        call = self._create_calls[0]
+        assert call["system_file"] == system_file, (
+            f"system_file: expected {system_file!r}, got {call['system_file']!r}"
+        )
+        for key, expected in kwargs.items():
+            assert call[key] == expected, (
+                f"{key}: expected {expected!r}, got {call[key]!r}"
+            )
+
+
 def _ccc(**kwargs: object) -> CopilotCLIClient:
     """Build a CopilotCLIClient with a noop runner default — for tests that don't run CLI."""
     kwargs.setdefault("runner", _NOOP_PR)
-    kwargs.setdefault("popen", None)
     kwargs.setdefault("session_fn", provider.current_repo_session)
-    kwargs.setdefault("session_factory", None)
+    kwargs.setdefault("session_factory", _NOOP_CSF)
     kwargs.setdefault("session_system_file", None)
     kwargs.setdefault("work_dir", None)
     kwargs.setdefault("repo_name", None)
@@ -1976,28 +2053,36 @@ class TestCopilotCLISession:
                 talker_resolver=provider.get_talker,
             )
 
-    def test_default_session_factory_creates_session_via_popen(
-        self, tmp_path: Path
-    ) -> None:
-        """CopilotCLIClient without session_factory falls back to the
-        _default_session_factory closure that creates CopilotCLISession(popen=...).
+    def test_make_runtime_branch_reached_via_popen(self, tmp_path: Path) -> None:
+        """CopilotCLISession._make_runtime() is called when popen is provided
+        and no runtime/runtime_factory is injected.
 
-        The session reaches CopilotACPRuntime.ensure_session before failing
-        (copilot not installed in CI). The FileNotFoundError confirms the
-        factory was invoked and the CopilotCLISession construction path ran.
+        _make_runtime is ``# pragma: no cover`` (spawns real infrastructure), but
+        the *call site* in __init__ is not — this test exercises that branch by
+        subclassing and overriding _make_runtime with a fake.
         """
         system_file = tmp_path / "persona.md"
         system_file.write_text("persona")
-        client = _ccc(
-            session_system_file=system_file,
+        fake_runtime = FakeRuntime()
+
+        class _StubSession(CopilotCLISession):
+            def _make_runtime(self, popen: object) -> object:  # type: ignore[override]
+                return fake_runtime
+
+        session = _StubSession(
+            system_file,
             work_dir=tmp_path,
+            model=CopilotCLIClient.work_model,
+            repo_name=None,
+            runtime=None,
+            runtime_factory=None,
             popen=RealPopenRunner(),
-            session_factory=None,  # force default factory path
+            session_id=None,
+            snapshot_publisher=None,
+            talker_resolver=provider.get_talker,
         )
-        with pytest.raises(FileNotFoundError, match="copilot"):
-            client._spawn_owned_session(  # pyright: ignore[reportPrivateUsage]
-                CopilotCLIClient.work_model
-            )
+        assert session.session_id == "sess-created"
+        assert fake_runtime.ensure_calls == [(None, CopilotCLIClient.work_model)]
 
 
 class TestIsCopilotQuotaError:
@@ -2201,9 +2286,11 @@ class TestCopilotCLIClient:
 
     def test_ensure_fresh_stop_noop_branches(self, tmp_path: Path) -> None:
         session = _FakeSession()
-        session_factory = _FakeCallRecorder(return_value=session)
+        spy = _SpyCopilotSessionFactory(
+            work_dir=tmp_path, repo_name=None, return_value=session
+        )
         client = _ccc(
-            session_factory=session_factory,  # type: ignore[arg-type]
+            session_factory=spy,
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
@@ -2218,11 +2305,9 @@ class TestCopilotCLIClient:
             == "ok"
         )
         client.stop_session()
-        session_factory.assert_called_once_with(
+        spy.assert_called_once_with(
             tmp_path / "persona.md",
-            work_dir=tmp_path,
             model=client.voice_model,
-            repo_name=None,
             session_id=None,
             snapshot_publisher=client,
             talker_resolver=provider.get_talker,
@@ -2241,9 +2326,11 @@ class TestCopilotCLIClient:
         self, tmp_path: Path
     ) -> None:
         session = _FakeSession()
-        session_factory = _FakeCallRecorder(return_value=session)
+        spy = _SpyCopilotSessionFactory(
+            work_dir=tmp_path, repo_name=None, return_value=session
+        )
         client = _ccc(
-            session_factory=session_factory,  # type: ignore[arg-type]
+            session_factory=spy,
             session_system_file=tmp_path / "persona.md",
             work_dir=tmp_path,
         )
@@ -2256,11 +2343,9 @@ class TestCopilotCLIClient:
             )
             == "ok"
         )
-        session_factory.assert_called_once_with(
+        spy.assert_called_once_with(
             tmp_path / "persona.md",
-            work_dir=tmp_path,
             model=client.voice_model,
-            repo_name=None,
             session_id=None,
             snapshot_publisher=client,
             talker_resolver=provider.get_talker,

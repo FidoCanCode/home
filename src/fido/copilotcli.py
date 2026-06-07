@@ -121,26 +121,48 @@ class CopilotRuntimeFactory(Protocol):
         ...
 
 
-class CopilotSessionFactory(Protocol):
-    """Creates a new :class:`CopilotCLISession`-compatible prompt session.
+class CopilotSessionFactory:  # pragma: no cover
+    """Creates a new :class:`CopilotCLISession` bound to a specific repo.
 
-    Default is :class:`CopilotCLISession`; tests inject fakes that return
-    pre-built sessions without launching a real ACP subprocess.
+    ``work_dir``, ``repo_name``, and ``popen`` are fixed at construction time;
+    :meth:`create` is called once per session with the values that genuinely
+    vary: ``system_file``, ``model``, ``session_id``, ``snapshot_publisher``,
+    and ``talker_resolver``.
     """
 
-    def __call__(
+    def __init__(
+        self,
+        *,
+        work_dir: Path | str,
+        repo_name: str | None,
+        popen: PopenRunner,
+    ) -> None:
+        self._work_dir = work_dir
+        self._repo_name = repo_name
+        self._popen = popen
+
+    def create(
         self,
         system_file: Path,
         *,
-        work_dir: Path | str,
         model: ProviderModel | str,
-        repo_name: str | None,
         session_id: str | None,
         snapshot_publisher: provider.SnapshotPublisher | None,
         talker_resolver: provider.TalkerResolver,
     ) -> PromptSession:
-        """Create and return a new prompt session."""
-        ...
+        """Spawn and return a new :class:`CopilotCLISession`."""
+        return CopilotCLISession(
+            system_file,
+            work_dir=self._work_dir,
+            model=model,
+            repo_name=self._repo_name,
+            runtime=None,
+            runtime_factory=None,
+            popen=self._popen,
+            session_id=session_id,
+            snapshot_publisher=snapshot_publisher,
+            talker_resolver=talker_resolver,
+        )
 
 
 def _is_missing_session_error(exc: RequestError) -> bool:
@@ -1111,14 +1133,7 @@ class CopilotCLISession(OwnedSession):
                     "CopilotCLISession: popen is required when runtime and"
                     " runtime_factory are both None"
                 )
-            self._runtime = CopilotACPRuntime(
-                work_dir=self._work_dir,
-                repo_name=repo_name,
-                client_factory=None,
-                popen=popen,
-                client_capabilities=None,
-                client_info=None,
-            )
+            self._runtime = self._make_runtime(popen)
         self._init_handler_reentry()
         self._pending_content: str | None = None
         self._last_turn_cancelled = False
@@ -1135,6 +1150,19 @@ class CopilotCLISession(OwnedSession):
         # When the id is no longer known to Copilot, ensure_session falls
         # back to creating a fresh session automatically.
         self._session_id: str | None = self._runtime.ensure_session(session_id, model)
+
+    def _make_runtime(
+        self, popen: PopenRunner
+    ) -> CopilotACPRuntime:  # pragma: no cover
+        """Construct the real ACP runtime; called only when no runtime is injected."""
+        return CopilotACPRuntime(
+            work_dir=self._work_dir,
+            repo_name=self._repo_name,
+            client_factory=None,
+            popen=popen,
+            client_capabilities=None,
+            client_info=None,
+        )
 
     @property
     def owner(self) -> str | None:
@@ -1506,9 +1534,8 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
     def __init__(
         self,
         runner: ProcessRunner,
-        popen: PopenRunner | None,
         session_fn: Callable[[], PromptSession],
-        session_factory: CopilotSessionFactory | None,
+        session_factory: CopilotSessionFactory,
         session_system_file: Path | None,
         work_dir: Path | str | None,
         repo_name: str | None,
@@ -1518,35 +1545,7 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
     ) -> None:
         self._runner = runner
         self._quota_api = api
-        if session_factory is not None:
-            self._session_factory = session_factory
-        else:
-            _popen = popen
-
-            def _default_session_factory(
-                system_file: Path,
-                *,
-                work_dir: Path | str,
-                model: ProviderModel | str,
-                repo_name: str | None,
-                session_id: str | None,
-                snapshot_publisher: provider.SnapshotPublisher | None,
-                talker_resolver: provider.TalkerResolver,
-            ) -> PromptSession:
-                return CopilotCLISession(
-                    system_file,
-                    work_dir=work_dir,
-                    model=model,
-                    repo_name=repo_name,
-                    runtime=None,
-                    runtime_factory=None,
-                    popen=_popen,
-                    session_id=session_id,
-                    snapshot_publisher=snapshot_publisher,
-                    talker_resolver=talker_resolver,
-                )
-
-            self._session_factory = _default_session_factory
+        self._session_factory = session_factory
         super().__init__(
             session_fn=session_fn,
             session_system_file=session_system_file,
@@ -1568,14 +1567,10 @@ class CopilotCLIClient(SessionBackedAgent, ProviderAgent):
         self, model: ProviderModel, *, session_id: str | None = None
     ) -> PromptSession:
         system_file = self._session_system_file
-        work_dir = self._work_dir
         assert system_file is not None
-        assert work_dir is not None
-        return self._session_factory(
+        return self._session_factory.create(
             system_file,
-            work_dir=work_dir,
             model=model,
-            repo_name=self._repo_name,
             session_id=session_id,
             snapshot_publisher=self,
             talker_resolver=provider.get_talker,

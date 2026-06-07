@@ -19,7 +19,12 @@ from fido.claude import (
 )
 from fido.codex import Codex, CodexAPI, CodexClient
 from fido.config import RepoConfig
-from fido.copilotcli import CopilotCLI, CopilotCLIAPI, CopilotCLIClient
+from fido.copilotcli import (
+    CopilotCLI,
+    CopilotCLIAPI,
+    CopilotCLIClient,
+    CopilotSessionFactory,
+)
 from fido.infra import (
     Clock,
     IOSelector,
@@ -147,9 +152,12 @@ class DefaultProviderFactory:
                     api=shared_api,
                     agent=CopilotCLIClient(
                         runner=self._copilot_process_runner,
-                        popen=self._copilot_popen_runner,
                         session_fn=_provider.current_repo_session,
-                        session_factory=None,
+                        session_factory=CopilotSessionFactory(
+                            work_dir=work_dir,
+                            repo_name=repo_name,
+                            popen=self._copilot_popen_runner,
+                        ),
                         api=shared_api,
                         session_system_file=self._session_system_file,
                         work_dir=work_dir,
